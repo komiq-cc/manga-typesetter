@@ -218,6 +218,12 @@ function letterCount(word) {
   return m ? m.length : 0;
 }
 
+// Hangul syllables and jamo.
+const HANGUL_CHARS = /[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]|\p{Script=Hangul}/u;
+export function hasHangul(word) {
+  return typeof word === 'string' && HANGUL_CHARS.test(word);
+}
+
 // ===== break points inside a word =====
 
 // What kind of break a position is. A line that ends at a HY_NONE position ends
@@ -265,6 +271,10 @@ function segmentSplits(seg) {
   if (cached !== undefined) return cached;
   if (_splitCache.size > 4000) _splitCache.clear();
   cached = [];
+  if (hasHangul(seg)) {
+    _splitCache.set(seg, cached);
+    return cached;
+  }
   const m = /^([^A-Za-z]*)([A-Za-z]+)([^A-Za-z]*)$/.exec(seg);
   // Four characters is the shortest word Liang's minimums (2 + 3) could ever
   // split, so anything shorter is not worth waking the trie for.
@@ -574,6 +584,7 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
     tokens(a, b) > 1 ||
     pos[a].hy !== HY_NONE ||
     pos[b].hy !== HY_NONE ||
+    hasHangul(words[pos[a].wStart].t) ||
     letterCount(words[pos[a].wStart].t) >= o.minOrphan;
 
   const totalW = width(0, M);

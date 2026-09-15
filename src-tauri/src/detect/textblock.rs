@@ -193,7 +193,7 @@ fn quads_intersect(a: &Quad, b: &Quad) -> bool {
 }
 
 /// Computes block orientation, font size, angle, and line distances from line geometry.
-fn examine_textblk(blk: &mut TextBlock, im_w: i32, sort: bool) {
+fn examine_textblk(blk: &mut TextBlock, im_w: i32, sort: bool, lang: &str) {
     let n = blk.lines.len();
     if n == 0 {
         return;
@@ -220,13 +220,15 @@ fn examine_textblk(blk: &mut TextBlock, im_w: i32, sort: bool) {
     }
     let norm_v = v.0.hypot(v.1);
     let norm_h = h.0.hypot(h.1);
-    let vertical = if blk.language == Language::Ja {
+    let is_ko = lang == "ko";
+    let vertical = if !is_ko && blk.language == Language::Ja {
         norm_v > norm_h
     } else {
         norm_v > norm_h * 2.0
     };
 
-    // Vertical Japanese text reads RTL from top-right; horizontal text reads from top-left.
+    // Vertical CJK text (Japanese and Korean alike) reads RTL from top-right;
+    // horizontal text reads from top-left.
     let (primary, primary_norm, origin, font_size) = if vertical {
         (v, norm_v, (im_w as f64, 0.0), round_half_even(norm_h / n as f64))
     } else {
@@ -384,12 +386,12 @@ fn merge_textlines(mut blks: Vec<TextBlock>) -> Vec<TextBlock> {
 }
 
 /// Orders blocks into natural reading sequence using a 4x3 grid.
-fn sort_textblk_list(blks: &mut [TextBlock], im_w: i32, im_h: i32) {
+fn sort_textblk_list(blks: &mut [TextBlock], im_w: i32, im_h: i32, lang: &str) {
     if blks.is_empty() {
         return;
     }
     let num_ja = blks.iter().filter(|b| b.language == Language::Ja).count();
-    let flip_lr = num_ja as f64 > blks.len() as f64 / 2.0;
+    let flip_lr = lang == "ja" && (num_ja as f64 > blks.len() as f64 / 2.0);
     let im_oriw = im_w as f64;
     // For two-page spreads (landscape), halve width to compute per-page grid.
     let w = if im_w > im_h { im_w as f64 / 2.0 } else { im_w as f64 };
@@ -421,6 +423,7 @@ pub fn group_output(
     im_w: i32,
     im_h: i32,
     mask: &GrayImage,
+    lang: &str,
 ) -> Vec<TextBlock> {
     const BBOX_SCORE_THRESH: f64 = 0.4;
     const MASK_SCORE_THRESH: f64 = 0.1;
@@ -457,7 +460,7 @@ pub fn group_output(
             }
             let mut blk = TextBlock::new(lb, Language::Unknown);
             blk.lines.push(*line);
-            examine_textblk(&mut blk, im_w, false);
+            examine_textblk(&mut blk, im_w, false, lang);
             if blk.vertical {
                 scattered_ver.push(blk);
             } else {
@@ -478,7 +481,7 @@ pub fn group_output(
             // whole proposal as a single line.
             blk.lines.push([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]);
         }
-        examine_textblk(&mut blk, im_w, true);
+        examine_textblk(&mut blk, im_w, true, lang);
 
         let want_split =
             blk.lines.len() > 1 && (blk.language == Language::Ja || blk.vertical);
@@ -494,7 +497,7 @@ pub fn group_output(
     // Step 3: rescue the strays, then sort.
     final_list.extend(merge_textlines(scattered_hor));
     final_list.extend(merge_textlines(scattered_ver));
-    sort_textblk_list(&mut final_list, im_w, im_h);
+    sort_textblk_list(&mut final_list, im_w, im_h, lang);
 
     // Step 4: Latin glyphs have ascenders and descenders the shrink map clips,
     // so horizontal English lines get padded outward before they are cropped.
@@ -611,6 +614,7 @@ pub fn split_by_regions(
     blocks: Vec<TextBlockOut>,
     regions: &[[i32; 4]],
     im_w: i32,
+    lang: &str,
 ) -> Vec<TextBlockOut> {
     let regions = dedupe_nested_regions(regions);
     let mut out = Vec::with_capacity(blocks.len());
@@ -692,7 +696,7 @@ pub fn split_by_regions(
             let lines = std::mem::take(&mut groups[i]);
             let mut tb = TextBlock::new(blk.xyxy, blk.language);
             tb.lines = lines;
-            examine_textblk(&mut tb, im_w, true);
+            examine_textblk(&mut tb, im_w, true, lang);
             tb.adjust_bbox(false);
             out.push(TextBlockOut {
                 xyxy: tb.xyxy,
@@ -730,7 +734,7 @@ mod tests {
     fn a_line_inside_a_proposal_is_assigned_to_it() {
         let blks = [([100, 100, 200, 400], 1usize)];
         let lines = [vline(120, 110, 30, 260)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].lines.len(), 1);
         assert_eq!(out[0].language, Language::Ja);
@@ -740,7 +744,7 @@ mod tests {
     fn a_line_outside_every_proposal_becomes_its_own_block() {
         let blks = [([600, 20, 700, 90], 1usize)];
         let lines = [vline(100, 100, 30, 260)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         // The proposal has no lines but a full mask, so it survives with a
         // synthetic line; the stray becomes a second block.
         assert_eq!(out.len(), 2);
@@ -751,19 +755,19 @@ mod tests {
     fn a_stray_line_over_blank_mask_is_discarded() {
         let blks: [([i32; 4], usize); 0] = [];
         let lines = [vline(100, 100, 30, 260)];
-        assert!(group_output(&blks, &lines, 800, 600, &mask_empty(800, 600)).is_empty());
+        assert!(group_output(&blks, &lines, 800, 600, &mask_empty(800, 600), "ja").is_empty());
     }
 
     #[test]
     fn an_empty_proposal_over_blank_mask_is_discarded() {
         let blks = [([100, 100, 200, 400], 1usize)];
-        assert!(group_output(&blks, &[], 800, 600, &mask_empty(800, 600)).is_empty());
+        assert!(group_output(&blks, &[], 800, 600, &mask_empty(800, 600), "ja").is_empty());
     }
 
     #[test]
     fn an_empty_proposal_over_text_gets_one_synthetic_line() {
         let blks = [([100, 100, 200, 400], 1usize)];
-        let out = group_output(&blks, &[], 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &[], 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].lines.len(), 1);
         assert_eq!(out[0].xyxy, [100, 100, 200, 400]);
@@ -773,7 +777,7 @@ mod tests {
     fn tall_narrow_japanese_lines_read_as_vertical() {
         let blks = [([100, 100, 220, 400], 1usize)];
         let lines = [vline(180, 110, 30, 280), vline(140, 110, 30, 280)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert!(out[0].vertical);
         // Font size for vertical text is the mean line *width*.
         assert!((out[0].font_size - 30.0).abs() < 1.0, "{}", out[0].font_size);
@@ -790,7 +794,7 @@ mod tests {
         // it should not.
         let mut blk = TextBlock::new([-10, -10, 10, 10], Language::Eng);
         blk.lines.push([[-10, -10], [10, -10], [10, 10], [-10, 10]]);
-        examine_textblk(&mut blk, 800, false);
+        examine_textblk(&mut blk, 800, false, "ja");
         assert_eq!(blk.distance.len(), 1);
         assert!(blk.distance[0].is_finite(), "{:?}", blk.distance);
         assert_eq!(blk.distance[0], 0.0);
@@ -798,14 +802,14 @@ mod tests {
         // Centred on writing axis gives 0 perpendicular distance without NaN.
         let mut blk = TextBlock::new([0, -10, 300, 10], Language::Eng);
         blk.lines.push([[0, -10], [300, -10], [300, 10], [0, 10]]);
-        examine_textblk(&mut blk, 800, false);
+        examine_textblk(&mut blk, 800, false, "ja");
         assert!(blk.distance[0].is_finite(), "{:?}", blk.distance);
         assert!(blk.distance[0].abs() < 1e-6, "{:?}", blk.distance);
 
         // A line quad collapsed to a point has no writing direction at all.
         let mut blk = TextBlock::new([50, 50, 50, 50], Language::Ja);
         blk.lines.push([[50, 50], [50, 50], [50, 50], [50, 50]]);
-        examine_textblk(&mut blk, 800, false);
+        examine_textblk(&mut blk, 800, false, "ja");
         assert!(blk.distance[0].is_finite(), "{:?}", blk.distance);
     }
 
@@ -814,9 +818,9 @@ mod tests {
         // Zero dimensions must not panic in padding clamp.
         let blks = [([0, 0, 10, 10], 0usize)];
         let lines = [[[0, 0], [10, 0], [10, 5], [0, 5]]];
-        assert!(group_output(&blks, &lines, 0, 600, &mask_full(1, 600)).is_empty());
-        assert!(group_output(&blks, &lines, 800, 0, &mask_full(800, 1)).is_empty());
-        assert!(group_output(&blks, &lines, 0, 0, &mask_full(1, 1)).is_empty());
+        assert!(group_output(&blks, &lines, 0, 600, &mask_full(1, 600), "ja").is_empty());
+        assert!(group_output(&blks, &lines, 800, 0, &mask_full(800, 1), "ja").is_empty());
+        assert!(group_output(&blks, &lines, 0, 0, &mask_full(1, 1), "ja").is_empty());
     }
 
     #[test]
@@ -826,7 +830,7 @@ mod tests {
             [[110, 110], [380, 110], [380, 132], [110, 132]],
             [[110, 140], [380, 140], [380, 162], [110, 162]],
         ];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert!(!out[0].vertical);
         assert_eq!(out[0].language, Language::Eng);
         // English blocks are padded outward, so the recorded size exceeds the
@@ -840,7 +844,7 @@ mod tests {
         // wider than the split rule tolerates, so this must come back as two.
         let blks = [([100, 100, 400, 400], 1usize)];
         let lines = [vline(110, 110, 30, 280), vline(330, 110, 30, 280)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out.len(), 2, "{out:#?}");
     }
 
@@ -848,7 +852,7 @@ mod tests {
     fn adjacent_columns_stay_one_block() {
         let blks = [([100, 100, 200, 400], 1usize)];
         let lines = [vline(110, 110, 30, 280), vline(145, 110, 30, 280)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].lines.len(), 2);
     }
@@ -857,7 +861,7 @@ mod tests {
     fn japanese_pages_sort_right_to_left() {
         let blks = [([50, 50, 150, 300], 1usize), ([600, 50, 700, 300], 1usize)];
         let lines = [vline(60, 60, 30, 220), vline(610, 60, 30, 220)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out.len(), 2);
         assert!(out[0].xyxy[0] > out[1].xyxy[0], "right block should come first");
     }
@@ -869,8 +873,49 @@ mod tests {
             [[60, 60], [290, 60], [290, 84], [60, 84]],
             [[510, 60], [740, 60], [740, 84], [510, 84]],
         ];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert!(out[0].xyxy[0] < out[1].xyxy[0]);
+    }
+
+    #[test]
+    fn korean_pages_do_not_flip_lr_even_when_all_blocks_are_ja() {
+        // Two blocks tagged Ja: right block [600..700], left block [50..150].
+        let blks = [([50, 50, 150, 300], 1usize), ([600, 50, 700, 300], 1usize)];
+        let lines = [vline(60, 60, 30, 220), vline(610, 60, 30, 220)];
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ko");
+        assert_eq!(out.len(), 2);
+        assert!(out[0].xyxy[0] < out[1].xyxy[0], "left block should come first in Korean LTR");
+    }
+
+    #[test]
+    fn korean_pages_use_strict_vertical_threshold_and_top_left_origin() {
+        // Single block with aspect ratio 1.5 (norm_v = 1.5 * norm_h):
+        // In Japanese (norm_v > norm_h), this would be considered vertical.
+        // In Korean (norm_v > norm_h * 2.0 is required), this must stay horizontal.
+        let mut blk_ja = TextBlock::new([100, 100, 200, 250], Language::Ja);
+        blk_ja.lines.push([[100, 100], [200, 100], [200, 250], [100, 250]]);
+        examine_textblk(&mut blk_ja, 800, false, "ja");
+        assert!(blk_ja.vertical, "Ja should use relaxed vertical threshold");
+
+        let mut blk_ko = TextBlock::new([100, 100, 200, 250], Language::Ja);
+        blk_ko.lines.push([[100, 100], [200, 100], [200, 250], [100, 250]]);
+        examine_textblk(&mut blk_ko, 800, false, "ko");
+        assert!(!blk_ko.vertical, "Ko must use strict 2.0 vertical threshold");
+    }
+
+    #[test]
+    fn vertical_korean_columns_still_read_right_to_left() {
+        // Vertical Korean (세로쓰기) reads top-to-bottom, right-to-left, exactly
+        // like vertical Japanese: the column nearest the right edge comes first.
+        let mut blk = TextBlock::new([100, 60, 630, 280], Language::Ja);
+        blk.lines.push(vline(100, 60, 30, 220));
+        blk.lines.push(vline(600, 60, 30, 220));
+        examine_textblk(&mut blk, 800, true, "ko");
+        assert!(blk.vertical, "tall narrow columns are vertical regardless of language");
+        assert!(
+            blk.lines[0][0][0] >= 600,
+            "the right-hand column must be read first in vertical Korean"
+        );
     }
 
     #[test]
@@ -878,7 +923,7 @@ mod tests {
         // Block box expands to enclose lines extending outside proposal.
         let blks = [([100, 100, 200, 300], 1usize)];
         let lines = [vline(120, 90, 30, 260)];
-        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600));
+        let out = group_output(&blks, &lines, 800, 600, &mask_full(800, 600), "ja");
         assert_eq!(out[0].xyxy, [100, 90, 200, 350]);
     }
 
@@ -926,7 +971,7 @@ mod tests {
             language: Language::Eng,
         };
         let regions = [[100, 100, 280, 220], [300, 100, 480, 220]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 2);
 
         assert_eq!(out[0].xyxy, [110, 120, 270, 200]);
@@ -957,7 +1002,7 @@ mod tests {
             language: Language::Eng,
         };
         let regions = [[100, 100, 280, 220]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].xyxy, [100, 100, 500, 220]);
         assert_eq!(out[0].lines.len(), 4);
@@ -979,7 +1024,7 @@ mod tests {
             language: Language::Eng,
         };
         let regions = [[100, 100, 200, 200], [400, 100, 500, 200]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].lines.len(), 2);
         assert_eq!(out[1].lines.len(), 1);
@@ -1000,7 +1045,7 @@ mod tests {
             language: Language::Eng,
         };
         let regions = [[100, 100, 200, 200], [400, 100, 500, 200]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].xyxy, [100, 100, 500, 200]);
         assert_eq!(out[0].lines.len(), 2);
@@ -1025,7 +1070,7 @@ mod tests {
             language: Language::Ja,
         };
         let regions = [[95, 105, 215, 235], [178, 108, 212, 232]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].lines.len(), 3);
     }
@@ -1049,7 +1094,7 @@ mod tests {
             language: Language::Ja,
         };
         let regions = [[130, 100, 220, 450], [130, 100, 220, 250], [130, 300, 220, 450]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].lines.len(), 2);
         assert_eq!(out[1].lines.len(), 2);
@@ -1072,7 +1117,7 @@ mod tests {
             language: Language::Ja,
         };
         let regions = [[130, 100, 220, 250], [130, 300, 220, 450]];
-        let out = split_by_regions(vec![blk], &regions, 800);
+        let out = split_by_regions(vec![blk], &regions, 800, "ja");
         assert_eq!(out.len(), 2);
         assert!(out[0].vertical);
         assert_eq!(out[0].lines.len(), 2);

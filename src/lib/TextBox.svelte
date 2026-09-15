@@ -1676,4 +1676,7 @@
     pointer-events: none;
     z-index: 4;
   }
+  .jp-pill {
+    font-family: 'Noto Sans JP', 'Hiragino Kaku Gothic Pro', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  }
 </style>

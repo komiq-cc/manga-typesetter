@@ -46,7 +46,7 @@ function normLine(item, idx, shift = 0) {
   const rawN = parseLineNumber(item.n ?? item.id ?? item.number ?? item.index);
   const legacy = item.text ?? item.content ?? item.tl ?? item.translation ?? item.t;
   const en = item.en ?? item.natural ?? item.stylised ?? item.stylized ?? legacy ?? '';
-  const jp = item.jp ?? item.japanese ?? item.original ?? item.raw ?? '';
+  const jp = item.jp ?? item.japanese ?? item.original ?? item.raw ?? item.ko ?? item.korean ?? item.kr ?? '';
   const type = item.type ?? item.kind ?? 'dialogue';
   const out = {
     n: rawN !== null ? rawN + shift : idx + 1,

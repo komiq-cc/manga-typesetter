@@ -135,14 +135,14 @@ function drawBurst(img, cx, cy, r, spikes = 9) {
 
 // One detected line, one page. `box` is the detector's block in page
 // coordinates; `vertical` is its claim about how the Japanese in it was set.
-const withDetect = (block, vertical, w = 500, h = 500) => [
+const withDetect = (block, vertical, w = 500, h = 500, lang = undefined) => [
   {
     id: 1,
     w,
     h,
-    lines: [{ n: 1, type: 'dialogue', jp: 'あ', en: '' }],
+    lines: [{ n: 1, type: 'dialogue', jp: lang === 'ko' ? '가' : 'あ', en: '', ...(lang ? { lang } : {}) }],
     boxes: [],
-    detect: { panels: [], boxes: [{ n: 1, box: block, vertical, font_size: 20 }] },
+    detect: { panels: [], boxes: [{ n: 1, box: block, vertical, font_size: 20, ...(lang ? { lang } : {}) }] },
   },
 ];
 
@@ -299,6 +299,32 @@ describe('placement, when there is no fit to be had', () => {
     // that the box is now wider than it is tall.
     expect([b.x, b.y, b.w, b.h]).toEqual([105, 225, 290, 50]);
     expect(b.w).toBeGreaterThan(b.h);
+  });
+
+  it('does not auto-transpose a tall Korean block when vertical is null/unset, while ja still is', () => {
+    // JA block with vertical: null auto-transposes on aspect ratio
+    loadProjectPages(withDetect([220, 100, 280, 400], null, 500, 500, 'ja'));
+    pixels = null;
+    placeActiveAt(250, 250);
+    const bJa = page().boxes[0];
+    expect(bJa.w).toBeGreaterThan(bJa.h);
+    expect([bJa.x, bJa.y, bJa.w, bJa.h]).toEqual([105, 225, 290, 50]);
+
+    // Korean block with vertical: null/unset is NOT transposed on aspect ratio alone
+    loadProjectPages(withDetect([220, 100, 280, 400], null, 500, 500, 'ko'));
+    pixels = null;
+    placeActiveAt(250, 250);
+    const bKo = page().boxes[0];
+    expect(bKo.w).toBeLessThan(bKo.h);
+    expect([bKo.x, bKo.y, bKo.w, bKo.h]).toEqual([225, 105, 50, 290]);
+
+    // Explicit vertical: true on Korean DOES transpose
+    loadProjectPages(withDetect([220, 100, 280, 400], true, 500, 500, 'ko'));
+    pixels = null;
+    placeActiveAt(250, 250);
+    const bKoVert = page().boxes[0];
+    expect(bKoVert.w).toBeGreaterThan(bKoVert.h);
+    expect([bKoVert.x, bKoVert.y, bKoVert.w, bKoVert.h]).toEqual([105, 225, 290, 50]);
   });
 
   it('leaves a horizontal block exactly as it was placed before', () => {

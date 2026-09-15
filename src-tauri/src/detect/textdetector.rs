@@ -57,7 +57,7 @@ impl TextDetector {
     }
 
     /// Detects text blocks and page-sized mask on an image.
-    pub fn detect(&mut self, img: &DynamicImage) -> ort::Result<(Vec<TextBlockOut>, GrayImage)> {
+    pub fn detect(&mut self, img: &DynamicImage, lang: &str) -> ort::Result<(Vec<TextBlockOut>, GrayImage)> {
         let (im_w, im_h) = img.dimensions();
         let lb = Letterbox::fit(im_w as usize, im_h as usize);
         let input = Tensor::from_array((
@@ -77,7 +77,7 @@ impl TextDetector {
         let mask = page_mask(seg, &lb, im_w, im_h)?;
         let lines = decode_lines(det, &lb);
 
-        let blocks = group_output(&proposals, &lines, im_w as i32, im_h as i32, &mask);
+        let blocks = group_output(&proposals, &lines, im_w as i32, im_h as i32, &mask, lang);
         let out = blocks
             .into_iter()
             .map(|b| TextBlockOut {
@@ -480,7 +480,7 @@ mod tests {
                 page.img_height
             );
 
-            let (found, mask) = det.detect(&img).expect("detect failed");
+            let (found, mask) = det.detect(&img, "ja").expect("detect failed");
             assert_eq!((mask.width(), mask.height()), (w, h), "{name}: mask is not page sized");
 
             if found.len() != page.blocks.len() {

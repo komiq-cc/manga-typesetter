@@ -60,7 +60,7 @@
 
             One file - <code>{app.exportName}-text.json</code> for the whole chapter, or
             <code>{app.exportName}-&lt;page&gt;-text.json</code> for a single page - carrying
-            the detected text (JP + your translation), reading order and box geometry.
+            the detected text (source + your translation), reading order and box geometry.
           {:else if isStrip}
 
             All pages: <code>{app.exportName}-strip-01.{app.fmt.toLowerCase()}</code> - this page:

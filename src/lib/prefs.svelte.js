@@ -26,6 +26,10 @@ export const prefs = $state({
   typeset: false,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
+  // The page language the detector runs in: 'ja' (right-to-left manga) or
+  // 'ko' (left-to-right manhwa). A machine preference, not a document fact -
+  // the same chapter can be re-detected either way on a fresh machine.
+  projectLanguage: 'ja',
   // ---- typesetting defaults for NEW text boxes ----
   // These five are per-BOX style properties (`style.autoHeight`, `style.shape`
   // and friends - see `defaultStyle` in data.js). What lives here is only the
@@ -96,6 +100,7 @@ function persist() {
       KEY,
       JSON.stringify({
         typeset: prefs.typeset,
+        projectLanguage: prefs.projectLanguage,
         defaultAutoHeight: prefs.defaultAutoHeight,
         defaultShape: prefs.defaultShape,
         defaultHyphenate: prefs.defaultHyphenate,
@@ -118,6 +123,11 @@ export function setPref(key, value) {
   // but a plain object would leave every shortcut lookup reading properties off
   // a number - and an array is an object too, but not the kind of map this is.
   if (key === 'shortcuts' && (!value || typeof value !== 'object' || Array.isArray(value))) return;
+  // The page language is one of two spellings and nothing else - anything a
+  // caller hands it that is not 'ko' is Japanese, which is also the default,
+  // so a corrupt value can only ever select the behaviour that was there
+  // before the preference existed.
+  if (key === 'projectLanguage') value = value === 'ko' ? 'ko' : 'ja';
   if (NAME_LIST_KEYS.includes(key)) {
     value = cleanNames(value);
     if (!value) return;
@@ -150,6 +160,9 @@ export function setPref(key, value) {
       setTool('pan');
     }
   }
+  // The detector reads `app.projectLanguage` when it picks OCR weights and
+  // reading order, so the preference has to land there the moment it changes.
+  if (key === 'projectLanguage') app.projectLanguage = prefs.projectLanguage;
   // No relayout for these: they are what the NEXT box is born with, and boxes
   // already on the page keep the flags they carry. Re-measuring here would be
   // re-measuring nothing.
@@ -200,9 +213,13 @@ function load() {
     const names = saved ? cleanNames(saved[k]) : null;
     if (names) prefs[k] = names;
   }
+  if (saved && (saved.projectLanguage === 'ko' || saved.projectLanguage === 'ja')) {
+    prefs.projectLanguage = saved.projectLanguage;
+  }
   setTypesetEnabled(prefs.typeset);
   applyBoxDefaults();
   setBrushToolAllowed(prefs.brushTool);
+  app.projectLanguage = prefs.projectLanguage;
 }
 
 load();

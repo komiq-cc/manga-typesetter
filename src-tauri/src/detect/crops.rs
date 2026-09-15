@@ -1051,7 +1051,7 @@ mod tests {
         let img = image::open(&golden.file).expect("open page");
         let mut detector =
             TextDetector::load(&models.join("comictextdetector.onnx")).expect("load detector");
-        let (blocks, mask) = detector.detect(&img).expect("detect failed");
+        let (blocks, mask) = detector.detect(&img, "ja").expect("detect failed");
         let page = Raster::from_rgb(&img.to_rgb8());
         let mask_raster = Raster::from_gray(&mask);
 

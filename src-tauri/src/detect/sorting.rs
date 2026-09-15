@@ -52,7 +52,7 @@ pub struct Block {
     /// Estimated font size in pixels (used for SFX vs dialogue heuristic).
     #[serde(default)]
     pub font_size: f32,
-    /// OCR-extracted Japanese text.
+    /// OCR-extracted Japanese or Korean text.
     #[serde(default)]
     pub jp: String,
     /// Assigned line type (`dialogue` or `sfx`).

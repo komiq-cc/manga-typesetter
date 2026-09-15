@@ -632,6 +632,18 @@
         <span class="dot {sidecarOk ? 'ok' : app.sidecar?.status === 'error' ? 'err' : 'off'}"></span>
         <span class="sval">{sidecarLabel}</span>
       </div>
+      <div class="srow">
+        <label class="slabel" for="setting-lang">Page language</label>
+        <select
+          id="setting-lang"
+          class="sval lang-select"
+          value={prefs.projectLanguage}
+          onchange={(e) => setPref('projectLanguage', e.target.value)}
+        >
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+        </select>
+      </div>
       {#if sidecarOk && app.sidecar.info?.gpu_build === false}
         <div class="qhint">
           CPU-only build. GPU acceleration needs the Linux (GPU) download, which runs on
@@ -648,7 +660,13 @@
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
             <div>
               <div class="mc-name">Detection &amp; OCR</div>
-              <div class="mc-sub">comic-text-detector · manga-ocr · panel YOLO</div>
+              <div class="mc-sub">
+                {#if app.projectLanguage === 'ko'}
+                  comic-text-detector · PP-OCRv4 ko · panel YOLO
+                {:else}
+                  comic-text-detector · manga-ocr · panel YOLO
+                {/if}
+              </div>
             </div>
           </div>
           <span class="tag auto">Auto</span>
@@ -880,6 +898,18 @@
   .sval {
     margin-left: 2px;
     color: var(--text);
+  }
+  .lang-select {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .lang-select:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   .dot {
     width: 9px;

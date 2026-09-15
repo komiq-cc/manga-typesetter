@@ -166,6 +166,12 @@ describe('balanceLines - a short word is never left alone', () => {
     expect(lines.at(-1)).not.toBe('IT!');
   });
 
+  it('excludes Hangul from the orphan penalty', () => {
+    // 1-2 syllable Korean eojeol ending a line (e.g. 네, 했다) is not penalized as an orphan
+    const lines = balanceLines('안녕하세요 네', 6, chars, { minOrphan: 3 });
+    expect(lines).toEqual(['안녕하세요', '네']);
+  });
+
   it('takes the threshold from the caller', () => {
     const text = 'THE RAIN CAME DOWN AND IT WAS COLD';
     const strict = balanceLines(text, 12, chars, { minOrphan: 6 });
@@ -215,6 +221,12 @@ describe('balanceLines - a word is only broken when nothing else will do', () =>
   it('lets that one line overflow rather than splitting it', () => {
     const lines = balanceLines('AAAAAAAAAAAAAAAAAAAA', 5, chars);
     expect(lines).toEqual(['AAAAAAAAAAAAAAAAAAAA']);
+  });
+
+  it('skips ASCII hyphenation on Hangul words and lets them overflow', () => {
+    // Hangul is excluded from ASCII hyphenation; long words overflow rather than being split
+    const lines = balanceLines('안녕하세요 반갑습니다대한민국만세', 10, chars, { hyphenate: true });
+    expect(lines).toEqual(['안녕하세요', '반갑습니다대한민국만세']);
   });
 
   it('carries a word to the next line whole when it fits there', () => {

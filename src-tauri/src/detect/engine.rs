@@ -12,8 +12,9 @@ use ort::session::Session;
 use tauri::async_runtime::Mutex as AsyncMutex;
 
 use super::accel;
-use super::analyze::{analyze, decode_image, AnalyzeResponse};
+use super::analyze::{analyze, decode_image, AnalyzeResponse, AnyOcrEngine};
 use super::ocr::OcrEngine;
+use super::ocr_ko::KoreanOcrEngine;
 use super::panels;
 use super::textdetector::TextDetector;
 
@@ -45,6 +46,16 @@ const OCR_FILES: [ModelFile; 3] = [
         url: "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/vocab.txt",
     },
 ];
+const KOREAN_OCR_FILES: [ModelFile; 2] = [
+    ModelFile {
+        rel: "paddleocr/korean_mobile_rec.onnx",
+        url: "https://huggingface.co/xberg-io/paddleocr-onnx-models/resolve/main/rec/korean/model.onnx",
+    },
+    ModelFile {
+        rel: "paddleocr/korean_dict.txt",
+        url: "https://huggingface.co/xberg-io/paddleocr-onnx-models/resolve/main/rec/korean/dict.txt",
+    },
+];
 
 /// Directory where downloaded model weights reside, relative to `$HOME`.
 const MODELS_SUFFIX: [&str; 2] = [".mangatypesetter", "models"];
@@ -64,6 +75,7 @@ struct Sessions {
     detector: Option<TextDetector>,
     panels: Option<Session>,
     ocr: Option<OcrEngine>,
+    ocr_ko: Option<KoreanOcrEngine>,
     /// Execution provider the text detector landed on, once it has loaded.
     device: Option<&'static str>,
     /// What the isolated probe answered, before any model has loaded.
@@ -139,7 +151,7 @@ impl DetectEngine {
     }
 
     /// Runs page analysis on a blocking thread, loading models as needed.
-    fn analyze_blocking(&self, bytes: &[u8], want_ocr: bool) -> Result<AnalyzeResponse, String> {
+    fn analyze_blocking(&self, bytes: &[u8], want_ocr: bool, lang: &str) -> Result<AnalyzeResponse, String> {
         let img = decode_image(bytes)?;
         let dir = &self.0.models_dir;
         let (mut s, recovered) = self.lock_sessions();
@@ -163,20 +175,43 @@ impl DetectEngine {
                 Err(e) => log::warn!("panel model unavailable, reading order degrades: {e}"),
             }
         }
-        if want_ocr && s.ocr.is_none() {
-            s.ocr = Some(
-                OcrEngine::load(&dir.join("manga-ocr"))
-                    .map_err(|e| format!("failed to load the OCR models: {e}"))?,
-            );
+        let lang_norm = if lang == "ko" { "ko" } else { "ja" };
+        if want_ocr {
+            if lang_norm == "ko" {
+                if s.ocr_ko.is_none() {
+                    match KoreanOcrEngine::load(
+                        &dir.join(KOREAN_OCR_FILES[0].rel),
+                        &dir.join(KOREAN_OCR_FILES[1].rel),
+                    ) {
+                        Ok(engine) => s.ocr_ko = Some(engine),
+                        Err(e) => log::warn!("korean ocr model unavailable: {e}"),
+                    }
+                }
+            } else if s.ocr.is_none() {
+                match OcrEngine::load(&dir.join("manga-ocr")) {
+                    Ok(engine) => s.ocr = Some(engine),
+                    Err(e) => log::warn!("japanese ocr model unavailable: {e}"),
+                }
+            }
         }
 
-        let Sessions { detector, panels, ocr, .. } = &mut *s;
+        let Sessions { detector, panels, ocr, ocr_ko, .. } = &mut *s;
         let detector = detector.as_mut().expect("loaded above");
+        let mut ocr_dispatch = if want_ocr {
+            if lang_norm == "ko" {
+                ocr_ko.as_mut().map(AnyOcrEngine::Ko)
+            } else {
+                ocr.as_mut().map(AnyOcrEngine::Ja)
+            }
+        } else {
+            None
+        };
         analyze(
             &img,
             detector,
             panels.as_mut(),
-            if want_ocr { ocr.as_mut() } else { None },
+            ocr_dispatch.as_mut(),
+            lang_norm,
         )
     }
 }
@@ -402,11 +437,18 @@ pub async fn detect_analyze(
     state: tauri::State<'_, DetectEngine>,
     image: Vec<u8>,
     ocr: bool,
+    lang: Option<String>,
 ) -> Result<AnalyzeResponse, String> {
     let engine = state.inner().clone();
+    let lang_str = lang.unwrap_or_default().trim().to_lowercase();
+    let page_lang = if lang_str.starts_with("ko") { "ko" } else { "ja" };
     let mut needed: Vec<&ModelFile> = vec![&TEXT_DETECTOR];
     if ocr {
-        needed.extend(OCR_FILES.iter());
+        if page_lang == "ko" {
+            needed.extend(KOREAN_OCR_FILES.iter());
+        } else {
+            needed.extend(OCR_FILES.iter());
+        }
     }
     engine.ensure(&needed).await?;
 
@@ -414,7 +456,8 @@ pub async fn detect_analyze(
         log::warn!("failed to download panel model, reading order degrades: {e}");
     }
 
-    tauri::async_runtime::spawn_blocking(move || engine.analyze_blocking(&image, ocr))
+    let lang_owned = page_lang.to_string();
+    tauri::async_runtime::spawn_blocking(move || engine.analyze_blocking(&image, ocr, &lang_owned))
         .await
         .map_err(|e| format!("analyze task failed: {e}"))?
 }
@@ -700,8 +743,11 @@ mod tests {
         // These are the only outbound requests the app makes, and the reqwest
         // dependency grew a TLS backend for them; if one ever regressed to
         // plain http that backend would be silently unused.
-        let all: Vec<&ModelFile> =
-            [&PANEL_MODEL, &TEXT_DETECTOR].into_iter().chain(OCR_FILES.iter()).collect();
+        let all: Vec<&ModelFile> = [&PANEL_MODEL, &TEXT_DETECTOR]
+            .into_iter()
+            .chain(OCR_FILES.iter())
+            .chain(KOREAN_OCR_FILES.iter())
+            .collect();
         for f in all {
             assert!(f.url.starts_with("https://"), "{}", f.url);
             assert!(!f.rel.starts_with('/') && !f.rel.contains(".."), "{}", f.rel);

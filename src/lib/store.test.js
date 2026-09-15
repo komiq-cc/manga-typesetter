@@ -2421,6 +2421,27 @@ describe('applying a detection result', () => {
     expect(page().lines.map((l) => [l.n, l.jp, l.en])).toEqual([[1, 'あ', 'Ah']]);
   });
 
+  it('keeps the English on a Korean line the detector found again unchanged', () => {
+    loadProjectPages([
+      { id: 1, w: 1000, h: 2000, lines: [{ n: 1, type: 'dialogue', jp: '안녕하세요', en: 'Hello', lang: 'ko' }], boxes: [] },
+    ]);
+    applyDetection(result({
+      lines: [{ n: 1, type: 'dialogue', jp: '안녕하세요', lang: 'ko', box: [100, 200, 300, 400], vertical: null, font_size: 20 }],
+    }));
+    expect(page().lines.map((l) => [l.n, l.jp, l.en])).toEqual([[1, '안녕하세요', 'Hello']]);
+    expect(page().lines[0].lang).toBe('ko');
+  });
+
+  it('keeps translation matched when imported from Korean source keys', () => {
+    loadProjectPages([
+      { id: 1, w: 1000, h: 2000, lines: [{ n: 1, type: 'dialogue', jp: '네, 알겠습니다', en: 'Yes, understood' }], boxes: [] },
+    ]);
+    applyDetection(result({
+      lines: [{ n: 1, type: 'dialogue', jp: '네, 알겠습니다', lang: 'ko', box: [100, 200, 300, 400], vertical: null, font_size: 20 }],
+    }));
+    expect(page().lines.map((l) => [l.n, l.jp, l.en])).toEqual([[1, '네, 알겠습니다', 'Yes, understood']]);
+  });
+
   // Same number, different sentence. The detector renumbers from 1 in reading
   // order on every run, so the number alone does not say it is the same line -
   // one bubble found that was missed before shifts every number after it.

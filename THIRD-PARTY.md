@@ -94,6 +94,7 @@ is governed by its publisher's terms, not by this project's license.
 | manga109 YOLO detector | [deepghs/manga109_yolo](https://huggingface.co/deepghs/manga109_yolo) | YOLO11 lineage; Ultralytics applies AGPL-3.0 to its models |
 | comic text detector | [manga-image-translator](https://github.com/zyddnys/manga-image-translator) | published from a GPL-3.0 repository |
 | manga-ocr-base | [kha-white/manga-ocr](https://github.com/kha-white/manga-ocr), [ONNX build](https://huggingface.co/onnx-community/manga-ocr-base-ONNX) | Apache-2.0 |
+| PP-OCRv4 Korean rec | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), [ONNX build](https://huggingface.co/xberg-io/paddleocr-onnx-models) | Apache-2.0 |
 
 The application runs these as ONNX graphs through `ort`. It does not link,
 vendor, or redistribute the Ultralytics package or any other AGPL or GPL code.

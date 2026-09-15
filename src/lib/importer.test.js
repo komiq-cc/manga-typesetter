@@ -171,3 +171,19 @@ describe('pages become PNG on the way in', () => {
     expect(await toPng(f)).toBe(f);
   });
 });
+
+describe('Korean source-text aliases', () => {
+  it('accepts ko, korean, and kr as source-text keys', () => {
+    const l1 = firstLine([{ n: 1, ko: '안녕하세요', en: 'Hello' }]);
+    expect(l1.jp).toBe('안녕하세요');
+    expect(l1.en).toBe('Hello');
+
+    const l2 = firstLine([{ n: 1, korean: '반갑습니다', en: 'Nice to meet you' }]);
+    expect(l2.jp).toBe('반갑습니다');
+    expect(l2.en).toBe('Nice to meet you');
+
+    const l3 = firstLine([{ n: 1, kr: '감사합니다', en: 'Thank you' }]);
+    expect(l3.jp).toBe('감사합니다');
+    expect(l3.en).toBe('Thank you');
+  });
+});

@@ -144,10 +144,12 @@ same version on every distro. `scripts/build-appimage.sh` explains why.
 [ONNX Runtime](https://onnxruntime.ai) via [`ort`](https://ort.pyke.io)
 
 Detection models from
-[deepghs/manga109_yolo](https://huggingface.co/deepghs/manga109_yolo) and
-[kha-white/manga-ocr](https://github.com/kha-white/manga-ocr). No model weights
-ship in the app - they download on first use, direct from the publisher,
-and each carries its publisher's own terms rather than this project's.
+[deepghs/manga109_yolo](https://huggingface.co/deepghs/manga109_yolo),
+[kha-white/manga-ocr](https://github.com/kha-white/manga-ocr), and
+[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (Korean recognition).
+No model weights ship in the app - they download on first use, direct from the
+publisher, and each carries its publisher's own terms rather than this
+project's.
 
 ## License
 

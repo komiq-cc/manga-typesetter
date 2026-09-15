@@ -123,8 +123,9 @@ the mapped face; a faux face is synthesised when none is mapped.
 ## Detection
 
 Run detection on one page or the whole chapter. It finds speech bubbles and
-text blocks, sorts them in Japanese reading order, separates SFX from dialogue,
-and can transcribe with manga-ocr. Models download on first use.
+text blocks, sorts them in reading order (right-to-left for Japanese,
+left-to-right for Korean), separates SFX from dialogue, and can transcribe
+with manga-ocr (Japanese) or PP-OCRv4 (Korean). Models download on first use.
 
 ## Export
 

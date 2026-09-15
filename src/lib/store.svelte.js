@@ -62,7 +62,7 @@ import {
   balancedBoxSize,
   clearLayoutMemo,
 } from './measure.js';
-import { neededHeight, growToFit } from './typeset.js';
+import { neededHeight, growToFit, hasHangul } from './typeset.js';
 // The pixel half of balloon fitting, and the two halves of getting pixels to it.
 // `balloon.js` is pure and knows nothing about this app; `page-pixels.js` is the
 // app's answer to "where do the pixels come from", and it answers null wherever
@@ -418,6 +418,8 @@ export const app = $state({
   // preference of the app, so `openChapter` writes it and `closeChapter` puts
   // it back.
   projectLayout: 'pages',
+  // The open chapter/page language ('ja' | 'ko'), defaulting to 'ja'.
+  projectLanguage: 'ja',
 });
 
 // ---------- derived helpers ----------
@@ -1740,7 +1742,13 @@ export function applyDetection(result, target = null) {
     result.lines.map((l) => {
       const jp = l.jp ?? '';
       const was = before.get(l.n);
-      return { n: l.n, type: l.type, jp, en: was && (was.jp ?? '') === jp ? (was.en ?? '') : '' };
+      return {
+        n: l.n,
+        type: l.type,
+        jp,
+        en: was && (was.jp ?? '') === jp ? (was.en ?? '') : '',
+        ...(l.lang != null ? { lang: l.lang } : result.lang != null ? { lang: result.lang } : {}),
+      };
     }),
   );
   // Detection geometry kept separately - read by the detected-text JSON export
@@ -1755,7 +1763,9 @@ export function applyDetection(result, target = null) {
       box: intoPage(l.box),
       vertical: l.vertical,
       font_size: Number.isFinite(l.font_size) ? l.font_size * sy : l.font_size,
+      ...(l.lang != null ? { lang: l.lang } : result.lang != null ? { lang: result.lang } : {}),
     })),
+    ...(result.lang != null ? { lang: result.lang } : {}),
   };
   // The typeset boxes go. Every one of them is bound to a line number the
   // detector has just reassigned, so keeping them would leave boxes rendering
@@ -1993,8 +2003,21 @@ export function balloonFitAt(p, imgX, imgY) {
 // up as a tall narrow strip: placed at a 40x200 rectangle, auto-height then grows
 // it further with every line the 40px width forces.
 const VERTICAL_ASPECT = 1.6;
-function looksVertical(det) {
+export function looksVertical(det, ln = null, p = null) {
   if (!det || !Array.isArray(det.box) || det.box.length !== 4) return false;
+  const isKorean =
+    det.lang === 'ko' ||
+    ln?.lang === 'ko' ||
+    (det.n != null && p?.lines?.find((l) => l.n === det.n)?.lang === 'ko') ||
+    (det.n != null && p?.detect?.boxes?.find((b) => b.n === det.n)?.lang === 'ko') ||
+    p?.detect?.lang === 'ko' ||
+    p?.lines?.some((l) => l.lang === 'ko') ||
+    (typeof app !== 'undefined' && app.projectLanguage === 'ko') ||
+    hasHangul(det.text ?? det.jp ?? ln?.jp ?? '');
+
+  if (isKorean) {
+    return det.vertical === true;
+  }
   if (det.vertical != null) return !!det.vertical;
   const [x1, y1, x2, y2] = det.box;
   const rw = Math.abs(x2 - x1);
@@ -2082,7 +2105,7 @@ function bornBox(p, ln, imgX, imgY) {
   // describing two different bubbles.
   if (!g) {
     fit = null;
-    const rect = looksVertical(det) ? transposeRect(det.box) : (det?.box ?? null);
+    const rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
     // Skipped whenever there IS a rect, because `placementRect` ignores the
     // fallback pair in that case and the measurement could not change the answer.
     // And skipped with no canvas, for the reason `autoFitBox` asks the same

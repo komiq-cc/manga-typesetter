@@ -1,7 +1,8 @@
 //! In-process manga detection and OCR using ONNX Runtime.
 //!
 //! Implements panel detection (manga109 YOLO), comic text detection
-//! (DBNet/YOLO/UNet), text ordering, and Japanese OCR (manga-ocr).
+//! (DBNet/YOLO/UNet), text ordering, and Japanese/Korean OCR
+//! (manga-ocr / PP-OCRv4).
 
 pub mod accel;
 pub mod analyze;
@@ -12,6 +13,7 @@ pub mod engine;
 pub mod geometry;
 pub mod minrect;
 pub mod ocr;
+pub mod ocr_ko;
 pub mod panels;
 pub mod sorting;
 pub mod textblock;
