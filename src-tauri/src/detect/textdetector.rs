@@ -553,4 +553,43 @@ mod tests {
 
         assert!(failures.is_empty(), "golden mismatches:\n  {}", failures.join("\n  "));
     }
+
+    /// Opt-in smoke test for diagnosing a user-supplied page without checking a
+    /// machine-specific fixture into the repository.
+    #[test]
+    fn supplied_page_reports_detector_blocks() {
+        let Ok(page_path) = std::env::var("MT_TEST_DETECT_PAGE") else {
+            eprintln!("skipping supplied-page test: MT_TEST_DETECT_PAGE is not set");
+            return;
+        };
+        let Some(home) = std::env::var_os("HOME") else {
+            eprintln!("skipping supplied-page test: HOME is not set");
+            return;
+        };
+        let model_path = std::path::PathBuf::from(home)
+            .join(".mangatypesetter")
+            .join("models")
+            .join("comictextdetector.onnx");
+
+        let image = image::open(&page_path)
+            .unwrap_or_else(|error| panic!("failed to open {page_path}: {error}"));
+        let mut detector = TextDetector::load(&model_path)
+            .unwrap_or_else(|error| panic!("failed to load {}: {error}", model_path.display()));
+        let (blocks, _) = detector
+            .detect(&image, "ja")
+            .unwrap_or_else(|error| panic!("failed to detect {page_path}: {error}"));
+
+        eprintln!("detected {} blocks in {page_path}", blocks.len());
+        for block in &blocks {
+            eprintln!(
+                "  {:?}, {} lines {:?}, vertical={}, language={:?}",
+                block.xyxy,
+                block.lines.len(),
+                block.lines,
+                block.vertical,
+                block.language
+            );
+        }
+        assert!(!blocks.is_empty(), "detector returned no blocks for {page_path}");
+    }
 }

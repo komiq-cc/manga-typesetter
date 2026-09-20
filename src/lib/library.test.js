@@ -130,6 +130,7 @@ const {
   setRoot,
   scanLibrary,
   createProject,
+  setProjectOcrLanguage,
   deleteProject,
   deleteChapter,
   projectById,
@@ -3278,6 +3279,85 @@ describe('the layout survives the project.json round trip', () => {
   });
 });
 
+describe('the OCR language belongs to one project', () => {
+  const projectJson = (slug) => JSON.parse(fsx._tree.files.get(`/lib/${slug}/project.json`));
+
+  it('stores a language for either layout and defaults old or invalid values to Japanese', async () => {
+    const korean = await createProject('Korean Strip', { layout: 'longstrip', ocrLanguage: 'ko' });
+    const invalid = await createProject('Unknown Strip', { layout: 'longstrip', ocrLanguage: 'xx' });
+    const pages = await createProject('Pages', { layout: 'pages', ocrLanguage: 'zh' });
+    expect(korean.ocrLanguage).toBe('ko');
+    expect(projectJson(korean.slug).ocrLanguage).toBe('ko');
+    expect(invalid.ocrLanguage).toBe('ja');
+    expect(pages.ocrLanguage).toBe('zh');
+    expect(projectJson(pages.slug).ocrLanguage).toBe('zh');
+
+    seedProject('legacy-language', PROJECT('p-legacy-language', 'Legacy language'));
+    await scanLibrary();
+    expect(projectById('p-legacy-language').ocrLanguage).toBe('ja');
+  });
+
+  it('adopts the Korean branch preference for old projects with no language field', async () => {
+    const originalStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+      getItem: (key) => key === 'mt.prefs' ? '{"projectLanguage":"ko"}' : null,
+    };
+    try {
+      seedProject('old-korean', PROJECT('p-old-korean', 'Old Korean'));
+      await scanLibrary();
+      expect(projectById('p-old-korean').ocrLanguage).toBe('ko');
+    } finally {
+      if (originalStorage) globalThis.localStorage = originalStorage;
+      else delete globalThis.localStorage;
+    }
+  });
+
+  it('lets an existing paged project switch to Korean and persists the choice', async () => {
+    const p = await createProject('Korean Pages', { layout: 'pages' });
+    expect(p.ocrLanguage).toBe('ja');
+    await setProjectOcrLanguage(p.id, 'ko');
+    expect(p.ocrLanguage).toBe('ko');
+    expect(projectJson(p.slug).ocrLanguage).toBe('ko');
+    await scanLibrary();
+    expect(projectById(p.id).ocrLanguage).toBe('ko');
+  });
+
+  it('survives a whole project.json rewrite when a chapter is added', async () => {
+    const p = await createProject('Chinese Strip', { layout: 'longstrip', ocrLanguage: 'zh' });
+    await createChapter({
+      projectId: p.id,
+      number: 1,
+      title: '',
+      files: [fakeFile('a.png', 1)],
+    });
+    expect(projectJson(p.slug).ocrLanguage).toBe('zh');
+  });
+
+  it('is mirrored on open, reset on close, and never leaks to another project', async () => {
+    const korean = await createProject('Korean Strip', { layout: 'longstrip', ocrLanguage: 'ko' });
+    const koreanChapter = await createChapter({
+      projectId: korean.id,
+      number: 1,
+      title: '',
+      files: [fakeFile('a.png', 1)],
+    });
+    const japanese = await createProject('Japanese Strip', { layout: 'longstrip' });
+    const japaneseChapter = await createChapter({
+      projectId: japanese.id,
+      number: 1,
+      title: '',
+      files: [fakeFile('b.png', 2)],
+    });
+
+    await openChapter(korean.id, koreanChapter.id);
+    expect(app.projectOcrLanguage).toBe('ko');
+    await openChapter(japanese.id, japaneseChapter.id);
+    expect(app.projectOcrLanguage).toBe('ja');
+    closeChapter();
+    expect(app.projectOcrLanguage).toBe('ja');
+  });
+});
+
 describe('the open chapter carries its project\'s layout', () => {
   afterEach(() => closeChapter());
 
@@ -3425,7 +3505,7 @@ describe('chapter packages', () => {
   });
 
   it('readChapterPackageSources returns the record and every named file byte-for-byte', async () => {
-    const p = await createProject('Series', { layout: 'longstrip' });
+    const p = await createProject('Series', { layout: 'longstrip', ocrLanguage: 'zh' });
     const c = await createChapterFromPages({
       projectId: p.id,
       number: 1,
@@ -3449,7 +3529,7 @@ describe('chapter packages', () => {
     expect(src.record.title).toBe('One');
     expect(src.record.pages).toHaveLength(2);
     expect(src.record.pages[0].boxes[0].id).toBe('b1');
-    expect(src.project).toEqual({ name: 'Series', layout: 'longstrip' });
+    expect(src.project).toEqual({ name: 'Series', layout: 'longstrip', ocrLanguage: 'zh' });
     expect(src.raws.get('a.png')).toEqual(new Uint8Array([1, 2]));
     expect(src.raws.get('b.png')).toEqual(new Uint8Array([4, 5, 6]));
     expect(src.cleaned.get('a-c.png')).toEqual(new Uint8Array([3]));

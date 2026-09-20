@@ -30,13 +30,11 @@ impl std::fmt::Display for LineType {
     }
 }
 
-/// Manga reading direction (RTL Japanese vs LTR western).
+/// Reading direction (RTL Japanese vs LTR Chinese/Korean longstrips).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadingDirection {
     #[default]
     Rtl,
-    // Mirrors the upstream enum; nothing selects it until a direction toggle ships.
-    #[allow(dead_code)]
     Ltr,
 }
 

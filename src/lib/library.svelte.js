@@ -27,6 +27,7 @@ import {
   closeBulk,
   normalizeChapterMode,
   normalizeLayout,
+  normalizeOcrLanguage,
   toast,
 } from './store.svelte.js';
 import { buildTextJson } from './text-json.js';
@@ -47,6 +48,17 @@ import { forgetPagePixels } from './page-pixels.js';
 
 const ROOT_KEY = 'mt.libraryRoot';
 const SCHEMA = 1;
+
+// The Korean branch stored language as an installation preference. Adopt it
+// only for projects written before the language moved into project.json.
+function legacyProjectLanguage() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('mt.prefs') ?? 'null');
+    return saved?.projectLanguage === 'ko' ? 'ko' : 'ja';
+  } catch {
+    return 'ja';
+  }
+}
 
 export const library = $state({
   root: '',
@@ -278,6 +290,8 @@ async function readProject(root, slug, problems, dupes) {
     // Absent reads 'pages', which is what every project written before the
     // longstrip layout existed actually is - see LAYOUTS in the store.
     layout: normalizeLayout(raw.layout),
+    // Old Korean builds stored this globally; otherwise absent is Japanese.
+    ocrLanguage: normalizeOcrLanguage(raw.ocrLanguage ?? legacyProjectLanguage()),
     ...projectTags(raw),
     chapters,
     unreadable: false,
@@ -500,10 +514,11 @@ async function freeDir(parent, name, taken) {
 // image with no margins, and re-reading them as separate pages - or the reverse -
 // describes art that does not exist. Anything unrecognised, including the
 // `undefined` every existing caller passes, is 'pages'.
-export async function createProject(name, { layout = 'pages' } = {}) {
+export async function createProject(name, { layout = 'pages', ocrLanguage = 'ja' } = {}) {
   const taken = new Set(library.projects.map((p) => p.slug));
   const { slug, dir } = await freeDir(library.root, name, taken);
   await fsx.mkdir(dir);
+  const normalizedLayout = normalizeLayout(layout);
   const record = {
     schema: SCHEMA,
     id: newId('p'),
@@ -512,7 +527,8 @@ export async function createProject(name, { layout = 'pages' } = {}) {
     updatedAt: now(),
     coverChapterId: null,
     coverPageId: null,
-    layout: normalizeLayout(layout),
+    layout: normalizedLayout,
+    ocrLanguage: normalizeOcrLanguage(ocrLanguage),
     // Born empty and written so: a project with no registry of its own is what
     // `projectTags` reads as pre-registry and hands the legacy global list.
     tags: [],
@@ -591,11 +607,25 @@ async function writeProjectRecord(p, patch) {
     coverChapterId: p.coverChapterId ?? null,
     coverPageId: p.coverPageId ?? null,
     layout: normalizeLayout(p.layout),
+    ocrLanguage: normalizeOcrLanguage(p.ocrLanguage),
     ...tagFields(p),
     ...patch,
   };
   await writeJson(await fsx.join(p.dir, 'project.json'), record);
   return record;
+}
+
+// Language can be corrected after import or changed for an existing project;
+// detection reads it from the open project rather than a machine-wide setting.
+export async function setProjectOcrLanguage(projectId, language) {
+  const p = projectById(projectId);
+  if (!p || p.unreadable) throw new Error('No such readable project');
+  const next = normalizeOcrLanguage(language);
+  const record = await writeProjectRecord(p, { ocrLanguage: next });
+  p.ocrLanguage = next;
+  p.updatedAt = record.updatedAt;
+  if (app.chapterRef?.projectId === projectId) app.projectOcrLanguage = next;
+  return next;
 }
 
 export const deleteChapter = guarded(async function deleteChapter(projectId, chapterId) {
@@ -856,6 +886,7 @@ async function buildChapter(p, number, title, copy, mode = 'typeset') {
       // and can never be chosen again, so losing it to a chapter import would
       // silently turn a webtoon project back into a paged one.
       layout: normalizeLayout(p.layout),
+      ocrLanguage: normalizeOcrLanguage(p.ocrLanguage),
       // And the tag registry with its size memory, which are this project's alone.
       ...tagFields(p),
     });
@@ -1180,7 +1211,11 @@ export async function readChapterPackageSources(projectId, chapterId) {
   return {
     record,
     translations,
-    project: { name: p?.name ?? '', layout: normalizeLayout(p?.layout) },
+    project: {
+      name: p?.name ?? '',
+      layout: normalizeLayout(p?.layout),
+      ocrLanguage: normalizeOcrLanguage(p?.ocrLanguage),
+    },
     raws,
     cleaned,
   };
@@ -1865,6 +1900,7 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // every open for the same reason the mode is: opening a paged chapter after a
   // longstrip one must give back the paged canvas.
   app.projectLayout = normalizeLayout(p.layout);
+  app.projectOcrLanguage = normalizeOcrLanguage(p.ocrLanguage);
   // And so does the tag registry: this project's vocabulary and size memory,
   // not whatever the last project left behind.
   bindProjectTags(p);
@@ -2087,6 +2123,7 @@ export function closeChapter() {
   // And so does the layout, for the same reason - it belonged to the project the
   // closed chapter was in.
   app.projectLayout = 'pages';
+  app.projectOcrLanguage = 'ja';
   // And the tag registry goes with it, so no project's vocabulary is on offer
   // while none is open.
   unbindTags();

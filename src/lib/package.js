@@ -49,7 +49,7 @@ const familySegment = (name) => String(name).replace(/[\\/]+/g, '_').trim() || '
 // input:
 //   record        the chapter.json record (pages with file/cleaned/w/h/lines/detect/boxes)
 //   translations  string, the derived text JSON (optional)
-//   project       { name, layout }
+//   project       { name, layout, ocrLanguage }
 //   raws          Map<fileName, Uint8Array>   every page.file must be present
 //   cleaned       Map<fileName, Uint8Array>   every page.cleaned must be present
 //   fonts         [{ name, faces: { slot: { file, data } | null } }]  user fonts only
@@ -108,7 +108,11 @@ export function buildChapterPackage({
     version: PACKAGE_VERSION,
     app,
     exportedAt,
-    project: { name: project.name ?? '', layout: project.layout ?? 'pages' },
+    project: {
+      name: project.name ?? '',
+      layout: project.layout ?? 'pages',
+      ocrLanguage: project.ocrLanguage ?? 'ja',
+    },
     chapter: {
       number: record.number ?? 0,
       title: record.title ?? '',

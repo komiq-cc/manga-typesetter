@@ -34,6 +34,7 @@
   let error = $state('');
   let workflow = $state('typeset');
   let newProjectLayout = $state('pages');
+  let newProjectOcrLanguage = $state('ja');
 
   const isPackage = $derived(source === 'package');
 
@@ -61,6 +62,7 @@
       error = '';
       newProjectName = '';
       newProjectLayout = 'pages';
+      newProjectOcrLanguage = 'ja';
       workflow = 'typeset';
     });
   });
@@ -108,6 +110,7 @@
       title = read.summary.title;
       if (!newProjectName.trim()) newProjectName = read.summary.projectName ?? '';
       newProjectLayout = read.summary.layout;
+      newProjectOcrLanguage = read.summary.ocrLanguage;
     } catch (e) {
       pkg = null;
       pkgSummary = null;
@@ -235,7 +238,10 @@
     let createdProject = null;
     try {
       if (target === '__new__') {
-        createdProject = await createProject(newProjectName.trim(), { layout: newProjectLayout });
+        createdProject = await createProject(newProjectName.trim(), {
+          layout: newProjectLayout,
+          ocrLanguage: newProjectOcrLanguage,
+        });
       }
       const pid = createdProject ? createdProject.id : target;
 
@@ -326,6 +332,15 @@
           <div class="seg">
             <button class:on={newProjectLayout === 'pages'} onclick={() => (newProjectLayout = 'pages')} disabled={busy}>Pages</button>
             <button class:on={newProjectLayout === 'longstrip'} onclick={() => (newProjectLayout = 'longstrip')} disabled={busy}>Longstrip</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span>Language</span>
+          <div class="seg">
+            <button class:on={newProjectOcrLanguage === 'ja'} onclick={() => (newProjectOcrLanguage = 'ja')} disabled={busy}>Japanese</button>
+            <button class:on={newProjectOcrLanguage === 'zh'} onclick={() => (newProjectOcrLanguage = 'zh')} disabled={busy}>Chinese</button>
+            <button class:on={newProjectOcrLanguage === 'ko'} onclick={() => (newProjectOcrLanguage = 'ko')} disabled={busy}>Korean</button>
           </div>
         </div>
       {/if}

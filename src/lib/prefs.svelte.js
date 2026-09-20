@@ -17,6 +17,7 @@
 import { setTypesetEnabled } from './measure.js';
 import { setBoxDefaults } from './data.js';
 import { relayoutAll, app, setTool, setBrushToolAllowed } from './store.svelte.js';
+import { normalizeOcrModels } from './ocr-models.js';
 
 const KEY = 'mt.prefs';
 
@@ -26,10 +27,6 @@ export const prefs = $state({
   typeset: false,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
-  // The page language the detector runs in: 'ja' (right-to-left manga) or
-  // 'ko' (left-to-right manhwa). A machine preference, not a document fact -
-  // the same chapter can be re-detected either way on a fresh machine.
-  projectLanguage: 'ja',
   // ---- typesetting defaults for NEW text boxes ----
   // These five are per-BOX style properties (`style.autoHeight`, `style.shape`
   // and friends - see `defaultStyle` in data.js). What lives here is only the
@@ -64,6 +61,9 @@ export const prefs = $state({
   // computer, and another machine's copy of the chapter has its own.
   hiddenBuiltinFonts: [],
   shownSystemFonts: [],
+  // Recognition quality/size is a preference of this installation, separate
+  // for each project language. Project files continue to store only language.
+  ocrModels: normalizeOcrModels(null),
 });
 
 // The two font lists are string arrays; anything else in them is dropped.
@@ -100,7 +100,6 @@ function persist() {
       KEY,
       JSON.stringify({
         typeset: prefs.typeset,
-        projectLanguage: prefs.projectLanguage,
         defaultAutoHeight: prefs.defaultAutoHeight,
         defaultShape: prefs.defaultShape,
         defaultHyphenate: prefs.defaultHyphenate,
@@ -110,6 +109,7 @@ function persist() {
         shortcuts: $state.snapshot(prefs.shortcuts),
         hiddenBuiltinFonts: $state.snapshot(prefs.hiddenBuiltinFonts),
         shownSystemFonts: $state.snapshot(prefs.shownSystemFonts),
+        ocrModels: $state.snapshot(prefs.ocrModels),
       }),
     );
   } catch {
@@ -123,11 +123,7 @@ export function setPref(key, value) {
   // but a plain object would leave every shortcut lookup reading properties off
   // a number - and an array is an object too, but not the kind of map this is.
   if (key === 'shortcuts' && (!value || typeof value !== 'object' || Array.isArray(value))) return;
-  // The page language is one of two spellings and nothing else - anything a
-  // caller hands it that is not 'ko' is Japanese, which is also the default,
-  // so a corrupt value can only ever select the behaviour that was there
-  // before the preference existed.
-  if (key === 'projectLanguage') value = value === 'ko' ? 'ko' : 'ja';
+  if (key === 'ocrModels') value = normalizeOcrModels(value);
   if (NAME_LIST_KEYS.includes(key)) {
     value = cleanNames(value);
     if (!value) return;
@@ -160,9 +156,6 @@ export function setPref(key, value) {
       setTool('pan');
     }
   }
-  // The detector reads `app.projectLanguage` when it picks OCR weights and
-  // reading order, so the preference has to land there the moment it changes.
-  if (key === 'projectLanguage') app.projectLanguage = prefs.projectLanguage;
   // No relayout for these: they are what the NEXT box is born with, and boxes
   // already on the page keep the flags they carry. Re-measuring here would be
   // re-measuring nothing.
@@ -213,13 +206,10 @@ function load() {
     const names = saved ? cleanNames(saved[k]) : null;
     if (names) prefs[k] = names;
   }
-  if (saved && (saved.projectLanguage === 'ko' || saved.projectLanguage === 'ja')) {
-    prefs.projectLanguage = saved.projectLanguage;
-  }
+  prefs.ocrModels = normalizeOcrModels(saved?.ocrModels);
   setTypesetEnabled(prefs.typeset);
   applyBoxDefaults();
   setBrushToolAllowed(prefs.brushTool);
-  app.projectLanguage = prefs.projectLanguage;
 }
 
 load();

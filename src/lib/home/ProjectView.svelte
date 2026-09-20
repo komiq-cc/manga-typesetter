@@ -1,5 +1,5 @@
 <script>
-  import { projectById, deleteChapter, setChapterMode } from '../library.svelte.js';
+  import { projectById, deleteChapter, setChapterMode, setProjectOcrLanguage } from '../library.svelte.js';
   import { route, goLibrary, goEditor } from '../route.svelte.js';
   import { toast } from '../store.svelte.js';
   import { relativeTime, plural } from '../format.js';
@@ -22,6 +22,21 @@
   let switchingId = $state(null);
   // The row whose package is being built and written.
   let exportingId = $state(null);
+  let changingLanguage = $state(false);
+
+  async function onLanguageChange(event) {
+    if (changingLanguage) return;
+    const select = event.currentTarget;
+    changingLanguage = true;
+    try {
+      await setProjectOcrLanguage(project.id, select.value);
+    } catch (e) {
+      select.value = project.ocrLanguage;
+      toast(`Could not change source language: ${e?.message ?? e}`);
+    } finally {
+      changingLanguage = false;
+    }
+  }
 
   // Build a package for one chapter and save it wherever the user says. A
   // cancelled save dialog resolves to null and is not worth a toast.
@@ -78,6 +93,14 @@
         {plural(project.chapters.length, 'chapter')} · {plural(pageTotal, 'page')}
       </div>
     </div>
+    <label class="project-language">
+      Source language
+      <select value={project.ocrLanguage} onchange={onLanguageChange} disabled={changingLanguage}>
+        <option value="ja">Japanese</option>
+        <option value="zh">Chinese</option>
+        <option value="ko">Korean</option>
+      </select>
+    </label>
     <button class="soft-btn" onclick={() => onNewChapter(project.id)}>New chapter</button>
   </div>
 

@@ -8,6 +8,7 @@
   import { resetPanels } from './editor/panels.svelte.js';
   import { processMemory, ROLE_LABELS } from './memory.js';
   import { prefs, setPref } from './prefs.svelte.js';
+  import { OCR_MODEL_OPTIONS } from './ocr-models.js';
   import {
     shortcutGroups,
     comboFor,
@@ -248,6 +249,12 @@
     } catch (e) {
       toast(`Couldn't set folder: ${e}`);
     }
+  }
+
+  function setOcrModel(language, model) {
+    setPref('ocrModels', { ...prefs.ocrModels, [language]: model });
+    const label = language === 'zh' ? 'Chinese' : 'Korean';
+    toast(`${label} OCR model changed`);
   }
 
   async function chooseRoot() {
@@ -632,18 +639,6 @@
         <span class="dot {sidecarOk ? 'ok' : app.sidecar?.status === 'error' ? 'err' : 'off'}"></span>
         <span class="sval">{sidecarLabel}</span>
       </div>
-      <div class="srow">
-        <label class="slabel" for="setting-lang">Page language</label>
-        <select
-          id="setting-lang"
-          class="sval lang-select"
-          value={prefs.projectLanguage}
-          onchange={(e) => setPref('projectLanguage', e.target.value)}
-        >
-          <option value="ja">Japanese</option>
-          <option value="ko">Korean</option>
-        </select>
-      </div>
       {#if sidecarOk && app.sidecar.info?.gpu_build === false}
         <div class="qhint">
           CPU-only build. GPU acceleration needs the Linux (GPU) download, which runs on
@@ -653,25 +648,64 @@
 
       <div class="group-label">Models</div>
 
-      <!-- Detection/OCR models (auto-managed, read-only) -->
-      <div class="model-card muted">
+      <div class="model-card">
         <div class="mc-top">
           <div class="mc-title">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
             <div>
-              <div class="mc-name">Detection &amp; OCR</div>
-              <div class="mc-sub">
-                {#if app.projectLanguage === 'ko'}
-                  comic-text-detector · PP-OCRv4 ko · panel YOLO
-                {:else}
-                  comic-text-detector · manga-ocr · panel YOLO
-                {/if}
-              </div>
+              <div class="mc-name">Language-specific OCR</div>
+              <div class="mc-sub">Choose the recognizer used after text detection</div>
             </div>
           </div>
-          <span class="tag auto">Auto</span>
+          <span class="tag auto">On demand</span>
         </div>
-        <p class="mc-desc">Downloaded automatically on first <b>Detect</b> and cached locally. No action needed.</p>
+
+        <div class="ocr-model-grid">
+          <div class="ocr-model-row">
+            <span>
+              <b>Japanese</b>
+              <small>{OCR_MODEL_OPTIONS.ja[0].detail}</small>
+            </span>
+            <span class="ocr-fixed">{OCR_MODEL_OPTIONS.ja[0].label}</span>
+          </div>
+
+          <label class="ocr-model-row">
+            <span>
+              <b>Chinese</b>
+              <small>Used by Chinese projects</small>
+            </span>
+            <select
+              aria-label="Chinese OCR model"
+              value={prefs.ocrModels.zh}
+              onchange={(e) => setOcrModel('zh', e.currentTarget.value)}
+            >
+              {#each OCR_MODEL_OPTIONS.zh as model (model.id)}
+                <option value={model.id}>{model.label} — {model.detail}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="ocr-model-row">
+            <span>
+              <b>Korean</b>
+              <small>Used by Korean projects</small>
+            </span>
+            <select
+              aria-label="Korean OCR model"
+              value={prefs.ocrModels.ko}
+              onchange={(e) => setOcrModel('ko', e.currentTarget.value)}
+            >
+              {#each OCR_MODEL_OPTIONS.ko as model (model.id)}
+                <option value={model.id}>{model.label} — {model.detail}</option>
+              {/each}
+            </select>
+          </label>
+        </div>
+
+        <p class="mc-desc">
+          Quality models are selected by default. The chosen model downloads on
+          the next <b>Detect</b>; changing it does not alter the project's saved language.
+        </p>
       </div>
 
       <!-- Model cache footprint + clear -->
@@ -899,18 +933,6 @@
     margin-left: 2px;
     color: var(--text);
   }
-  .lang-select {
-    background: var(--panel2);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 3px 8px;
-    font-size: 12.5px;
-    cursor: pointer;
-  }
-  .lang-select:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
   .dot {
     width: 9px;
     height: 9px;
@@ -937,8 +959,50 @@
     margin-bottom: 12px;
     background: var(--panel2);
   }
-  .model-card.muted {
-    opacity: 0.85;
+  .ocr-model-grid {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .ocr-model-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.8fr) minmax(190px, 1.2fr);
+    align-items: center;
+    gap: 14px;
+  }
+  .ocr-model-row > span:first-child {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .ocr-model-row b {
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .ocr-model-row small,
+  .ocr-fixed {
+    color: var(--t2);
+    font-size: 11px;
+  }
+  .ocr-model-row select {
+    min-width: 0;
+    width: 100%;
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--line2);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+  }
+  .ocr-model-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .ocr-fixed {
+    padding: 0 9px;
   }
   .mc-top {
     display: flex;

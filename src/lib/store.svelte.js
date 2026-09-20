@@ -418,8 +418,10 @@ export const app = $state({
   // preference of the app, so `openChapter` writes it and `closeChapter` puts
   // it back.
   projectLayout: 'pages',
-  // The open chapter/page language ('ja' | 'ko'), defaulting to 'ja'.
-  projectLanguage: 'ja',
+  // The open project's source language for detection/OCR. This is project
+  // state, not a global preference: opening another series must select that
+  // series' recognizer and reading direction instead of carrying this one over.
+  projectOcrLanguage: 'ja',
 });
 
 // ---------- derived helpers ----------
@@ -1657,6 +1659,16 @@ export const normalizeLayout = (l) => (LAYOUTS.includes(l) ? l : 'pages');
 // Same shape and same reasoning as `isTranslateMode` above.
 export const isLongstrip = () => app.projectLayout === 'longstrip';
 
+// ---------- the project's OCR language ----------
+//
+// Kept as compact ISO 639-1 codes on disk and over IPC. Every project written
+// before this existed was detected with manga-ocr, so an absent or unknown
+// value is Japanese. The visible choice is offered for longstrip projects,
+// where manhwa/manhua need their own recognizers.
+export const OCR_LANGUAGES = ['ja', 'zh', 'ko'];
+export const normalizeOcrLanguage = (language) =>
+  OCR_LANGUAGES.includes(language) ? language : 'ja';
+
 // Make `p` the current page, if it is not already. In a strip every page is on
 // screen at once, so a click, a drag or a caret can land on a page the index is
 // not pointing at - and the index is what selection, the undo stack and the
@@ -1989,15 +2001,14 @@ export function balloonFitAt(p, imgX, imgY) {
   return shape;
 }
 
-// Is this detected block a column of vertical Japanese?
+// Is this detected block a column whose rectangle should be transposed for
+// horizontal translated text?
 //
 // `vertical` is the detector's own answer and is believed whenever it gives one,
 // in both directions. The fallback is for the case it says nothing at all - an
 // older detection, a hand-written chapter.json, a sidecar that did not report the
-// field - where a block markedly taller than it is wide is a vertical column for
-// every practical purpose. Horizontal Japanese and horizontal Latin are both set
-// in wide short blocks; nothing that reads left-to-right produces a rectangle
-// twice as tall as it is wide with text tight inside it.
+// field. Korean blocks only use an explicit vertical flag: Hangul in a tall
+// bubble can still be horizontal text and must keep that bubble's shape.
 //
 // It matters because the untransposed column is one of the two ways a box ends
 // up as a tall narrow strip: placed at a 40x200 rectangle, auto-height then grows
@@ -2005,19 +2016,13 @@ export function balloonFitAt(p, imgX, imgY) {
 const VERTICAL_ASPECT = 1.6;
 export function looksVertical(det, ln = null, p = null) {
   if (!det || !Array.isArray(det.box) || det.box.length !== 4) return false;
-  const isKorean =
+  const korean =
     det.lang === 'ko' ||
     ln?.lang === 'ko' ||
-    (det.n != null && p?.lines?.find((l) => l.n === det.n)?.lang === 'ko') ||
-    (det.n != null && p?.detect?.boxes?.find((b) => b.n === det.n)?.lang === 'ko') ||
     p?.detect?.lang === 'ko' ||
-    p?.lines?.some((l) => l.lang === 'ko') ||
-    (typeof app !== 'undefined' && app.projectLanguage === 'ko') ||
+    app.projectOcrLanguage === 'ko' ||
     hasHangul(det.text ?? det.jp ?? ln?.jp ?? '');
-
-  if (isKorean) {
-    return det.vertical === true;
-  }
+  if (korean) return det.vertical === true;
   if (det.vertical != null) return !!det.vertical;
   const [x1, y1, x2, y2] = det.box;
   const rw = Math.abs(x2 - x1);

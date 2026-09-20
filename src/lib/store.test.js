@@ -91,6 +91,8 @@ import {
   LAYOUTS,
   normalizeLayout,
   isLongstrip,
+  OCR_LANGUAGES,
+  normalizeOcrLanguage,
   focusPage,
   cloneStyle,
   rememberStyle,
@@ -3353,6 +3355,21 @@ describe('the project layout flag', () => {
     expect(isLongstrip()).toBe(false);
     app.projectLayout = 'longstrip';
     expect(isLongstrip()).toBe(true);
+  });
+});
+
+describe('the project OCR language', () => {
+  it('accepts exactly the supported language codes', () => {
+    expect(OCR_LANGUAGES).toEqual(['ja', 'zh', 'ko']);
+    expect(normalizeOcrLanguage('ja')).toBe('ja');
+    expect(normalizeOcrLanguage('zh')).toBe('zh');
+    expect(normalizeOcrLanguage('ko')).toBe('ko');
+  });
+
+  it('treats missing and unknown values as Japanese for old projects', () => {
+    expect(normalizeOcrLanguage(undefined)).toBe('ja');
+    expect(normalizeOcrLanguage(null)).toBe('ja');
+    expect(normalizeOcrLanguage('chinese')).toBe('ja');
   });
 });
 

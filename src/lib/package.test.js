@@ -43,7 +43,7 @@ function sampleInput() {
   return {
     record: sampleRecord(),
     translations: '{"pages":[]}',
-    project: { name: 'My Series', layout: 'longstrip' },
+    project: { name: 'My Series', layout: 'longstrip', ocrLanguage: 'ko' },
     raws: new Map([
       ['p1.png', bytes(1, 2, 3)],
       ['p2.png', bytes(4, 5)],
@@ -85,7 +85,7 @@ describe('buildChapterPackage', () => {
     const manifest = JSON.parse(strFromU8(entries['manifest.json']));
     expect(manifest.format).toBe(PACKAGE_FORMAT);
     expect(manifest.version).toBe(PACKAGE_VERSION);
-    expect(manifest.project).toEqual({ name: 'My Series', layout: 'longstrip' });
+    expect(manifest.project).toEqual({ name: 'My Series', layout: 'longstrip', ocrLanguage: 'ko' });
     expect(manifest.chapter).toEqual({ number: 7, title: 'Seven', mode: 'typeset', pageCount: 2 });
     expect(manifest.fonts).toEqual([
       {
@@ -130,6 +130,7 @@ describe('readChapterPackage', () => {
     expect(pkg.record).toEqual(sampleRecord());
     expect(pkg.translations).toBe('{"pages":[]}');
     expect(pkg.manifest.project.layout).toBe('longstrip');
+    expect(pkg.manifest.project.ocrLanguage).toBe('ko');
     expect([...pkg.raws.get('p1.png')]).toEqual([1, 2, 3]);
     expect([...pkg.raws.get('p2.png')]).toEqual([4, 5]);
     expect([...pkg.cleaned.get('p1-clean.png')]).toEqual([9, 9, 9, 9]);

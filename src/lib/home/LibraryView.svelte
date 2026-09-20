@@ -13,6 +13,7 @@
   let newName = $state('');
   // Project reading layout.
   let layout = $state('pages');
+  let ocrLanguage = $state('ja');
 
   onMount(scanLibrary);
 
@@ -22,10 +23,12 @@
     naming = false;
     newName = '';
     const chosen = layout;
+    const chosenLanguage = ocrLanguage;
     layout = 'pages';
+    ocrLanguage = 'ja';
 
     try {
-      const p = await createProject(name, { layout: chosen });
+      const p = await createProject(name, { layout: chosen, ocrLanguage: chosenLanguage });
       goProject(p.id);
     } catch (e) {
       toast(`Could not create ${name}: ${e?.message ?? e}`);
@@ -65,6 +68,11 @@
     <div class="seg new-layout">
       <button class:on={layout === 'pages'} onclick={() => (layout = 'pages')}>Pages</button>
       <button class:on={layout === 'longstrip'} onclick={() => (layout = 'longstrip')}>Longstrip</button>
+    </div>
+    <div class="seg new-language" aria-label="Source language">
+      <button class:on={ocrLanguage === 'ja'} onclick={() => (ocrLanguage = 'ja')}>Japanese</button>
+      <button class:on={ocrLanguage === 'zh'} onclick={() => (ocrLanguage = 'zh')}>Chinese</button>
+      <button class:on={ocrLanguage === 'ko'} onclick={() => (ocrLanguage = 'ko')}>Korean</button>
     </div>
     <button class="soft-btn wide" onclick={onCreate}>Create</button>
   {:else}

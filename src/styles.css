@@ -1008,6 +1008,8 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
    rather than a segmented control that wandered in. */
 .seg.new-layout{ width:212px; border-radius:8px; }
 .seg.new-layout button{ height:36px; font-size:11.5px; }
+.seg.new-language{ width:272px; border-radius:8px; }
+.seg.new-language button{ height:36px; padding:0 9px; font-size:11.5px; }
 
 .home-actions{ display:flex; flex-direction:column; align-items:center; gap:10px; padding:168px 0 152px; }
 .section-label{ font-size:10.5px; letter-spacing:.22em; color:var(--t3); margin-bottom:18px; }
@@ -1044,6 +1046,9 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .project-title{ flex:1; min-width:0; }
 .project-name{ font-size:27px; font-weight:500; letter-spacing:-.02em; line-height:1.1; }
 .project-meta{ font-size:11.5px; color:var(--t3); margin-top:9px; }
+.project-language{ display:flex; flex-direction:column; gap:5px; margin-left:auto; font-size:11.5px; color:var(--t3); }
+.project-language select{ min-width:130px; height:32px; padding:0 8px; border:1px solid var(--line2); border-radius:6px; background:var(--surface); color:var(--text); font:inherit; }
+.project-language select:focus{ outline:none; border-color:var(--accent); }
 
 .chapter-table{ border-top:1px solid var(--line); }
 .chapter-row{ display:flex; align-items:center; border-bottom:1px solid var(--line); }

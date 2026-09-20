@@ -12,10 +12,11 @@ use ort::session::Session;
 use tauri::async_runtime::Mutex as AsyncMutex;
 
 use super::accel;
-use super::analyze::{analyze, decode_image, AnalyzeResponse, AnyOcrEngine};
-use super::ocr::OcrEngine;
-use super::ocr_ko::KoreanOcrEngine;
+use super::analyze::{analyze, decode_image, AnalyzeResponse};
+use super::ocr::{OcrEngine, TextRecognizer};
+use super::paddle_ocr::PaddleOcrEngine;
 use super::panels;
+use super::sorting::ReadingDirection;
 use super::textdetector::TextDetector;
 
 /// Model file relative path and download URL.
@@ -32,7 +33,7 @@ const TEXT_DETECTOR: ModelFile = ModelFile {
     rel: "comictextdetector.onnx",
     url: "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt.onnx",
 };
-const OCR_FILES: [ModelFile; 3] = [
+const JAPANESE_OCR_FILES: [ModelFile; 3] = [
     ModelFile {
         rel: "manga-ocr/encoder_model.onnx",
         url: "https://huggingface.co/onnx-community/manga-ocr-base-ONNX/resolve/main/onnx/encoder_model.onnx",
@@ -46,16 +47,139 @@ const OCR_FILES: [ModelFile; 3] = [
         url: "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/vocab.txt",
     },
 ];
-const KOREAN_OCR_FILES: [ModelFile; 2] = [
-    ModelFile {
-        rel: "paddleocr/korean_mobile_rec.onnx",
-        url: "https://huggingface.co/xberg-io/paddleocr-onnx-models/resolve/main/rec/korean/model.onnx",
-    },
-    ModelFile {
-        rel: "paddleocr/korean_dict.txt",
-        url: "https://huggingface.co/xberg-io/paddleocr-onnx-models/resolve/main/rec/korean/dict.txt",
-    },
-];
+const CHINESE_OCR_V5_MOBILE: ModelFile = ModelFile {
+    rel: "paddleocr/ch_PP-OCRv5_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
+};
+const CHINESE_OCR_V5_SERVER: ModelFile = ModelFile {
+    rel: "paddleocr/ch_PP-OCRv5_rec_server.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx",
+};
+const KOREAN_OCR_V5_MOBILE: ModelFile = ModelFile {
+    rel: "paddleocr/korean_PP-OCRv5_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx",
+};
+const KOREAN_OCR_V4_MOBILE: ModelFile = ModelFile {
+    rel: "paddleocr/korean_PP-OCRv4_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv4/rec/korean_PP-OCRv4_rec_mobile.onnx",
+};
+const PADDLE_OCR_V6_SMALL: ModelFile = ModelFile {
+    rel: "paddleocr/PP-OCRv6_rec_small.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+};
+const PADDLE_OCR_V6_MEDIUM: ModelFile = ModelFile {
+    rel: "paddleocr/PP-OCRv6_rec_medium.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx",
+};
+
+/// The source language selected on the project. Unknown/missing values retain
+/// the Japanese behaviour every project had before this setting existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OcrLanguage {
+    Japanese,
+    Chinese,
+    Korean,
+}
+
+impl OcrLanguage {
+    fn from_code(code: Option<&str>) -> Self {
+        match code {
+            Some("zh") => Self::Chinese,
+            Some("ko") => Self::Korean,
+            _ => Self::Japanese,
+        }
+    }
+
+    fn direction(self) -> ReadingDirection {
+        match self {
+            Self::Japanese => ReadingDirection::Rtl,
+            Self::Chinese | Self::Korean => ReadingDirection::Ltr,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::Japanese => "ja",
+            Self::Chinese => "zh",
+            Self::Korean => "ko",
+        }
+    }
+}
+
+/// A concrete recognizer selected in Settings. The language remains a project
+/// property (and controls reading order); this is a machine preference for the
+/// quality/size trade-off used whenever that language is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OcrModel {
+    MangaOcr,
+    ChineseV5Mobile,
+    ChineseV5Server,
+    KoreanV5Mobile,
+    KoreanV4Mobile,
+    PaddleV6Small,
+    PaddleV6Medium,
+}
+
+impl OcrModel {
+    fn default_for(language: OcrLanguage) -> Self {
+        match language {
+            OcrLanguage::Japanese => Self::MangaOcr,
+            // Quality-first defaults. The smaller and language-specific models
+            // stay available in Settings for slower machines and comparisons.
+            OcrLanguage::Chinese => Self::PaddleV6Medium,
+            // PP-OCRv6 supports Chinese, English, Japanese and Latin-script
+            // languages, but not Korean. PP-OCRv5 Korean is PaddleOCR's
+            // current language-specific model and its documented quality pick.
+            OcrLanguage::Korean => Self::KoreanV5Mobile,
+        }
+    }
+
+    fn from_code(language: OcrLanguage, code: Option<&str>) -> Self {
+        match (language, code) {
+            (OcrLanguage::Japanese, _) => Self::MangaOcr,
+            (OcrLanguage::Chinese, Some("ch-ppocrv5-mobile")) => Self::ChineseV5Mobile,
+            (OcrLanguage::Chinese, Some("ch-ppocrv5-server")) => Self::ChineseV5Server,
+            (OcrLanguage::Chinese, Some("ppocrv6-small")) => Self::PaddleV6Small,
+            (OcrLanguage::Chinese, Some("ppocrv6-medium")) => Self::PaddleV6Medium,
+            (OcrLanguage::Korean, Some("ko-ppocrv5-mobile")) => Self::KoreanV5Mobile,
+            (OcrLanguage::Korean, Some("ko-ppocrv4-mobile")) => Self::KoreanV4Mobile,
+            _ => Self::default_for(language),
+        }
+    }
+
+    fn paddle_file(self) -> Option<&'static ModelFile> {
+        match self {
+            Self::MangaOcr => None,
+            Self::ChineseV5Mobile => Some(&CHINESE_OCR_V5_MOBILE),
+            Self::ChineseV5Server => Some(&CHINESE_OCR_V5_SERVER),
+            Self::KoreanV5Mobile => Some(&KOREAN_OCR_V5_MOBILE),
+            Self::KoreanV4Mobile => Some(&KOREAN_OCR_V4_MOBILE),
+            Self::PaddleV6Small => Some(&PADDLE_OCR_V6_SMALL),
+            Self::PaddleV6Medium => Some(&PADDLE_OCR_V6_MEDIUM),
+        }
+    }
+}
+
+enum Recognizer {
+    Japanese(OcrEngine),
+    Paddle(PaddleOcrEngine),
+}
+
+impl TextRecognizer for Recognizer {
+    fn ocr(&mut self, img: &image::DynamicImage) -> ort::Result<String> {
+        match self {
+            Self::Japanese(engine) => engine.ocr(img),
+            Self::Paddle(engine) => engine.ocr(img),
+        }
+    }
+
+    fn prefers_line_crops(&self) -> bool {
+        match self {
+            Self::Japanese(engine) => engine.prefers_line_crops(),
+            Self::Paddle(engine) => engine.prefers_line_crops(),
+        }
+    }
+}
 
 /// Directory where downloaded model weights reside, relative to `$HOME`.
 const MODELS_SUFFIX: [&str; 2] = [".mangatypesetter", "models"];
@@ -74,8 +198,7 @@ fn download_deadline() -> Duration {
 struct Sessions {
     detector: Option<TextDetector>,
     panels: Option<Session>,
-    ocr: Option<OcrEngine>,
-    ocr_ko: Option<KoreanOcrEngine>,
+    ocr: HashMap<OcrModel, Recognizer>,
     /// Execution provider the text detector landed on, once it has loaded.
     device: Option<&'static str>,
     /// What the isolated probe answered, before any model has loaded.
@@ -151,7 +274,13 @@ impl DetectEngine {
     }
 
     /// Runs page analysis on a blocking thread, loading models as needed.
-    fn analyze_blocking(&self, bytes: &[u8], want_ocr: bool, lang: &str) -> Result<AnalyzeResponse, String> {
+    fn analyze_blocking(
+        &self,
+        bytes: &[u8],
+        want_ocr: bool,
+        language: OcrLanguage,
+        model: OcrModel,
+    ) -> Result<AnalyzeResponse, String> {
         let img = decode_image(bytes)?;
         let dir = &self.0.models_dir;
         let (mut s, recovered) = self.lock_sessions();
@@ -175,34 +304,35 @@ impl DetectEngine {
                 Err(e) => log::warn!("panel model unavailable, reading order degrades: {e}"),
             }
         }
-        let lang_norm = if lang == "ko" { "ko" } else { "ja" };
-        if want_ocr {
-            if lang_norm == "ko" {
-                if s.ocr_ko.is_none() {
-                    match KoreanOcrEngine::load(
-                        &dir.join(KOREAN_OCR_FILES[0].rel),
-                        &dir.join(KOREAN_OCR_FILES[1].rel),
-                    ) {
-                        Ok(engine) => s.ocr_ko = Some(engine),
-                        Err(e) => log::warn!("korean ocr model unavailable: {e}"),
-                    }
+        if want_ocr && !s.ocr.contains_key(&model) {
+            let recognizer = match model {
+                OcrModel::MangaOcr => Recognizer::Japanese(
+                    OcrEngine::load(&dir.join("manga-ocr"))
+                        .map_err(|e| format!("failed to load the Japanese OCR models: {e}"))?,
+                ),
+                _ => {
+                    let file = model
+                        .paddle_file()
+                        .expect("non-Japanese models have one file");
+                    Recognizer::Paddle(
+                        PaddleOcrEngine::load(&dir.join(file.rel))
+                            .map_err(|e| format!("failed to load the selected OCR model: {e}"))?,
+                    )
                 }
-            } else if s.ocr.is_none() {
-                match OcrEngine::load(&dir.join("manga-ocr")) {
-                    Ok(engine) => s.ocr = Some(engine),
-                    Err(e) => log::warn!("japanese ocr model unavailable: {e}"),
-                }
-            }
+            };
+            s.ocr.insert(model, recognizer);
         }
 
-        let Sessions { detector, panels, ocr, ocr_ko, .. } = &mut *s;
+        let Sessions {
+            detector,
+            panels,
+            ocr,
+            ..
+        } = &mut *s;
         let detector = detector.as_mut().expect("loaded above");
-        let mut ocr_dispatch = if want_ocr {
-            if lang_norm == "ko" {
-                ocr_ko.as_mut().map(AnyOcrEngine::Ko)
-            } else {
-                ocr.as_mut().map(AnyOcrEngine::Ja)
-            }
+        let recognizer = if want_ocr {
+            ocr.get_mut(&model)
+                .map(|engine| engine as &mut dyn TextRecognizer)
         } else {
             None
         };
@@ -210,8 +340,9 @@ impl DetectEngine {
             &img,
             detector,
             panels.as_mut(),
-            ocr_dispatch.as_mut(),
-            lang_norm,
+            recognizer,
+            language.direction(),
+            language.code(),
         )
     }
 }
@@ -437,17 +568,17 @@ pub async fn detect_analyze(
     state: tauri::State<'_, DetectEngine>,
     image: Vec<u8>,
     ocr: bool,
-    lang: Option<String>,
+    language: Option<String>,
+    ocr_model: Option<String>,
 ) -> Result<AnalyzeResponse, String> {
     let engine = state.inner().clone();
-    let lang_str = lang.unwrap_or_default().trim().to_lowercase();
-    let page_lang = if lang_str.starts_with("ko") { "ko" } else { "ja" };
+    let language = OcrLanguage::from_code(language.as_deref());
+    let model = OcrModel::from_code(language, ocr_model.as_deref());
     let mut needed: Vec<&ModelFile> = vec![&TEXT_DETECTOR];
     if ocr {
-        if page_lang == "ko" {
-            needed.extend(KOREAN_OCR_FILES.iter());
-        } else {
-            needed.extend(OCR_FILES.iter());
+        match model.paddle_file() {
+            Some(file) => needed.push(file),
+            None => needed.extend(JAPANESE_OCR_FILES.iter()),
         }
     }
     engine.ensure(&needed).await?;
@@ -456,10 +587,11 @@ pub async fn detect_analyze(
         log::warn!("failed to download panel model, reading order degrades: {e}");
     }
 
-    let lang_owned = page_lang.to_string();
-    tauri::async_runtime::spawn_blocking(move || engine.analyze_blocking(&image, ocr, &lang_owned))
-        .await
-        .map_err(|e| format!("analyze task failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.analyze_blocking(&image, ocr, language, model)
+    })
+    .await
+    .map_err(|e| format!("analyze task failed: {e}"))?
 }
 
 /// On-disk size + location of the downloaded model weights (Settings panel).
@@ -527,6 +659,51 @@ pub async fn detect_health(state: tauri::State<'_, DetectEngine>) -> Result<Heal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_language_selects_its_recognizer_and_reading_direction() {
+        assert_eq!(OcrLanguage::from_code(None), OcrLanguage::Japanese);
+        assert_eq!(
+            OcrLanguage::from_code(Some("unknown")),
+            OcrLanguage::Japanese
+        );
+        assert_eq!(OcrLanguage::from_code(Some("zh")), OcrLanguage::Chinese);
+        assert_eq!(OcrLanguage::from_code(Some("ko")), OcrLanguage::Korean);
+        assert_eq!(OcrLanguage::Japanese.direction(), ReadingDirection::Rtl);
+        assert_eq!(OcrLanguage::Chinese.direction(), ReadingDirection::Ltr);
+        assert_eq!(OcrLanguage::Korean.direction(), ReadingDirection::Ltr);
+
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Chinese, None),
+            OcrModel::PaddleV6Medium
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Korean, None),
+            OcrModel::KoreanV5Mobile
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Chinese, Some("ch-ppocrv5-server")),
+            OcrModel::ChineseV5Server
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Korean, Some("ko-ppocrv5-mobile")),
+            OcrModel::KoreanV5Mobile
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Korean, Some("ppocrv6-medium")),
+            OcrModel::KoreanV5Mobile,
+            "stored selections from the pre-fix build must migrate away from the unsupported model"
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Korean, Some("ch-ppocrv5-server")),
+            OcrModel::KoreanV5Mobile,
+            "a model for another language must fall back rather than load"
+        );
+        assert_eq!(
+            OcrModel::from_code(OcrLanguage::Japanese, Some("ppocrv6-medium")),
+            OcrModel::MangaOcr
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mt-engine-test-{name}-{}", std::process::id()));
@@ -743,14 +920,74 @@ mod tests {
         // These are the only outbound requests the app makes, and the reqwest
         // dependency grew a TLS backend for them; if one ever regressed to
         // plain http that backend would be silently unused.
-        let all: Vec<&ModelFile> = [&PANEL_MODEL, &TEXT_DETECTOR]
-            .into_iter()
-            .chain(OCR_FILES.iter())
-            .chain(KOREAN_OCR_FILES.iter())
-            .collect();
+        let all: Vec<&ModelFile> = [
+            &PANEL_MODEL,
+            &TEXT_DETECTOR,
+            &CHINESE_OCR_V5_MOBILE,
+            &CHINESE_OCR_V5_SERVER,
+            &KOREAN_OCR_V5_MOBILE,
+            &KOREAN_OCR_V4_MOBILE,
+            &PADDLE_OCR_V6_SMALL,
+            &PADDLE_OCR_V6_MEDIUM,
+        ]
+        .into_iter()
+        .chain(JAPANESE_OCR_FILES.iter())
+        .collect();
         for f in all {
             assert!(f.url.starts_with("https://"), "{}", f.url);
             assert!(!f.rel.starts_with('/') && !f.rel.contains(".."), "{}", f.rel);
         }
+    }
+
+    #[test]
+    fn paddle_models_use_the_desktop_client_compatible_mirror() {
+        for model in [
+            &CHINESE_OCR_V5_MOBILE,
+            &CHINESE_OCR_V5_SERVER,
+            &KOREAN_OCR_V4_MOBILE,
+            &KOREAN_OCR_V5_MOBILE,
+            &PADDLE_OCR_V6_SMALL,
+            &PADDLE_OCR_V6_MEDIUM,
+        ] {
+            assert!(
+                model.url.starts_with("https://huggingface.co/DjB314/RapidOCR/resolve/"),
+                "Paddle model regressed to a host the desktop downloader cannot use: {}",
+                model.url
+            );
+        }
+    }
+
+    /// Opt-in end-to-end diagnostic using the same download and session path as
+    /// the Tauri command, but against a caller-supplied page on disk.
+    #[test]
+    fn supplied_korean_page_runs_the_production_pipeline() {
+        let Ok(page_path) = std::env::var("MT_TEST_KOREAN_PAGE") else {
+            eprintln!("skipping Korean page test: MT_TEST_KOREAN_PAGE is not set");
+            return;
+        };
+        let model = OcrModel::from_code(
+            OcrLanguage::Korean,
+            std::env::var("MT_TEST_KOREAN_MODEL").ok().as_deref(),
+        );
+        let engine = DetectEngine::new(default_models_dir());
+        let ocr_file = model.paddle_file().expect("Korean model must be PaddleOCR");
+        tauri::async_runtime::block_on(engine.ensure(&[&TEXT_DETECTOR, ocr_file]))
+            .expect("production model download failed");
+
+        let bytes = std::fs::read(&page_path)
+            .unwrap_or_else(|error| panic!("failed to read {page_path}: {error}"));
+        let result = engine
+            .analyze_blocking(&bytes, true, OcrLanguage::Korean, model)
+            .unwrap_or_else(|error| panic!("production analysis failed for {page_path}: {error}"));
+
+        eprintln!("production pipeline detected {} regions", result.lines.len());
+        for line in &result.lines {
+            eprintln!("  {:?}: {:?}", line.r#box, line.jp);
+        }
+        assert!(!result.lines.is_empty(), "production pipeline returned no regions");
+        assert!(
+            result.lines.iter().any(|line| !line.jp.trim().is_empty()),
+            "Korean recognizer returned empty text for every detected region"
+        );
     }
 }

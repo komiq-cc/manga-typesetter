@@ -18,12 +18,12 @@ beforeEach(() => {
 });
 
 describe('analyzeImage IPC invocation', () => {
-  it('defaults lang to ja when omitted', async () => {
+  it('defaults language to ja when omitted', async () => {
     const { analyzeImage } = await import('./sidecar.js');
     await analyzeImage('blob:fake');
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0][0]).toBe('detect_analyze');
-    expect(h.calls[0][1].lang).toBe('ja');
+    expect(h.calls[0][1].language).toBe('ja');
     expect(h.calls[0][1].ocr).toBe(true);
   });
 
@@ -32,19 +32,20 @@ describe('analyzeImage IPC invocation', () => {
     await analyzeImage('blob:fake', { ocr: false, lang: 'ko' });
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0][0]).toBe('detect_analyze');
-    expect(h.calls[0][1].lang).toBe('ko');
+    expect(h.calls[0][1].language).toBe('ko');
+    expect(h.calls[0][1].ocrModel).toBe('ko-ppocrv5-mobile');
     expect(h.calls[0][1].ocr).toBe(false);
   });
 
   it('supports lang passed as positional third arg', async () => {
     const { analyzeImage } = await import('./sidecar.js');
     await analyzeImage('blob:fake', { ocr: true }, 'ko');
-    expect(h.calls.at(-1)[1].lang).toBe('ko');
+    expect(h.calls.at(-1)[1].language).toBe('ko');
   });
 
   it('supports lang passed as second arg string', async () => {
     const { analyzeImage } = await import('./sidecar.js');
     await analyzeImage('blob:fake', 'ko');
-    expect(h.calls.at(-1)[1].lang).toBe('ko');
+    expect(h.calls.at(-1)[1].language).toBe('ko');
   });
 });

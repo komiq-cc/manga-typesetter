@@ -99,7 +99,11 @@ npm test              # vitest
 ```
 
 Detection models download on first use and are cached under your home
-directory; nothing ships in the bundle.
+directory; nothing ships in the bundle. Chinese and Korean recognizers can be
+selected independently under **Settings → System → Models**. PP-OCRv6 Medium
+is the quality-first Chinese default. Korean defaults to the Korean-specific
+PP-OCRv5 model; PP-OCRv6 does not support Korean. Alternate smaller or legacy
+models remain available.
 
 ### GPU
 
@@ -144,12 +148,12 @@ same version on every distro. `scripts/build-appimage.sh` explains why.
 [ONNX Runtime](https://onnxruntime.ai) via [`ort`](https://ort.pyke.io)
 
 Detection models from
-[deepghs/manga109_yolo](https://huggingface.co/deepghs/manga109_yolo),
-[kha-white/manga-ocr](https://github.com/kha-white/manga-ocr), and
-[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (Korean recognition).
-No model weights ship in the app - they download on first use, direct from the
-publisher, and each carries its publisher's own terms rather than this
-project's.
+[deepghs/manga109_yolo](https://huggingface.co/deepghs/manga109_yolo) and
+[kha-white/manga-ocr](https://github.com/kha-white/manga-ocr), plus PP-OCRv4/v5
+Korean and PP-OCRv5/v6 Chinese recognizers published by
+[RapidOCR](https://github.com/RapidAI/RapidOCR). No model weights ship in the
+app - they download on first use from a byte-for-byte RapidOCR mirror, and
+each carries its publisher's own terms rather than this project's.
 
 ## License
 

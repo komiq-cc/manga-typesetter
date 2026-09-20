@@ -8,6 +8,8 @@
 
 import { app, page, applyDetection, toast } from './store.svelte.js';
 import { withPageImages, hasRawImage } from './page-images.js';
+import { prefs } from './prefs.svelte.js';
+import { ocrModelForLanguage } from './ocr-models.js';
 
 // app.sidecar is initialized lazily so older saved state stays compatible.
 function ensureState() {
@@ -30,31 +32,29 @@ export function sidecarReady() {
 }
 
 // Run detection + OCR on an image URL (object URL or asset URL). Returns the
-// engine payload { img_width, img_height, panels, lines:[{n,type,jp,en,box,vertical,font_size,lang}] }
+// engine payload { img_width, img_height, panels, lines:[{n,type,lang,jp,en,box,vertical,font_size}] }
 // or throws. Requires Tauri.
-export async function analyzeImage(imageUrl, options = {}, maybeLang) {
+export async function analyzeImage(imageUrl, options = {}, maybeLanguage) {
   const invoke = await getInvoke();
   if (!invoke) throw new Error('detection unavailable (no Tauri runtime)');
   let ocr = true;
-  let lang = 'ja';
-  if (typeof options === 'string') {
-    lang = options;
-  } else if (typeof options === 'object' && options !== null) {
-    if (options.ocr !== undefined) ocr = options.ocr;
-    if (options.lang !== undefined) lang = options.lang;
+  let language = app.projectOcrLanguage;
+  if (typeof options === 'string') language = options;
+  else if (options && typeof options === 'object') {
+    ocr = options.ocr ?? true;
+    language = options.language ?? options.lang ?? language;
   }
-  if (typeof maybeLang === 'string') {
-    lang = maybeLang;
-  }
+  if (typeof maybeLanguage === 'string') language = maybeLanguage;
   const buf = await (await fetch(imageUrl)).arrayBuffer();
   const bytes = Array.from(new Uint8Array(buf));
-  return invoke('detect_analyze', { image: bytes, ocr, lang });
+  const ocrModel = ocrModelForLanguage(language, prefs.ocrModels);
+  return invoke('detect_analyze', { image: bytes, ocr, language, ocrModel });
 }
 
 // Detect + OCR one page object and apply results to it. Returns { lines } on
 // success or { error } on failure. Shared by the single-page and whole-chapter
 // paths. Pins the write to `p` - detection may resolve after the user navigates.
-async function detectOnePage(p, { ocr = true, lang } = {}) {
+async function detectOnePage(p, { ocr = true, language, lang } = {}) {
   if (!hasRawImage(p)) return { skipped: true };
   // A batch runs over every page in the chapter, but only five pages' images
   // are in memory at a time (see page-images.js) - so each page is minted for
@@ -63,8 +63,7 @@ async function detectOnePage(p, { ocr = true, lang } = {}) {
   return await withPageImages(p, async () => {
     if (!p.raw) return { skipped: true };
     try {
-      const pageLang = lang ?? app.projectLanguage ?? 'ja';
-      const result = await analyzeImage(p.raw, { ocr, lang: pageLang });
+      const result = await analyzeImage(p.raw, { ocr, language: language ?? lang });
       applyDetection(result, p);
       return { lines: result.lines.length };
     } catch (e) {
@@ -74,7 +73,7 @@ async function detectOnePage(p, { ocr = true, lang } = {}) {
 }
 
 // Orchestrates detection for the current page's raw image and applies results.
-export async function detectCurrentPage({ ocr = true, lang } = {}) {
+export async function detectCurrentPage({ ocr = true, language, lang } = {}) {
   const p = page();
   if (!hasRawImage(p)) {
     toast('No raw page to detect - import a raw image first');
@@ -86,7 +85,7 @@ export async function detectCurrentPage({ ocr = true, lang } = {}) {
   }
   app.detecting = true;
   try {
-    const r = await detectOnePage(p, { ocr, lang });
+    const r = await detectOnePage(p, { ocr, language, lang });
     if (r.error) toast(`Detection failed: ${r.error}`);
     else toast(`Detected ${r.lines} text region(s)`);
   } finally {
@@ -97,7 +96,7 @@ export async function detectCurrentPage({ ocr = true, lang } = {}) {
 // Detect + OCR every loaded raw page, in order. Runs one page at a time so the
 // engine isn't hammered with concurrent requests; the ONNX sessions stay warm
 // across pages. Pages without a raw image are skipped.
-export async function detectAllPages({ ocr = true, lang } = {}) {
+export async function detectAllPages({ ocr = true, language, lang } = {}) {
   if (!sidecarReady()) {
     toast('Detection engine not ready');
     return;
@@ -114,16 +113,20 @@ export async function detectAllPages({ ocr = true, lang } = {}) {
   app.detectBatch = { done: 0, total: targets.length };
   let linesTotal = 0;
   let failed = 0;
+  let firstError = '';
   try {
     for (const p of targets) {
-      const r = await detectOnePage(p, { ocr, lang });
-      if (r.error) failed++;
+      const r = await detectOnePage(p, { ocr, language, lang });
+      if (r.error) {
+        failed++;
+        if (!firstError) firstError = r.error;
+      }
       else linesTotal += r.lines ?? 0;
       app.detectBatch = { done: app.detectBatch.done + 1, total: targets.length };
     }
     toast(
       `Detected ${targets.length} page(s) · ${linesTotal} text region(s)` +
-        (failed ? ` · ${failed} page(s) failed` : ''),
+        (failed ? ` · ${failed} page(s) failed · ${firstError}` : ''),
     );
   } finally {
     app.detecting = false;

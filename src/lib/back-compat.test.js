@@ -720,35 +720,6 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
     expect(prefs.shortcuts).toEqual({});
   });
 
-  // The page language arrived with Korean detection. A blob from any build
-  // before it has no `projectLanguage` key, and absent has to mean Japanese -
-  // the only behaviour those builds knew.
-  it('restores a saved page language, and an absent one is Japanese', async () => {
-    expect((await withStorage('{"projectLanguage":"ko"}')).prefs.projectLanguage).toBe('ko');
-    expect((await withStorage('{}')).prefs.projectLanguage).toBe('ja');
-    expect((await withStorage(null)).prefs.projectLanguage).toBe('ja');
-  });
-
-  it('refuses a page language it does not know and keeps Japanese', async () => {
-    expect((await withStorage('{"projectLanguage":"korean"}')).prefs.projectLanguage).toBe('ja');
-    expect((await withStorage('{"projectLanguage":1}')).prefs.projectLanguage).toBe('ja');
-  });
-
-  it('persists the page language through setPref and lands it on the app store', async () => {
-    const { prefs, setPref, map } = await withStorage('{}');
-    // The reset gives `prefs` a fresh store module; the top-of-file `app` is the
-    // pre-reset instance, so the store the preference writes to is this one.
-    const { app: freshApp } = await import('./store.svelte.js');
-    setPref('projectLanguage', 'ko');
-    expect(prefs.projectLanguage).toBe('ko');
-    expect(freshApp.projectLanguage).toBe('ko');
-    expect(JSON.parse(map.get('mt.prefs')).projectLanguage).toBe('ko');
-    // Anything that is not Korean is Japanese, which is the pre-preference answer.
-    setPref('projectLanguage', 'zh');
-    expect(prefs.projectLanguage).toBe('ja');
-    expect(freshApp.projectLanguage).toBe('ja');
-  });
-
   // The typesetting defaults moved out of the Inspector and into Settings, so a
   // blob written by any build before that has none of them. Absent has to mean
   // exactly what `defaultStyle()` says, or upgrading would silently change how

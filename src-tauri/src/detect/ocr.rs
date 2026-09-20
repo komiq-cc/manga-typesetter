@@ -9,6 +9,18 @@ use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
 
+/// Common interface for the Japanese manga-ocr and language-specific PaddleOCR
+/// recognizers used by the page analysis pipeline.
+pub trait TextRecognizer {
+    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String>;
+
+    /// Paddle recognition graphs are trained on a single text line. Manga OCR
+    /// is instead a manga-crop recognizer and performs better on whole blocks.
+    fn prefers_line_crops(&self) -> bool {
+        false
+    }
+}
+
 /// Square input size for the ViT encoder (224x224).
 pub const INPUT_SIZE: usize = 224;
 
@@ -489,6 +501,12 @@ impl OcrEngine {
             .map(|(_, h)| h.tokens.clone())
             .unwrap_or_default();
         Ok(best)
+    }
+}
+
+impl TextRecognizer for OcrEngine {
+    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String> {
+        OcrEngine::ocr(self, img)
     }
 }
 

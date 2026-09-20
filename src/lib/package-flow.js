@@ -12,7 +12,7 @@ import {
 } from './library.svelte.js';
 import { userFontRecords, installFontFace } from './fonts.js';
 import { tagsInUse } from './tags.svelte.js';
-import { app, normalizeLayout } from './store.svelte.js';
+import { app, normalizeLayout, normalizeOcrLanguage } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import {
   buildChapterPackage,
@@ -156,6 +156,7 @@ export async function inspectPackage(file, projectId = null) {
       cleanedCount: record.pages.filter((pg) => pg.cleaned).length,
       boxCount: record.pages.reduce((n, pg) => n + (pg.boxes?.length ?? 0), 0),
       layout: normalizeLayout(manifest.project?.layout),
+      ocrLanguage: normalizeOcrLanguage(manifest.project?.ocrLanguage),
       projectName: manifest.project?.name ?? '',
       app: manifest.app ?? '',
       exportedAt: manifest.exportedAt ?? '',
