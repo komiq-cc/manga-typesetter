@@ -201,6 +201,7 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
    viewport overflows into the scroll rather than being squeezed back into it -
    the same rule, and the same reason, as `.page-frame` above. */
 .strip{
+  position:relative;
   display:flex; flex-direction:column; align-items:center; gap:0;
   flex:0 0 auto; background:var(--paper); box-shadow:var(--edge);
 }
@@ -208,18 +209,33 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
 .strip.panning{ will-change: translate; }
 .page-frame img.page-img{ display:block; width:100%; height:100%; pointer-events:none; }
 .boxlayer{ position:absolute; inset:0; }
+.strip-overlay{
+  position:absolute; inset:0;
+  pointer-events:none;
+  overflow:visible;
+}
+.page-boxlayer{
+  position:absolute;
+  pointer-events:none;
+  overflow:visible;
+}
+.page-boxlayer .tbox{
+  pointer-events:auto;
+}
 /* A hand tool that only pans from the gaps between boxes is no hand tool on a
    finished page. With the boxes deaf, a press anywhere lands on the layer and
    starts a pan instead of dragging whatever it happened to be over - the box
    keeps its own gesture, it just is not the one being made. The box being typed
    into is spared: taking pointer events off a live caret would strand it. */
-.boxlayer.pan .tbox:not(.editing){ pointer-events:none; }
+.boxlayer.pan .tbox:not(.editing),
+.strip-overlay.pan .tbox:not(.editing){ pointer-events:none; }
 
 /* placed text box */
 .tbox{
   position:absolute; display:flex; align-items:center; justify-content:center;
   text-align:center; cursor:move; padding:2px;
   line-height:1.1; word-break:break-word; overflow:visible;
+  pointer-events:auto;
 }
 .tbox .txt{ width:100%; white-space:pre-wrap; }
 /* Shaped line breaking (typeset.js) renders one element per computed line, so

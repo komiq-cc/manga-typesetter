@@ -1873,6 +1873,9 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // line a superseded load has already replaced the newer one's document.
   if (!mine()) return;
   // Swap last: the chapter on screen stays intact until the new one is ready.
+  // The load refits boxes immediately. Its bounds must come from the incoming
+  // project's layout, not from whichever project was open before this one.
+  app.projectLayout = normalizeLayout(p.layout);
   const minted = loadProjectPages(pages);
   // After the swap, not before. Pointing the module at the new chapter releases
   // the old one's images, and releasing an image nulls the `raw`/`cleaned` of
@@ -1895,11 +1898,8 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   const mode = normalizeChapterMode(record.mode);
   app.chapterMode = mode;
   c.mode = mode;
-  // The layout belongs to the PROJECT, so it comes off the catalogue record
-  // rather than out of chapter.json - a chapter has no say in it. Written on
-  // every open for the same reason the mode is: opening a paged chapter after a
-  // longstrip one must give back the paged canvas.
-  app.projectLayout = normalizeLayout(p.layout);
+  // The layout belongs to the project and was set just before page loading so
+  // its auto-height pass could use the correct document bounds.
   app.projectOcrLanguage = normalizeOcrLanguage(p.ocrLanguage);
   // And so does the tag registry: this project's vocabulary and size memory,
   // not whatever the last project left behind.

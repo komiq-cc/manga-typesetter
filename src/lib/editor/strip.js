@@ -1,4 +1,5 @@
 // Arithmetic and layout functions for longstrip webtoon columns.
+import { strokeExtent, shadowExtent, motionBlurExtent, inkReach } from '../text-paint.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -11,6 +12,113 @@ export function stripOffsets(pages, zoom = 1) {
     y += Math.max(0, p?.h ?? 0) * zoom;
   }
   return { tops, total: y };
+}
+
+// Owner-local coordinates remain the saved representation, but a longstrip
+// box may cross either edge of that owner's image. These document extents let
+// fitting and movement use the chapter's bounds without rewriting box data.
+export function stripPageExtent(pages, ownerId) {
+  const index = pages?.findIndex((p) => p?.id === ownerId) ?? -1;
+  if (index < 0) return null;
+  // An undecoded frame has no trustworthy placement yet. Using a partial total
+  // here would clamp authored geometry against a document that is still growing.
+  if (pages.some((p) => !(p?.h > 0))) return null;
+  const { tops, total } = stripOffsets(pages, 1);
+  return { top: tops[index], total };
+}
+
+export function stripDragYBounds(pages, ownerId, boxHeight, retained = 20) {
+  const extent = stripPageExtent(pages, ownerId);
+  if (!extent) return null;
+  return {
+    min: -extent.top - boxHeight + retained,
+    max: extent.total - extent.top - retained,
+  };
+}
+
+// Use the same effect extents as the exporter so virtualization cannot cull a
+// box whose stroke, shadow or smear still paints into the resident window.
+export function boxEffectPad(style) {
+  if (!style) return 0;
+  const stroke = strokeExtent(style.strokes);
+  const shadow = shadowExtent(style.shadows);
+  const roughen = style.roughen?.on ? Math.max(0, style.roughen.amount ?? 0) + 2 : 0;
+  const blur = Math.max(0, style.blur ?? 0) * 3;
+  const motion = motionBlurExtent(style.motionBlur);
+  const reach = Math.max(stroke, shadow > 0 ? stroke + shadow : 0, roughen, inkReach(style));
+  // The text rasterizer reserves the same four pixels for antialiasing around
+  // its footprint even when no named effect is active.
+  return Math.ceil(reach + blur + motion + 4);
+}
+
+// Vertical span of a box in unzoomed strip coordinates, accounting for
+// rotation and conservative effect reach.
+export function boxPaintedStripSpan(box, ownerTop = 0) {
+  const y = box?.y ?? 0;
+  const w = Math.max(0, box?.w ?? 0);
+  const h = Math.max(0, box?.h ?? 0);
+  const rot = box?.style?.rotation || 0;
+  const pad = boxEffectPad(box?.style);
+  let top = y;
+  let bottom = y + h;
+  if (rot) {
+    const a = (rot * Math.PI) / 180;
+    const half = (Math.abs(Math.sin(a)) * w + Math.abs(Math.cos(a)) * h) / 2;
+    const cy = y + h / 2;
+    top = cy - half;
+    bottom = cy + half;
+  }
+  return {
+    top: ownerTop + top - pad,
+    bottom: ownerTop + bottom + pad,
+  };
+}
+
+// The vertical span of the resident artwork window in strip coordinates.
+export function stripResidentWindow(pages, tops, centerIndex, viewportH, opts = {}) {
+  const n = pages?.length ?? 0;
+  if (!n) return { top: 0, bottom: 0, lo: 0, hi: 0, radius: 0 };
+  const heights = pages.map((p) => p?.h ?? 0);
+  const radius = residentRadiusFor(heights, centerIndex, viewportH, opts);
+  const lo = Math.max(0, centerIndex - radius);
+  const hi = Math.min(n - 1, centerIndex + radius);
+  const top = tops?.[lo] ?? 0;
+  const lastH = Math.max(0, pages[hi]?.h ?? 0);
+  const bottom = (tops?.[hi] ?? 0) + lastH;
+  return { top, bottom, lo, hi, radius };
+}
+
+// Test if a box's painted bounds intersect the resident artwork window, or is pinned.
+export function isBoxInStripWindow(box, ownerTop, windowTop, windowBottom, isTarget = false) {
+  if (isTarget) return true;
+  const span = boxPaintedStripSpan(box, ownerTop);
+  return span.bottom >= windowTop && span.top <= windowBottom;
+}
+
+// Resolve a client point (clientX, clientY) against an array of page frame rects/elements.
+export function stripFrameCoords(clientX, clientY, frames, zoom = 1) {
+  const n = frames?.length ?? 0;
+  if (!n || !(zoom > 0)) return null;
+  for (let i = 0; i < n; i++) {
+    const f = frames[i];
+    if (!f) continue;
+    const r = typeof f.getBoundingClientRect === 'function' ? f.getBoundingClientRect() : f;
+    const isLast = i === n - 1;
+    if (
+      clientX >= r.left &&
+      clientX <= r.right &&
+      clientY >= r.top &&
+      (isLast ? clientY <= r.bottom : clientY < r.bottom)
+    ) {
+      return {
+        x: (clientX - r.left) / zoom,
+        y: (clientY - r.top) / zoom,
+        pg: f.pg ?? null,
+        index: i,
+      };
+    }
+  }
+  return null;
 }
 
 // Where every frame of a mounted strip sits, computed rather than measured.
@@ -80,6 +188,17 @@ export function focusHoldsIndex(tops, heights, index, scrollTop, viewportH, minP
   const h = Math.max(0, heights?.[index] ?? 0);
   const shown = visibleHeightOf(tops[index], h, scrollTop, viewportH);
   return shown > 0 && shown >= Math.min(minPx, h);
+}
+
+// A selected box can be visible across a seam after its owner frame has left
+// the viewport. Keep the editing page focused while a useful part of its
+// painted span is still on screen.
+export function focusedBoxHoldsIndex(box, ownerTop, zoom, scrollTop, viewportH, minPx = FOCUS_HOLD_PX) {
+  if (!box || !(zoom > 0)) return false;
+  const span = boxPaintedStripSpan(box);
+  const top = ownerTop + span.top * zoom;
+  const height = Math.max(0, (span.bottom - span.top) * zoom);
+  return height > 0 && visibleHeightOf(top, height, scrollTop, viewportH) >= Math.min(minPx, height);
 }
 
 // Find maximum page width across chapter.

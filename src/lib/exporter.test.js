@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { fsx } from './fsx.js';
+import { setChapterImageDirs, releaseAllPageImages } from './page-images.js';
 import { app, loadProjectPages } from './store.svelte.js';
 import {
   exportTextJson,
@@ -83,6 +85,7 @@ let order;
 // Every composite draw's destination rectangle, for the tests that are about
 // the footprint rather than about where its corner landed.
 let rects;
+let draws;
 const stubContext = () => ({
   fillStyle: '',
   strokeStyle: '',
@@ -124,6 +127,14 @@ const stubContext = () => ({
       // bitmap is on the page is the whole of what a warp does to the footprint.
       if (dw != null) rects.push({ x, y, w: dw, h: dh });
     }
+    draws.push({
+      kind: _img?.src ? 'art' : 'box',
+      src: _img?.src,
+      x,
+      y,
+      dw,
+      dh,
+    });
   },
   scale() {},
   save() {},
@@ -159,6 +170,7 @@ const stubContext = () => ({
     painted.push(s);
     placed.push([x, y]);
     fills.push(this.fillStyle);
+    draws.push({ kind: 'text', text: s, x, y });
   },
   strokeText(s) {
     stroked.push({ text: s, width: this.lineWidth, color: this.strokeStyle, alpha: this.globalAlpha });
@@ -183,6 +195,7 @@ beforeEach(() => {
   painted = [];
   placed = [];
   composited = [];
+  draws = [];
   stroked = [];
   shadowed = [];
   displaced = [];
@@ -228,6 +241,7 @@ beforeEach(() => {
   // would run before the promise it resolves exists.
   globalThis.Image = class {
     set src(url) {
+      this._src = url;
       const size = naturalSizes[url];
       queueMicrotask(() => {
         if (!size) return this.onerror?.(new Error('decode failed'));
@@ -235,6 +249,9 @@ beforeEach(() => {
         this.naturalHeight = size[1];
         this.onload?.();
       });
+    }
+    get src() {
+      return this._src;
     }
   };
   URL.createObjectURL = () => 'blob:test';
@@ -249,6 +266,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  releaseAllPageImages();
+  vi.restoreAllMocks();
   setTypesetEnabled(false);
   // A layout is a property of the open project, and one test opening a
   // longstrip one must not leave every later test in a strip.
@@ -761,6 +780,38 @@ describe('roughened text', () => {
 });
 
 describe('renderStripSliceCanvas', () => {
+  it('loads artwork for an intersecting page outside the resident image window', async () => {
+    naturalSizes = { 'blob:test': [800, 1000] };
+    vi.spyOn(fsx, 'join').mockImplementation(async (...parts) => parts.join('/'));
+    vi.spyOn(fsx, 'assetUrl').mockResolvedValue(null);
+    vi.spyOn(fsx, 'readFile').mockResolvedValue(new Uint8Array([1, 2, 3]));
+    setChapterImageDirs('/raw', null);
+    const pages = [{ id: 1, file: '001.png', raw: null, cleaned: null, w: 800, h: 1000, lines: [], boxes: [] }];
+
+    await renderStripSliceCanvas(pages, [0], 0, 500);
+
+    expect(fsx.readFile).toHaveBeenCalledWith('/raw/001.png');
+    expect(draws.some((d) => d.src === 'blob:test')).toBe(true);
+  });
+
+  it('includes a box whose shadow reaches the slice across a source seam', async () => {
+    naturalSizes = { 'blob:b': [800, 1000] };
+    const pages = [
+      {
+        id: 1, w: 800, h: 1000, raw: null, lines: [],
+        boxes: [{
+          id: 'shadow-tail', lineN: null, text: 'SHADOW_TAIL',
+          x: 100, y: 850, w: 300, h: 100,
+          style: normalizeStyle({ size: 20, shadows: [{ x: 0, y: 100, blur: 0, color: '#000000', opacity: 1 }] }),
+        }],
+      },
+      { id: 2, w: 800, h: 1000, raw: 'blob:b', lines: [], boxes: [] },
+    ];
+
+    await renderStripSliceCanvas(pages, [0, 1000], 1000, 1200);
+
+    expect(painted).toContain('SHADOW_TAIL');
+  });
   const strip = () => [
     { id: 1, w: 800, h: 1000, raw: 'blob:a', lines: [], boxes: [] },
     { id: 2, w: 600, h: 1000, raw: 'blob:b', lines: [], boxes: [] },
@@ -788,9 +839,154 @@ describe('renderStripSliceCanvas', () => {
     await renderStripSliceCanvas(strip(), [0, 1000], 0, 500);
     expect(composited).toEqual([[0, 0]]);
   });
+
+  it('paints downward cross-seam text on top of later page background', async () => {
+    naturalSizes = { 'blob:a': [800, 1000], 'blob:b': [800, 1000] };
+    const pages = [
+      {
+        id: 1,
+        w: 800,
+        h: 1000,
+        raw: 'blob:a',
+        lines: [],
+        boxes: [
+          {
+            id: 'b-down',
+            lineN: null,
+            text: 'SEAM_DOWN',
+            x: 100,
+            y: 900,
+            w: 300,
+            h: 200,
+            style: normalizeStyle({ size: 20 }),
+          },
+        ],
+      },
+      { id: 2, w: 800, h: 1000, raw: 'blob:b', lines: [], boxes: [] },
+    ];
+    // Slice covers seam: [800, 1200]
+    await renderStripSliceCanvas(pages, [0, 1000], 800, 1200);
+
+    const artBIdx = draws.findIndex((d) => d.src === 'blob:b');
+    const textIdx = draws.findIndex((d) => d.kind === 'box' || d.kind === 'text');
+    expect(artBIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThanOrEqual(0);
+    // Invariant 1: All contributing backgrounds must paint before any lettering.
+    // Later page background (blob:b) must not paint over earlier page's cross-seam text.
+    expect(artBIdx).toBeLessThan(textIdx);
+  });
+
+  it('paints upward cross-seam text on top of all contributing backgrounds', async () => {
+    naturalSizes = { 'blob:a': [800, 1000], 'blob:b': [800, 1000] };
+    const pages = [
+      {
+        id: 1,
+        w: 800,
+        h: 1000,
+        raw: 'blob:a',
+        lines: [],
+        boxes: [
+          {
+            id: 'b-p1',
+            lineN: null,
+            text: 'PAGE_1_BOX',
+            x: 100,
+            y: 800,
+            w: 300,
+            h: 100,
+            style: normalizeStyle({ size: 20 }),
+          },
+        ],
+      },
+      {
+        id: 2,
+        w: 800,
+        h: 1000,
+        raw: 'blob:b',
+        lines: [],
+        boxes: [
+          {
+            id: 'b-up',
+            lineN: null,
+            text: 'SEAM_UP',
+            x: 100,
+            y: -100,
+            w: 300,
+            h: 200,
+            style: normalizeStyle({ size: 20 }),
+          },
+        ],
+      },
+    ];
+    // Slice covers seam: [700, 1200]
+    await renderStripSliceCanvas(pages, [0, 1000], 700, 1200);
+
+    const artAIdx = draws.findIndex((d) => d.src === 'blob:a');
+    const artBIdx = draws.findIndex((d) => d.src === 'blob:b');
+    const p1TextIdx = draws.findIndex((d) => d.kind === 'box' || d.kind === 'text');
+    expect(artAIdx).toBeGreaterThanOrEqual(0);
+    expect(artBIdx).toBeGreaterThanOrEqual(0);
+    expect(p1TextIdx).toBeGreaterThanOrEqual(0);
+    // Artwork must precede all lettering: Page 2 background must not paint after Page 1 text.
+    expect(artBIdx).toBeLessThan(p1TextIdx);
+  });
+
+  it('renders cross-seam text in a slice where the owner background is absent', async () => {
+    // Slice [1050, 1500] is inside Page 2. Page 1 background (0..1000) is absent.
+    // Natural sizes only provides blob:b to verify blob:a is never decoded or requested.
+    naturalSizes = { 'blob:b': [800, 1000] };
+    const pages = [
+      {
+        id: 1,
+        w: 800,
+        h: 1000,
+        raw: 'blob:a',
+        lines: [],
+        boxes: [
+          {
+            id: 'b-down',
+            lineN: null,
+            text: 'SEAM_DOWN_IN_P2_SLICE',
+            x: 100,
+            y: 900,
+            w: 300,
+            h: 200,
+            style: normalizeStyle({ size: 20 }),
+          },
+        ],
+      },
+      { id: 2, w: 800, h: 1000, raw: 'blob:b', lines: [], boxes: [] },
+    ];
+    await renderStripSliceCanvas(pages, [0, 1000], 1050, 1500);
+
+    // Page 1's artwork must NOT be drawn (it is outside the slice).
+    expect(draws.some((d) => d.src === 'blob:a')).toBe(false);
+    // Page 2's artwork MUST be drawn (it intersects the slice).
+    const artBIdx = draws.findIndex((d) => d.src === 'blob:b');
+    expect(artBIdx).toBeGreaterThanOrEqual(0);
+    // Page 1's cross-seam text MUST be drawn.
+    const textIdx = draws.findIndex((d) => d.kind === 'box' || d.kind === 'text');
+    expect(textIdx).toBeGreaterThanOrEqual(0);
+    // Page 2's artwork must be painted BEFORE the text so lettering is not obscured.
+    expect(artBIdx).toBeLessThan(textIdx);
+  });
 });
 
 describe('exportImages in a longstrip project', () => {
+  it('measures an unvisited current source slice before exporting it', async () => {
+    naturalSizes = { 'blob:test': [600, 900] };
+    vi.spyOn(fsx, 'join').mockImplementation(async (...parts) => parts.join('/'));
+    vi.spyOn(fsx, 'assetUrl').mockResolvedValue(null);
+    vi.spyOn(fsx, 'readFile').mockResolvedValue(new Uint8Array([1, 2, 3]));
+    setChapterImageDirs('/raw', null);
+    app.projectLayout = 'longstrip';
+    loadProjectPages([{ id: 88, file: '088.png', raw: null, cleaned: null, w: 0, h: 0, lines: [], boxes: [] }]);
+
+    expect(await exportImages('PNG', 'current')).toBe(true);
+
+    expect(app.pages[0]).toMatchObject({ w: 600, h: 900 });
+    expect(draws.some((d) => d.src === 'blob:test')).toBe(true);
+  });
   beforeEach(() => {
     app.projectLayout = 'longstrip';
     app.stripSliceH = 1000;
@@ -811,6 +1007,57 @@ describe('exportImages in a longstrip project', () => {
   it('still exports one page as that page', async () => {
     await exportImages('PNG', 'current');
     expect(downloaded).toEqual(['ch01-11.png']);
+  });
+
+  it('exports the current source page slice via the strip compositor, including neighbor and upward cross-seam boxes', async () => {
+    naturalSizes = { 'blob:p1': [800, 1000], 'blob:p2': [800, 1000] };
+    const p1 = {
+      id: 101,
+      w: 800,
+      h: 1000,
+      raw: 'blob:p1',
+      lines: [],
+      boxes: [
+        {
+          id: 'b-prev',
+          lineN: null,
+          text: 'PREV_OWNED_BOX',
+          x: 40,
+          y: 900,
+          w: 300,
+          h: 200,
+          style: normalizeStyle({ size: 20 }),
+        },
+      ],
+    };
+    const p2 = {
+      id: 102,
+      w: 800,
+      h: 1000,
+      raw: 'blob:p2',
+      lines: [],
+      boxes: [
+        {
+          id: 'b-cur-up',
+          lineN: null,
+          text: 'CUR_CROSSING_UP_BOX',
+          x: 40,
+          y: -100,
+          w: 300,
+          h: 200,
+          style: normalizeStyle({ size: 20 }),
+        },
+      ],
+    };
+
+    loadProjectPages([p1, p2]);
+    app.pageIndex = 1; // current page is p2 (document range [1000, 2000])
+
+    await exportImages('PNG', 'current');
+
+    expect(downloaded).toEqual(['ch01-102.png']);
+    expect(painted).toContain('PREV_OWNED_BOX');
+    expect(painted).toContain('CUR_CROSSING_UP_BOX');
   });
 
   it('leaves the text document alone - it is one file for the chapter either way', async () => {

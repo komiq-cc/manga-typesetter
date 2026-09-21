@@ -19,7 +19,9 @@
     autoFitBoxTo,
     focusPage,
     resizeBox,
+    isLongstrip,
   } from './store.svelte.js';
+  import { stripDragYBounds } from './editor/strip.js';
 
   import { untrack } from 'svelte';
   import { record } from './editor/history.svelte.js';
@@ -823,6 +825,7 @@
     settleEdits();
     const zz = app.zoom;
     const dims = pg;
+    const stripBounds = isLongstrip() ? stripDragYBounds(app.pages, dims.id, box.h) : null;
     const pid = e.pointerId;
     const sx = e.clientX, sy = e.clientY, ox = box.x, oy = box.y;
 
@@ -831,7 +834,9 @@
     const move = (ev) => {
       if (ev.pointerId !== pid) return;
       box.x = clamp(ox + (ev.clientX - sx) / zz, -box.w + 20, dims.w - 20);
-      box.y = clamp(oy + (ev.clientY - sy) / zz, -box.h + 20, dims.h - 20);
+      box.y = stripBounds
+        ? clamp(oy + (ev.clientY - sy) / zz, stripBounds.min, stripBounds.max)
+        : clamp(oy + (ev.clientY - sy) / zz, -box.h + 20, dims.h - 20);
       markUnsaved();
     };
 

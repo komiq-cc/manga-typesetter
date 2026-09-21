@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   stripOffsets,
+  stripPageExtent,
+  stripDragYBounds,
+  boxEffectPad,
+  boxPaintedStripSpan,
+  stripResidentWindow,
+  isBoxInStripWindow,
+  stripFrameCoords,
   stripFrameMetrics,
   pageIndexAtCenter,
   maxPageWidth,
@@ -10,6 +17,7 @@ import {
   scrollTopForFraction,
   visibleHeightOf,
   focusHoldsIndex,
+  focusedBoxHoldsIndex,
   RESIDENT_MIN,
   RESIDENT_MAX,
 } from './strip.js';
@@ -32,6 +40,194 @@ describe('stripOffsets', () => {
   it('answers for a chapter with no pages', () => {
     expect(stripOffsets([])).toEqual({ tops: [], total: 0 });
     expect(stripOffsets(null)).toEqual({ tops: [], total: 0 });
+  });
+});
+
+describe('owner-local geometry across strip seams', () => {
+  const ps = pages(100, 200, 50);
+
+  it('locates an owner within the unzoomed document', () => {
+    expect(stripPageExtent(ps, 2)).toEqual({ top: 100, total: 350 });
+    expect(stripPageExtent(ps, 9)).toBe(null);
+    expect(stripPageExtent([{ id: 1, h: 100 }, { id: 2, h: 0 }], 1)).toBe(null);
+  });
+
+  it('allows a box to cross its owner seam but retains a reachable part in the document', () => {
+    expect(stripDragYBounds(ps, 1, 80)).toEqual({ min: -60, max: 330 });
+    expect(stripDragYBounds(ps, 2, 80)).toEqual({ min: -160, max: 230 });
+    expect(stripDragYBounds(ps, 3, 80)).toEqual({ min: -360, max: 30 });
+  });
+
+  it('maps cross-seam local coordinates to continuous strip coordinates in both directions', () => {
+    // Downward overflow from page 1 (h: 100) into page 2
+    const p1Extent = stripPageExtent(ps, 1);
+    const boxOnP1 = { y: 80, h: 60 }; // ends at y=140, 40px into page 2
+    const stripY1 = p1Extent.top + boxOnP1.y;
+    expect(stripY1).toBe(80);
+    expect(stripY1 + boxOnP1.h).toBe(140); // 40px past page 1's bottom (100)
+
+    // Upward overflow from page 2 (top: 100, h: 200) into page 1
+    const p2Extent = stripPageExtent(ps, 2);
+    const boxOnP2 = { y: -30, h: 50 }; // starts 30px up into page 1
+    const stripY2 = p2Extent.top + boxOnP2.y;
+    expect(stripY2).toBe(70); // 30px above page 2's top (100)
+    expect(stripY2 + boxOnP2.h).toBe(120);
+  });
+});
+
+describe('boxPaintedStripSpan and effect reach', () => {
+  it('calculates conservative effect pads for strokes, shadows, blur, and ink', () => {
+    expect(boxEffectPad(null)).toBe(0);
+    expect(boxEffectPad({})).toBe(4);
+
+    const s = {
+      strokes: [{ width: 4 }, { width: 6 }],
+      shadows: [{ y: 5, blur: 4 }],
+      blur: 3,
+      motionBlur: { on: true, y: 4, amount: 2 },
+      roughen: { on: true, amount: 3 },
+      ink: { on: true, strokes: [{ size: 10 }] },
+    };
+    // The editor must retain at least this much painted reach. The shared
+    // painter's shadow and motion blur bounds are deliberately more generous.
+    expect(boxEffectPad(s)).toBeGreaterThanOrEqual(50);
+  });
+
+  it('computes painted strip span taking rotation and effects into account', () => {
+    // Unrotated box on page at top=500
+    const b1 = { y: 100, w: 200, h: 80 };
+    expect(boxPaintedStripSpan(b1, 500)).toEqual({ top: 600, bottom: 680 });
+
+    // 90-degree rotated box (becomes 200px tall centered at y=140 -> local top 40, bottom 240)
+    const b2 = { y: 100, w: 200, h: 80, style: { rotation: 90 } };
+    expect(boxPaintedStripSpan(b2, 500)).toEqual({ top: 536, bottom: 744 });
+
+    // Box with effects padding
+    const b3 = { y: 100, w: 200, h: 80, style: { strokes: [{ width: 10 }] } };
+    expect(boxPaintedStripSpan(b3, 500)).toEqual({ top: 586, bottom: 694 });
+  });
+});
+
+describe('stripResidentWindow and isBoxInStripWindow', () => {
+  const chapter = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, w: 800, h: 1000 }));
+  const { tops } = stripOffsets(chapter, 1);
+
+  it('determines resident artwork strip bounds from center page and viewport', () => {
+    // At center index 10 (page 11, top: 10000), with 800px viewport, radius is 3 (pages 7..13)
+    const win = stripResidentWindow(chapter, tops, 10, 800);
+    expect(win.radius).toBe(3);
+    expect(win.lo).toBe(7);
+    expect(win.hi).toBe(13);
+    expect(win.top).toBe(7000);
+    expect(win.bottom).toBe(14000);
+  });
+
+  it('mounts boxes on offscreen owners that extend into the resident window', () => {
+    const winTop = 7000;
+    const winBottom = 14000;
+
+    // Box owned by page 1 (ownerTop: 0) extending down into page 8 (y: 7500, h: 100)
+    const crossBox = { y: 7500, w: 200, h: 100 };
+    expect(isBoxInStripWindow(crossBox, 0, winTop, winBottom)).toBe(true);
+
+    // Box owned by page 1 staying on page 1 (y: 100, h: 50) -> does not intersect window
+    const offscreenBox = { y: 100, w: 200, h: 50 };
+    expect(isBoxInStripWindow(offscreenBox, 0, winTop, winBottom)).toBe(false);
+
+    // Box owned by page 25 (ownerTop: 24000) extending upward into page 13 (y: -10500, h: 100) -> top in strip space: 13500
+    const upwardBox = { y: -10500, w: 200, h: 100 };
+    expect(isBoxInStripWindow(upwardBox, 24000, winTop, winBottom)).toBe(true);
+
+    // Pinned selection or editing box is always mounted even if far offscreen
+    expect(isBoxInStripWindow(offscreenBox, 0, winTop, winBottom, true)).toBe(true);
+  });
+});
+
+describe('shared longstrip text overlay layout and hit resolution', () => {
+  const mixedPages = [
+    { id: 1, w: 800, h: 1200 },
+    { id: 2, w: 1000, h: 1500 },
+    { id: 3, w: 600, h: 800 },
+  ];
+
+  it('aligns page boxlayers with centered page frames across zoom levels', () => {
+    for (const zoom of [1, 0.5, 1.25]) {
+      const { tops } = stripOffsets(mixedPages, zoom);
+      const maxW = maxPageWidth(mixedPages) * zoom; // 1000 * zoom
+
+      // Page 1 (w: 800)
+      const left1 = (maxW - mixedPages[0].w * zoom) / 2;
+      expect(tops[0]).toBe(0);
+      expect(left1).toBe((1000 - 800) * zoom / 2);
+
+      // Page 2 (w: 1000)
+      const left2 = (maxW - mixedPages[1].w * zoom) / 2;
+      expect(tops[1]).toBe(1200 * zoom);
+      expect(left2).toBe(0);
+
+      // Page 3 (w: 600)
+      const left3 = (maxW - mixedPages[2].w * zoom) / 2;
+      expect(tops[2]).toBe((1200 + 1500) * zoom);
+      expect(left3).toBe((1000 - 600) * zoom / 2);
+    }
+  });
+
+  it('resolves geometric click positions across seam boundaries via stripFrameCoords', () => {
+    const zoom = 1;
+    const { tops } = stripOffsets(mixedPages, zoom);
+    const stageTop = 50;
+    const stageLeft = 100;
+    const maxW = maxPageWidth(mixedPages) * zoom; // 1000
+
+    const frames = mixedPages.map((pg, i) => {
+      const w = pg.w * zoom;
+      const h = pg.h * zoom;
+      const top = stageTop + tops[i];
+      const left = stageLeft + (maxW - w) / 2;
+      return {
+        left,
+        right: left + w,
+        top,
+        bottom: top + h,
+        pg,
+      };
+    });
+
+    // Click inside page 1
+    expect(stripFrameCoords(stageLeft + 200, stageTop + 500, frames, zoom)).toEqual({
+      x: 100, // (200 - 100 left pad)
+      y: 500,
+      pg: mixedPages[0],
+      index: 0,
+    });
+
+    // Click 1px above seam between page 1 and page 2 (page 1 bottom is stageTop + 1200)
+    expect(stripFrameCoords(stageLeft + 200, stageTop + 1199, frames, zoom)).toEqual({
+      x: 100,
+      y: 1199,
+      pg: mixedPages[0],
+      index: 0,
+    });
+
+    // Click exactly on the seam (stageTop + 1200) resolves to page 2
+    expect(stripFrameCoords(stageLeft + 200, stageTop + 1200, frames, zoom)).toEqual({
+      x: 200, // page 2 left pad is 0
+      y: 0,
+      pg: mixedPages[1],
+      index: 1,
+    });
+
+    // Click 1px below seam resolves to page 2
+    expect(stripFrameCoords(stageLeft + 200, stageTop + 1201, frames, zoom)).toEqual({
+      x: 200,
+      y: 1,
+      pg: mixedPages[1],
+      index: 1,
+    });
+
+    // Click outside strip width returns null
+    expect(stripFrameCoords(stageLeft - 20, stageTop + 500, frames, zoom)).toBe(null);
+    expect(stripFrameCoords(stageLeft + 1050, stageTop + 500, frames, zoom)).toBe(null);
   });
 });
 
@@ -182,6 +378,14 @@ describe('the focused page holds the index while the reader is working', () => {
     expect(focusHoldsIndex(tops, [0, 1000, 1000], 0, 0, 800)).toBe(false);
     expect(focusHoldsIndex(tops, heights, 9, 0, 800)).toBe(false);
     expect(focusHoldsIndex(tops, heights, -1, 0, 800)).toBe(false);
+  });
+
+  it('keeps focus when cross-seam text remains visible after its owner frame leaves', () => {
+    const box = { y: 900, w: 200, h: 300 };
+    // Owner frame ends at 1000; the viewport starts at 1050, on the next image.
+    expect(focusHoldsIndex([0, 1000], [1000, 1000], 0, 1050, 100)).toBe(false);
+    expect(focusedBoxHoldsIndex(box, 0, 1, 1050, 100)).toBe(true);
+    expect(focusedBoxHoldsIndex(box, 0, 1, 1250, 100)).toBe(false);
   });
 });
 

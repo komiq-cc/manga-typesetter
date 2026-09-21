@@ -26,8 +26,8 @@ import { warpActive } from './warp.js';
 import { warpBoxCanvas } from './warp-paint.js';
 import { settleBoxTips } from './brush-tips.js';
 import { withPageImages } from './page-images.js';
-import { stripOffsets, maxPageWidth } from './editor/strip.js';
-import { planStripCuts, boxSpanY, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
+import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
+import { planStripCuts, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
 // The detected-text JSON serialiser lives in a leaf module so the library can
 // write that document on every autosave without importing this file - see the
 // note at the top of text-json.js. Re-exported here because this is where every
@@ -992,20 +992,6 @@ async function measureStrip(pages) {
   return { tops, total, width: maxPageWidth(pages) || PAGE_W };
 }
 
-// What a page actually paints into the column: its frame, plus any box that
-// hangs off it. A box can be dragged until only 20px of it is still over its own
-// page (see TextBox's clamp), so "which pages does this slice need" is not
-// answerable from the frames alone.
-function pageStripSpan(p, top) {
-  let a = top;
-  let b = top + Math.max(0, p?.h ?? 0);
-  for (const box of p?.boxes ?? []) {
-    const s = boxSpanY(box);
-    if (top + s.top < a) a = top + s.top;
-    if (top + s.bottom > b) b = top + s.bottom;
-  }
-  return { top: a, bottom: b };
-}
 
 // Pin several pages' images for the duration of one call. Nesting rather than
 // looping because `withPageImages` releases in its own `finally` - the pins have
@@ -1046,20 +1032,33 @@ export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1) {
   ctx.fillRect(0, 0, W, H);
   ctx.imageSmoothingQuality = 'high'; // crisp downscale of the supersampled text
 
-  const hits = [];
-  pages.forEach((p, i) => {
+  const artHits = [];
+  const textHits = [];
+
+  (pages ?? []).forEach((p, i) => {
     const top = tops[i] ?? 0;
-    const span = pageStripSpan(p, top);
-    if (span.bottom > y0 && span.top < y1) hits.push({ p, top });
+    const h = Math.max(0, p?.h ?? 0);
+    // Runtime URLs are null outside the resident image window. Select by
+    // geometry first; withPagesImages mints and pins the artwork below.
+    if (top + h > y0 && top < y1) {
+      artHits.push({ p, top });
+    }
+    for (const box of p?.boxes ?? []) {
+      const s = boxPaintedStripSpan(box, top);
+      if (s.bottom > y0 && s.top < y1) {
+        textHits.push({ box, p, top });
+      }
+    }
   });
 
+  // Pass 1: paint all artwork intersecting the requested output rectangle.
   await withPagesImages(
-    hits.map((h) => h.p),
+    artHits.map((h) => h.p),
     async () => {
-      for (const { p, top } of hits) {
+      for (const { p, top } of artHits) {
         const { w, h } = await pageSpace(p);
         const x = Math.round((W - w) / 2);
-        const y = top - y0; // whole pixels: `planStripCuts` rounds every cut
+        const y = top - y0;
         const base = p.cleaned ?? p.raw;
         if (base) {
           try {
@@ -1069,23 +1068,44 @@ export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1) {
             /* draw this page's text on white if its image fails */
           }
         }
-        // `paintBoxOnPage` draws in page-local coordinates through the current
-        // transform - its direct-angle path translates/rotates from it, and its
-        // supersampled offscreen path composites through it - so translating to
-        // the page's corner in the slice is all this needs. The canvas clips
-        // whatever falls outside the slice, which is the neighbouring file's
-        // half of a box the cut had to cross.
-        for (const box of p.boxes ?? []) {
-          ctx.save();
-          ctx.translate(x, y);
-          ctx.globalAlpha = box.style.opacity ?? 1;
-          paintBoxOnPage(ctx, box, p, tips);
-          ctx.restore();
-        }
       }
     },
   );
+
+  // Pass 2: paint all lettering whose painted bounds intersect that rectangle,
+  // in stable document layer order.
+  for (const { box, p, top } of textHits) {
+    const w = p?.w || W;
+    const x = Math.round((W - w) / 2);
+    const y = top - y0;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.globalAlpha = box.style.opacity ?? 1;
+    paintBoxOnPage(ctx, box, p, tips);
+    ctx.restore();
+  }
   return canvas;
+}
+
+// Render one source page of a longstrip column to a Blob via the strip compositor,
+// slicing at [top, top + h] in document space so cross-seam lettering and neighbor
+// boxes are preserved.
+async function renderStripPageBlob(p, fmt) {
+  const pages = app.pages?.length ? app.pages : [p];
+  const idx = pages.findIndex((pg) => pg?.id === p?.id);
+  // The current source boundary and the column width use the same measured
+  // layout as whole-chapter export. Measurement pins one image at a time, so
+  // it does not retain the whole chapter's decoded artwork.
+  const { tops } = await measureStrip(pages);
+  const top = idx >= 0 ? tops[idx] ?? 0 : 0;
+  const canvas = await renderStripSliceCanvas(pages, tops, top, top + (p.h || PAGE_H));
+  const blob = await new Promise((res) => canvas.toBlob(res, MIME[fmt], QUALITY[fmt]));
+  canvas.width = 0;
+  canvas.height = 0;
+  if (!blob) {
+    throw new Error(`Could not render page ${p?.id ?? ''} (page too large)`.trim());
+  }
+  return blob;
 }
 
 // Raster formats - the ones a strip can be re-cut into. PSD stays one layered
@@ -1288,6 +1308,9 @@ export async function exportImages(fmt, scope) {
           const { buildPagePsd } = await import('./psd.js');
           const bytes = await buildPagePsd(p);
           return new Blob([bytes], { type: MIME.PSD });
+        }
+        if (isLongstrip() && RASTER.has(fmt)) {
+          return await renderStripPageBlob(p, fmt);
         }
         return await renderPageBlob(p, fmt);
       });

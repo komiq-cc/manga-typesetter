@@ -74,6 +74,7 @@ import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
 // its own defaults, so `setTool` can disarm it without the two ever cycling.
 import { setBrushMode } from './brush-tool.svelte.js';
 import { scaleStroke } from './brush.js';
+import { stripPageExtent, stripDragYBounds } from './editor/strip.js';
 
 export { PAGE_W, PAGE_H };
 
@@ -607,7 +608,11 @@ export function autoFitBoxTo(b, lineCount, p = page()) {
   const s = b?.style;
   if (!fitApplies(b, s)) return false;
   const need = neededHeight(lineCount, s, BOX_PAD);
-  const next = growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
+  const extent = isLongstrip() ? stripPageExtent(app.pages, p?.id) : null;
+  const next = extent && extent.total > 0
+    ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)
+    : growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
+  if (extent && extent.total > 0) next.y -= extent.top;
   if (next.h === b.h && next.y === b.y) return false;
   b.y = next.y;
   b.h = next.h;
@@ -2822,7 +2827,10 @@ export function nudgeBox(id, dx, dy) {
   if (nudgePending && (nudgePending.boxId !== id || nudgePending.pageId !== p.id)) settleNudge();
   else if (!nudgePending) settleEdits();
   const x = clamp(b.x + dx, -b.w + 20, p.w - 20);
-  const y = clamp(b.y + dy, -b.h + 20, p.h - 20);
+  const stripBounds = isLongstrip() ? stripDragYBounds(app.pages, p.id, b.h) : null;
+  const y = stripBounds
+    ? clamp(b.y + dy, stripBounds.min, stripBounds.max)
+    : clamp(b.y + dy, -b.h + 20, p.h - 20);
   if (x === b.x && y === b.y) return false;
   nudgePending ??= { boxId: id, pageId: p.id, before: { x: b.x, y: b.y } };
   b.x = x;

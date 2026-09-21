@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // ===========================================================================
 // The auto-height, wired up
@@ -142,6 +142,42 @@ describe('the box grows to its text, anchored where the text is', () => {
     const once = geom(b);
     expect(autoFitBox(b, page())).toBe(false);
     expect(geom(b)).toEqual(once);
+  });
+});
+
+describe('auto-height across longstrip source seams', () => {
+  const NEED = neededHeight(2, { size: 20, lineHeight: 1.1 }, 2);
+
+  beforeEach(() => {
+    app.projectLayout = 'longstrip';
+  });
+
+  afterEach(() => {
+    app.projectLayout = 'pages';
+  });
+
+  it('lets a top-aligned box grow from its owner into the next image', () => {
+    loadProjectPages([
+      { id: 1, w: 800, h: 100, lines: [], boxes: [twoLiner({ y: 90, style: { size: 20, lineHeight: 1.1, valign: 'top' } })] },
+      { id: 2, w: 800, h: 100, lines: [], boxes: [] },
+    ]);
+    expect(geom(app.pages[0].boxes[0])).toEqual({ y: 90, h: NEED });
+  });
+
+  it('lets a bottom-aligned box on the later image grow upward', () => {
+    loadProjectPages([
+      { id: 1, w: 800, h: 100, lines: [], boxes: [] },
+      { id: 2, w: 800, h: 100, lines: [], boxes: [twoLiner({ y: 5, style: { size: 20, lineHeight: 1.1, valign: 'bottom' } })] },
+    ]);
+    expect(geom(app.pages[1].boxes[0])).toEqual({ y: 5 + 20 - NEED, h: NEED });
+  });
+
+  it('waits for every page dimension before using document-wide bounds', () => {
+    loadProjectPages([
+      { id: 1, w: 800, h: 100, lines: [], boxes: [twoLiner({ y: 90, style: { size: 20, lineHeight: 1.1, valign: 'top' } })] },
+      { id: 2, w: 0, h: 0, lines: [], boxes: [] },
+    ]);
+    expect(geom(app.pages[0].boxes[0])).toEqual({ y: 100 - NEED, h: NEED });
   });
 });
 

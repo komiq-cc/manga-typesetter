@@ -25,10 +25,15 @@
     fitWidthZoom,
     maxPageWidth,
     pageIndexAtCenter,
+    stripOffsets,
     stripFrameMetrics,
     focusHoldsIndex,
+    focusedBoxHoldsIndex,
     residentRadiusFor,
     scrollFraction,
+    stripResidentWindow,
+    isBoxInStripWindow,
+    stripFrameCoords,
   } from './strip.js';
   import { publishStripScroll } from './strip-sync.svelte.js';
 
@@ -38,7 +43,7 @@
   let scrollEl;
   let stageEl;
   // Per-page frame element bindings.
-  let stripEl;
+  let stripEl = $state(null);
   let frameEls = $state([]);
   // The same, for a paged chapter's mounted window - see `mountedPages`. Indexed
   // by page index like `frameEls`, and sparse: only the window's own slots are
@@ -240,31 +245,37 @@
   // string building per event. That is the shape of a webview that stops
   // answering.
   //
-  // So the boxes follow the pictures. The window is the SAME one
-  // `page-images.js` is holding - `residentRadiusFor` off the on-screen heights,
-  // exactly as EditorRoot computes it for the images - which is what makes this
-  // invisible rather than merely cheaper: a slice outside it has had its raster
-  // revoked and is already drawing as a blank frame, so there was never any art
-  // under the text that has stopped being mounted. Inside it, everything is as
-  // it was.
-  //
-  // The paged branch has had this since the mounted window landed; see
-  // `MOUNT_RADIUS`. This is the same idea in the unit a strip measures in.
-  const stripBoxRadius = $derived.by(() => {
-    if (!strip) return 0;
-    const zoom = app.zoom;
-    return residentRadiusFor(
-      app.pages.map((pg) => (pg.h ?? 0) * zoom),
-      app.pageIndex,
-      typeof window === 'undefined' ? 0 : window.innerHeight,
-    );
+  // So boxes follow the resident artwork window: a box is mounted if its derived
+  // painted strip bounds (rotation and effects included) intersect the resident
+  // window, or if it is currently selected or being edited. Offscreen owner pages
+  // with no visible boxes render no boxlayer elements.
+  const stripLayout = $derived(strip ? stripOffsets(app.pages, app.zoom) : null);
+  const unzoomedStripTops = $derived.by(() => {
+    if (!strip) return [];
+    return stripOffsets(app.pages, 1).tops;
   });
-  // The current page is in the window whatever the arithmetic says, for the same
-  // reason it is in `mountedPages`: a jump lands on it before anything has had a
-  // chance to re-measure.
-  const stripBoxesOn = (i) =>
-    i === app.pageIndex ||
-    (i >= app.pageIndex - stripBoxRadius && i <= app.pageIndex + stripBoxRadius);
+
+  const stripResident = $derived.by(() => {
+    if (!strip) return null;
+    const zoom = app.zoom || 1;
+    const vh = typeof window === 'undefined' ? 0 : window.innerHeight;
+    return stripResidentWindow(app.pages, unzoomedStripTops, app.pageIndex, vh / zoom);
+  });
+
+  const isBoxVisible = (box, pageIndex) => {
+    if (!strip) return true;
+    const isTarget = box?.id === app.selectedId || box?.id === app.editingId;
+    if (isTarget) return true;
+    if (!stripResident) return true;
+    const ownerTop = unzoomedStripTops[pageIndex] ?? 0;
+    return isBoxInStripWindow(box, ownerTop, stripResident.top, stripResident.bottom, isTarget);
+  };
+
+  const pageHasVisibleBoxes = (pg, pageIndex) => {
+    if (!strip) return true;
+    if (!pg?.boxes?.length) return false;
+    return pg.boxes.some((b) => isBoxVisible(b, pageIndex));
+  };
 
   // The visible frame, for everything that measures the page: pan clamping,
   // `frameCoords`, and TextBox's own rotation gesture. Never a hidden one - a
@@ -414,13 +425,31 @@
       const r = pageFrameEl.getBoundingClientRect();
       return { x: (e.clientX - r.left) / app.zoom, y: (e.clientY - r.top) / app.zoom, pg: page() };
     }
-    const el = e.target?.closest?.('.page-frame');
-    if (!el) return null;
-    const id = el.dataset.pageId;
-    const pg = app.pages.find((q) => String(q.id) === id);
-    if (!pg) return null;
-    const r = el.getBoundingClientRect();
-    return { x: (e.clientX - r.left) / app.zoom, y: (e.clientY - r.top) / app.zoom, pg };
+    const n = app.pages.length;
+    if (!n || !stripEl) return null;
+
+    const el = e.target?.closest?.('[data-page-id]');
+    if (el && el.dataset.pageId) {
+      const pg = app.pages.find((q) => String(q.id) === el.dataset.pageId);
+      if (pg) {
+        const r = el.getBoundingClientRect();
+        return { x: (e.clientX - r.left) / app.zoom, y: (e.clientY - r.top) / app.zoom, pg };
+      }
+    }
+
+    const frames = frameEls.map((frame, i) =>
+      frame
+        ? {
+            left: frame.getBoundingClientRect().left,
+            right: frame.getBoundingClientRect().right,
+            top: frame.getBoundingClientRect().top,
+            bottom: frame.getBoundingClientRect().bottom,
+            pg: app.pages[i],
+          }
+        : null,
+    );
+    const hit = stripFrameCoords(e.clientX, e.clientY, frames, app.zoom);
+    return hit ? { x: hit.x, y: hit.y, pg: hit.pg } : null;
   }
 
   // Bound to `.stage`, not to `.boxlayer`, and that difference is the whole of
@@ -435,7 +464,7 @@
   // Only the hand claims the extra ground. Text and Place stay page-only - they
   // read a point in page coordinates, and a click 200px out in the grey would
   // otherwise land a box off the paper - so their branch below still demands a
-  // press that landed on `.boxlayer` itself.
+  // press that landed on `.boxlayer` or a page frame.
   function onStagePointerDown(e) {
     // The primary button and nothing else. A right-click is on its way to a
     // context menu and a middle one is a paste on some platforms; neither is a
@@ -456,11 +485,13 @@
     // which is exactly why it is cheap to keep: the cost of being wrong is a
     // stray box on a page the user is not typesetting.
     if (translate) return;
-    if (!e.target.classList.contains('boxlayer')) return;
+    if (e.target.closest?.('.tbox')) return;
+    if (!strip && !e.target.classList.contains('boxlayer')) return;
     // The Text tool drags the empty page to pan too, and turns a press that
     // never travelled into a new box.
     if (app.tool === 'text') {
-      startPanPointer(e, true);
+      const hit = frameCoords(e);
+      if (hit) startPanPointer(e, true);
       return;
     }
     const hit = frameCoords(e);
@@ -714,8 +745,13 @@
     // The page that box is on holds the index until it has been scrolled off
     // screen - see `focusHoldsIndex` for the rule and why it is a hold rather
     // than a lock.
-    const working = !!(app.editingId || app.selectedId);
-    if (i !== app.pageIndex && !(working && focusHoldsIndex(tops, heights, app.pageIndex, st, vh)))
+    const workingId = app.editingId || app.selectedId;
+    const focusedBox = workingId && app.pages[app.pageIndex]?.boxes.find((b) => b.id === workingId);
+    const keepFocus = !!workingId && (
+      focusHoldsIndex(tops, heights, app.pageIndex, st, vh) ||
+      focusedBoxHoldsIndex(focusedBox, tops[app.pageIndex] ?? 0, app.zoom, st, vh)
+    );
+    if (i !== app.pageIndex && !keepFocus)
       gotoPage(i);
     // The reference strip follows this one - see strip-sync.svelte.js.
     publishStripScroll(scrollFraction(scrollEl));
@@ -868,7 +904,12 @@
            `page-images.js` mints their picture, so a 200-page chapter mounts 200
            cheap boxes and holds a handful of rasters - and the strip's scroll
            height is the same before and after any of them arrives, which is the
-           one property that keeps a scroll position meaning what it meant. -->
+           one property that keeps a scroll position meaning what it meant.
+
+           Layering:
+           Artwork layer: independent page frames containing images.
+           Shared text overlay: mounted over all artwork so cross-seam text boxes
+           paint cleanly above subsequent page images without being obscured. -->
       <div
         class="strip"
         class:panning={panLive}
@@ -892,20 +933,30 @@
                    wait for that rather than starting its own. -->
               <img class="page-img" src={srcOf(pg)} alt="Page" crossorigin="anonymous" decoding="async" onload={(e) => onCleanedLoad(e, pg)} />
             {/if}
-            <div class="boxlayer" class:pan={app.tool === 'pan'}>
-              <!-- Only inside the resident window - see `stripBoxesOn`. A
-                   translate chapter renders no canvas boxes at all: the boxes
-                   are typeset-mode state that survives the switch on disk, and
-                   showing them here would present a canvas the mode's tools
-                   cannot touch. -->
-              {#if !translate && stripBoxesOn(i)}
-                {#each pg.boxes as box (box.id)}
-                  <TextBox {box} {pg} pageFrameEl={frameEls[i]} />
-                {/each}
-              {/if}
-            </div>
           </div>
         {/each}
+        <div class="strip-overlay boxlayer" class:pan={app.tool === 'pan'}>
+          <!-- Mount individual boxes whose derived painted strip bounds intersect the
+               resident artwork window, or that are selected/editing targets. Offscreen
+               owner pages with no intersecting boxes render nothing. -->
+          {#if !translate && stripLayout}
+            {#each app.pages as pg, i (pg.id)}
+              {#if pageHasVisibleBoxes(pg, i)}
+                <div
+                  class="page-boxlayer"
+                  data-page-id={pg.id}
+                  style="top:{stripLayout.tops[i] ?? 0}px; left:calc(50% - {(pg.w * app.zoom) / 2}px); width:{pg.w * app.zoom}px; height:{pg.h * app.zoom}px;"
+                >
+                  {#each pg.boxes as box (box.id)}
+                    {#if isBoxVisible(box, i)}
+                      <TextBox {box} {pg} pageFrameEl={frameEls[i]} />
+                    {/if}
+                  {/each}
+                </div>
+              {/if}
+            {/each}
+          {/if}
+        </div>
       </div>
     {:else}
       <!-- The page on screen and its immediate neighbours, all mounted, all but

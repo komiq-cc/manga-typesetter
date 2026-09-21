@@ -3019,6 +3019,42 @@ describe('nudging a box with the arrow keys', () => {
   });
 });
 
+describe('nudging a box across longstrip source seams', () => {
+  beforeEach(() => {
+    app.chapterRef = null;
+    app.chapterMode = 'typeset';
+    app.projectLayout = 'longstrip';
+    loadProjectPages([
+      { id: 1, w: 800, h: 100, lines: [], boxes: [] },
+      { id: 2, w: 800, h: 200, lines: [], boxes: [] },
+    ]);
+  });
+
+  afterEach(() => {
+    settleEdits();
+    app.projectLayout = 'pages';
+  });
+
+  it('moves an owner-page box into the next source image', () => {
+    const id = addEmptyBox(400, 80);
+    endEdit('typed');
+    const b = byId(id);
+    b.y = 80;
+    expect(nudgeBox(id, 0, 60)).toBe(true);
+    expect(b.y).toBe(140);
+  });
+
+  it('moves a box on the second image upward across its owner seam', () => {
+    gotoPage(1);
+    const id = addEmptyBox(400, 20);
+    endEdit('typed');
+    const b = byId(id);
+    b.y = 20;
+    expect(nudgeBox(id, 0, -120)).toBe(true);
+    expect(b.y).toBe(-100);
+  });
+});
+
 // The blur or the Escape with no typing in it, which used to be an edit.
 describe('ending an inline edit that changed nothing', () => {
   beforeEach(() => {
