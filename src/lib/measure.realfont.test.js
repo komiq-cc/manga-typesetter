@@ -330,6 +330,36 @@ describe('real glyph ink stays inside the box', () => {
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
     expect(box.review).toBeUndefined();
   });
+
+  // OVF-4: a word no line can hold, with real advances. The breaker has no
+  // hyphen for an SFX like this one (no vowel after the A's), so it keeps it
+  // whole on a line far wider than the box; the ladder widens the box to its
+  // balloon and tries every size down to the floor, and the word is still
+  // wider. So the box is flagged, and the flag names the word.
+  it.each(['Comic Neue', 'DejaVu Sans'])('%s: an SFX wider than its balloon is flagged as a word too wide', (font) => {
+    const sfx = 'AAAAAARRRRRGGGGGHHHHHHHHH!!!!';
+    const s = styleFor(font, { size: 30 });
+    const balloon = { kind: 'ellipse', cx: 400, cy: 300, rx: 100, ry: 60 };
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [{ n: 1, jp: 'あ', en: sfx, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, x: 357, y: 280, w: 86 + textInset(s) * 2, h: 40, fit: balloon, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    expect(placeBlock(boxCandidate(box, sfx)).lines).toEqual([sfx]);
+    autoFitBox(box, p);
+    expect(box.review?.reason).toBe(REVIEW_REASONS.wideWord);
+    expect(box.x).toBeCloseTo(300, 6);
+    expect(box.w).toBeCloseTo(200, 6);
+    expect(box.style.size).toBe(30);
+    containedOrFlagged(box, p);
+  });
 });
 
 // ---------------------------------------------------------------------------

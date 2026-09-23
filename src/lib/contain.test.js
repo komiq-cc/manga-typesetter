@@ -532,12 +532,66 @@ describe('the ladder, on an auto box', () => {
       const b = byId('b1');
       autoFitBox(b, p);
       expect(b.style.size).toBe(S);
-      expect(b.review).toMatchObject({ kind: 'overflow', reason: REVIEW_REASONS.minSize });
+      // ...and says it is the word that does not fit (OVF-4).
+      expect(b.review).toMatchObject({ kind: 'overflow', reason: REVIEW_REASONS.wideWord });
       expect(b.review.overflow.l + b.review.overflow.r).toBeGreaterThan(0);
       // Grown as far as the balloon allows - closer to fitting, and the flag
       // says by how much.
       expect(b.x).toBeCloseTo(300, 6);
       expect(b.w).toBeCloseTo(200, 6);
+    });
+  });
+
+  // OVF-4. The breaker keeps a word it cannot hyphenate whole, on a line of
+  // its own and wider than the box, and the flag it ends up with names the
+  // word: what fixes it is a break or a shorter word, not fewer of them.
+  describe('a word wider than the balloon', () => {
+    const balloon = { kind: 'ellipse', cx: 400, cy: 300, rx: 100, ry: 60 };
+
+    // The review's own example: 478px of SFX in 86px of content at 30px.
+    it('widens to the balloon, cannot shrink far enough, and says it is the word', () => {
+      const sfx = 'AAAAAARRRRRGGGGGHHHHHHHHH!!!!';
+      const s30 = style({ size: 30 });
+      const p = load([{ id: 'b1', lineN: null, text: sfx, x: 357, y: 280, w: 86 + 2 * textInset(s30), h: 40, fit: balloon, style: s30 }]);
+      const b = byId('b1');
+      expect(sfx.length * 0.55 * 30).toBeCloseTo(478.5, 6);
+      expect(placeBlock(boxCandidate(b, sfx)).lines).toEqual([sfx]);
+      autoFitBox(b, p);
+      expect(b.review).toMatchObject({ kind: 'overflow', reason: REVIEW_REASONS.wideWord });
+      // As wide as the balloon, at the size the user set: the smallest size the
+      // ladder may use (22.5) is still 359px of word.
+      expect(b.x).toBeCloseTo(300, 6);
+      expect(b.w).toBeCloseTo(200, 6);
+      expect(b.style.size).toBe(30);
+      expect(b.review.overflow.l).toBeGreaterThan(0);
+      expect(b.review.overflow.r).toBeGreaterThan(0);
+    });
+
+    // Words the breaker has no hyphen for: no vowels, an accent, an
+    // apostrophe. Thirty characters each: 247.5px at the smallest size the
+    // ladder may use, in 196px of content.
+    it.each([
+      ['no vowels', 'KRRSS' + 'H'.repeat(22) + '!!!'],
+      ['an accent', 'É'.repeat(30)],
+      ['an apostrophe', "Y'KNOW" + 'N'.repeat(24)],
+    ])('names the word for one with %s', (_what, word) => {
+      expect(word).toHaveLength(30);
+      const p = load([{ id: 'b1', lineN: null, text: `NO ${word} NO`, x: 350, y: 280, w: 100, h: 40, fit: balloon, style: style() }]);
+      const b = byId('b1');
+      autoFitBox(b, p);
+      expect(placeBlock(boxCandidate(b, b.text)).lines).toContain(word);
+      expect(b.review?.reason).toBe(REVIEW_REASONS.wideWord);
+    });
+
+    // A box sized by hand is only flagged, and its flag says why it was left
+    // alone; "Fit now" runs the ladder on it, and when that gives up on a word,
+    // the flag says so.
+    it('says so on a box sized by hand once "Fit now" has tried', () => {
+      const p = load([{ id: 'b1', lineN: null, text: 'KRRSS' + 'H'.repeat(22) + '!!!', x: 350, y: 280, w: 100, h: 40, fit: balloon, style: style({ autoHeight: false }) }]);
+      const b = byId('b1');
+      expect(b.review?.reason).toBe(REVIEW_REASONS.manual);
+      fitBoxNow('b1', p);
+      expect(b.review?.reason).toBe(REVIEW_REASONS.wideWord);
     });
   });
 

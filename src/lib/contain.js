@@ -27,7 +27,9 @@
 //       The ladder, run once: grow the height, then the width, within
 //       `fitLimit`, then shrink the size no lower than `minSize`. `geometry:
 //       false` locks x/y/w/h and only searches the size. Returns what to write
-//       back; the caller writes it.
+//       back; the caller writes it. A review it returns names why it gave up:
+//       `alignedEdge` (ink past the edge the text is anchored to), `wideWord` (a
+//       single word wider than the most room it could have) or `minSize`.
 //   reviewFor(verdict, reason)       -> null | box.review
 //   isAutoBox(cand), manualReason(cand), fitLimit(cand, page, strip)
 //   REVIEW_REASONS, CONTAIN_TOL
@@ -57,6 +59,7 @@
 import {
   applyCase,
   layoutLines,
+  lineWidth,
   balloonWidthsFor,
   blockYFor,
   baselineInLine,
@@ -497,9 +500,44 @@ function fitsAtAll(cand, size, limit, locked) {
   return containBox(big, placeBlock(big, NO_CACHE)).fits;
 }
 
-// Why the ladder gave up on what it was left with.
-function failReason(place, v) {
-  return clearable(place, v) ? REVIEW_REASONS.minSize : REVIEW_REASONS.alignedEdge;
+// ===== a word wider than its box (OVF-4) =====
+//
+// The shaped breaker keeps every word whole unless it can hyphenate it, and it
+// only invents a hyphen inside a plain A-Z word with a vowel on both sides of
+// the break (typeset.js). Anything else - an SFX with no vowels, "KRRSSHH!!", a
+// word with an apostrophe or an accent in it, a Hangul word, a CJK sentence with
+// no spaces - is one token however long it is, and a line of one token is
+// allowed to be wider than the width it was broken to, because the only other
+// thing the breaker could do with it is drop it. On its own line it runs past
+// both sides of a centred box.
+//
+// The ladder's width step is what makes room for it: the box widens within its
+// balloon by what the ink needs, and then the size comes down. When neither is
+// enough, the flag should say it is the WORD that does not fit rather than the
+// text: "cannot fit above minimum size" reads as too many words, which a
+// letterer answers by cutting some, when the answer here is a break the breaker
+// cannot invent, a shorter word, or a smaller size set by hand.
+//
+// A line counts when it is a single token and the breaker's own measure of it
+// (`lineWidth`) is wider than the content box it was broken to - the advance,
+// not the ink, so an italic's lean past a word that does fit is not one.
+function hasWideWord(cand, place) {
+  if (place.isCurve) return false;
+  const room = contentWidth(cand.w, place.s) + GROW_EPS;
+  return place.lines.some((line) => {
+    const word = line.trim();
+    return word !== '' && !/\s/.test(word) && lineWidth(word, place.s, place.s.size) > room;
+  });
+}
+
+// Why the ladder gave up on what it was left with: overflow it cannot reach, on
+// the edge the text is anchored to; or room it ran out of - for one word
+// (above), or for the text as a whole.
+function failReason(cand, place, v) {
+  if (!clearable(place, v)) return REVIEW_REASONS.alignedEdge;
+  const o = layoutSides(place.s, v.overflow);
+  if (widthNeed(place.s, o) > CONTAIN_TOL && hasWideWord(cand, place)) return REVIEW_REASONS.wideWord;
+  return REVIEW_REASONS.minSize;
 }
 
 export function fitBox(cand, opts = {}) {
@@ -542,5 +580,5 @@ export function fitBox(cand, opts = {}) {
     if (r.v.fits) return result(r, null);
   }
   // Step 4.
-  return result(own, reviewFor(own.v, failReason(own.place, own.v)));
+  return result(own, reviewFor(own.v, failReason(own.c, own.place, own.v)));
 }
