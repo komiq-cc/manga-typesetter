@@ -6,6 +6,32 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     environment: 'node',
-    include: ['src/**/*.test.js'],
+    // Two lanes, one `npx vitest run`.
+    //
+    //   unit      every test the app has always had: no canvas, and the stand-in
+    //             metric (`chars x size x 0.55`) wherever a test grants one.
+    //   realfont  `*.realfont.test.js` only. Its setup file registers the fonts
+    //             in src/test/fonts with @napi-rs/canvas and gives measure.js a
+    //             `document` to make its canvas from, so text is measured with
+    //             real advances, kerning and vertical metrics. See
+    //             src/test/fonts/README.md.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          include: ['src/**/*.test.js'],
+          exclude: ['**/node_modules/**', 'src/**/*.realfont.test.js'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'realfont',
+          include: ['src/**/*.realfont.test.js'],
+          setupFiles: ['src/test/real-fonts.js'],
+        },
+      },
+    ],
   },
 })
