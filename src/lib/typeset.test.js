@@ -633,6 +633,121 @@ describe('balanceLines - one width per line', () => {
   });
 });
 
+// ===== which silhouette =====
+//
+// 'auto' fills each line to its own row, so the block takes the balloon's
+// silhouette. 'oval' and 'rect' ask for one silhouette whatever the balloon
+// does, as a preference priced at no more than a line.
+
+describe('balanceScored - the silhouette a block aims for', () => {
+  const texts = [
+    'THE WORLD IS ENDING AND NOBODY CARES AT ALL',
+    'YOU ARE GOING TO REGRET THIS FOR THE REST OF YOUR LIFE',
+    'WE HAVE TO GET OUT OF HERE BEFORE IT FINDS US AGAIN',
+    'THIS IS THE PART WHERE YOU TELL ME IT WAS ALL A MISUNDERSTANDING',
+    'STOP ALWAYS WHY NEVER HELP NEVER A NEVER I NEVER',
+    'AAAAA BBBB CCC DDDD EEEE FFFFFF',
+    "Is there something you'd like our cooperation with?",
+    "Now then, I shall go submit everyone's lottery results.",
+    '...are the twin pillars holding up Kuzunoha-sensei and the company.',
+    'He told me not to imbue my arrows.',
+  ];
+  const lineCost = TYPESET_DEFAULTS.lineCost;
+
+  it('is the ordinary block unless it is asked for, and a rectangle is already even', () => {
+    // A value the module does not know is 'auto' - 'off' is measure.js's switch
+    // to plain wrapping and never reaches the breaker as a preference. And a
+    // rectangle asked for an even block is handed the one it already had, to
+    // the last bit rather than to a rounding error.
+    for (const text of texts) {
+      for (const w of [9, 12, 16, 20, 26, 34]) {
+        for (const metric of [chars, weighted]) {
+          const plain = balanceScored(text, w, metric);
+          for (const shape of ['auto', 'off', 'bogus', 'rect']) {
+            expect(balanceScored(text, w, metric, { shape })).toEqual(plain);
+          }
+          expect(balanceCandidates(text, w, metric, { shape: 'rect' })).toEqual(balanceCandidates(text, w, metric));
+        }
+      }
+    }
+  });
+
+  it('sets an oval as short, long, short at the count the text wants', () => {
+    // Even in a rectangle, which is what 'auto' makes of it: the same three
+    // lines, re-cut so the middle one carries the width.
+    const told = 'He told me not to imbue my arrows.';
+    expect(balanceLines(told, 16, chars)).toEqual(['He told me', 'not to imbue', 'my arrows.']);
+    expect(balanceLines(told, 16, chars, { shape: 'oval' })).toEqual(['He told', 'me not to imbue', 'my arrows.']);
+
+    const flashy = 'That flashy one you used against the sub-dragon?';
+    expect(balanceLines(flashy, 20, chars)).toEqual(['That flashy one', 'you used against', 'the sub-dragon?']);
+    expect(balanceLines(flashy, 20, chars, { shape: 'oval' })).toEqual([
+      'That flashy',
+      'one you used against',
+      'the sub-dragon?',
+    ]);
+  });
+
+  it('sets an even block in an oval balloon when asked for a rectangle', () => {
+    // The mirror case: 'auto' follows the balloon's curve, 'rect' evens the
+    // lines out - and still keeps every one of them inside its own row.
+    const text = 'That flashy one you used against the sub-dragon?';
+    const w = ellipse(12);
+    expect(balanceLines(text, w, chars)).toEqual(['That flashy', 'one you used against', 'the sub-dragon?']);
+    const even = balanceLines(text, w, chars, { shape: 'rect' });
+    expect(even).toEqual(['That flashy one', 'you used against', 'the sub-dragon?']);
+    const rows = w(even.length);
+    even.forEach((line, k) => expect(line.length).toBeLessThanOrEqual(rows[k]));
+  });
+
+  it('aims a dense block at the oval it can have, not at one it cannot', () => {
+    // Three full lines in a narrow box. The oval the text would need is wider
+    // in the middle than the box is, so the middle line is on target at the
+    // box's full width - not a pinch to be cured by a fourth line.
+    const text = "Does that mean we're being abandoned... or something?";
+    const lines = ["Does that mean we're", 'being abandoned...', 'or something?'];
+    expect(balanceLines(text, 20, chars)).toEqual(lines);
+    expect(balanceLines(text, 20, chars, { shape: 'oval' })).toEqual(lines);
+  });
+
+  it('never spends more than a line on the silhouette', () => {
+    // Priced in full, an oval bought as many lines as it took to be one: this
+    // went from three lines to five. Capped, it keeps its three and pays the
+    // line instead.
+    const coop = "Is there something you'd like our cooperation with?";
+    const plain = balanceScored(coop, 20, chars);
+    const oval = balanceScored(coop, 20, chars, { shape: 'oval' });
+    expect(plain.lines).toHaveLength(3);
+    expect(oval.lines).toEqual(plain.lines);
+    expect(oval.cost).toBeCloseTo(plain.cost + lineCost, 12);
+
+    // And in general: at every count, in rectangles and ellipses, by the search
+    // and by the greedy fallback, a silhouette costs at most a line more than
+    // the ordinary block, keeps it inside its rows, and offers the same counts.
+    for (const text of texts) {
+      for (const w of [9, 12, 16, 20, 26, 34, ellipse(8), ellipse(12), ellipse(16)]) {
+        for (const metric of [chars, weighted]) {
+          for (const extra of [{}, { maxWords: 5 }]) {
+            const ordinary = balanceScored(text, w, metric, extra);
+            const counts = balanceCandidates(text, w, metric, extra);
+            for (const shape of ['oval', 'rect']) {
+              const chosen = balanceScored(text, w, metric, { ...extra, shape });
+              expect(chosen.cost).toBeLessThanOrEqual(ordinary.cost + lineCost + 1e-9);
+              expect(chosen.greedy).toBe(ordinary.greedy);
+              for (const k of chosen.overflowLines) expect(chosen.lines[k].trim()).not.toMatch(/\s/);
+
+              const offered = balanceCandidates(text, w, metric, { ...extra, shape });
+              expect(offered.map((c) => c.lines.length)).toEqual(counts.map((c) => c.lines.length));
+              offered.forEach((c, i) => expect(c.cost).toBeLessThanOrEqual(counts[i].cost + lineCost + 1e-9));
+              expect(offered).toContainEqual(chosen);
+            }
+          }
+        }
+      }
+    }
+  });
+});
+
 // ===== hyphenation =====
 //
 // The reference is a tall narrow balloon reading MURA- / MATA- / SAN!, which is

@@ -55,6 +55,20 @@
 // ends are full, which is exactly the gap a reader notices, and it catches it
 // even when that middle line is physically the widest one on the page.
 //
+// ===== which silhouette =====
+//
+// Filled to its own rows, a block takes the silhouette of whatever it is set
+// in: even in a rectangle, oval in an oval balloon. That is `shape: 'auto'`,
+// and it is everything the section above describes. `shape: 'oval'` and
+// `'rect'` ask for one silhouette whatever the balloon does. That is a
+// preference and never a constraint: the shape terms measure each line against
+// the width it is MEANT to have (`preferredOf`), while whether a line fits and
+// what hanging out costs still measure against the width it HAS, so no
+// preference can put ink past an edge. And it is priced like the hourglass, at
+// no more than a line (`bestAt`): keeping to a silhouette may make a block cost
+// at most one line more than the ordinary block, so a preference reshapes a
+// block and does not stack it into a column to be an oval.
+//
 // ===== hyphenation =====
 //
 // Real scanlation splits a word rather than let a name hang out of a tall narrow
@@ -167,6 +181,7 @@ export const TYPESET_DEFAULTS = {
   hourglass: 300, // penalty on a notched block; capped at `lineCost` across counts
   hourglassTol: 0.12, // dip below which a profile is not called an hourglass
   lineCost: 0.12, // mild preference for fewer lines
+  shape: 'auto', // the silhouette the block aims for: 'auto', 'oval' or 'rect' - see `preferredOf`
 
   // Overflow. A line wider than its own allowance hangs over the edge of the
   // balloon, which before this pass was something the module could notice and do
@@ -411,6 +426,21 @@ function hourglassPenalty(ratios, weight, tol) {
   }
   const dip = notch - tol;
   return dip > 0 ? weight * dip * dip : 0;
+}
+
+// The oval a block of `n` lines aims for when it is asked to be one: each line's
+// share of the widest, read off a curve through the line centres, with the first
+// and last line at `u = -1` and `1`. The curve is the one that gives
+// 62/86/100/86/62 at five lines, the review's starting point, and it is the
+// curve the lettering benchmark scores `ovalScore` against, so the preference
+// and the measurement cannot drift apart. A starting point to tune on real
+// pages, not a rule.
+function ovalProfile(n) {
+  if (n === 1) return [1];
+  return Array.from({ length: n }, (_, i) => {
+    const u = (2 * i) / (n - 1) - 1;
+    return 1 - 0.62 * u * u + 0.24 * u ** 4;
+  });
 }
 
 // The width argument, normalised to one shape: a function from a line count to
@@ -669,17 +699,79 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
     return totalW / sum;
   };
 
+  // The room each line is MEANT to have, as against the room it HAS. Every term
+  // that is about the block's shape - raggedness, the pinch, the short last line,
+  // the hourglass - measures a line's fill against this. Everything that is
+  // about the balloon - whether a line fits, what overflowing costs, which lines
+  // hang out - still measures against the room the line has, so a preference
+  // can never put ink past an edge.
+  //
+  //   auto  the rows themselves. A line is meant to fill its own row, which is
+  //         every rule above as it always was: an even block in a rectangle, a
+  //         block that follows the curve in an oval balloon.
+  //   oval  short lines at the top and bottom and the long one in the middle,
+  //         along `ovalProfile`, whatever the balloon does.
+  //   rect  even lines, so an oval balloon gets a block that does not follow
+  //         its curve, as far as its rows allow.
+  //
+  // What each line is meant to hold is the most oval (or most even) block of
+  // THIS text that the rows can take: the text's width shared out along the
+  // profile, and where that would give a row more than it has, the row gets
+  // all it has and the rest is shared out again among the others. A dense
+  // block in a narrow box therefore aims for an oval with a flat top rather
+  // than for one it cannot have, and a full-width middle line is on target
+  // instead of being taken for a pinch - taken for one, it made a word hanging
+  // out of the middle of the block look like the cure.
+  //
+  // Then scaled back to what the rows would be meant to hold, so that `T` comes
+  // out the same for every shape and every weight keeps the scale it was tuned
+  // at. `auto` is this with the rows themselves as the profile, which is why it
+  // can simply be handed back.
+  const prefers = o.shape === 'oval' || o.shape === 'rect';
+  const rowsThemselves = (w) => w;
+  const preferredOf = (w) => {
+    if (!prefers) return w;
+    const L = w.length;
+    const want = o.shape === 'oval' ? ovalProfile(L) : new Array(L).fill(1);
+    // Even rows asked to be even already are: handed back as they are, so a
+    // rectangle set as 'rect' - or as a one- or two-line 'oval' - is the
+    // 'auto' block to the last bit rather than to a rounding error.
+    if (want.every((v) => v === want[0]) && w.every((v) => v === w[0])) return w;
+    let room = 0;
+    for (const v of w) room += v;
+    // Rows that cannot hold the text at all have nothing to prefer between.
+    if (totalW >= room) return w;
+    let rest = totalW;
+    let parts = 0;
+    for (const v of want) parts += v;
+    let c = rest / parts;
+    // The rows that run out first are the ones with the least room for their
+    // share; each one taken out raises everyone else's share, so the first row
+    // that keeps its share is the last one that could have run out.
+    const order = Array.from({ length: L }, (_, k) => k).sort((i, j) => w[i] / want[i] - w[j] / want[j]);
+    for (const k of order) {
+      if (c * want[k] <= w[k]) break;
+      rest -= w[k];
+      parts -= want[k];
+      c = rest / parts;
+    }
+    const back = room / totalW;
+    return want.map((v, k) => Math.min(w[k], c * v) * back);
+  };
+
   // One line's cost, and the single place it is defined: the DP minimises the
   // sum of this and the scorer adds the same numbers up again over a finished
   // breaking. Two expressions of one cost function would be two answers to "is
   // this breaking better", and the search would be optimising something the
   // comparison did not believe.
   //
-  // `pinchW` is a parameter for one reason only - the second, harder search in
-  // `shaped` below. Every scoring call passes `o.pinch`.
-  const lineCostOf = (a, b, k, L, T, w, pinchW) => {
+  // `w` is the room each line has and `p` the room it is meant to have (see
+  // `preferredOf`); `T` is measured against `p`. `pinchW` is a parameter for one
+  // reason only - the second, harder search in `shaped` below. Every scoring
+  // call passes `o.pinch`.
+  const lineCostOf = (a, b, k, L, T, w, p, pinchW) => {
     const W = w[k - 1];
-    const r = width(a, b) / W;
+    const r = width(a, b) / p[k - 1];
     let c = o.ragged * (r - T) ** 2;
     // Both of these weight a line that falls SHORT of the target, and only that
     // direction: a line that runs long is a full line, which is what was
@@ -738,9 +830,10 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
   //
   // Returns the cuts, not the cost: what a breaking costs is `score`'s business,
   // and this may have searched under a weight the score does not use.
-  const solve = (L, allowOrphan, pinchW) => {
+  const solve = (L, allowOrphan, pinchW, prefer) => {
     const w = widthsOf(L);
-    const T = targetFor(w);
+    const p = prefer(w);
+    const T = targetFor(p);
     let prev = new Array(M + 1).fill(Infinity);
     prev[0] = 0;
     let reach = 0;
@@ -757,7 +850,7 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
           if (!fits(a, b, k, w)) break;
           if (prev[a] === Infinity) continue;
           if (!allowOrphan && !orphanOk(a, b, L)) continue;
-          const tot = prev[a] + lineCostOf(a, b, k, L, T, w, pinchW);
+          const tot = prev[a] + lineCostOf(a, b, k, L, T, w, p, pinchW);
           // `<=` while `a` falls, so a tie keeps the smallest `a` - the one
           // that put more words on the earlier line. That is the whole of the
           // tie-breaking rule inside a candidate, and it is why two runs on the
@@ -786,7 +879,9 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
   };
 
   // What a finished breaking is worth, always under the standard weights, so two
-  // breakings found by two different searches can be compared at all.
+  // breakings found by two different searches can be compared at all. `prefer`
+  // gives the widths the shape terms measure against: `preferredOf`, or the
+  // rows themselves for the price a silhouette is capped at (see `bestAt`).
   //
   //   merit    the separable costs plus the price of another line: everything
   //            but the profile.
@@ -796,15 +891,16 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
   //   cost     merit plus the profile at no more than one line's price. What
   //            line counts are compared on, and what a caller is handed. See
   //            `hourglass` for why the two prices differ.
-  const score = (cuts, L) => {
+  const score = (cuts, L, prefer) => {
     const w = rowsOf(L);
-    const T = targetFor(w);
+    const p = prefer(w);
+    const T = targetFor(p);
     let base = 0;
     for (let k = 1; k <= cuts.length; k++) {
       const [a, b] = cuts[k - 1];
-      base += lineCostOf(a, b, k, L, T, w, o.pinch);
+      base += lineCostOf(a, b, k, L, T, w, p, o.pinch);
     }
-    const ratios = cuts.map(([a, b], k) => width(a, b) / w[k]);
+    const ratios = cuts.map(([a, b], k) => width(a, b) / p[k]);
     const penalty = hourglassPenalty(ratios, o.hourglass, o.hourglassTol);
     const merit = base + o.lineCost * L;
     return { cuts, L, merit, penalty, cost: merit + Math.min(penalty, o.lineCost) };
@@ -822,11 +918,11 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
   // So the heavy `pinchHard` weight never prices anything - it only proposes. A
   // proposal that dodges the dip by making a mess of the raggedness loses on its
   // own merit, which is the property that makes the big `hourglass` weight safe.
-  const shaped = (cand, allowOrphan) => {
+  const shaped = (cand, allowOrphan, prefer) => {
     if (!cand || cand.penalty === 0) return cand;
-    const alt = solve(cand.L, allowOrphan, o.pinchHard);
+    const alt = solve(cand.L, allowOrphan, o.pinchHard, prefer);
     if (!alt) return cand;
-    const scored = score(alt, cand.L);
+    const scored = score(alt, cand.L, prefer);
     return scored.merit + scored.penalty < cand.merit + cand.penalty ? scored : cand;
   };
 
@@ -850,21 +946,56 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
     };
   };
 
+  // What a block costs when a silhouette was asked for: its cost against the
+  // widths its lines are meant to have, or its cost against the rows and one
+  // line more, whichever is less - a shape is worth at most a line (see
+  // `bestAt`). `plain` is a breaking priced against the rows: the same one, or
+  // the one the search against the rows found.
+  const capped = (cand, plain) =>
+    plain && plain.cost + o.lineCost < cand.cost ? { ...plain, cost: plain.cost + o.lineCost } : cand;
+
   // The fallback, scored like everything else so a caller comparing blocks
   // compares them on one scale, and flagged, because no orphan, hyphen or shape
   // rule has been applied to it and a caller may want to say so.
   const fallback = () => {
     const cuts = greedy().map(([i, j]) => [i === 0 ? 0 : endPos[i - 1], endPos[j - 1]]);
-    const only = publish(score(cuts, cuts.length), true, false);
+    const L = cuts.length;
+    const scored = score(cuts, L, preferredOf);
+    const only = publish(prefers ? capped(scored, score(cuts, L, rowsThemselves)) : scored, true, false);
     return { best: only, byCount: [only] };
   };
   if (!enumerate) return fallback();
 
-  // The best breaking at exactly `L` lines: the ordinary search, then the
-  // profile repair.
+  // The best breaking at exactly `L` lines against one reference profile: the
+  // ordinary search, then the profile repair.
+  const searchAt = (L, allowOrphan, prefer) => {
+    const cuts = solve(L, allowOrphan, o.pinch, prefer);
+    return cuts && shaped(score(cuts, L, prefer), allowOrphan, prefer);
+  };
+
+  // The best breaking at exactly `L` lines. Without a silhouette preference that
+  // is the search above. With one, it is the breaking that best keeps to the
+  // preferred widths - unless it costs more than a line over the breaking that
+  // keeps to the rows, in which case that one is used and pays the line.
+  //
+  // The cap is `hourglass`'s, for the same reason: a shape is worth at most a
+  // line. An oval holds less than a rectangle of the same width, so a dense
+  // block kept to one needs more lines, and priced at its full cost the
+  // preference would buy them - `Is there something you'd like our cooperation
+  // with?` went from three lines to five to be an oval. Capped, it can move the
+  // count by about a line, and past that the block is the ordinary one.
+  //
+  // Two searches and no loss of exactness: each finds the cheapest breaking
+  // under one of the two prices, and the cheaper of those is the cheapest
+  // breaking under the lesser price, which is what `capped` charges. When the
+  // preferred widths are the rows themselves - no preference, a rectangle asked
+  // to be even, a text wider than all its rows - `preferredOf` hands back the
+  // rows as they are, and the second search would be the first one again.
   const bestAt = (L, allowOrphan) => {
-    const cuts = solve(L, allowOrphan, o.pinch);
-    return cuts && shaped(score(cuts, L), allowOrphan);
+    const cand = searchAt(L, allowOrphan, preferredOf);
+    const w = widthsOf(L);
+    if (!cand || preferredOf(w) === w) return cand;
+    return capped(cand, searchAt(L, allowOrphan, rowsThemselves));
   };
 
   // Every line count from one up. The ceiling is the number of break positions
@@ -963,7 +1094,9 @@ function joinParagraphs(parts) {
 //   lines           the lines, as they will be drawn
 //   merit, cost     its prices under the standard weights (see `score`), summed
 //                   over the paragraphs. Comparable between breakings of the
-//                   same text; not between two texts.
+//                   same text; not between two texts. Under a `shape` other than
+//                   'auto', `cost` also prices the distance from that silhouette,
+//                   at no more than a line a paragraph (see `bestAt`).
 //   overflowLines   indices into `lines` of the lines wider than their own row.
 //                   Only a single unbreakable token can be, so a non-empty list
 //                   means this text does not fit this width at this size.
