@@ -1210,9 +1210,23 @@ export function inscribedRect(shape, opts = {}) {
 // single width the breaker has always been given.
 //
 // The widths are the balloon's, not the text box's. A caller laying out inside a
-// box still owes the box its own padding - `BOX_PAD` on each edge, the 2px both
-// the editor and the exporter lay out inside - exactly as it does today when it
-// hands the breaker `box.w - 4`.
+// box still owes the box its own inset - `textInset(style)` on each edge, the
+// padding plus the outline's reach, which the editor and the exporter both lay
+// out inside - as `balloonWidthsFor` (measure.js) does when it caps every row at
+// the box's `contentWidth`.
+//
+// A block taller than the balloon is the one case with no row-by-row answer.
+// Left centred, its outer rows fall past the top and the bottom of the curve,
+// where the interior is nothing at all - and this used to hand those rows a
+// width of one pixel, which a breaker reads as a row that takes exactly one word
+// (a single token is always accepted). One word a row means more rows, which
+// fall further outside, which take one word each, until the search runs out of
+// line counts: fifteen lines, twelve of them outside a 260x160 oval, for a
+// sentence the plain box sets in ten. No width fixes a text that is too big for
+// its balloon - a smaller size does, and that is the caller's decision - so the
+// block gets the widest the balloon ever is, on every row. That is a plain
+// rectangle, and a rectangle is never taller than the flat layout of the same
+// text in a box no wider than the balloon.
 export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middle', opts = {}) {
   const n = Number.isFinite(+lineCount) ? Math.max(0, Math.floor(+lineCount)) : 0;
   if (!shape || n === 0) return [];
@@ -1222,15 +1236,14 @@ export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middl
   if (s.kind === 'rect') return new Array(n).fill(Math.max(o.minLineWidth, s.w));
 
   const blockH = n * lh;
+  if (blockH > 2 * s.ry) return new Array(n).fill(Math.max(o.minLineWidth, 2 * s.rx));
+  // Anchored by valign, and inside the shape by construction: a block that fits
+  // sits inside whether it hangs from the top, stands on the bottom or is
+  // centred, so there is nothing left to clamp.
   let top;
   if (valign === 'top') top = s.cy - s.ry;
   else if (valign === 'bottom') top = s.cy + s.ry - blockH;
   else top = s.cy - blockH / 2;
-  // A block that fits is nudged back inside; a block that does not fit is left
-  // centred, and its outermost lines simply come back narrow. Pretending
-  // otherwise - clamping a block taller than the balloon to the balloon - would
-  // hand the breaker widths for a layout that cannot exist.
-  if (blockH <= 2 * s.ry) top = clamp(top, s.cy - s.ry, s.cy + s.ry - blockH);
 
   const out = new Array(n);
   for (let i = 0; i < n; i++) {

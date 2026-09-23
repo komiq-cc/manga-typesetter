@@ -506,11 +506,34 @@ describe('interiorLineWidths - the width each line actually has', () => {
   });
 
   it('gives the middle lines of an oval more room than the outer ones', () => {
-    const w = interiorLineWidths(ell, 30, 5, 'middle');
+    // Five lines of 26 are 130, inside the 134 the inset leaves of this oval's
+    // height. (Five of 30 used to be asked here, which is a block taller than
+    // the balloon - see the next test for what that gets now.)
+    const w = interiorLineWidths(ell, 26, 5, 'middle');
     expect(w.length).toBe(5);
     expect(w[2]).toBeGreaterThan(w[0]);
     expect(w[2]).toBeGreaterThan(w[4]);
     expect(w[0]).toBeCloseTo(w[4], 6); // a centred block is symmetric
+  });
+
+  it('gives a block taller than the balloon its full width on every row', () => {
+    // Inset, this oval is 214 wide and 134 tall. Four lines of 30 fit and are
+    // shaped; a fifth makes a block of 150, which no row-by-row width can put
+    // inside the balloon, and it comes back as the plain rectangle the balloon's
+    // widest row allows - never the one-pixel rows past the curve that a breaker
+    // fills one word at a time.
+    const inset = safetyInset(ell);
+    const widest = 2 * (ell.rx - inset);
+    const fits = interiorLineWidths(ell, 30, 4, 'middle');
+    expect(fits[0]).toBeLessThan(fits[1]);
+    expect(fits.every((v) => v < widest)).toBe(true);
+    for (const valign of ['top', 'middle', 'bottom']) {
+      expect(interiorLineWidths(ell, 30, 5, valign)).toEqual(new Array(5).fill(widest));
+      expect(interiorLineWidths(ell, 60, 12, valign)).toEqual(new Array(12).fill(widest));
+    }
+    // Exactly as tall as the balloon still fits: the edge belongs to the shaped side.
+    const exact = interiorLineWidths(ell, (2 * (ell.ry - inset)) / 4, 4, 'middle');
+    expect(exact[1]).toBeLessThan(widest);
   });
 
   it('takes the narrowest width across each line band, not the width at its centre', () => {
@@ -576,8 +599,11 @@ describe('interiorLineWidths - the width each line actually has', () => {
   });
 
   it('never hands back a width a breaker cannot divide by', () => {
-    // A block far taller than the balloon: the honest answer for the outermost
-    // lines is "almost nothing", and almost nothing must still be positive.
+    // A block far taller than the balloon, and a balloon the inset eats whole:
+    // whatever the geometry says, every width is positive and finite.
+    expect(interiorLineWidths({ kind: 'ellipse', cx: 0, cy: 0, rx: 3, ry: 3 }, 10, 4)).toEqual(
+      new Array(4).fill(BALLOON_DEFAULTS.minLineWidth),
+    );
     const w = interiorLineWidths(ell, 60, 12, 'middle');
     expect(w.length).toBe(12);
     for (const v of w) expect(v).toBeGreaterThan(0);

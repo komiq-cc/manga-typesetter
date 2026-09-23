@@ -18,7 +18,9 @@ import {
   balloonWidthsFor,
   clearLayoutMemo,
   layoutMemoSize,
+  BOX_PAD,
 } from './measure.js';
+import { inscribedRect, safetyInset } from './balloon.js';
 
 // The measurer is injected precisely so this file can use one: a character is
 // one unit wide, so every expectation below can be read off the strings without
@@ -821,6 +823,60 @@ describe('the typesetting switch', () => {
     expect(balloonWidthsFor(box, { ...style, valign: 'middle' }, 20)).toBe(null);
     setTypesetEnabled(true);
     expect(balloonWidthsFor(box, { ...style, valign: 'middle' }, 20)).toBeTypeOf('function');
+  });
+});
+
+// A text too big for its balloon, laid out through the real wiring: the box
+// placed at the balloon's inscribed rectangle and the widths from
+// `balloonWidthsFor`, exactly as the editor and the exporter get them. The
+// block cannot fit whatever the breaker does, so the question is only whether
+// the balloon makes it worse than no balloon at all - and it used to, by a lot.
+describe('a text too big for its balloon', () => {
+  const fit = { kind: 'ellipse', cx: 300, cy: 300, rx: 130, ry: 80 };
+  const room = inscribedRect(fit);
+  const box = { x: room.x, y: room.y, w: room.w, h: room.h, fit };
+  const contentW = box.w - BOX_PAD * 2;
+  const style = { font: 'Comic Neue', size: 26, bold: false, italic: false, lineHeight: 1.1, letterSpacing: 0, align: 'center', uppercase: false, shape: 'auto', balloon: true };
+  const probe = 'I CANNOT BELIEVE YOU WOULD SAY SOMETHING LIKE THAT TO ME AFTER EVERYTHING WE HAVE BEEN THROUGH';
+
+  beforeEach(() => setTypesetEnabled(true));
+  afterEach(() => setTypesetEnabled(false));
+
+  it('breaks into no more lines than the flat box would', () => {
+    // The probe that found it. At 26px this oval holds four lines and the text
+    // needs ten even laid out flat; the rows past the curve used to come back
+    // one pixel wide, each took a single word, and the block ran to fifteen
+    // lines (sixteen bottom-aligned), twelve of them outside the balloon.
+    for (const valign of ['top', 'middle', 'bottom']) {
+      const s = { ...style, valign };
+      const flat = layoutLines(probe, s, 26, contentW);
+      const shaped = layoutLines(probe, s, 26, contentW, balloonWidthsFor(box, s, 26));
+      expect(flat.length).toBe(10);
+      expect(shaped.length).toBeLessThanOrEqual(flat.length);
+    }
+  });
+
+  it('holds at every size the balloon runs out of rows at', () => {
+    const texts = [
+      probe,
+      'YOU ARE GOING TO REGRET THIS FOR THE REST OF YOUR LIFE',
+      'THIS IS THE PART WHERE YOU TELL ME IT WAS ALL A MISUNDERSTANDING',
+      'WAIT. WHAT DID YOU JUST SAY TO ME?',
+    ];
+    const inset = safetyInset(fit);
+    let checked = 0;
+    for (const text of texts) {
+      for (let size = 14; size <= 44; size += 3) {
+        const s = { ...style, size, valign: 'middle' };
+        const holds = Math.floor((2 * (fit.ry - inset)) / (size * s.lineHeight));
+        const flat = layoutLines(text, s, size, contentW);
+        if (flat.length <= holds) continue;
+        checked++;
+        const shaped = layoutLines(text, s, size, contentW, balloonWidthsFor(box, s, size));
+        expect(shaped.length).toBeLessThanOrEqual(flat.length);
+      }
+    }
+    expect(checked).toBeGreaterThan(10);
   });
 });
 
