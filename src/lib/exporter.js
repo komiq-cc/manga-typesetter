@@ -18,6 +18,7 @@ import {
   drawClipShapes,
   clipActive,
   inkActive,
+  inkBounds,
   inkReach,
   shadowExtent,
   drawInk,
@@ -285,6 +286,24 @@ function layoutBox(box, p) {
     bottomExtra = Math.max(0, blockY + blockH - box.h);
     leftExtra = Math.max(0, -blockX);
     rightExtra = Math.max(0, blockX + blockW - box.w);
+  }
+
+  // Hand-drawn ink past the box's far edges (OVF-7). The pad above holds the
+  // ink's overhang above and left of the box - `inkExtent` measures from the
+  // box's corner and cannot see its size - so a stroke carried past the right
+  // or the bottom edge, on the board or by the brush's liquify, was painted
+  // into a footprint that ended `pad` px past the edge, and the export cut it
+  // off there. That is clipping, the one answer to overflow the rule never
+  // allows: the containment check counts the stroke wherever it goes and flags
+  // the box, and the file has to show what the flag is about. The size is known
+  // here, so the footprint grows by the far-side overhang the way it grows for
+  // the text block's, and the pad still adds the finish wrapped around it.
+  if (inkActive(s.ink)) {
+    const k = inkBounds(s.ink);
+    if (k) {
+      rightExtra = Math.max(rightExtra, k.maxX - box.w);
+      bottomExtra = Math.max(bottomExtra, k.maxY - box.h);
+    }
   }
 
   leftExtra = Math.ceil(leftExtra);

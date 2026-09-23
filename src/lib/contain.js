@@ -20,8 +20,15 @@
 //   placeAtHeight(place, cand)       -> `place` moved to `cand`'s height, for a
 //       candidate that differs from the one it was made for in `y`/`h` only.
 //       No new layout: line breaking does not read the height.
-//   boxInkRect(cand, place?)         -> { x, y, w, h } box-local, or null (no ink)
+//   boxInkRect(cand, place?)         -> { x, y, w, h } box-local, or null (no ink).
+//       Everything the export paints for the box: glyphs, outline, shadows,
+//       hand-drawn ink, blur, smear, roughening, an include mask's cut and the
+//       mesh warp, in the frame the user sees (after a flip).
 //   containBox(cand, place?)         -> { fits, overflow: { l, t, r, b } } (px, raw)
+//   growAround(cand, place?)         -> null when the box fits, or
+//       { x, y, w, h, dx, dy }: the box grown around everything it paints, and
+//       the translation that carries its ink and mask shapes so nothing moves
+//       on the page. For a box with no text in it (OVF-7).
 //   inkHeight(cand, place?)          -> the height the box needs for its ink to
 //       clear its top and bottom, grown the way `valign` grows it, or 0 when
 //       no height would change the verdict. For the grow-only paths, which may
@@ -36,6 +43,8 @@
 //       single word wider than the most room it could have) or `minSize`.
 //   reviewFor(verdict, reason)       -> null | box.review
 //   isAutoBox(cand), manualReason(cand), fitLimit(cand, page, strip)
+//       Manual: auto sizing off, text on a curve, a mesh warp, hand-drawn ink
+//       or a mask - `manualReason` names which, in that order.
 //   REVIEW_REASONS, CONTAIN_TOL
 //
 //   box.review = { kind: 'overflow', overflow: { l, t, r, b }, reason } - absent
@@ -55,7 +64,9 @@
 // box off `measureText` - which is where an italic's overhang, a J's tail, an
 // accented capital and a letter-spaced line's real extent all show up - placed
 // exactly where the exporter draws it, then outset by everything else that
-// paints: the stroke bands and the shadows thrown from them.
+// paints: the stroke bands, the shadows thrown from them, the hand-drawn ink,
+// the blurs, the roughening and the mesh (OVF-7, at `boxInkRect`). Every pixel
+// the export can make visible counts, and nothing opts out.
 //
 // Tolerance is half a pixel. Anything under that is antialiasing on the box's
 // own edge, and flagging it would make the flag noise.
@@ -75,8 +86,16 @@ import {
   circleLayout,
   pathLayout,
 } from './measure.js';
-import { strokeExtent } from './text-paint.js';
-import { warpActive } from './warp.js';
+import {
+  strokeExtent,
+  motionBlurTaps,
+  inkActive,
+  inkBounds,
+  clipActive,
+  clipShapesBounds,
+} from './text-paint.js';
+import { warpActive, affineFromTriangle } from './warp.js';
+import { warpPlan } from './warp-paint.js';
 import { shapeBounds } from './balloon.js';
 import { neededHeight } from './typeset.js';
 import { normalizeFit, REVIEW_REASONS } from './data.js';
@@ -103,29 +122,46 @@ function curvedStyle(s) {
 // ===== auto and manual =====
 //
 // An AUTO box is one the app may move, resize and shrink to make its text fit:
-// auto sizing on, straight text, no mesh warp, and a width to lay out in. Every
-// other box is MANUAL - the user shaped it by hand, bent its text along a curve,
-// or pulled it through a mesh - and a manual box is never touched
-// automatically. It is checked like any other and flagged when it overflows,
-// and the flag's "Fit now" is how the user asks for the ladder on it.
+// auto sizing on, straight text, nothing hand-placed inside it (below), and a
+// width to lay out in. Every other box is MANUAL - the user shaped it by hand,
+// bent its text along a curve, pulled it through a mesh, drew on it or masked
+// it - and a manual box is never touched automatically. It is checked like any
+// other and flagged when it overflows, and the flag's "Fit now" is how the user
+// asks for the ladder on it.
 //
-// The warp is a manual marker rather than one more effect to count because its
-// geometry is the user's hand-placed mesh points in box-local px: grow the box
-// and the mesh no longer means what they drew.
+// The warp is a manual marker - as well as something the check counts - because
+// its geometry is the user's hand-placed mesh points in box-local px: grow the
+// box and the mesh no longer means what they drew. Hand-drawn ink and a mask's
+// shapes are the same kind of thing (OVF-7): box-local px measured from the
+// box's corner, which the ladder does not carry when it writes the box's new
+// rectangle. The text re-anchors inside the grown box; the strokes and the
+// mask stay pinned to its corner, so every growth step would slide the user's
+// lettering, or the cut-out, against the text it was drawn around. The ladder's
+// arithmetic is wrong for them as well: it grows a box by what its ANCHORED text
+// needs, and ink past the top or the left of a box moves with that corner
+// however far the box grows - so an inked box would grow to its limit for
+// nothing, and again on the next edit.
 export function isAutoBox(cand) {
   const s = cand?.style;
   if (!s || s.autoHeight === false) return false;
-  if (curvedStyle(s)) return false;
-  if (warpActive(s, cand.w, cand.h)) return false;
+  if (handPlaced(cand)) return false;
   return cand.w > 0;
+}
+
+// What makes a box manual whatever its sizing switch says, as the flag names it,
+// or null.
+function handPlaced(cand) {
+  const s = cand?.style;
+  if (curvedStyle(s)) return REVIEW_REASONS.curve;
+  if (warpActive(s, cand?.w, cand?.h)) return REVIEW_REASONS.warp;
+  if (inkActive(s?.ink)) return REVIEW_REASONS.ink;
+  if (clipActive(s?.clip)) return REVIEW_REASONS.mask;
+  return null;
 }
 
 // Why a manual box was left alone, for its flag.
 export function manualReason(cand) {
-  const s = cand?.style;
-  if (curvedStyle(s)) return REVIEW_REASONS.curve;
-  if (warpActive(s, cand?.w, cand?.h)) return REVIEW_REASONS.warp;
-  return REVIEW_REASONS.manual;
+  return handPlaced(cand) ?? REVIEW_REASONS.manual;
 }
 
 // ===== where the block sits =====
@@ -206,25 +242,56 @@ const unite = (r, x0, y0, x1, y1) =>
     : { x0, y0, x1, y1 };
 
 // Everything the box paints, as one box-local rectangle, or null when it paints
-// nothing. The pieces, in the order the exporter paints them:
+// nothing. OVF-7 settled what "everything" is: every pixel the export can make
+// visible - the letters and their outline and every effect laid on them - with
+// no switch to leave any of it out. The pieces, in the order the exporter
+// paints them (`renderBoxTexture`, then `warpTexture`):
 //
 //   the glyphs   each line's ink at its anchor and baseline. A curve's glyphs
 //                one by one: each glyph's own ink (`glyphInk` - centred on its
 //                anchor, on a middle baseline, the way every curved renderer
 //                draws it) turned by the glyph's rotation (OVF-6, below).
+//   the ink      the hand-drawn strokes, each one's reach with its tip
+//                (`inkBounds`), box-local from the box's corner.
 //   the strokes  outset by the outermost band's outer edge (`strokeExtent`) on
-//                every side: the bands are round-joined outlines of the glyphs.
-//   the shadows  each one the stroked silhouette moved by its own offset and
-//                spread by its blur - per direction, so a shadow thrown down
-//                and right grows the rectangle down and right and nowhere else.
-//                The spread is twice the named blur, the same reach
-//                `shadowExtent` gives it (the painter blurs at sigma = blur/2,
-//                and a gaussian has let go by four sigma). A shadow with no
-//                opacity paints nothing and counts for nothing.
+//                every side: the bands are round-joined outlines of the glyphs,
+//                and the same bands are grown around the ink (`paintFinish`).
+//   the shadows  each one that silhouette - glyphs and ink - moved by its own
+//                offset and spread by its blur, per direction, so a shadow
+//                thrown down and right grows the rectangle down and right and
+//                nowhere else. A shadow with no opacity paints nothing and
+//                counts for nothing.
+//   the blur     the whole picture's gaussian, on every side.
+//   the smear    the directional blur: the picture drawn again at every tap of
+//                `motionBlurTaps` - the list the exporter draws - so it reaches
+//                along each axis as far as the furthest tap does, and across
+//                the smear not at all.
+//   the crumple  roughening moves each pixel by at most half its `amount` along
+//                each axis: `amount` is feDisplacementMap's `scale`, the full
+//                span of the displacement (`roughenOffset`).
+//   the mask     an include mask shows nothing outside its shapes, so the
+//                rectangle is cut to theirs. An exclude mask only takes pixels
+//                away from the inside of it, which a rectangle cannot say
+//                without the pixels; left as it is, it is still a bound.
+//   the mesh     a warped box's finished picture, carried through the mesh
+//                (`warpedRect`, below).
+//
+// Visible means the export can make the pixel non-zero. A gaussian of anything
+// inside a rectangle is, three sigma past its edge, at most 1 - Phi(3) = 0.135%
+// of full ink - under half of one 8-bit step, so it rounds to nothing - and the
+// browsers' three-box approximation of the gaussian stops short of three sigma
+// anyway. So the whole-text blur (sigma = `blur`, the filter's own radius) is
+// counted three sigma out, which is the reach the exporter pads its canvas by.
+// A shadow keeps twice its named blur, the contract's number and the reach
+// `shadowExtent` pads for: its sigma is half the blur, so that is four sigma, a
+// sigma past the rule. The smear has no tail to cut: every tap is a copy of the
+// picture at the tap's weight, and even the faintest - the outermost tap at the
+// most iterations, 0.07/33 of the ink - lights over half an 8-bit step, so it
+// counts to the last tap.
 //
 // A flipped box mirrors the finished picture about its centre, so the rectangle
-// is mirrored with it. Rotation is not applied: the box turns with its text, and
-// "inside the box" is a question asked in the box's own frame.
+// is mirrored with it, last. Rotation is not applied: the box turns with its
+// text, and "inside the box" is a question asked in the box's own frame.
 export function boxInkRect(cand, place = placeBlock(cand)) {
   const s = place.s;
   let r = null;
@@ -243,9 +310,11 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
       r = unite(r, place.anchorX + k.left, base - k.ascent, place.anchorX + k.right, base + k.descent);
     }
   }
+  const ink = inkActive(s.ink) ? inkBounds(s.ink) : null;
+  if (ink) r = unite(r, ink.minX, ink.minY, ink.maxX, ink.maxY);
   if (!r) return null;
   const so = strokeExtent(s.strokes);
-  const sil = { x0: r.x0 - so, y0: r.y0 - so, x1: r.x1 + so, y1: r.y1 + so };
+  const sil = grow(r, so, so);
   let u = sil;
   for (const sh of s.shadows ?? []) {
     if (!(Number(sh?.opacity ?? 1) > 0)) continue;
@@ -254,9 +323,96 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
     const spread = 2 * Math.max(0, Number(sh?.blur) || 0);
     u = unite(u, sil.x0 + dx - spread, sil.y0 + dy - spread, sil.x1 + dx + spread, sil.y1 + dy + spread);
   }
+  const blur = Math.max(0, Number(s.blur) || 0);
+  if (blur > 0) u = grow(u, 3 * blur, 3 * blur);
+  if (s.motionBlur?.on) {
+    let mx = 0;
+    let my = 0;
+    for (const t of motionBlurTaps(s.motionBlur.x, s.motionBlur.y, s.motionBlur.amount)) {
+      mx = Math.max(mx, Math.abs(t.dx));
+      my = Math.max(my, Math.abs(t.dy));
+    }
+    u = grow(u, mx, my);
+  }
+  if (s.roughen?.on) {
+    const d = Math.abs(Number(s.roughen.amount) || 0) / 2;
+    u = grow(u, d, d);
+  }
+  if (clipActive(s.clip) && s.clip.mode === 'include') {
+    const m = clipShapesBounds(s.clip.shapes);
+    u = m && cut(u, m.minX, m.minY, m.maxX, m.maxY);
+    if (!u) return null;
+  }
+  if (warpActive(s, cand.w, cand.h)) u = warpedRect(u, s.warp, cand.w, cand.h);
   if (s.flipH) u = { ...u, x0: cand.w - u.x1, x1: cand.w - u.x0 };
   if (s.flipV) u = { ...u, y0: cand.h - u.y1, y1: cand.h - u.y0 };
   return { x: u.x0, y: u.y0, w: u.x1 - u.x0, h: u.y1 - u.y0 };
+}
+
+const grow = (r, dx, dy) => ({ x0: r.x0 - dx, y0: r.y0 - dy, x1: r.x1 + dx, y1: r.y1 + dy });
+
+// The part of `r` inside the rectangle given, or null when they do not meet.
+function cut(r, x0, y0, x1, y1) {
+  const out = { x0: Math.max(r.x0, x0), y0: Math.max(r.y0, y0), x1: Math.min(r.x1, x1), y1: Math.min(r.y1, y1) };
+  return out.x0 < out.x1 && out.y0 < out.y1 ? out : null;
+}
+
+// OVF-7, the mesh. A warp carries the box's finished picture - type, ink and
+// every filter above - through its mesh, and the painter draws that as the
+// triangles `warpPlan` lays out, each one under the affine map its three
+// corners define. The rectangle is carried the same way: cut to each triangle,
+// and the corners of each piece mapped by that triangle's own affine. The
+// pieces, not the rectangle's edges: a liquify twirl or a handle dragged across
+// its neighbours folds the mesh over itself, and then the ink that lands
+// furthest out need not come from an edge.
+//
+// Where this can part from the painter is the band of cells past the box: the
+// painter lays it out to its padded canvas and this to the rectangle, and the
+// band is one cell deep, so a point in it is interpolated over a different
+// span - the same map, read a fraction of a pixel apart under a strong
+// perspective. A mesh the painter will not draw at all (`warpPlan` refusing it)
+// leaves the box unwarped on both sides.
+function warpedRect(u, warp, w, h) {
+  const plan = warpPlan(warp, w, h, { x: u.x0, y: u.y0, w: u.x1 - u.x0, h: u.y1 - u.y0 });
+  if (!plan) return u;
+  let out = null;
+  for (const t of plan.tris) {
+    const m = affineFromTriangle(t.src, t.dst);
+    if (!m) continue;
+    for (const [x, y] of clipToRect(t.src, u)) {
+      const X = m[0] * x + m[2] * y + m[4];
+      const Y = m[1] * x + m[3] * y + m[5];
+      out = unite(out, X, Y, X, Y);
+    }
+  }
+  return out ?? u;
+}
+
+// A convex polygon cut to an axis-aligned rectangle (Sutherland-Hodgman), as
+// the corners of what is left.
+function clipToRect(poly, r) {
+  let out = poly;
+  for (const [axis, edge, keepAbove] of [
+    [0, r.x0, true],
+    [0, r.x1, false],
+    [1, r.y0, true],
+    [1, r.y1, false],
+  ]) {
+    const src = out;
+    out = [];
+    const inside = (p) => (keepAbove ? p[axis] >= edge : p[axis] <= edge);
+    for (let i = 0; i < src.length; i++) {
+      const a = src[i];
+      const b = src[(i + 1) % src.length];
+      if (inside(a)) out.push(a);
+      if (inside(a) !== inside(b)) {
+        const k = (edge - a[axis]) / (b[axis] - a[axis]);
+        out.push([a[0] + k * (b[0] - a[0]), a[1] + k * (b[1] - a[1])]);
+      }
+    }
+    if (!out.length) break;
+  }
+  return out;
 }
 
 // OVF-6. Text on an arc, a ring or a path is drawn glyph by glyph, each one
@@ -358,6 +514,69 @@ export function inkHeight(cand, place = placeBlock(cand)) {
   const failing = va === 'middle' ? Math.max(o.t, o.b) : va === 'top' ? o.b : o.t;
   if (!(failing > CONTAIN_TOL)) return 0;
   return cand.h + growFor(heightNeed(s, o));
+}
+
+// ===== a box grown around what is pinned to it =====
+//
+// Hand-drawn ink and a mask's shapes are box-local px measured from the box's
+// corner (OVF-7), so they cannot be fitted the way text is: nothing about them
+// shrinks, and a box that grows the way the ladder grows it drags them along
+// with its corner. What does hold them is the other way round - the box grows
+// by what is outside it, on the side it is outside, and they are carried back
+// by the same amount, so they stay exactly where they are on the page and only
+// the box's own rectangle changes. That is how a box born around its ink is
+// made to hold the ink's finish (`addInkBox`), and what "Fit now" does for a
+// box that is only ink.
+//
+// Text does not stay put: it is anchored to the box by `align` and `valign`
+// and re-anchors inside the grown box, which is why this is for boxes with no
+// text in them. (A box with text is the ladder's.) Nor does anything laid out
+// over the box's size rather than pinned to its corner - a curve, a mesh - so
+// neither is one of these boxes either. The one thing that does shift is a
+// roughened box's grain, which is laid from the box's text stack and moves
+// with it; the crumple's reach, which is what the check counts, does not.
+//
+// The sides are the verdict's, in the frame the user sees - a flipped box's
+// left overflow is on its left - and each grows by whole px, clear of the
+// overflow (see GROW_EPS). Two things keep everything in place on the page
+// whatever the box's flip and rotation are:
+//
+//   the rectangle   the flip mirrors about the box's centre and the rotation
+//                   turns about it, so the centre is what has to move: by half
+//                   the difference between the two sides of each pair, turned
+//                   with the box (`paintBoxOnPage` turns the picture by
+//                   `rotation` about the centre, with the mirror inside).
+//   the carry       in the box's own unmirrored frame, the pinned geometry
+//                   moves by the growth on the side it is drawn from: the left
+//                   one, or the right one under a horizontal flip, which
+//                   mirrors the picture's left onto the box's right.
+//
+// Returns null when the box fits, or `{ x, y, w, h, dx, dy }`: the grown box,
+// and the translation that carries the pinned geometry.
+export function growAround(cand, place = placeBlock(cand)) {
+  const v = containBox(cand, place);
+  if (v.fits) return null;
+  const side = (o) => (o > CONTAIN_TOL ? growFor(o) : 0);
+  const l = side(v.overflow.l);
+  const t = side(v.overflow.t);
+  const r = side(v.overflow.r);
+  const b = side(v.overflow.b);
+  const s = cand.style;
+  const w = cand.w + l + r;
+  const h = cand.h + t + b;
+  const a = ((Number(s.rotation) || 0) * Math.PI) / 180;
+  const mx = (r - l) / 2;
+  const my = (b - t) / 2;
+  const cx = cand.x + cand.w / 2 + Math.cos(a) * mx - Math.sin(a) * my;
+  const cy = cand.y + cand.h / 2 + Math.sin(a) * mx + Math.cos(a) * my;
+  return {
+    x: cx - w / 2,
+    y: cy - h / 2,
+    w,
+    h,
+    dx: s.flipH ? r : l,
+    dy: s.flipV ? b : t,
+  };
 }
 
 // ===== how far a box may grow =====

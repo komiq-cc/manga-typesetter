@@ -16,7 +16,7 @@
 import { liquifyField } from './liquify.js';
 import { WARP_MAX_GRID, WARP_MIN_GRID } from './data.js';
 import { gizmoPts, regridWarp } from './warp-gizmo.js';
-import { cloneStyle, markUnsaved } from './store.svelte.js';
+import { cloneStyle, markUnsaved, reviewBox, pageById } from './store.svelte.js';
 import { record } from './editor/history.svelte.js';
 
 // The mesh spacing the tool wants, as a fraction of its radius. Cells about
@@ -134,6 +134,9 @@ export function liquifyMeshGesture(box, pageId, tool) {
         return false;
       }
       markUnsaved();
+      // Where the mesh left the box's ink decides its flag (OVF-7), and the
+      // gesture's end is the one moment to ask.
+      reviewBox(box, pageById(pageId) ?? undefined);
       record({ t: 'style', pageId, boxId: box.id, before, after: cloneStyle(box.style) });
       return true;
     },

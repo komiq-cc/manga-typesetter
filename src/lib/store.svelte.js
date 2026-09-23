@@ -64,6 +64,7 @@ import {
   placeAtHeight,
   containBox,
   inkHeight,
+  growAround,
   fitBox,
   reviewFor,
   isAutoBox,
@@ -82,6 +83,8 @@ import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
 // its own defaults, so `setTool` can disarm it without the two ever cycling.
 import { setBrushMode } from './brush-tool.svelte.js';
 import { scaleStroke } from './brush.js';
+import { translateStrokes } from './brush-board.svelte.js';
+import { translateClipShapes } from './text-paint.js';
 import { stripPageExtent, stripDragYBounds } from './editor/strip.js';
 
 export { PAGE_W, PAGE_H };
@@ -550,12 +553,14 @@ function clamp(v, a, b) {
 //
 // The rule is now the user's, and it is stricter than "the height follows the
 // text": text never goes outside its box, measured in PIXELS - italic overhang,
-// accents, strokes, shadows - and it is never clipped to get there. A box either
-// fits or carries `box.review` saying it does not (see contain.js, which decides
-// both, and data.js for the flag's shape). Two ways that gets enforced:
+// accents, strokes, shadows, and every effect laid on them (OVF-7) - and it is
+// never clipped to get there. A box either fits or carries `box.review` saying
+// it does not (see contain.js, which decides both, and data.js for the flag's
+// shape). Two ways that gets enforced:
 //
 //   the ladder     `autoFitBox`. After an edit or a placement, an AUTO box (auto
-//                  sizing on, straight text, no mesh warp) that does not fit is
+//                  sizing on, straight text, and no mesh, ink or mask pinned to
+//                  it - see `isAutoBox` in contain.js) that does not fit is
 //                  grown - height, then width, within its balloon and the page -
 //                  and then its font is shrunk, no lower than `minSizeFor`; only
 //                  if that fails is it flagged. A MANUAL box is never moved,
@@ -780,21 +785,41 @@ export const fitGeom = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.s
 // ===== the flag's own commands =====
 //
 // "Fit now": the ladder, once, on any box - including a manual one, because the
-// user asking is exactly what a manual box waits for. A box whose geometry is
-// its own - text on a curve, a mesh warp - keeps its rectangle and may only have
-// its font shrunk; a box sized by hand is grown within its balloon like an auto
-// box, and stays manual afterwards. One undo entry, and none when nothing moved.
+// user asking is exactly what a manual box waits for. What it may do depends on
+// what made the box manual:
+//
+//   sized by hand     grown within its balloon like an auto box, and it stays
+//                     manual afterwards.
+//   hand-placed       text on a curve, a mesh warp, or hand-drawn ink or a mask
+//                     around text: the box keeps its rectangle and may only have
+//                     its font shrunk, because its geometry is its own or pinned
+//                     to its corner, and growing the box would slide the text
+//                     against it (see `isAutoBox`).
+//   only ink          a box with ink or a mask and no text has no font to shrink
+//                     and nothing anchored to it, so it is grown around what it
+//                     paints with the ink carried the other way (`holdInk`) -
+//                     nothing moves on the page but the box's own rectangle.
+//
+// One undo entry, and none when nothing moved.
 export function fitBoxNow(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
   if (!b?.style || !canMeasure()) return false;
   settleEdits();
   const before = cloneStyle(b.style);
   const geomBefore = fitGeom(b);
-  const cand = boxCandidate(b, boxText(b, p));
-  const lockGeom = manualReason(cand) !== REVIEW_REASONS.manual;
-  const r = fitBox(cand, { page: p, strip: stripOf(p), minSize: minSizeFor(b, p), geometry: !lockGeom });
-  const changed = writeFit(b, r);
-  writeReview(b, r.review);
+  const text = boxText(b, p);
+  const cand = boxCandidate(b, text);
+  const reason = manualReason(cand);
+  let changed;
+  if ((reason === REVIEW_REASONS.ink || reason === REVIEW_REASONS.mask) && !String(text ?? '').trim()) {
+    changed = holdInk(b, p);
+    reviewBox(b, p);
+  } else {
+    const lockGeom = reason !== REVIEW_REASONS.manual;
+    const r = fitBox(cand, { page: p, strip: stripOf(p), minSize: minSizeFor(b, p), geometry: !lockGeom });
+    changed = writeFit(b, r);
+    writeReview(b, r.review);
+  }
   if (!changed) return false;
   recordEdit({ t: 'style', pageId: p.id, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
   markUnsaved();
@@ -802,8 +827,8 @@ export function fitBoxNow(boxId = app.selectedId, p = page()) {
 }
 
 // "Make auto": auto sizing back on, and the ladder run on the result - one undo
-// entry for both. A curved or warped box turns its flag on and stays manual,
-// since what makes it manual is not the flag.
+// entry for both. A curved, warped, inked or masked box turns its flag on and
+// stays manual, since what makes it manual is not the flag.
 export function makeBoxAuto(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
   if (!b?.style) return false;
@@ -2931,13 +2956,19 @@ export function addInkBox({ w, h, strokes, finish }, imgX, imgY, target = null) 
     id: 'b' + boxSeq++,
     lineN: ln.n,
     text: null,
-    x: clamp(Math.round(imgX - bw / 2), 0, Math.max(0, p.w - bw)),
-    y: clamp(Math.round(imgY - bh / 2), 0, Math.max(0, p.h - bh)),
+    x: Math.round(imgX - bw / 2),
+    y: Math.round(imgY - bh / 2),
     w: bw,
     h: bh,
     style,
     fit: null,
   };
+  holdInk(b, p);
+  b.x = clamp(b.x, 0, Math.max(0, p.w - b.w));
+  b.y = clamp(b.y, 0, Math.max(0, p.h - b.h));
+  // Born with its own verdict, as a duplicate is: an inked box is manual, so
+  // nothing fits it unasked, and the flag is the one thing that can say so.
+  reviewBox(b, p);
   p.boxes.push(b);
   recordEdit({
     t: 'place',
@@ -2951,9 +2982,41 @@ export function addInkBox({ w, h, strokes, finish }, imgX, imgY, target = null) 
   return b.id;
 }
 
+// A box grown around its ink, with the ink carried the other way (OVF-7): the
+// box's rectangle grows by what the check finds outside it, on the side it is
+// outside, and the strokes - and a mask's shapes, pinned to the same corner -
+// move back by the same amount, so nothing lands anywhere else on the page
+// (`growAround` in contain.js, which also keeps a flipped or turned box still).
+// Two callers, both of which have only ink to hold:
+//
+//   `addInkBox`   the board sizes the box to the strokes' own reach and a margin
+//                 (`boardPlacement`), but what the strokes wear - the finish's
+//                 outline and shadows - can reach past the margin, and a box
+//                 whose ink ran out of it the moment it was placed would be
+//                 flagged for something the user never did.
+//   `fitBoxNow`   the flag's answer for a box that is only ink. Resizing one
+//                 scales the strokes with it (`resizeBox`), so its overhang
+//                 grows with the box and no drag can clear it; this can.
+//
+// Answers whether the box changed.
+function holdInk(b, p) {
+  if (!canMeasure()) return false;
+  const g = growAround(boxCandidate(b, boxText(b, p)));
+  if (!g) return false;
+  const s = b.style;
+  if (s.ink?.strokes?.length) s.ink = { ...s.ink, strokes: translateStrokes(s.ink.strokes, g.dx, g.dy) };
+  if (s.clip?.shapes?.length) s.clip = { ...s.clip, shapes: translateClipShapes(s.clip.shapes, g.dx, g.dy) };
+  b.x = g.x;
+  b.y = g.y;
+  b.w = g.w;
+  b.h = g.h;
+  return true;
+}
+
 // Replace a box's ink with strokes edited on the board. One `style` entry;
 // the box's geometry is left alone, because the strokes come back in the frame
-// they left in and the ink canvas already grows to hold overhang.
+// they left in and the ink canvas already grows to hold overhang - which is
+// the user's to fix, so the flag says whether the ink still fits.
 export function setBoxInk(pageId, boxId, strokes) {
   const p = pageById(pageId);
   const b = p?.boxes.find((x) => x.id === boxId);
@@ -2966,6 +3029,7 @@ export function setBoxInk(pageId, boxId, strokes) {
   // or the next undo would rewind nothing visible.
   if (JSON.stringify(before.ink) === JSON.stringify(ink)) return true;
   b.style.ink = ink;
+  reviewBox(b, p);
   recordEdit({ t: 'style', pageId, boxId, before, after: cloneStyle(b.style) });
   markUnsaved();
   return true;

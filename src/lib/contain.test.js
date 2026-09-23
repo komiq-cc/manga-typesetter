@@ -105,6 +105,11 @@ const hist = await import('./editor/history.svelte.js');
 const psd = await import('./psd.js');
 const { defaultStyle, normalizeStyle, normalizeReview, REVIEW_REASONS } = await import('./data.js');
 const { neededHeight } = await import('./typeset.js');
+const paint = await import('./text-paint.js');
+const { meshMap, identityMesh, affineFromTriangle } = await import('./warp.js');
+const { warpPlan } = await import('./warp-paint.js');
+const gizmo = await import('./warp-gizmo.js');
+const { liquifyMeshGesture } = await import('./liquify-mesh.js');
 
 const { BOX_PAD, textInset, contentWidth, setTypesetEnabled, clearLayoutMemo, layoutMemoSize, canMeasure } = measure;
 const { boxCandidate, placeBlock, boxInkRect, containBox, fitBox, fitLimit, reviewFor, isAutoBox, CONTAIN_TOL } = contain;
@@ -126,6 +131,8 @@ const {
   endEdit,
   setMinFontSize,
   fitGeom,
+  addInkBox,
+  setBoxInk,
 } = store;
 
 setTypesetEnabled(true);
@@ -494,6 +501,228 @@ describe('boxInkRect, on a curve', () => {
   });
 });
 
+// ===== everything else the box paints (OVF-7) =====
+//
+// Every pixel the export can make visible counts, and nothing opts out: the
+// hand-drawn ink, the whole-picture blur, the smear, the crumple, an include
+// mask's cut and the mesh, in the order the exporter lays them on. Each one is
+// pinned here against the plain glyph rectangle of the same box, so the numbers
+// are the effect's own reach and nothing else: "HELLO" centred in a 200 x 100
+// box, 55px of advance across the middle.
+
+// A round brush stroke through the points given, box-local, at full pressure:
+// it reaches half its size past every point it passes through.
+const inkLine = (pts, size = 10) => ({ pts: pts.map(([x, y]) => [x, y, 1]), size, color: '#000000' });
+const inkOf = (...strokes) => ({ on: true, strokes });
+const mesh = (pts, cols = 1, rows = 1) => ({ on: true, cols, rows, pts });
+const edges = (r) => ({ x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h });
+const grownBy = (e, l, t = l, r = l, b = t) => ({ x0: e.x0 - l, y0: e.y0 - t, x1: e.x1 + r, y1: e.y1 + b });
+const expectEdges = (r, want, digits = 6) => {
+  const e = edges(r);
+  for (const k of ['x0', 'y0', 'x1', 'y1']) expect(e[k], k).toBeCloseTo(want[k], digits);
+};
+
+describe('boxInkRect, every effect the export paints', () => {
+  const base = () => cand({ text: 'HELLO' });
+  const plainEdges = () => edges(boxInkRect(base()));
+  const withFx = (extra) => boxInkRect({ ...base(), style: style(extra) });
+
+  it('counts the whole-picture blur three sigma out, on every side', () => {
+    const P = plainEdges();
+    expectEdges(withFx({ blur: 4 }), grownBy(P, 12));
+    // The blur is of the finished picture, so the outline and a shadow thrown
+    // right are blurred with the glyphs: three sigma past all of it.
+    const lit = withFx({
+      blur: 2,
+      strokes: [{ color: '#fff', width: 3, opacity: 1 }],
+      shadows: [{ color: '#000', x: 4, y: 0, blur: 0, opacity: 1 }],
+    });
+    expectEdges(lit, grownBy(P, 3 + 6, 3 + 6, 3 + 4 + 6, 3 + 6));
+  });
+
+  // The smear is the picture drawn again at every tap of `motionBlurTaps`, the
+  // list the exporter draws. The furthest tap is the second gaussian offset,
+  // 3.23 steps, at the last iteration - both ways along the direction, and not
+  // at all across it.
+  it('counts the smear along its own axis, out to its furthest tap', () => {
+    const MB_OFF2 = 3.2307692308;
+    const P = plainEdges();
+    const along = MB_OFF2 * 2 * 4;
+    expectEdges(withFx({ motionBlur: { on: true, x: 2, y: 0, amount: 4 } }), grownBy(P, along, 0, along, 0));
+    // Diagonal: each axis as far as its own component carries it.
+    expectEdges(withFx({ motionBlur: { on: true, x: 1, y: -2, amount: 3 } }), grownBy(P, MB_OFF2 * 3, MB_OFF2 * 6));
+    // Off, or with no direction - no taps at all - it paints nothing.
+    expect(withFx({ motionBlur: { on: false, x: 2, y: 0, amount: 16 } })).toEqual(boxInkRect(base()));
+    expect(withFx({ motionBlur: { on: true, x: 0, y: 0, amount: 16 } })).toEqual(boxInkRect(base()));
+    // The default smear, switched on, reaches 103px each way along x: an auto
+    // box wearing it is widened or shrunk for it, and a manual one flagged.
+    const d = withFx({ motionBlur: { ...defaultStyle().motionBlur, on: true } });
+    expect(P.x0 - d.x).toBeCloseTo(103.3846, 3);
+  });
+
+  // Roughening is feDisplacementMap at `scale: amount`: the full span of the
+  // displacement, so a pixel moves at most half of it either way.
+  it('counts the crumple half its amount out on every side', () => {
+    const P = plainEdges();
+    expectEdges(withFx({ roughen: { on: true, amount: 8, detail: 0.05, seed: 7 } }), grownBy(P, 4));
+    expectEdges(withFx({ roughen: { on: true, amount: -6 } }), grownBy(P, 3));
+    expect(withFx({ roughen: { on: false, amount: 40 } })).toEqual(boxInkRect(base()));
+  });
+
+  // Hand-drawn ink is box-local, measured from the box's corner, and the box's
+  // outline and shadows are drawn around it as one shape (`paintFinish`), so it
+  // is part of the silhouette they grow from.
+  it('counts hand-drawn ink, with the outline and the shadows wrapped around it', () => {
+    // Straight runs a whole number of stamps long, so the last stamp lands on
+    // the last point and the reach is exactly half the size past both ends.
+    const ink = inkOf(inkLine([[20, 30], [120, 30]]), inkLine([[20, 30], [20, 60]]));
+    expect(paint.inkBounds(style({ ink }).ink)).toEqual({ minX: 15, minY: 25, maxX: 125, maxY: 65 });
+    expect(boxInkRect(cand({ text: '', style: style({ ink }) }))).toEqual({ x: 15, y: 25, w: 110, h: 40 });
+    const finished = boxInkRect(
+      cand({
+        text: '',
+        style: style({
+          ink,
+          strokes: [{ color: '#fff', width: 3, opacity: 1 }],
+          shadows: [{ color: '#000', x: 5, y: 6, blur: 1, opacity: 1 }],
+        }),
+      }),
+    );
+    expectEdges(finished, { x0: 12, y0: 22, x1: 125 + 3 + 5 + 2, y1: 65 + 3 + 6 + 2 });
+
+    // With text, the two together - here a stroke run out past the right edge,
+    // which is where the export used to cut it off (`layoutBox`).
+    const P = plainEdges();
+    const far = inkOf(inkLine([[150, 50], [230, 50]]));
+    const both = { ...base(), style: style({ ink: far }) };
+    expectEdges(boxInkRect(both), { x0: P.x0, y0: Math.min(P.y0, 45), x1: 235, y1: Math.max(P.y1, 55) });
+    expect(containBox(both).overflow).toEqual({ l: 0, t: 0, r: 35, b: 0 });
+    // Ink switched off paints nothing.
+    expect(withFx({ ink: { ...far, on: false } })).toEqual(boxInkRect(base()));
+    expect(boxInkRect(cand({ text: '', style: style({ ink: { ...far, on: false } }) }))).toBeNull();
+  });
+
+  // An include mask shows nothing outside its shapes, over the finished
+  // picture - blur and all - so the rectangle is cut to their bounds. An
+  // exclude mask takes pixels out of the middle, which a rectangle cannot say;
+  // left alone it is still a bound.
+  it("cuts to an include mask's shapes, and leaves an exclude mask's alone", () => {
+    const P = plainEdges();
+    const clip = (mode, ...shapes) => ({ on: true, mode, shapes });
+    const oval = { kind: 'ellipse', cx: 100, cy: 50, rx: 10, ry: 4 };
+    expectEdges(withFx({ clip: clip('include', oval) }), { x0: 90, y0: 46, x1: 110, y1: 54 });
+    expectEdges(withFx({ blur: 4, clip: clip('include', oval) }), { x0: 90, y0: 46, x1: 110, y1: 54 });
+    // A brush stroke of the mask: its points, grown by half its width.
+    const band = { kind: 'stroke', size: 6, pts: [[40, 50], [160, 50]] };
+    expectEdges(withFx({ clip: clip('include', band) }), { x0: P.x0, y0: 47, x1: P.x1, y1: 53 });
+    const left = { kind: 'poly', pts: [[0, 0], [95, 0], [95, 100], [0, 100]] };
+    expectEdges(withFx({ clip: clip('include', left) }), { x0: P.x0, y0: P.y0, x1: 95, y1: P.y1 });
+    expect(withFx({ clip: clip('exclude', oval) })).toEqual(boxInkRect(base()));
+    // A mask that shows none of it: nothing is painted, and nothing painted
+    // always fits - even in a box the bare text runs out of on every side.
+    const tiny = cand({ text: 'HELLO', w: 20, h: 10 });
+    expect(containBox(tiny).fits).toBe(false);
+    const hidden = { ...tiny, style: style({ clip: clip('include', { kind: 'ellipse', cx: 300, cy: 300, rx: 5, ry: 5 }) }) };
+    expect(boxInkRect(hidden)).toBeNull();
+    expect(containBox(hidden).fits).toBe(true);
+  });
+
+  // The mesh carries the finished picture; where the map is affine the
+  // rectangle goes through it exactly.
+  it('carries the rectangle through an affine mesh exactly', () => {
+    const P = plainEdges();
+    expectEdges(withFx({ warp: mesh([[10, 5], [210, 5], [10, 105], [210, 105]]) }), grownBy(P, -10, -5, 10, 5));
+    // Stretched to twice its width about the box's centre: x goes to 2x - 100.
+    const wide = withFx({ warp: mesh([[-100, 0], [300, 0], [-100, 100], [300, 100]]) });
+    expectEdges(wide, { x0: 2 * P.x0 - 100, y0: P.y0, x1: 2 * P.x1 - 100, y1: P.y1 });
+    // A mesh left where it started is no warp at all.
+    expect(withFx({ warp: mesh(identityMesh(1, 1, 200, 100)) })).toEqual(boxInkRect(base()));
+    expect(withFx({ warp: mesh(identityMesh(3, 2, 200, 100), 3, 2) })).toEqual(boxInkRect(base()));
+  });
+
+  // A perspective drag is a homography, which keeps straight lines straight:
+  // the picture's rectangle lands inside the quadrilateral its four corners go
+  // to. The painter draws the map as affine pieces whose corners sit on it
+  // exactly, and the check reads the same pieces, so both are within the
+  // pieces' own error of the homography: a third of a pixel on a box this size
+  // (`WARP_SUB` in warp-paint.js).
+  it('carries it through a perspective drag to where the homography takes its corners', () => {
+    const pts = [[0, 0], [200, 0], [0, 100], [320, 180]];
+    const m = meshMap(pts, 1, 1, 200, 100);
+    expect(m.kind).toBe('projective');
+    const P = plainEdges();
+    const to = [
+      [P.x0, P.y0],
+      [P.x1, P.y0],
+      [P.x0, P.y1],
+      [P.x1, P.y1],
+    ].map(([x, y]) => m.at(x, y));
+    const want = {
+      x0: Math.min(...to.map((q) => q[0])),
+      y0: Math.min(...to.map((q) => q[1])),
+      x1: Math.max(...to.map((q) => q[0])),
+      y1: Math.max(...to.map((q) => q[1])),
+    };
+    const got = edges(withFx({ warp: mesh(pts) }));
+    for (const k of ['x0', 'y0', 'x1', 'y1']) expect(Math.abs(got[k] - want[k]), k).toBeLessThan(CONTAIN_TOL);
+    // And the drag did move it: the far corner's side is pulled out.
+    expect(got.x1 - P.x1).toBeGreaterThan(3);
+    expect(got.y1 - P.y1).toBeGreaterThan(3);
+  });
+
+  // A mesh folded over itself - here the middle column of a four-cell grid
+  // dragged 80px right, past its right-hand neighbour - carries the picture's
+  // MIDDLE furthest out, so the corners of the rectangle are not enough: the
+  // check follows every piece the painter cuts. Held against the painter's own pieces, point by point: every point
+  // of the picture through the affine of the triangle it falls in, which is
+  // how the painter draws it. (The pieces are the painter's approximation of
+  // the smooth surface - a pixel off it, in a fold this hard - and it is the
+  // pieces that land in the file.)
+  it('holds everything a folded mesh carries, from the middle of the picture as well as its corners', () => {
+    const row = (y) => [0, 50, 180, 150, 200].map((x) => [x, y]);
+    const pts = [...row(0), ...row(100)];
+    const warp = mesh(pts, 4, 1);
+    const P = plainEdges();
+    const got = edges(withFx({ warp }));
+    const plan = warpPlan(warp, 200, 100, { x: P.x0, y: P.y0, w: P.x1 - P.x0, h: P.y1 - P.y0 });
+    const inside = ([a, b, c], x, y) => {
+      const side = (p, q) => (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0]);
+      const d = [side(a, b), side(b, c), side(c, a)];
+      return !(d.some((v) => v < -1e-9) && d.some((v) => v > 1e-9));
+    };
+    const carry = (x, y) => {
+      const t = plan.tris.find((tri) => inside(tri.src, x, y));
+      const m = affineFromTriangle(t.src, t.dst);
+      return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+    };
+    const corners = [P.x0, P.x1].flatMap((x) => [P.y0, P.y1].map((y) => carry(x, y)[0]));
+    let far = -Infinity;
+    for (let i = 0; i <= 60; i++) {
+      for (let j = 0; j <= 12; j++) {
+        const [X, Y] = carry(P.x0 + ((P.x1 - P.x0) * i) / 60, P.y0 + ((P.y1 - P.y0) * j) / 12);
+        far = Math.max(far, X);
+        expect(X).toBeGreaterThanOrEqual(got.x0 - 1e-6);
+        expect(X).toBeLessThanOrEqual(got.x1 + 1e-6);
+        expect(Y).toBeGreaterThanOrEqual(got.y0 - 1e-6);
+        expect(Y).toBeLessThanOrEqual(got.y1 + 1e-6);
+      }
+    }
+    // Sampled finely enough to find the furthest reach, and the fold's reach
+    // is well past anything the corners go to.
+    expect(got.x1 - far).toBeLessThan(0.5);
+    expect(far).toBeGreaterThan(Math.max(...corners) + 5);
+  });
+
+  it('mirrors the warped picture, since the flip is outside the mesh', () => {
+    const shift = mesh([[10, 5], [210, 5], [10, 105], [210, 105]]);
+    const t = withFx({ warp: shift });
+    const m = withFx({ warp: shift, flipH: true });
+    expect(m.x).toBeCloseTo(200 - (t.x + t.w), 6);
+    expect(m.w).toBeCloseTo(t.w, 6);
+    expect(m.y).toBeCloseTo(t.y, 6);
+  });
+});
+
 // ===== the ladder =====
 
 describe('the ladder, on an auto box', () => {
@@ -842,6 +1071,225 @@ describe('a manual box', () => {
   });
 });
 
+// ===== what is pinned to the box (OVF-7) =====
+//
+// Hand-drawn ink and a mask's shapes are box-local px from the box's corner,
+// so a box wearing either is manual, like a curve or a mesh: the ladder grows a
+// box by what its anchored TEXT needs and does not carry them, so every step it
+// took would slide them against the text they were drawn around.
+
+describe('a box with something pinned to its corner', () => {
+  const ink = inkOf(inkLine([[10, 10], [50, 10]], 6));
+  const mask = { on: true, mode: 'exclude', shapes: [{ kind: 'ellipse', cx: 20, cy: 20, rx: 5, ry: 5 }] };
+  const warp = mesh([[10, 5], [210, 5], [10, 105], [210, 105]]);
+  const reason = (extra) => contain.manualReason(cand({ style: style(extra) }));
+  const auto = (extra) => isAutoBox(cand({ style: style(extra) }));
+
+  it('is manual, and the flag names what made it so - in the order curve, mesh, ink, mask', () => {
+    expect(auto({ ink })).toBe(false);
+    expect(reason({ ink })).toBe(REVIEW_REASONS.ink);
+    expect(REVIEW_REASONS.ink).toBe('hand-drawn ink');
+    expect(auto({ clip: mask })).toBe(false);
+    expect(reason({ clip: mask })).toBe(REVIEW_REASONS.mask);
+    expect(REVIEW_REASONS.mask).toBe('masked');
+    expect(reason({ curve: 40, warp, ink, clip: mask })).toBe(REVIEW_REASONS.curve);
+    expect(reason({ warp, ink, clip: mask })).toBe(REVIEW_REASONS.warp);
+    expect(reason({ ink, clip: mask })).toBe(REVIEW_REASONS.ink);
+    expect(reason({ autoHeight: false })).toBe(REVIEW_REASONS.manual);
+  });
+
+  it('is auto again when nothing is actually drawn or cut', () => {
+    expect(auto({ ink: { ...ink, on: false } })).toBe(true);
+    expect(auto({ ink: { on: true, strokes: [] } })).toBe(true);
+    expect(auto({ clip: { ...mask, on: false } })).toBe(true);
+    expect(auto({ clip: { ...mask, shapes: [] } })).toBe(true);
+    expect(auto({ warp: mesh(identityMesh(1, 1, 200, 100)) })).toBe(true);
+  });
+
+  // The ink layer's own complaint before this: auto sized, with no text to
+  // measure, so every opening grew it to the height of an empty line - and the
+  // ink, pinned to its corner, slid with the growth.
+  it('opens as it was saved: an ink layer is not grown to hold an empty line', () => {
+    load([{ id: 'k', lineN: null, text: null, x: 100, y: 100, w: 70, h: 18, style: style({ ink: inkOf(inkLine([[10, 9], [60, 9]], 8)) }) }]);
+    const b = byId('k');
+    expect(geomOf(b)).toEqual({ x: 100, y: 100, w: 70, h: 18, size: S });
+    expect(b.review).toBeUndefined();
+    expect(verdict(b).fits).toBe(true);
+  });
+});
+
+describe('ink in the store', () => {
+  // Where a box-local point lands on the page: through the flip, then turned
+  // by `rotation` about the box's centre - `paintBoxOnPage`'s transform.
+  const onPage = (b, [x, y]) => {
+    const s = b.style;
+    const a = ((Number(s.rotation) || 0) * Math.PI) / 180;
+    const u = (s.flipH ? -1 : 1) * (x - b.w / 2);
+    const v = (s.flipV ? -1 : 1) * (y - b.h / 2);
+    return [b.x + b.w / 2 + Math.cos(a) * u - Math.sin(a) * v, b.y + b.h / 2 + Math.sin(a) * u + Math.cos(a) * v];
+  };
+  const pagePoints = (b) => b.style.ink.strokes.flatMap((k) => k.pts.map((q) => onPage(b, q)));
+  const plain = (v) => JSON.parse(JSON.stringify(v));
+
+  // The board sizes a new box to its strokes and a margin; the finish the
+  // strokes wear - an outline, a shadow - can reach past that. The box is grown
+  // around it and the strokes carried back, so it is born holding its ink,
+  // unflagged, with every stroke exactly where it was drawn on the page.
+  it('is born from the board holding its finish, the strokes where they were drawn', () => {
+    app.chapterMode = 'typeset';
+    load([]);
+    const strokes = [inkLine([[9, 15], [51, 15]], 6)];
+    const bare = byId(addInkBox({ w: 60, h: 30, strokes }, 400, 300));
+    expect({ x: bare.x, y: bare.y, w: bare.w, h: bare.h }).toEqual({ x: 370, y: 285, w: 60, h: 30 });
+    expect(bare.review).toBeUndefined();
+
+    // An 8px outline reaches 2px past both ends of the margin, and a shadow
+    // thrown 10px down 6px past the bottom.
+    const finish = {
+      strokes: [{ color: '#ffffff', width: 8, opacity: 1 }],
+      shadows: [{ color: '#000000', x: 0, y: 10, blur: 0, opacity: 1 }],
+    };
+    const b = byId(addInkBox({ w: 60, h: 30, strokes, finish }, 400, 300));
+    expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: 368, y: 285, w: 64, h: 36 });
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    // Carried 2px right inside a box 2px further left: the same page px.
+    expect(b.style.ink.strokes[0].pts[0].slice(0, 2)).toEqual([11, 15]);
+    expect(pagePoints(bare)).toEqual([
+      [379, 300],
+      [421, 300],
+    ]);
+    expect(pagePoints(b)).toEqual(pagePoints(bare));
+  });
+
+  it('is flagged, and nothing moved, when the board runs it past the edge', () => {
+    load([{ id: 'k', lineN: null, text: null, x: 100, y: 100, w: 200, h: 100, style: style({ ink: inkOf(inkLine([[20, 50], [120, 50]])) }) }]);
+    const b = byId('k');
+    const before = geomOf(b);
+    expect(b.review).toBeUndefined();
+    expect(setBoxInk(1, 'k', [inkLine([[100, 50], [230, 50]])])).toBe(true);
+    expect(geomOf(b)).toEqual(before);
+    expect(b.review).toEqual({ kind: 'overflow', overflow: { l: 0, t: 0, r: 35, b: 0 }, reason: REVIEW_REASONS.ink });
+    hist.undo();
+    expect(byId('k').review).toBeUndefined();
+    hist.redo();
+    expect(byId('k').review?.reason).toBe(REVIEW_REASONS.ink);
+  });
+
+  // "Fit now" on a box that is only ink has no font to shrink and no text
+  // anchored to it: the box grows around what it paints and the ink - and the
+  // mask pinned to the same corner - is carried back, so on the page only the
+  // box's own rectangle changes. Flipped and turned, which is where getting the
+  // carry and the centre right matters.
+  it('"Fit now" grows a box of ink around it, flipped and turned, and nothing moves on the page', () => {
+    const drawn = inkOf(inkLine([[-10, 20], [120, 20]]), inkLine([[50, 20], [50, 60]]));
+    const cut = { on: true, mode: 'exclude', shapes: [{ kind: 'ellipse', cx: 30, cy: 30, rx: 6, ry: 4 }, { kind: 'stroke', size: 4, pts: [[60, 40], [70, 45]] }] };
+    const p = load([{ id: 'k', lineN: null, text: null, x: 100, y: 100, w: 100, h: 50, style: style({ ink: drawn, clip: cut, flipH: true, rotation: 30 }) }]);
+    const b = byId('k');
+    // The strokes reach -15..125 across and 15..65 down: mirrored in a 100px
+    // box, that is 25px out on the left and 15 on the right, and 15 below.
+    expect(b.review).toEqual({ kind: 'overflow', overflow: { l: 25, t: 0, r: 15, b: 15 }, reason: REVIEW_REASONS.ink });
+    const before = { geom: geomOf(b), ink: plain(b.style.ink), clip: plain(b.style.clip), onPage: pagePoints(b) };
+
+    expect(fitBoxNow('k', p)).toBe(true);
+    expect({ w: b.w, h: b.h, size: b.style.size }).toEqual({ w: 140, h: 65, size: S });
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    pagePoints(b).forEach(([x, y], i) => {
+      expect(x).toBeCloseTo(before.onPage[i][0], 6);
+      expect(y).toBeCloseTo(before.onPage[i][1], 6);
+    });
+    // Carried by the growth on the side they are drawn from: the right one,
+    // since the flip mirrors the picture's left onto the box's right.
+    expect(b.style.ink.strokes[0].pts[0].slice(0, 2)).toEqual([5, 20]);
+    expect(b.style.clip.shapes[0]).toMatchObject({ cx: 45, cy: 30 });
+    expect(b.style.clip.shapes[1].pts).toEqual([[75, 40], [85, 45]]);
+
+    // One undo puts back the box, the strokes, the mask and the flag.
+    hist.undo();
+    const u = byId('k');
+    expect(geomOf(u)).toEqual(before.geom);
+    expect(plain(u.style.ink)).toEqual(before.ink);
+    expect(plain(u.style.clip)).toEqual(before.clip);
+    expect(u.review?.reason).toBe(REVIEW_REASONS.ink);
+    hist.redo();
+    expect(byId('k').review).toBeUndefined();
+    expect(fitBoxNow('k', p)).toBe(false);
+  });
+
+  // With text in it, the ink is pinned to the corner the text is laid out
+  // from: the box keeps its rectangle, and only the font may shrink.
+  it('"Fit now" on text with ink in it keeps the box and the ink, and may only shrink the font', () => {
+    const drawn = inkOf(inkLine([[5, 5], [30, 5]], 4));
+    const p = load([{ id: 'b1', lineN: null, text: 'AAAA BBBB CCCC DDDD', x: 100, y: 100, w: 60, h: 20, style: style({ ink: drawn }) }]);
+    const b = byId('b1');
+    expect(b.review?.reason).toBe(REVIEW_REASONS.ink);
+    const before = geomOf(b);
+    const strokes = plain(b.style.ink.strokes);
+    fitBoxNow('b1', p);
+    expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: before.x, y: before.y, w: before.w, h: before.h });
+    expect(b.style.size).toBeLessThanOrEqual(before.size);
+    expect(plain(b.style.ink.strokes)).toEqual(strokes);
+    expect(!!b.review).toBe(!verdict(b).fits);
+  });
+});
+
+describe('a mesh in the store', () => {
+  // Stretched to twice its width about the box's centre, "HELLO THERE" at 20px
+  // is 239px of ink in a 200px box. "Fit now" keeps the box and the mesh and
+  // shrinks the font until the stretched picture fits: 16.5px, where 17 is a
+  // pixel wide of it.
+  it('"Fit now" on a warped box shrinks the font until the warped picture fits', () => {
+    const stretch = mesh([[-100, 0], [300, 0], [-100, 100], [300, 100]]);
+    const p = load([{ id: 'b1', lineN: null, text: 'HELLO THERE', x: 100, y: 100, w: 200, h: 100, style: style({ warp: stretch }) }]);
+    const b = byId('b1');
+    const before = geomOf(b);
+    expect(b.review?.reason).toBe(REVIEW_REASONS.warp);
+    expect(fitBoxNow('b1', p)).toBe(true);
+    expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: before.x, y: before.y, w: before.w, h: before.h });
+    expect(b.style.size).toBe(16.5);
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    const bigger = { ...boxCandidate(b, b.text), style: { ...b.style, size: 17 } };
+    expect(containBox(bigger).fits).toBe(false);
+    hist.undo();
+    expect(geomOf(byId('b1'))).toEqual(before);
+    expect(byId('b1').review?.reason).toBe(REVIEW_REASONS.warp);
+  });
+
+  // The gestures that move a mesh are the ones that can carry ink out of the
+  // box, and each asks for the verdict once, as it ends. Top-left text, so a
+  // pull on the top-left handle takes it straight out over the corner.
+  it('a handle drag, a reset and a liquify push each leave the flag saying where the ink went', () => {
+    const s = style({ align: 'left', valign: 'top', warp: { on: true, cols: 1, rows: 1, pts: [] } });
+    load([{ id: 'b1', lineN: null, text: 'HELLO', x: 100, y: 100, w: 200, h: 100, style: s }]);
+    let b = byId('b1');
+    expect(b.review).toBeUndefined();
+
+    const before = gizmo.beginWarpDrag(b);
+    gizmo.dragWarpTo(b, 0, -30, -20);
+    expect(gizmo.commitWarpDrag(b, 1, before)).toBe(true);
+    expect(verdict(b).fits).toBe(false);
+    expect(b.review).toEqual(reviewFor(verdict(b), REVIEW_REASONS.warp));
+    hist.undo();
+    expect(byId('b1').review).toBeUndefined();
+    hist.redo();
+    b = byId('b1');
+    expect(b.review?.reason).toBe(REVIEW_REASONS.warp);
+
+    expect(gizmo.resetWarp(b, 1)).toBe(true);
+    expect(b.review).toBeUndefined();
+
+    const push = liquifyMeshGesture(b, 1, { mode: 'push', radius: 60, strength: 100 });
+    expect(push.step({ cx: 30, cy: 10, dx: -40, dy: 0 })).toBe(true);
+    expect(push.commit()).toBe(true);
+    expect(verdict(b).fits).toBe(false);
+    expect(b.review).toEqual(reviewFor(verdict(b), REVIEW_REASONS.warp));
+    hist.undo();
+    expect(byId('b1').review).toBeUndefined();
+  });
+});
+
 // ===== the small ones (OVF-10) =====
 
 describe('what a line is drawn with that its advance does not say', () => {
@@ -1089,6 +1537,18 @@ describe('the invariant, over random boxes', () => {
       flipV: r() < 0.15,
       autoHeight: r() < 0.8,
       curve: r() < 0.1 ? 40 : 0,
+      // OVF-7: everything else the check counts, each on a few of the boxes -
+      // ink run past an edge, masks that show part of the picture or none of
+      // it, a perspective drag that can carry the text out.
+      blur: r() < 0.15 ? 1 + Math.round(r() * 3) : 0,
+      motionBlur: r() < 0.1 ? { on: true, x: Math.round(r() * 4 - 2), y: Math.round(r() * 4 - 2), amount: 1 + Math.floor(r() * 4) } : undefined,
+      roughen: r() < 0.1 ? { on: true, amount: Math.round(r() * 10), detail: 0.05, seed: 7 } : undefined,
+      ink: r() < 0.12 ? inkOf(inkLine([[r() * w, r() * h], [r() * w * 1.3, r() * h * 1.3]], 2 + Math.round(r() * 10))) : undefined,
+      clip:
+        r() < 0.08
+          ? { on: true, mode: r() < 0.5 ? 'include' : 'exclude', shapes: [{ kind: 'ellipse', cx: w / 2, cy: h / 2, rx: 5 + r() * w, ry: 5 + r() * h }] }
+          : undefined,
+      warp: r() < 0.08 ? mesh([[0, 0], [w, 0], [0, h], [w + r() * 40 - 20, h + r() * 40 - 20]]) : undefined,
     });
     const fit = r() < 0.4 ? { kind: 'ellipse', cx: x + w / 2, cy: y + h / 2, rx: w / 2 + r() * 80, ry: h / 2 + r() * 60 } : null;
     return { id: `b${i}`, lineN: null, text, x, y, w, h, fit, style: s };

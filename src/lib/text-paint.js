@@ -868,6 +868,42 @@ export function drawClipShapes(ctx, shapes) {
   }
 }
 
+// The rectangle `drawClipShapes` paints for these shapes, box-local page px, as
+// `{ minX, minY, maxX, maxY }`, or null when none of them paints anything: an
+// ellipse's own box, a polygon's points, a brush stroke's points grown by half
+// its width (its caps and joins are round, so no further). An include mask
+// shows nothing outside it, which is what the containment check reads it for.
+export function clipShapesBounds(shapes) {
+  let out = null;
+  const add = (x0, y0, x1, y1) => {
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return;
+    out = out
+      ? { minX: Math.min(out.minX, x0), minY: Math.min(out.minY, y0), maxX: Math.max(out.maxX, x1), maxY: Math.max(out.maxY, y1) }
+      : { minX: x0, minY: y0, maxX: x1, maxY: y1 };
+  };
+  for (const sh of shapes ?? []) {
+    if (sh?.kind === 'ellipse') {
+      const rx = Math.abs(+sh.rx);
+      const ry = Math.abs(+sh.ry);
+      add(+sh.cx - rx, +sh.cy - ry, +sh.cx + rx, +sh.cy + ry);
+    } else if (sh?.kind === 'poly' || sh?.kind === 'stroke') {
+      const r = sh.kind === 'stroke' ? Math.max(0, +sh.size || 0) / 2 : 0;
+      for (const p of sh.pts ?? []) add(+p?.[0] - r, +p?.[1] - r, +p?.[0] + r, +p?.[1] + r);
+    }
+  }
+  return out;
+}
+
+// The same shapes moved by (dx, dy) box-local px, as new objects: what carries
+// a mask with its box when the box grows around it (`growAround`, contain.js).
+export function translateClipShapes(shapes, dx, dy) {
+  return (Array.isArray(shapes) ? shapes : []).map((sh) => {
+    if (sh?.kind === 'ellipse') return { ...sh, cx: sh.cx + dx, cy: sh.cy + dy };
+    if (Array.isArray(sh?.pts)) return { ...sh, pts: sh.pts.map((q) => [q[0] + dx, q[1] + dy]) };
+    return sh;
+  });
+}
+
 // Whether the mask changes anything at all: on, with at least one shape.
 export function clipActive(clip) {
   return !!(clip?.on && (clip.shapes?.length ?? 0) > 0);
@@ -919,8 +955,11 @@ export function shadowExtent(shadows) {
   return out;
 }
 
-// The box-local rectangle every stroke's ink reaches, or null for no ink.
-function inkBounds(ink) {
+// The box-local rectangle every stroke's ink reaches, or null for no ink. The
+// containment check counts the ink with it (contain.js) and the export grows
+// its footprint by it past the box's far edges (`layoutBox`), so it is the one
+// statement of where a box's ink goes.
+export function inkBounds(ink) {
   let out = null;
   for (const k of ink.strokes) {
     const b = strokeBounds(k);

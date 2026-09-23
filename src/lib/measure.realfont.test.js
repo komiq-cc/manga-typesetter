@@ -16,7 +16,7 @@ import {
   textInset,
   contentWidth,
 } from './measure.js';
-import { renderBoxTexture } from './exporter.js';
+import { renderBox, renderBoxTexture } from './exporter.js';
 import { systemFontEntry } from './fonts.js';
 import { defaultStyle, normalizeStyle, REVIEW_REASONS } from './data.js';
 import { neededHeight } from './typeset.js';
@@ -451,8 +451,13 @@ describe('real glyph ink stays inside the box', () => {
 describe('boxInkRect is the ink the exporter paints', () => {
   const SLACK = 0.5 + 0.15;
   const ROUNDED_OUT = 1;
-  function rasterInk(box, p) {
-    const { canvas, ox, oy, ss } = renderBoxTexture(box, p);
+  // The painted ink's rectangle, box-local page px. Through the mesh as well
+  // when the box has one (`renderBox`), whose footprint may be rendered at a
+  // lower resolution than the texture's - so the scale is read off the bitmap.
+  function rasterInk(box, p, warped = false) {
+    const r = warped ? renderBox(box, p) : renderBoxTexture(box, p);
+    const { canvas, ox, oy } = r;
+    const ss = canvas.width / r.cw;
     const W = canvas.width;
     const H = canvas.height;
     const d = canvas.getContext('2d').getImageData(0, 0, W, H).data;
@@ -469,6 +474,7 @@ describe('boxInkRect is the ink the exporter paints', () => {
         if (y > maxY) maxY = y;
       }
     }
+    if (maxX < 0) return null;
     return { x0: minX / ss - ox, y0: minY / ss - oy, x1: (maxX + 1) / ss - ox, y1: (maxY + 1) / ss - oy };
   }
 
@@ -576,6 +582,86 @@ describe('boxInkRect is the ink the exporter paints', () => {
       const msg = `${k}: raster ${got[k]} vs check ${want[k]}`;
       expect(missed, msg).toBeLessThanOrEqual(SLACK);
       expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT + TURNED);
+    }
+  });
+
+  // OVF-7: every effect the export lays on the type, and hand-drawn ink. The
+  // painted side keeps the raster's slack and nothing more, as above. The
+  // check's side has room for `loose` px more on top, because the check says
+  // where a pixel CAN light and the painter lights less than that wherever the
+  // effect fades out: a gaussian's tail under half an 8-bit step (up to a
+  // sigma and a half short of the three the check counts), a crumple that
+  // does not happen to push the outermost pixel its full reach, an oval mask
+  // narrower where the text crosses it than its own box.
+  //
+  // The ink reaches past all four edges of the box - which is the case the
+  // exporter used to cut off on the right and at the bottom, where its
+  // footprint was grown for ink behind the box's corner only.
+  const INK_OUT = {
+    on: true,
+    strokes: [
+      { pts: [[-30, 50, 1], [60, 50, 1]], size: 10, color: '#000000' },
+      { pts: [[80, -20, 1], [80, 40, 1]], size: 10, color: '#000000' },
+      { pts: [[100, 50, 1], [200, 50, 1]], size: 10, color: '#000000' },
+      { pts: [[50, 60, 1], [50, 160, 1]], size: 10, color: '#000000' },
+    ],
+  };
+  const PERSPECTIVE = { on: true, cols: 1, rows: 1, pts: [[0, 0], [170, 0], [0, 100], [230, 140]] };
+  const EFFECTS = [
+    ['a blur', 'WAVE', { blur: 4, strokes: [] }, 1.5 * 4],
+    ['a smear along x', 'WAVE', { strokes: [], motionBlur: { on: true, x: 2, y: 0, amount: 4 } }, 0],
+    ['a diagonal smear', 'WAVE', { strokes: [], motionBlur: { on: true, x: 1, y: -1.5, amount: 3 } }, 0],
+    ['a crumple', 'WAVE', { strokes: [], roughen: { on: true, amount: 8, detail: 0.05, seed: 7 } }, 8 / 2],
+    [
+      'an include mask',
+      'WAVE WAVE',
+      { strokes: [], clip: { on: true, mode: 'include', shapes: [{ kind: 'ellipse', cx: 85, cy: 50, rx: 20, ry: 10 }] } },
+      3,
+    ],
+    [
+      'an outline, a shadow, a blur and a smear together',
+      'WAVE',
+      {
+        strokes: [{ color: '#ffffff', width: 3, opacity: 1 }],
+        shadows: [{ color: '#000000', x: 5, y: 4, blur: 1, opacity: 1 }],
+        blur: 1.5,
+        motionBlur: { on: true, x: 0, y: 2, amount: 2 },
+      },
+      // Both tails - the whole-picture blur's and the shadow's own, counted at
+      // twice its blur - and the smear's faint outer taps dim them further.
+      1.5 * 1.5 + 2 * 1,
+    ],
+    ['ink past every edge', null, { strokes: [], shadows: [], ink: INK_OUT }, 0],
+    [
+      'ink past every edge, with text, an outline and a shadow',
+      'WAVE',
+      { ink: INK_OUT, strokes: [{ color: '#ffffff', width: 4, opacity: 1 }], shadows: [{ color: '#000000', x: 4, y: 6, blur: 0, opacity: 1 }] },
+      0,
+    ],
+    ['a perspective drag', 'WAVE', { strokes: [], warp: PERSPECTIVE }, 0],
+  ];
+
+  it.each(EFFECTS)('%s', (label, text, extra, loose) => {
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [],
+        boxes: [{ id: 'b1', lineN: null, text, x: 200, y: 150, w: 170, h: 100, style: styleFor('Comic Neue', extra) }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    const geo = boxInkRect(boxCandidate(box, boxText(box, p)));
+    const got = rasterInk(box, p, !!extra.warp);
+    const want = { x0: geo.x, y0: geo.y, x1: geo.x + geo.w, y1: geo.y + geo.h };
+    for (const k of ['x0', 'y0', 'x1', 'y1']) {
+      const missed = k.endsWith('0') ? want[k] - got[k] : got[k] - want[k];
+      const msg = `${k}: raster ${got[k]} vs check ${want[k]}`;
+      expect(missed, msg).toBeLessThanOrEqual(SLACK);
+      expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT + loose);
     }
   });
 });

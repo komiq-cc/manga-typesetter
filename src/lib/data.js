@@ -769,6 +769,10 @@ export const REVIEW_REASONS = Object.freeze({
   manual: 'sized by hand',
   curve: 'text on a curve',
   warp: 'warped',
+  // Hand-drawn ink and mask shapes sit at box-local px from the box's corner,
+  // which growing the box would slide against its text (contain.js).
+  ink: 'hand-drawn ink',
+  mask: 'masked',
   // An auto box found overflowing by a pass that only grows heights - a chapter
   // opening, a font arriving - and so has not been refitted yet.
   stale: 'no longer fits',

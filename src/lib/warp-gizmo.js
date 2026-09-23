@@ -23,7 +23,7 @@
 
 import { identityMesh, isIdentityMesh, resampleMesh, meshMap } from './warp.js';
 import { WARP_MIN_GRID, WARP_MAX_GRID } from './data.js';
-import { cloneStyle, markUnsaved } from './store.svelte.js';
+import { cloneStyle, markUnsaved, reviewBox, pageById } from './store.svelte.js';
 import { record } from './editor/history.svelte.js';
 
 // The handle's radius on SCREEN, px, and it is screen px on purpose: a handle
@@ -289,6 +289,10 @@ export function commitWarpDrag(box, pageId, before) {
   const after = cloneStyle(box.style);
   if (JSON.stringify(before) === JSON.stringify(after)) return false;
   markUnsaved();
+  // The mesh carries the box's ink wherever it was dragged, and the flag has to
+  // say whether that is still inside the box (OVF-7). Once, here: a flag per
+  // pointer move would repaint every badge on the page forty times a second.
+  reviewBox(box, pageById(pageId) ?? undefined);
   record({ t: 'style', pageId, boxId: box.id, before, after });
   return true;
 }
@@ -353,6 +357,7 @@ export function resetWarp(box, pageId) {
   const before = cloneStyle(box.style);
   w.pts = [];
   markUnsaved();
+  reviewBox(box, pageById(pageId) ?? undefined);
   record({ t: 'style', pageId, boxId: box.id, before, after: cloneStyle(box.style) });
   return true;
 }
