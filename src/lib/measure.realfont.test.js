@@ -19,6 +19,7 @@ import {
 import { renderBoxTexture } from './exporter.js';
 import { systemFontEntry } from './fonts.js';
 import { defaultStyle, normalizeStyle, REVIEW_REASONS } from './data.js';
+import { neededHeight } from './typeset.js';
 
 // ===========================================================================
 // Text measured with real fonts
@@ -329,6 +330,32 @@ describe('real glyph ink stays inside the box', () => {
     autoFitBox(box, p);
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
     expect(box.review).toBeUndefined();
+  });
+
+  // OVF-8: the height a chapter opens at is the ink's as well as the lines'.
+  // Accented capitals over a line of descenders, at a line height of 0.8 and in
+  // the default outline, stand taller than their line boxes; sized from the
+  // line boxes alone, the box was flagged "no longer fits" on every opening and
+  // nothing grew. The grow-only height reads the ink.
+  it.each(['Comic Neue', 'DejaVu Sans'])('%s: accents over descenders at a tight line height open inside their box', (font) => {
+    const text = 'ÉCLAT\ngypsy';
+    const s = styleFor(font, { lineHeight: 0.8 });
+    loadProjectPages([
+      {
+        id: 1,
+        w: 600,
+        h: 400,
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, x: 200, y: 150, w: 240, h: 20, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    expect(placeBlock(boxCandidate(box, boxText(box, p))).lines).toEqual(['ÉCLAT', 'gypsy']);
+    expect(box.h).toBeGreaterThan(neededHeight(2, box.style, textInset(box.style)));
+    expect(box.review).toBeUndefined();
+    expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
   });
 
   // OVF-4: a word no line can hold, with real advances. The breaker has no

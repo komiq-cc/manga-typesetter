@@ -22,6 +22,10 @@
 //       No new layout: line breaking does not read the height.
 //   boxInkRect(cand, place?)         -> { x, y, w, h } box-local, or null (no ink)
 //   containBox(cand, place?)         -> { fits, overflow: { l, t, r, b } } (px, raw)
+//   inkHeight(cand, place?)          -> the height the box needs for its ink to
+//       clear its top and bottom, grown the way `valign` grows it, or 0 when
+//       no height would change the verdict. For the grow-only paths, which may
+//       only ever make a box taller.
 //   fitBox(cand, { page, strip, minSize, geometry })
 //                                    -> { x, y, w, h, size, fits, overflow, review }
 //       The ladder, run once: grow the height, then the width, within
@@ -279,6 +283,37 @@ export function reviewFor(verdict, reason) {
     overflow: { l: px(o.l), t: px(o.t), r: px(o.r), b: px(o.b) },
     reason: reason || REVIEW_REASONS.stale,
   };
+}
+
+// ===== the height the ink needs =====
+//
+// The line boxes are not the ink. `neededHeight` sizes a box as its lines times
+// the line height plus the padding, and the glyphs are not bound by that: an
+// accented capital rises above the font's ascent, a deep descender drops below
+// its descent, a line height under 1 packs the lines tighter than the glyphs
+// stand, and the outline and the shadows reach past all of it (OVF-8). So the
+// height a box needs is the larger of what its lines need and what its ink
+// needs, and this is the second one, read off the same verdict as everything
+// else here.
+//
+// Grown the way the box grows - `valign` anchors it: a centred block gains half
+// of any growth on each side, a top-aligned one gains it all at the bottom -
+// and only when the verdict is actually failing on an edge a taller box can
+// clear. Within the tolerance is inside, and a box the grow-only paths grew for
+// a third of a pixel would be every box in a chapter changing height the first
+// time it opened. Ink past the edge the block is anchored to is no reason to
+// grow: the block moves with that edge.
+//
+// Once it grows, it grows clear of all of it (see GROW_EPS), as the ladder's
+// height step does, so the answer is the same whichever of the two gets there.
+export function inkHeight(cand, place = placeBlock(cand)) {
+  if (place.isCurve) return 0;
+  const s = place.s;
+  const o = layoutSides(s, containBox(cand, place).overflow);
+  const va = valignOf(s);
+  const failing = va === 'middle' ? Math.max(o.t, o.b) : va === 'top' ? o.b : o.t;
+  if (!(failing > CONTAIN_TOL)) return 0;
+  return cand.h + growFor(heightNeed(s, o));
 }
 
 // ===== how far a box may grow =====

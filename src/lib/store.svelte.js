@@ -63,6 +63,7 @@ import {
   placeBlock,
   placeAtHeight,
   containBox,
+  inkHeight,
   fitBox,
   reviewFor,
   isAutoBox,
@@ -561,10 +562,12 @@ function clamp(v, a, b) {
 //                  resized or shrunk here: it gets the verdict and nothing else.
 //   grow-only      `refitBox` and `autoFitBoxTo`. A chapter opening, a font
 //                  arriving, the component's own safety net: the height grows
-//                  to the line count as it always has, and the flag is brought
-//                  up to date. Nothing else moves - opening a chapter must never
-//                  change a box's size, width or position, so a box laid out by
-//                  an older engine that no longer fits is flagged, not refitted.
+//                  to hold the lines and their ink (`growHeightTo`), and the
+//                  flag is brought up to date. Nothing else moves - opening a
+//                  chapter must never change a box's size, width or position,
+//                  so a box laid out by an older engine that no longer fits is
+//                  grown taller when that is enough, and otherwise flagged, not
+//                  refitted.
 //
 // Every path that can change what the box has to fit calls one of them - inline
 // typing, the Inspector's text field and style controls, the queue's own
@@ -689,18 +692,16 @@ export function reviewBox(b, p = page(), place) {
   writeReview(b, reviewFor(v, reason));
 }
 
-// Grow-only by line count, and the verdict. The chapter-open and font-arrival
-// path (`refitPage`), and the history's fallback for an entry that recorded no
-// geometry: neither is an edit, so neither may resize anything but the height,
-// and that only upward.
+// Grow-only by line count and ink, and the verdict. The chapter-open and
+// font-arrival path (`refitPage`), and the history's fallback for an entry that
+// recorded no geometry: neither is an edit, so neither may resize anything but
+// the height, and that only upward.
 export function refitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
   const cand = boxCandidate(b, boxText(b, p));
   const place = placeBlock(cand);
-  const changed = isAutoBox(cand) ? growHeightTo(b, place.lines.length, p) : false;
-  // The growth moved `y` and `h` and nothing else, which the lines do not read.
-  reviewBox(b, p, changed ? placeAtHeight(place, boxCandidate(b, cand.text)) : place);
-  return changed;
+  // Text on a curve has no lines to count, and is never an auto box.
+  return growAndReview(b, p, cand, place, place.isCurve ? 0 : place.lines.length);
 }
 
 // ===== the same fit, for a caller that has already broken the lines =====
@@ -720,20 +721,45 @@ export function refitBox(b, p = page()) {
 // `lineCount` is trusted. It has to be - the whole point is not to re-derive it
 // - and the one caller is the one place in the app that cannot get it wrong,
 // because the number it passes is the number of lines it is about to draw.
+//
+// The block is still placed once here, for the ink: the verdict reads it, and
+// so does the height (OVF-8, below). Placing it is the layout memo's hit on the
+// lines the component has just broken, not a second break.
 export function autoFitBoxTo(b, lineCount, p = page()) {
   if (!b?.style || !canMeasure()) return false;
-  const changed = isAutoBox(boxCandidate(b, boxText(b, p))) ? growHeightTo(b, lineCount, p) : false;
-  reviewBox(b, p);
+  const cand = boxCandidate(b, boxText(b, p));
+  return growAndReview(b, p, cand, placeBlock(cand), lineCount);
+}
+
+// The two grow-only paths' shared tail: grow an auto box's height, then write
+// the verdict. The growth moves `y` and `h` and nothing else, which the lines
+// do not read, so the block placed for the box as it stood is re-placed at the
+// new height rather than laid out again.
+function growAndReview(b, p, cand, place, lineCount) {
+  const changed = isAutoBox(cand) ? growHeightTo(b, lineCount, p, cand, place) : false;
+  reviewBox(b, p, changed ? placeAtHeight(place, boxCandidate(b, cand.text)) : place);
   return changed;
 }
 
-// The grow-only height rule, once: the line boxes inside the content box (the
-// box less `textInset` - its padding and its outline's reach - above and below),
-// anchored by `valign`, capped by the page - or by the whole strip in a
-// longstrip document, where a box may hang over a seam.
-function growHeightTo(b, lineCount, p) {
+// The grow-only height rule, once: the taller of what the lines need and what
+// the ink needs, anchored by `valign`, capped by the page - or by the whole
+// strip in a longstrip document, where a box may hang over a seam.
+//
+// The lines: their line boxes inside the content box (the box less
+// `textInset` - its padding and its outline's reach - above and below).
+//
+// The ink (OVF-8): the line boxes are not the glyphs. An accent over a capital
+// rises past the font's ascent, a descender under a tight line height drops
+// past the line box, and a shadow thrown down reaches past both - and a box
+// sized from its line count alone had all of that outside it, flagged "no
+// longer fits" on every opening with nothing done about it, when growing is
+// exactly what these paths are allowed to do. `inkHeight` (contain.js) is the
+// height at which the verdict clears on the edge that growing moves; zero when
+// the ink is already inside, or only outside on the edge the block is anchored
+// to, which no height clears.
+function growHeightTo(b, lineCount, p, cand, place) {
   const s = b.style;
-  const need = neededHeight(lineCount, s, textInset(s));
+  const need = Math.max(neededHeight(lineCount, s, textInset(s)), inkHeight(cand, place));
   const extent = stripOf(p);
   const next = extent && extent.total > 0
     ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)

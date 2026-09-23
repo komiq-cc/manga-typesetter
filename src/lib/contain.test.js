@@ -462,8 +462,11 @@ describe('the ladder, on an auto box', () => {
     expect(b.style.size).toBe(S);
   });
 
-  // Test 3, the fixing half.
-  it('grows the height for an accent above a tight leading, and the width for an italic', () => {
+  // Test 3, the fixing half. Growing the height is something opening a chapter
+  // may do (OVF-8), so an accent over a tight leading is inside from the start;
+  // growing the width is not, so an italic's lean waits for an edit to run the
+  // ladder.
+  it('grows the height for an accent above a tight leading on opening, and the width for an italic on an edit', () => {
     const outlined = { strokes: [{ color: '#fff', width: 3, opacity: 1 }] };
     const p = load([
       // Accented capitals at lineHeight 0.9, outlined as the default style is:
@@ -472,23 +475,26 @@ describe('the ladder, on an auto box', () => {
       // auto height's inset holds the outline. Inside, with nothing to fit.
       { id: 'caps', lineN: null, text: 'ÉTÉ', x: 100, y: 100, w: 200, h: 10, style: style({ lineHeight: 0.9, ...outlined }) },
       // An accent over a descender at 0.8: 1.13 em of glyph in a 0.8 em line
-      // box, more than the inset's room above and below - the line boxes are
-      // what the open-time height is sized from, so this one is flagged.
+      // box, more than the inset's room above and below. Sized from its line
+      // boxes alone, this one was flagged on every opening; the height the
+      // grow-only paths give it now is its ink's.
       { id: 'acc', lineN: null, text: 'Égy', x: 100, y: 300, w: 200, h: 10, style: style({ lineHeight: 0.8, ...outlined }) },
       { id: 'ita', lineN: null, text: 'fff', x: 100, y: 500, w: 3 * ADV + BOX_PAD * 2, h: 40, style: style({ align: 'left', italic: true }) },
     ]);
     expect(byId('caps').review).toBeUndefined();
     expect(verdict(byId('caps')).fits).toBe(true);
-    for (const id of ['acc', 'ita']) {
-      const b = byId(id);
-      expect(b.review, id).toBeDefined();
-      autoFitBox(b, p);
-      expect(verdict(b).fits, id).toBe(true);
-      expect(b.review, id).toBeUndefined();
-    }
-    // The accent box grew past the line-box height `neededHeight` gives it.
     const acc = byId('acc');
+    expect(acc.review).toBeUndefined();
+    expect(verdict(acc).fits).toBe(true);
+    // Past the line-box height `neededHeight` gives it.
     expect(acc.h).toBeGreaterThan(neededHeight(1, acc.style, textInset(acc.style)));
+    // Nothing for an edit to do to it; the italic is the edit's.
+    expect(autoFitBox(acc, p)).toBe(false);
+    const ita = byId('ita');
+    expect(ita.review).toBeDefined();
+    autoFitBox(ita, p);
+    expect(verdict(ita).fits).toBe(true);
+    expect(ita.review).toBeUndefined();
   });
 
   // Test 4: a token too long for its line. The width grows inside the balloon;
@@ -773,6 +779,52 @@ describe('the grow-only paths', () => {
     const once = geomOf(b);
     expect(autoFitBoxTo(b, 4, p)).toBe(false);
     expect(geomOf(b)).toEqual(once);
+  });
+
+  // OVF-8. The height these paths give a box is the taller of what its line
+  // boxes need and what its ink needs: here a shadow thrown 10px past the
+  // block, which no line count knows about. Grown on opening from the edge the
+  // block is anchored to, inside and unflagged, and settled - and the editor's
+  // safety net, which counts lines it has already broken, gives the same
+  // height.
+  it.each([
+    ['top', 10],
+    ['bottom', -10],
+    ['middle', 10],
+  ])('grow a %s-aligned box for a shadow its line boxes do not hold', (valign, dy) => {
+    const s = style({ valign, shadows: [{ color: '#000', x: 0, y: dy, blur: 0, opacity: 1 }] });
+    const lineOnly = neededHeight(1, s, textInset(s));
+    const p = load([{ id: 'b1', lineN: null, text: 'HELLO', x: 100, y: 300, w: 200, h: lineOnly, style: s }]);
+    const b = byId('b1');
+    expect(b.h).toBeGreaterThan(lineOnly);
+    // By no more than the throw: twice it for a centred block, which grows
+    // half on each side.
+    expect(b.h - lineOnly).toBeLessThanOrEqual((valign === 'middle' ? 2 : 1) * Math.abs(dy) + 1);
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    if (valign === 'top') expect(b.y).toBe(300);
+    else if (valign === 'bottom') expect(b.y + b.h).toBe(300 + lineOnly);
+    else expect(b.y + b.h / 2).toBeCloseTo(300 + lineOnly / 2, 6);
+    expect({ x: b.x, w: b.w, size: b.style.size }).toEqual({ x: 100, w: 200, size: S });
+    expect(refitPage(p)).toBe(0);
+    const grown = geomOf(b);
+    b.y = 300;
+    b.h = lineOnly;
+    expect(autoFitBoxTo(b, 1, p)).toBe(true);
+    expect(geomOf(b)).toEqual(grown);
+    expect(autoFitBoxTo(b, 1, p)).toBe(false);
+  });
+
+  // ...but never for ink past the edge the block is anchored to: the block
+  // moves with that edge, so no height clears it. Flagged, as it was.
+  it('do not grow a box for ink past the edge its block is anchored to', () => {
+    const s = style({ valign: 'top', shadows: [{ color: '#000', x: 0, y: -10, blur: 0, opacity: 1 }] });
+    const lineOnly = neededHeight(1, s, textInset(s));
+    load([{ id: 'b1', lineN: null, text: 'HELLO', x: 100, y: 300, w: 200, h: lineOnly, style: s }]);
+    const b = byId('b1');
+    expect(geomOf(b)).toEqual({ x: 100, y: 300, w: 200, h: lineOnly, size: S });
+    expect(b.review).toMatchObject({ kind: 'overflow', reason: REVIEW_REASONS.stale });
+    expect(b.review.overflow.t).toBeGreaterThan(CONTAIN_TOL);
   });
 
   it('a drag that makes the text overflow flags it and resizes nothing else', () => {
