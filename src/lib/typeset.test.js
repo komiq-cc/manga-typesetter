@@ -359,6 +359,32 @@ describe('balanceLines - determinism', () => {
     expect(Number.isFinite(scored.cost)).toBe(true);
     expect(balanceCandidates(text, 20, chars)).toEqual([scored]);
   });
+
+  it('sets a 70-word paragraph by the search, and says which path it took', () => {
+    // Past the old limit of 60 words, and at 21 lines past the old 16 as well.
+    // Greedy wrapping, which is what a paragraph this long used to get, fills
+    // KEEPER WAS to the brim and strands SO in front of a word it cannot share
+    // a line with.
+    const text =
+      'THE OLD KEEPER WAS SO UNCHARACTERISTICALLY QUIET WHEN HE FINALLY CAME DOWN FROM THE ' +
+      'TOWER THAT WE KNEW SOMETHING WAS WRONG BEFORE HE SAID A WORD AND WHEN HE DID SPEAK IT ' +
+      'WAS ONLY TO TELL US THAT THE SHIPS HAD STOPPED COMING YEARS AGO AND THAT HE HAD GONE ON ' +
+      'LIGHTING THE LAMP EVERY NIGHT ANYWAY BECAUSE SOMEBODY HAD TO DO IT AND BECAUSE THE DARK ' +
+      'MUST NEVER WIN';
+    expect(text.split(' ')).toHaveLength(70);
+    const alone = (l) => !/\s/.test(l) && l.replace(/[^\p{L}\p{N}]/gu, '').length < TYPESET_DEFAULTS.minOrphan;
+
+    const scored = balanceScored(text, 20, chars);
+    expect(scored.greedy).toBe(false);
+    expect(scored.orphansRelaxed).toBe(false);
+    expect(scored.lines).toHaveLength(21);
+    expect(scored.lines.filter(alone)).toEqual([]);
+    expect(scored.lines.join(' ').split(' ')).toEqual(text.split(' '));
+
+    const before = balanceScored(text, 20, chars, { maxWords: 60, maxLines: 16 });
+    expect(before.greedy).toBe(true);
+    expect(before.lines.filter(alone)).toEqual(['SO']);
+  });
 });
 
 // ===== what the choice knew =====
@@ -563,10 +589,22 @@ describe('balanceLines - one width per line', () => {
       seen.push(L);
       return new Array(L).fill(16);
     };
-    balanceLines('THE WORLD IS ENDING AND NOBODY CARES AT ALL', spy, chars);
+    const text = 'THE WORLD IS ENDING AND NOBODY CARES AT ALL';
+    const lines = balanceLines(text, spy, chars);
     // Once each, so the search and the scorer can never be looking at two
-    // different balloons; and never above the number of words, because a block
-    // of nine words has nowhere to put a tenth line.
+    // different balloons; and not past the count where the lines alone would
+    // cost more than the block already found.
+    // Four lines at 0.55 is the winner, and five lines cost 0.6 before a single
+    // line of them is priced.
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(lines).toHaveLength(4);
+    expect(Math.max(...seen)).toBe(4);
+    // Every count is on offer to a caller that asks for them all - but never one
+    // above the number of words, because a block of nine words has nowhere to
+    // put a tenth line. (Eight and nine are asked about and have no breaking:
+    // IS and AT would each need a line of their own.)
+    seen.length = 0;
+    expect(balanceCandidates(text, spy, chars).map((c) => c.lines.length)).toEqual([4, 5, 6, 7]);
     expect(new Set(seen).size).toBe(seen.length);
     expect(Math.max(...seen)).toBe(9);
   });

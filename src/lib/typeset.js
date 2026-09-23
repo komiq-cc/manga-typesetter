@@ -157,8 +157,8 @@ import enUsPatterns from 'hyphenation.en-us';
 // of `breakParagraph` for why the rule has to be relaxable at all.
 export const TYPESET_DEFAULTS = {
   minOrphan: 3, // a word with fewer letters than this may not sit alone on a line
-  maxLines: 16, // candidate line counts above this are not enumerated
-  maxWords: 60, // beyond this the DP is skipped and greedy wrapping is used
+  maxLines: 32, // candidate line counts above this are not enumerated
+  maxWords: 150, // beyond this the DP is skipped and greedy wrapping is used
   ragged: 1, // weight on each line's squared deviation from the target fill ratio
   lastShort: 0.6, // extra weight when the FINAL line is the short one
   pinch: 3, // weight on an INTERIOR line falling short of the target
@@ -446,7 +446,9 @@ function widthsResolver(spec) {
 // One paragraph - no newlines - broken every way the search keeps: the best
 // breaking at each line count it could use (`byCount`, ascending), and the one
 // of those that wins (`best`). Both in the published shape; see `balanceScored`.
-function breakParagraph(para, widthSpec, measureFn, o) {
+// `every` asks for every count; without it the search stops at the first count
+// that can no longer win, and `byCount` ends there.
+function breakParagraph(para, widthSpec, measureFn, o, every) {
   const words = [];
   const re = /\S+/g;
   let m;
@@ -458,6 +460,20 @@ function breakParagraph(para, widthSpec, measureFn, o) {
     const blank = { lines: [''], merit: o.lineCost, cost: o.lineCost, overflowLines: [], greedy: false, orphansRelaxed: false };
     return { best: blank, byCount: [blank] };
   }
+
+  // Every string is handed to `measureFn` once, however many ways it is reached:
+  // the same word at two places in the paragraph, or the same word asked about
+  // by the hyphenation gate and then by the search. In the app `measureFn` is a
+  // canvas `measureText`, and it is the dearest thing this module does.
+  const measured = new Map();
+  const measure = (s) => {
+    let v = measured.get(s);
+    if (v === undefined) {
+      v = measureFn(s);
+      measured.set(s, v);
+    }
+    return v;
+  };
 
   // Asked for once per line count and remembered, for two reasons. The cheap one
   // is that `solve` and `score` both want it. The load-bearing one is that the
@@ -499,16 +515,7 @@ function breakParagraph(para, widthSpec, measureFn, o) {
   //
   // It works in words, `[first, end)` per line, because it never breaks inside
   // one; `fallback` below turns those into the positions everything else uses.
-  const wcache = new Map();
-  const wordsWidth = (i, j) => {
-    const k = i * (n + 1) + j;
-    let v = wcache.get(k);
-    if (v === undefined) {
-      v = measureFn(para.slice(words[i].s, words[j - 1].e));
-      wcache.set(k, v);
-    }
-    return v;
-  };
+  const wordsWidth = (i, j) => measure(para.slice(words[i].s, words[j - 1].e));
   const greedyAt = (w) => {
     const out = [];
     const allow = (k) => w[Math.min(k, w.length - 1)];
@@ -561,8 +568,6 @@ function breakParagraph(para, widthSpec, measureFn, o) {
     // fifteen hypothetical line counts, and `widthsFor` is a stranger's function
     // that this module should call as few times as it can get away with.
     let longest = 0;
-    // Through the same cache the greedy fallback uses, so a word is measured
-    // once per paragraph however many of these passes want to know about it.
     for (let j = 0; j < n; j++) longest = Math.max(longest, wordsWidth(j, j + 1));
     let widest = 0;
     for (let L = 1; L <= o.maxLines && widest <= longest + FIT_EPS; L++) {
@@ -611,14 +616,17 @@ function breakParagraph(para, widthSpec, measureFn, o) {
     para.slice(pos[a].start, pos[b].end) + (pos[b].hy === HY_ADDED ? '-' : '');
   const tokens = (a, b) => pos[b].wEnd - pos[a].wStart + 1;
 
-  const cache = new Map();
   // The measured width of the line as it will be DRAWN, hyphen included. A
-  // hyphen that was not measured is a hyphen hanging out of the balloon.
+  // hyphen that was not measured is a hyphen hanging out of the balloon. Kept
+  // by position as well as by string, because the search asks about the same
+  // pair many times and building the string to look it up would cost more than
+  // the lookup saves.
+  const cache = new Map();
   const width = (a, b) => {
     const k = a * (M + 1) + b;
     let v = cache.get(k);
     if (v === undefined) {
-      v = measureFn(lineText(a, b));
+      v = measure(lineText(a, b));
       cache.set(k, v);
     }
     return v;
@@ -709,8 +717,24 @@ function breakParagraph(para, widthSpec, measureFn, o) {
   // Optimal break points for exactly `L` lines, by dynamic programming over
   // (line index, positions consumed) - Knuth-style, rather than greedy, because
   // a break that looks best locally routinely forces a terrible one two lines
-  // later. The strings here are one speech bubble long, so the cubic worst case
-  // is not a cost worth trading correctness for.
+  // later.
+  //
+  // A line is only ever as long as its row, and that is what keeps this cheap.
+  // The line ending at `b` is tried from the latest start back, and the first
+  // start that does not fit ends the search, because every earlier one is the
+  // same line with more text in front of it: wider, and more tokens, so it
+  // cannot fit either. The pruning is exact - it skips nothing the full search
+  // could have chosen - and it turns the work from every pair of positions into
+  // every position times a line's worth of them. That matters twice over,
+  // because a pair is a string handed to `measureFn`, which in the app is a
+  // canvas `measureText` and the dearest thing this module does.
+  //
+  // `reach` is the furthest position the previous line could end at. No line
+  // starts beyond it, so the search for a line ending at `b` begins there, and
+  // once even that start is too far back for `b` to fit, no later `b` can be
+  // reached at all - with one exception, which is why the test is skipped for
+  // it: a line ending at an invented hyphen carries a '-' that the longer line
+  // after it does not, so the longer line is not simply the same text and more.
   //
   // Returns the cuts, not the cost: what a breaking costs is `score`'s business,
   // and this may have searched under a weight the score does not use.
@@ -719,27 +743,34 @@ function breakParagraph(para, widthSpec, measureFn, o) {
     const T = targetFor(w);
     let prev = new Array(M + 1).fill(Infinity);
     prev[0] = 0;
+    let reach = 0;
     const back = [];
     for (let k = 1; k <= L; k++) {
       const cur = new Array(M + 1).fill(Infinity);
       const bk = new Array(M + 1).fill(-1);
-      for (let b = k; b <= M; b++) {
-        if (M - b < L - k) continue; // not enough text left to fill the remaining lines
-        for (let a = k - 1; a < b; a++) {
+      let next = -1;
+      // Not past `M - (L - k)`: every later line needs a position of its own.
+      for (let b = k; b <= M - (L - k); b++) {
+        const from = Math.min(b - 1, reach);
+        if (from < b - 1 && pos[b].hy !== HY_ADDED && !fits(from, b, k, w)) break;
+        for (let a = from; a >= k - 1; a--) {
+          if (!fits(a, b, k, w)) break;
           if (prev[a] === Infinity) continue;
-          if (!fits(a, b, k, w)) continue;
           if (!allowOrphan && !orphanOk(a, b, L)) continue;
           const tot = prev[a] + lineCostOf(a, b, k, L, T, w, pinchW);
-          // Strict `<` while `a` climbs, so a tie keeps the smallest `a` - the
-          // one that put more words on the earlier line. That is the whole of
-          // the tie-breaking rule inside a candidate, and it is why two runs on
-          // the same input can never differ.
-          if (tot < cur[b]) {
+          // `<=` while `a` falls, so a tie keeps the smallest `a` - the one
+          // that put more words on the earlier line. That is the whole of the
+          // tie-breaking rule inside a candidate, and it is why two runs on the
+          // same input can never differ.
+          if (tot <= cur[b]) {
             cur[b] = tot;
             bk[b] = a;
           }
         }
+        if (cur[b] !== Infinity) next = b;
       }
+      if (next < 0) return null;
+      reach = next;
       back.push(bk);
       prev = cur;
     }
@@ -840,12 +871,22 @@ function breakParagraph(para, widthSpec, measureFn, o) {
   // rather than the number of words, because a single hyphenatable word is a
   // paragraph that can legally occupy three lines - which is the whole of the
   // reference case.
+  //
+  // A block costs at least `lineCost` a line, so once the lines alone would cost
+  // what the cheapest block so far costs in all, no count from there up can win,
+  // and a caller that only wants the winner is spared them. That is most of the
+  // work in a wide box, where every count past the right one is still a legal
+  // breaking and each takes a full search to price.
   const maxL = Math.min(M, o.maxLines);
   const everyCount = (allowOrphan) => {
     const out = [];
+    let cheapest = Infinity;
     for (let L = 1; L <= maxL; L++) {
+      if (!every && o.lineCost * L >= cheapest) break;
       const cand = bestAt(L, allowOrphan);
-      if (cand) out.push(cand);
+      if (!cand) continue;
+      out.push(cand);
+      cheapest = Math.min(cheapest, cand.cost);
     }
     return out;
   };
@@ -933,7 +974,7 @@ function joinParagraphs(parts) {
 //                   company, and carries the cheapest orphans instead.
 export function balanceScored(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
-  return joinParagraphs(paragraphsOf(text).map((para) => breakParagraph(para, width, measureFn, o).best));
+  return joinParagraphs(paragraphsOf(text).map((para) => breakParagraph(para, width, measureFn, o, false).best));
 }
 
 // The best breaking at every line count the text can be set in, ascending, each
@@ -950,7 +991,7 @@ export function balanceCandidates(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
   let runs = new Map([[0, { cost: 0, parts: [] }]]);
   for (const para of paragraphsOf(text)) {
-    const { byCount } = breakParagraph(para, width, measureFn, o);
+    const { byCount } = breakParagraph(para, width, measureFn, o, true);
     const next = new Map();
     for (const [L0, run] of runs) {
       for (const cand of byCount) {
