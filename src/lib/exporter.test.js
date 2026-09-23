@@ -13,7 +13,7 @@ import {
   sanitizeExportName,
 } from './exporter.js';
 import { PAGE_W, PAGE_H, normalizeStyle } from './data.js';
-import { arcLayout, layoutLines, BOX_PAD, balloonWidthsFor, setTypesetEnabled, baselineInLine } from './measure.js';
+import { arcLayout, layoutLines, BOX_PAD, textInset, balloonWidthsFor, setTypesetEnabled, baselineInLine } from './measure.js';
 import { patternTilePx, TILE_SS } from './text-paint.js';
 import { neededHeight } from './typeset.js';
 
@@ -463,6 +463,33 @@ describe('shaped lines reach the page', () => {
       // No ink shift under node - there is no canvas to measure ink with, so
       // `inkShiftY` answers zero and the block is centred by its line box.
       expect(y).toBe(box.y + (box.h - lineH) / 2 + baselineInLine(box.style, box.style.size));
+    });
+
+    // An outline is ink the box has to hold as well, so the content box is the
+    // box less the padding AND the outline's reach (`textInset`), on every side:
+    // a left- or right-aligned block is anchored that far in, and so is a top-
+    // or bottom-aligned one - which puts the outline's outer edge, not the
+    // glyph's, 2px inside the box. Anchored at the bare padding, a line that
+    // filled its width drew its outline 3px past the edge it was aligned to.
+    it('anchors an outlined left/top block its text inset in from the box corner', async () => {
+      const box = boxWith({ size: 20, align: 'left', valign: 'top', shadow: { on: false } });
+      box.text = 'ONE';
+      await renderPageCanvas({ id: 7, w: 800, h: 1200, lines: [], boxes: [box] });
+      const [x, y] = [composited.at(-1)[0] + placed.at(-1)[0], composited.at(-1)[1] + placed.at(-1)[1]];
+      // The default outline: 3px, so an inset of 5.
+      expect(textInset(box.style)).toBe(BOX_PAD + 3);
+      expect(x).toBe(box.x + textInset(box.style));
+      expect(y).toBe(box.y + textInset(box.style) + baselineInLine(box.style, box.style.size));
+    });
+
+    it('anchors an outlined right/bottom block its text inset in from the far corner', async () => {
+      const box = boxWith({ size: 20, align: 'right', valign: 'bottom', shadow: { on: false } });
+      box.text = 'ONE';
+      await renderPageCanvas({ id: 7, w: 800, h: 1200, lines: [], boxes: [box] });
+      const [x, y] = [composited.at(-1)[0] + placed.at(-1)[0], composited.at(-1)[1] + placed.at(-1)[1]];
+      const lineH = box.style.size * box.style.lineHeight;
+      expect(x).toBe(box.x + box.w - textInset(box.style));
+      expect(y).toBe(box.y + box.h - textInset(box.style) - lineH + baselineInLine(box.style, box.style.size));
     });
 
     it('gives an auto-fitted box no slack under its last line', async () => {
@@ -1323,12 +1350,14 @@ describe('a box with every effect on at once', () => {
       [1, 'rgba(0,0,255,0.5)'],
     ]);
 
-    // The gradient spans the content box - the box less its padding, as tall as
-    // the block - and 90deg runs it left to right across exactly that width.
+    // The gradient spans the content box - the box less its text inset (the
+    // padding plus the 3px outline's reach) on each side, as tall as the block -
+    // and 90deg runs it left to right across exactly that width.
     const lineH = box.style.size * box.style.lineHeight;
     const [x0, y0, x1, y1] = gradStops[0].args;
-    expect(x0).toBeCloseTo(pad + BOX_PAD, 6);
-    expect(x1).toBeCloseTo(pad + box.w - BOX_PAD, 6);
+    expect(textInset(box.style)).toBe(BOX_PAD + 3);
+    expect(x0).toBeCloseTo(pad + textInset(box.style), 6);
+    expect(x1).toBeCloseTo(pad + box.w - textInset(box.style), 6);
     expect(y0).toBeCloseTo(pad + (box.h - lineH) / 2 + lineH / 2, 6);
     expect(y1).toBeCloseTo(y0, 6);
 

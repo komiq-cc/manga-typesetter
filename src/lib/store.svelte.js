@@ -54,7 +54,7 @@ import {
 // metrics. The alternative was a second measurer living in the store, which is
 // exactly how the editor and the exporter would start disagreeing about where a
 // line breaks.
-import { canMeasure, BOX_PAD, balancedBoxSize, clearLayoutMemo } from './measure.js';
+import { canMeasure, textInset, balancedBoxSize, clearLayoutMemo } from './measure.js';
 // Containment - whether a box's text stays inside the box, and the ladder that
 // makes it. Pure, and it joins the lazy store <-> measure cycle above on the
 // same terms: nothing in it runs at evaluation time.
@@ -727,12 +727,13 @@ export function autoFitBoxTo(b, lineCount, p = page()) {
   return changed;
 }
 
-// The grow-only height rule, once: the line boxes plus padding, anchored by
-// `valign`, capped by the page - or by the whole strip in a longstrip document,
-// where a box may hang over a seam.
+// The grow-only height rule, once: the line boxes inside the content box (the
+// box less `textInset` - its padding and its outline's reach - above and below),
+// anchored by `valign`, capped by the page - or by the whole strip in a
+// longstrip document, where a box may hang over a seam.
 function growHeightTo(b, lineCount, p) {
   const s = b.style;
-  const need = neededHeight(lineCount, s, BOX_PAD);
+  const need = neededHeight(lineCount, s, textInset(s));
   const extent = stripOf(p);
   const next = extent && extent.total > 0
     ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)

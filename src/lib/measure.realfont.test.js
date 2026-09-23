@@ -13,10 +13,12 @@ import {
   setTypesetEnabled,
   clearLayoutMemo,
   BOX_PAD,
+  textInset,
+  contentWidth,
 } from './measure.js';
 import { renderBoxTexture } from './exporter.js';
 import { systemFontEntry } from './fonts.js';
-import { defaultStyle, normalizeStyle } from './data.js';
+import { defaultStyle, normalizeStyle, REVIEW_REASONS } from './data.js';
 
 // ===========================================================================
 // Text measured with real fonts
@@ -201,35 +203,37 @@ describe('real glyph ink stays inside the box', () => {
       applyCase(text, s),
       s,
       s.size,
-      Math.max(1, box.w - BOX_PAD * 2),
+      contentWidth(box.w, s),
       balloonWidthsFor(box, s, s.size),
     );
     expect(lines.length).toBeGreaterThan(2);
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
   });
 
-  // One line that fills the content width exactly - the tightest box today's
+  // One line that fills the content width exactly - the tightest box the
   // layout keeps it on one line in - loaded as a saved document would be, so the
   // store's own open-time refit sizes its height. "WAIT WHAT" starts and ends on
-  // letters with almost no side bearing, so nothing but the padding stands
-  // between the ink and the box edge.
+  // letters with almost no side bearing, so nothing but the inset (the padding,
+  // and the outline's room - `textInset`) stands between the ink and the box
+  // edge. `pad` overrides the inset, for the width the layout used to keep it
+  // whole in; `text` swaps the line.
   const FULL = 'WAIT WHAT';
-  function fullWidthBox(font, extra = {}) {
+  function fullWidthBox(font, extra = {}, { pad = null, text = FULL } = {}) {
     const s = styleFor(font, extra);
-    const w = lineWidth(FULL, s, SIZE) + BOX_PAD * 2 + 0.01;
+    const w = lineWidth(text, s, SIZE) + (pad ?? textInset(s)) * 2 + 0.01;
     loadProjectPages([
       {
         id: 1,
         w: 600,
         h: 400,
-        lines: [{ n: 1, jp: 'あ', en: FULL, type: 'dialogue' }],
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
         boxes: [{ id: 'b1', lineN: 1, text: null, x: 200, y: 150, w, h: 20, style: s }],
         detect: null,
       },
     ]);
     const p = page();
     const box = p.boxes[0];
-    const lines = layoutLines(applyCase(FULL, box.style), box.style, SIZE, box.w - BOX_PAD * 2);
+    const lines = layoutLines(applyCase(text, box.style), box.style, SIZE, contentWidth(box.w, box.style));
     return { box, p, lines };
   }
 
@@ -256,13 +260,60 @@ describe('real glyph ink stays inside the box', () => {
 
   // The default outline is 3px and the box pads its text by BOX_PAD = 2px, so
   // the outline of a full-width line was drawn about a pixel outside the box
-  // with nothing saying so (OVF-3).
-  it('a full-width Comic Neue line in the default 3px outline: inside, or flagged', () => {
-    const { box, p } = fullWidthBox('Comic Neue');
-    containedOrFlagged(box, p);
-    autoFitBox(box, p);
+  // with nothing saying so (OVF-3). The breaker now leaves the outline its room:
+  // the tightest box that keeps the line whole keeps its outline inside, on
+  // opening, with nothing to fit or flag.
+  it('a full-width Comic Neue line in the default 3px outline: inside, and unflagged', () => {
+    const { box, p, lines } = fullWidthBox('Comic Neue');
+    expect(textInset(box.style)).toBe(BOX_PAD + 3);
+    expect(lines).toEqual([FULL]);
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
     expect(box.review).toBeUndefined();
+    // The box the old layout kept it whole in - the padding alone - now breaks
+    // it, rather than running its outline past the edge.
+    const old = fullWidthBox('Comic Neue', {}, { pad: BOX_PAD });
+    expect(old.lines).toEqual(['WAIT', 'WHAT']);
+    expect(inkPastBox(old.box, old.p).worst).toBeLessThanOrEqual(TOLERANCE);
+    expect(old.box.review).toBeUndefined();
+  });
+
+  // Aligned to a side, a full-width line is anchored the inset in from it, so
+  // its outline is inside on the edge it is aligned to as well as the far one -
+  // the edge no growth can clear, because the text moves with it. Anchored at
+  // the padding alone, every one of these drew its outline a pixel or more past
+  // that edge and was flagged for it. Lines that start (left) or end (right) on
+  // T, J, W or Y: the capitals with the least side bearing, and J's hook behind
+  // the pen.
+  it.each([
+    ['Comic Neue', 'left', 'JUST WAIT'],
+    ['Comic Neue', 'left', 'TRY JAW'],
+    ['Comic Neue', 'right', 'TWO WAY'],
+    ['Comic Neue', 'right', 'JAW TWIT'],
+    ['DejaVu Sans', 'left', 'JUST WAIT'],
+    ['DejaVu Sans', 'left', 'TRY JAW'],
+    ['DejaVu Sans', 'right', 'TWO WAY'],
+    ['DejaVu Sans', 'right', 'JAW TWIT'],
+  ])('a full-width %s line aligned %s, "%s", in the default 3px outline: inside, and unflagged', (font, align, text) => {
+    const { box, p, lines } = fullWidthBox(font, { align }, { text });
+    expect(textInset(box.style)).toBe(BOX_PAD + 3);
+    expect(lines).toEqual([text]);
+    expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+    expect(box.review).toBeUndefined();
+  });
+
+  // Not every face. Bangers' glyphs reach up to about 4px past their advance on
+  // the right at 26px - more than the 2px of padding the inset has before it
+  // counts the outline - and aligned right, that is the anchored edge: widening
+  // moves the text with it, and the floor size (three quarters of 26) still
+  // overhangs. So the box is flagged, and says why. Clearing it would take an
+  // anchor that reads the ink rather than the advance, in every renderer.
+  it('a full-width Bangers line aligned right, in the default outline: flagged on its aligned edge', () => {
+    const { box, p } = fullWidthBox('Bangers', { align: 'right' });
+    expect(containedOrFlagged(box, p)).toBeGreaterThan(TOLERANCE);
+    autoFitBox(box, p);
+    expect(box.review?.reason).toBe(REVIEW_REASONS.alignedEdge);
+    expect(box.review.overflow.r).toBeGreaterThan(0);
+    containedOrFlagged(box, p);
   });
 
   // Found by this lane: Bangers' glyphs reach up to about 3.7px past their

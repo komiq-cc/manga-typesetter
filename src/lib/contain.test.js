@@ -106,7 +106,7 @@ const psd = await import('./psd.js');
 const { defaultStyle, normalizeStyle, normalizeReview, REVIEW_REASONS } = await import('./data.js');
 const { neededHeight } = await import('./typeset.js');
 
-const { BOX_PAD, setTypesetEnabled, clearLayoutMemo, layoutMemoSize, canMeasure } = measure;
+const { BOX_PAD, textInset, contentWidth, setTypesetEnabled, clearLayoutMemo, layoutMemoSize, canMeasure } = measure;
 const { boxCandidate, placeBlock, boxInkRect, containBox, fitBox, fitLimit, reviewFor, isAutoBox, CONTAIN_TOL } = contain;
 const {
   app,
@@ -183,17 +183,21 @@ describe('boxInkRect', () => {
     expect(containBox(c, place).fits).toBe(true);
   });
 
-  // Test 1: the default 3px outline on a full-width line. The outline reaches
-  // 3px past the glyphs and the padding is 2, so the check has to see a box
-  // that does not fit - which is what nothing checked before.
+  // The outline, counted: the stroked ink is the glyph ink grown by the
+  // outline's width on every side. Both boxes are wide enough to keep the line
+  // whole with its outline (see the text inset below), so the two rectangles
+  // are the same block, stroked and not.
   it('counts the default 3px outline on every side', () => {
-    const c = cand({ text: FULL, w: fullW, h: 40, style: style({ strokes: [{ color: '#fff', width: 3, opacity: 1 }] }) });
-    const v = containBox(c);
-    expect(v.fits).toBe(false);
-    expect(v.overflow.l).toBeCloseTo(3 + 0.2 - (fullW - 9 * ADV) / 2, 6);
-    expect(v.overflow.r).toBeCloseTo(3 - (fullW - 9 * ADV) / 2, 6);
-    expect(v.overflow.t).toBe(0);
-    expect(v.overflow.b).toBe(0);
+    const stroked = style({ strokes: [{ color: '#fff', width: 3, opacity: 1 }] });
+    const w = 9 * ADV + textInset(stroked) * 2 + 0.01;
+    const bare = boxInkRect(cand({ text: FULL, w, h: 40, style: style() }));
+    const c = cand({ text: FULL, w, h: 40, style: stroked });
+    expect(placeBlock(c).lines).toEqual([FULL]);
+    const r = boxInkRect(c);
+    expect(r.x).toBeCloseTo(bare.x - 3, 6);
+    expect(r.y).toBeCloseTo(bare.y - 3, 6);
+    expect(r.w).toBeCloseTo(bare.w + 6, 6);
+    expect(r.h).toBeCloseTo(bare.h + 6, 6);
   });
 
   // Test 2: a shadow grows the rectangle in the direction it is thrown, by its
@@ -269,6 +273,146 @@ describe('boxInkRect', () => {
   });
 });
 
+// ===== the text inset (OVF-3) =====
+//
+// The box's content box is the box less the padding AND the outline's reach
+// (`textInset`) on every side, in every renderer: the lines are broken to its
+// width, a left- or right-aligned block is anchored to its side and a top- or
+// bottom-aligned one to its top or bottom, and the auto height is the block
+// plus the inset above and below. So a line that fills its width, or sits on
+// the edge it is aligned to, keeps its outline inside the box. The default
+// outline is 3px against 2px of padding, and before this every full-width line
+// had a pixel of outline outside the box - on an aligned edge, where no growth
+// can reach it.
+describe('the text inset', () => {
+  const FULL = 'WAIT WHAT';
+  const outline = (width, extra = {}) => style({ strokes: [{ color: '#fff', width, opacity: 1 }], ...extra });
+
+  it('is the padding plus the outline, rounded up to a whole pixel', () => {
+    expect(textInset(style())).toBe(BOX_PAD);
+    expect(textInset(outline(3))).toBe(BOX_PAD + 3);
+    // Every band counts - the reach is the outermost band's outer edge - and a
+    // fraction rounds up rather than leaving a sliver of outline on the edge.
+    expect(textInset(style({ strokes: [{ color: '#fff', width: 2.5, opacity: 1 }, { color: '#000', width: 1.2, opacity: 1 }] }))).toBe(
+      BOX_PAD + 4,
+    );
+    expect(textInset(normalizeStyle({}))).toBe(BOX_PAD + 3);
+    expect(contentWidth(100, outline(3))).toBe(90);
+    // Never narrower than a pixel, as `layoutLines` would clamp it anyway.
+    expect(contentWidth(8, outline(3))).toBe(1);
+  });
+
+  // OVF-2's test 1: the default outline on a full-width line stays inside. The
+  // tightest box that keeps the line whole is now its advance plus the inset on
+  // both sides, and in it the outline clears both edges with nothing to fit.
+  it('keeps the default outline of a full-width line inside the box, unflagged', () => {
+    for (const width of [3, 6, 2.5]) {
+      const s = outline(width);
+      const w = 9 * ADV + textInset(s) * 2 + 0.01;
+      const c = cand({ text: FULL, w, h: 40, style: s });
+      expect(placeBlock(c).lines, `${width}px`).toEqual([FULL]);
+      expect(containBox(c).fits, `${width}px`).toBe(true);
+      // A pixel narrower and the line no longer fits whole, so it breaks - it
+      // does not run into the outline's room.
+      expect(placeBlock({ ...c, w: w - 1 }).lines, `${width}px`).toEqual(['WAIT', 'WHAT']);
+    }
+    // Loaded as a saved chapter: the grow-only refit finds nothing to flag.
+    const s = outline(3);
+    load([{ id: 'b1', lineN: null, text: FULL, x: 300, y: 300, w: 9 * ADV + textInset(s) * 2 + 0.01, h: 40, style: s }]);
+    expect(byId('b1').review).toBeUndefined();
+  });
+
+  // Aligned to a side, the block is anchored the inset in from it, so the
+  // outline of a line that starts - or, aligned right, ends - on a letter with
+  // no side bearing, or on one that reaches behind its pen, is inside on the one
+  // edge no growth can move away from it: the text moves with that edge. At the
+  // padding alone, T's outline was a pixel past a left edge and J's 2.6px, and
+  // every such box carried an 'ink past the aligned edge' flag nothing could
+  // clear. J, T and W: the stub's three glyphs with the least side bearing.
+  it('anchors a left- or right-aligned full-width line inside, outline and all', () => {
+    for (const align of ['left', 'right']) {
+      const s = outline(3, { align });
+      for (const text of ['JUMP WAIT', 'TWIN JAW', 'WAIT WHAT']) {
+        const at = `${align} ${text}`;
+        const w = text.length * ADV + textInset(s) * 2 + 0.01;
+        const c = cand({ text, w, h: 40, style: s });
+        const place = placeBlock(c);
+        expect(place.lines, at).toEqual([text]);
+        expect(place.anchorX, at).toBe(align === 'left' ? textInset(s) : w - textInset(s));
+        expect(containBox(c, place).fits, at).toBe(true);
+      }
+    }
+    // J's tail is the worst of them: 0.08 em behind the pen, the outline 3px
+    // behind that, and still 0.4px inside the left edge.
+    const s = outline(3, { align: 'left' });
+    const r = boxInkRect(cand({ text: 'JUMP WAIT', w: 9 * ADV + textInset(s) * 2 + 0.01, h: 40, style: s }));
+    expect(r.x).toBeCloseTo(textInset(s) - 0.08 * S - 3, 6);
+    expect(r.x).toBeGreaterThan(0);
+    // Right-aligned, a line ending in W is 0.2px of glyph and 3px of outline
+    // past its advance, 1.8px inside the right edge.
+    const sr = outline(3, { align: 'right' });
+    const wr = 8 * ADV + textInset(sr) * 2 + 0.01;
+    const rr = boxInkRect(cand({ text: 'TWIN JAW', w: wr, h: 40, style: sr }));
+    expect(wr - (rr.x + rr.w)).toBeCloseTo(textInset(sr) - 0.01 * S - 3, 6);
+    // Loaded as a saved chapter, left and right: nothing to flag.
+    load([
+      { id: 'l', lineN: null, text: 'JUMP WAIT', x: 100, y: 100, w: 9 * ADV + textInset(s) * 2 + 0.01, h: 40, style: s },
+      { id: 'r', lineN: null, text: 'TWIN JAW', x: 100, y: 300, w: wr, h: 40, style: sr },
+    ]);
+    expect(byId('l').review).toBeUndefined();
+    expect(byId('r').review).toBeUndefined();
+  });
+
+  // The same inset above and below: a top- or bottom-aligned block is anchored
+  // that far in from its edge, and the auto height makes room for the outline
+  // over the first line and under the last. A centred block is anchored at the
+  // box's centre, which is the one anchor the outline does not move.
+  it('anchors a top- or bottom-aligned block the inset in, and the auto height holds it', () => {
+    const top = outline(3, { valign: 'top' });
+    expect(placeBlock(cand({ text: 'HELLO', h: 100, style: top })).blockY).toBe(textInset(top));
+    const bottom = outline(3, { valign: 'bottom' });
+    const pb = placeBlock(cand({ text: 'HELLO', h: 100, style: bottom }));
+    expect(pb.blockY).toBeCloseTo(100 - textInset(bottom) - pb.lineH, 6);
+    const mid = placeBlock(cand({ text: 'HELLO', h: 100, style: outline(3, { valign: 'middle' }) }));
+    const midBare = placeBlock(cand({ text: 'HELLO', h: 100, style: style({ valign: 'middle' }) }));
+    expect([mid.blockY, mid.anchorX]).toEqual([midBare.blockY, midBare.anchorX]);
+    // A top-aligned auto box opened at a height too small for its text grows to
+    // the block plus the inset above and below, and its outline is inside.
+    load([{ id: 'b1', lineN: null, text: 'HELLO', x: 100, y: 100, w: 200, h: 10, style: top }]);
+    const b = byId('b1');
+    expect(b.h).toBeCloseTo(neededHeight(1, b.style, textInset(b.style)), 6);
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+  });
+
+  // One helper, so every layout breaks at the same width: the placement the
+  // exporter, the PSD writer and the check read; the balloon's per-line widths;
+  // and the balanced size a new box is placed at.
+  it('is the width every layout breaks at', () => {
+    const s = outline(3);
+    const text = 'THE WORLD IS ENDING AND NOBODY CARES AT ALL';
+    const c = cand({ text, w: 150, h: 200, style: s });
+    expect(placeBlock(c).lines).toEqual(measure.layoutLines(text, s, S, 140, null));
+    // ...and not at the padding alone, where the old full-width line stayed whole.
+    const old = cand({ text: FULL, w: 9 * ADV + BOX_PAD * 2 + 0.01, h: 40, style: s });
+    expect(measure.layoutLines(FULL, s, S, old.w - BOX_PAD * 2, null)).toEqual([FULL]);
+    expect(placeBlock(old).lines).toEqual(['WAIT', 'WHAT']);
+    // Balloon widths come off the same inset: a rectangle's every line is the
+    // balloon's width less the balloon's safety margin and the box's inset.
+    const fitted = { ...c, fit: { kind: 'rect', x: 0, y: 0, w: 150, h: 400 } };
+    const widths = measure.balloonWidthsFor(fitted, s, S)(3);
+    const bare = measure.balloonWidthsFor({ ...fitted, style: style() }, style(), S)(3);
+    expect(widths[0]).toBeCloseTo(bare[0] - 2 * 3, 6);
+    // A new box is sized so its lines keep the inset: the balanced width is
+    // the content width plus the inset on both sides.
+    const bal = measure.balancedBoxSize(text, s);
+    const balBare = measure.balancedBoxSize(text, style());
+    expect(bal.w - balBare.w).toBe(2 * 3);
+    const placed = cand({ text, w: bal.w, h: bal.h, style: s });
+    expect(placeBlock(placed).lines).toHaveLength(bal.lines);
+  });
+});
+
 describe('the flag', () => {
   it('is whole pixels rounded up, and an edge inside the tolerance reads 0', () => {
     const r = reviewFor({ fits: false, overflow: { l: 0.3, t: 1.01, r: 0.5, b: 7 } }, REVIEW_REASONS.minSize);
@@ -293,12 +437,15 @@ describe('the flag', () => {
 // ===== the ladder =====
 
 describe('the ladder, on an auto box', () => {
-  // Test 1, the fixing half: an edit fits the full-width outlined line by
-  // widening the box, symmetrically, just enough.
-  it('widens a centred box clear of its outline', () => {
-    const w = 9 * ADV + BOX_PAD * 2 + 0.01;
-    const p = load([{ id: 'b1', lineN: null, text: 'WAIT WHAT', x: 300, y: 300, w, h: 40, style: style({ strokes: [{ color: '#fff', width: 3, opacity: 1 }] }) }]);
+  // An unbreakable word a little wider than its box: an edit widens the box,
+  // symmetrically about its centre, by as little as the ink needs. "KRRSSHH"
+  // has no vowels, so the breaker has nowhere to hyphenate it and keeps it
+  // whole, 1.2px of ink past each side of a 73px box.
+  it('widens a centred box around a word too wide for it', () => {
+    const w = 7 * ADV - 4;
+    const p = load([{ id: 'b1', lineN: null, text: 'KRRSSHH', x: 300, y: 300, w, h: 40, style: style() }]);
     const b = byId('b1');
+    expect(placeBlock(boxCandidate(b, 'KRRSSHH')).lines).toEqual(['KRRSSHH']);
     // Opening flags it and moves nothing sideways.
     expect(b.w).toBe(w);
     expect(b.x).toBe(300);
@@ -317,12 +464,21 @@ describe('the ladder, on an auto box', () => {
 
   // Test 3, the fixing half.
   it('grows the height for an accent above a tight leading, and the width for an italic', () => {
+    const outlined = { strokes: [{ color: '#fff', width: 3, opacity: 1 }] };
     const p = load([
-      // Outlined, as the default style is: the accent clears the line box by
-      // itself, and the outline takes it over the top of the box.
-      { id: 'acc', lineN: null, text: 'ÉTÉ', x: 100, y: 100, w: 200, h: 10, style: style({ lineHeight: 0.9, strokes: [{ color: '#fff', width: 3, opacity: 1 }] }) },
-      { id: 'ita', lineN: null, text: 'fff', x: 100, y: 300, w: 3 * ADV + BOX_PAD * 2, h: 40, style: style({ align: 'left', italic: true }) },
+      // Accented capitals at lineHeight 0.9, outlined as the default style is:
+      // the accent clears the line box, the ink-centring takes it back down
+      // into the room a line of capitals leaves under its baseline, and the
+      // auto height's inset holds the outline. Inside, with nothing to fit.
+      { id: 'caps', lineN: null, text: 'ÉTÉ', x: 100, y: 100, w: 200, h: 10, style: style({ lineHeight: 0.9, ...outlined }) },
+      // An accent over a descender at 0.8: 1.13 em of glyph in a 0.8 em line
+      // box, more than the inset's room above and below - the line boxes are
+      // what the open-time height is sized from, so this one is flagged.
+      { id: 'acc', lineN: null, text: 'Égy', x: 100, y: 300, w: 200, h: 10, style: style({ lineHeight: 0.8, ...outlined }) },
+      { id: 'ita', lineN: null, text: 'fff', x: 100, y: 500, w: 3 * ADV + BOX_PAD * 2, h: 40, style: style({ align: 'left', italic: true }) },
     ]);
+    expect(byId('caps').review).toBeUndefined();
+    expect(verdict(byId('caps')).fits).toBe(true);
     for (const id of ['acc', 'ita']) {
       const b = byId(id);
       expect(b.review, id).toBeDefined();
@@ -331,7 +487,8 @@ describe('the ladder, on an auto box', () => {
       expect(b.review, id).toBeUndefined();
     }
     // The accent box grew past the line-box height `neededHeight` gives it.
-    expect(byId('acc').h).toBeGreaterThan(neededHeight(1, byId('acc').style, BOX_PAD));
+    const acc = byId('acc');
+    expect(acc.h).toBeGreaterThan(neededHeight(1, acc.style, textInset(acc.style)));
   });
 
   // Test 4: a token too long for its line. The width grows inside the balloon;
@@ -423,15 +580,25 @@ describe('the ladder, on an auto box', () => {
   });
 
   it('flags ink on the edge the text is anchored to, which no growth reaches', () => {
-    // Left-aligned J: its tail reaches behind the pen, past the padding.
-    const p = load([{ id: 'b1', lineN: null, text: 'JJJ', x: 100, y: 100, w: 200, h: 40, style: style({ align: 'left', strokes: [{ color: '#fff', width: 3, opacity: 1 }] }) }]);
+    // Left-aligned, its shadow thrown 8px to the left. The inset holds the
+    // outline, not a shadow's offset: the shadow falls 6.2px past the left edge
+    // (8px, less the 1.8px the outline's outer edge is inside it - the padding
+    // less W's overhang behind the pen).
+    const s = style({
+      align: 'left',
+      strokes: [{ color: '#fff', width: 3, opacity: 1 }],
+      shadows: [{ color: '#000', x: -8, y: 0, blur: 0, opacity: 1 }],
+    });
+    const p = load([{ id: 'b1', lineN: null, text: 'WAIT', x: 100, y: 100, w: 200, h: 40, style: s }]);
     const b = byId('b1');
     const before = geomOf(b);
+    expect(verdict(b).overflow.l).toBeCloseTo(8 - (BOX_PAD - 0.01 * S), 6);
     autoFitBox(b, p);
     expect(b.review?.reason).toBe(REVIEW_REASONS.alignedEdge);
-    expect(b.review.overflow.l).toBeGreaterThan(0);
-    // Nothing shrank for it: a smaller font does not move the anchor.
-    expect(b.style.size).toBe(before.size);
+    expect(b.review.overflow.l).toBe(7);
+    // Nothing moved or shrank for it: the text moves with the edge it is
+    // anchored to, and a smaller font does not shorten the shadow's throw.
+    expect(geomOf(b)).toEqual(before);
   });
 
   it('is idempotent: run again on its own answer it changes nothing', () => {

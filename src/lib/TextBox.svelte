@@ -34,7 +34,7 @@
     caretAfter,
     isAtomicInput,
   } from './editor/field-undo.svelte.js';
-  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, BOX_PAD, balloonWidthsFor, inkShiftY } from './measure.js';
+  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, textInset, contentWidth, balloonWidthsFor, inkShiftY } from './measure.js';
   import {
     strokeBands,
     rgba,
@@ -530,9 +530,14 @@
       effectsSubTab.id === 'transform',
   );
 
+  // Padded by the content box's inset - the padding plus the outline's reach
+  // (`textInset`, measure.js) - so the flex layout and `text-align` put the block
+  // exactly where the exporter and the PSD writer anchor it, with room for its
+  // outline inside the box.
+  const pad = $derived(textInset(s) * z);
   const boxStyle = $derived(
     `left:${box.x * z}px;top:${box.y * z}px;width:${box.w * z}px;height:${box.h * z}px;` +
-      `padding:${2 * z}px;` +
+      `padding:${pad}px;` +
       `transform:rotate(${s.rotation}deg);justify-content:${justify};align-items:${alignItems};` +
       `opacity:${s.opacity}`,
   );
@@ -705,7 +710,7 @@
       applyCase(text, s),
       s,
       s.size,
-      Math.max(1, box.w - BOX_PAD * 2),
+      contentWidth(box.w, s),
       balloonWidthsFor(box, s, s.size),
     );
   });
@@ -1421,7 +1426,7 @@
        handles and the jp pill stay outside it, unmasked. -->
   <div
     class="clipwrap"
-    style="justify-content:{justify};align-items:{alignItems};padding:{2 * z}px;{warped ? '' : maskCss}"
+    style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{warped ? '' : maskCss}"
   >
   {#if warped}
     <!-- The whole box as one picture: type, ink and every filter, carried

@@ -68,7 +68,7 @@ import {
   balloonWidthsFor,
   setTypesetEnabled,
   clearLayoutMemo,
-  BOX_PAD,
+  contentWidth,
 } from '../../lib/measure.js';
 import { renderBoxTexture } from '../../lib/exporter.js';
 import { systemFontEntry } from '../../lib/fonts.js';
@@ -250,7 +250,7 @@ export function storeLayout(c, { page: p }) {
 // The exporter's, the editor's and the PSD's one call (see `layoutLines`).
 function rendererLines(b, text) {
   const s = b.style;
-  return layoutLines(applyCase(text, s), s, s.size, Math.max(1, b.w - BOX_PAD * 2), balloonWidthsFor(b, s, s.size));
+  return layoutLines(applyCase(text, s), s, s.size, contentWidth(b.w, s), balloonWidthsFor(b, s, s.size));
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +414,11 @@ export async function runCase(c, { layout = storeLayout, setPixels, approved = {
   const blockH = lines.length * out.size * s.lineHeight;
   const inside = interiorOf(c.balloon);
   const ink = inkOf(box, p, inside);
-  const glyphs = inkOf({ ...box, style: { ...s, strokes: [] } }, p, null);
+  // The outline made invisible rather than removed: its width is part of the
+  // inset the lines are broken to (`textInset`), so without it the exporter
+  // would break the block differently and this would measure some other
+  // layout's glyphs.
+  const glyphs = inkOf({ ...box, style: { ...s, strokes: (s.strokes ?? []).map((k) => ({ ...k, opacity: 0 })) } }, p, null);
   const sig = signatureOf(out);
 
   const result = {

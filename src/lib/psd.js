@@ -15,7 +15,7 @@ import { renderBoxLayer, pageSpace, settleNoise } from './exporter.js';
 import { settleBoxTips } from './brush-tips.js';
 import { fontCssFor, fontNameFor } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
-import { applyCase, canMeasure, BOX_PAD, blockYFor } from './measure.js';
+import { applyCase, canMeasure, textInset, contentWidth, blockYFor } from './measure.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { normalizeFit } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
@@ -94,6 +94,8 @@ function hexToRgb(hex) {
   if (h.length === 3) h = h.split('').map((c) => c + c).join('');
   return { r: parseInt(h.slice(0, 2), 16) || 0, g: parseInt(h.slice(2, 4), 16) || 0, b: parseInt(h.slice(4, 6), 16) || 0 };
 }
+// ...and back, for what the importer reads off a layer.
+const rgbHex = (c) => '#' + [c?.r, c?.g, c?.b].map((v) => ((v | 0) & 255).toString(16).padStart(2, '0')).join('');
 
 // ---------------------------------------------------------------------------
 // embedded JSON (XMP image resource) - the lossless source of truth
@@ -497,18 +499,20 @@ export function textLayerFor(p, box, rendered) {
   // goes in as-is and live (font-present) re-rendering lands exactly on the
   // cached pixels.
   //
-  // The content origin, not the box origin: the editor's `.tbox` carries
-  // `padding: BOX_PAD`, the app wraps at `box.w - BOX_PAD * 2`, and the raster
-  // exporter now anchors the block that same BOX_PAD in from every edge. A type
-  // layer flush with the box rect would put Photoshop's own re-render 2px left
-  // of and above the pixels underneath it for a left- or top-aligned box -
-  // invisible until the layer re-renders, and then a 2px jump. `boxBounds`
-  // loses the padding on both sides for the same reason: it is the box the text
-  // re-flows inside, so it has to be the content box, not the frame.
+  // The content origin, not the box origin: the editor's `.tbox` is padded by
+  // `textInset` - the padding plus the outline's reach (measure.js) - and lays
+  // its lines out inside that content box, and the raster exporter anchors the
+  // block the same inset in from every edge. A type layer flush with the box
+  // rect would put Photoshop's own re-render that far left of and above the
+  // pixels underneath it for a left- or top-aligned box - invisible until the
+  // layer re-renders, and then a jump. `boxBounds` loses the inset on both
+  // sides for the same reason: it is the frame the lines are broken and aligned
+  // in, so it has to be the content box, not the box. The importer below undoes
+  // exactly this inset, reading the outline back off the layer's effects.
   //
   // Vertically the origin is the BLOCK's top, not the box's. Photoshop flows
   // paragraph text from the top of `boxBounds` and has no notion of our
-  // `valign`, so a middle- or bottom-aligned box anchored at `box.y + BOX_PAD`
+  // `valign`, so a middle- or bottom-aligned box anchored at the content top
   // described text at the top of the frame while the cached pixels underneath
   // showed it centred or sitting on the floor. The file looked right until the
   // layer re-rendered - a font substitution, or the type tool - and then the
@@ -522,7 +526,7 @@ export function textLayerFor(p, box, rendered) {
   const lineH = (s.lineHeight || 1.1) * s.size;
   const blockH = place ? place.blockH : content.split('\n').length * lineH;
   const blockY = place ? place.blockY : blockYFor(s, box.h, blockH, 0);
-  const ox = box.x + BOX_PAD;
+  const ox = box.x + textInset(s);
   const oy = box.y + blockY;
   const tx = cx + (ox - cx) * cos - (oy - cy) * sin;
   const ty = cy + (ox - cx) * sin + (oy - cy) * cos;
@@ -635,10 +639,10 @@ export function textLayerFor(p, box, rendered) {
       warp: warpForCurve(s.curve),
       shapeType: 'box',
       // The block's own rect, measured from the origin above. Width is the
-      // content box, because that is what the app wraps at and Photoshop
-      // reflows at; height is the block rather than the rest of the frame, so
-      // the box Photoshop draws in is the box the app drew.
-      boxBounds: [0, 0, Math.round(box.w - BOX_PAD * 2), Math.round(blockH)],
+      // content box, because that is what the app breaks its lines to and
+      // Photoshop reflows at; height is the block rather than the rest of the
+      // frame, so the box Photoshop draws in is the box the app drew.
+      boxBounds: [0, 0, Math.round(contentWidth(box.w, s)), Math.round(blockH)],
       style: {
         font: { name: face.name },
         fontSize,
@@ -903,6 +907,35 @@ async function reconstructFromProject(project, psd) {
   return page;
 }
 
+// The outline, back off a type layer's stroke effects: the inverse of the
+// writer's `effects.stroke` in `textLayerFor`. The writer states each band as an
+// OUTSIDE stroke whose size is the band's outer edge - the cumulative width -
+// so the visible widths are the steps between consecutive sizes, innermost
+// first as the style keeps them. Another tool's centred stroke reaches half its
+// size past the glyph and an inside one none, which is all of either the app
+// can draw. A layer with no stroke effect has no outline, and the box gets none
+// rather than the app's default: the layer's frame was not laid out with the
+// default's inset, so the box recovered from it could not be either.
+function strokesFromEffects(list) {
+  const bands = [];
+  for (const e of Array.isArray(list) ? list : []) {
+    if (!e || e.enabled === false) continue;
+    const size = Number(e.size?.value) || 0;
+    const reach = e.position === 'inside' ? 0 : e.position === 'center' ? size / 2 : size;
+    if (!(reach > 0)) continue;
+    const opacity = Number.isFinite(+e.opacity) ? Math.min(1, Math.max(0, +e.opacity)) : 1;
+    bands.push({ reach, color: rgbHex(e.color), opacity });
+  }
+  bands.sort((a, b) => a.reach - b.reach);
+  const out = [];
+  let prev = 0;
+  for (const k of bands) {
+    if (k.reach > prev) out.push({ color: k.color, width: k.reach - prev, opacity: k.opacity });
+    prev = Math.max(prev, k.reach);
+  }
+  return out;
+}
+
 // Best-effort reconstruction for a foreign PSD (no embedded project). Maps the
 // document size, bottom raster → raw/cleaned, and any editable text layers →
 // text boxes with an approximate style.
@@ -960,6 +993,10 @@ export async function reconstructForeign(psd) {
         });
       } else if (n.text) {
         const st = n.text.style || {};
+        // The outline first: the box comes back from the layer's frame by
+        // undoing the content box's inset, and the inset counts the outline.
+        const strokes = strokesFromEffects(n.effects?.stroke);
+        const inset = textInset({ strokes });
         let x = n.left ?? 0;
         let y = n.top ?? 0;
         let w = Math.max(40, (n.right ?? x + 200) - x);
@@ -984,11 +1021,15 @@ export async function reconstructForeign(psd) {
         ) {
           const contentW = bb[2] - bb[0];
           const contentH = bb[3] - bb[1];
+          // The inverse of the writer's frame: `boxBounds` is the content box,
+          // `textInset` in from every edge of the box (see `textLayerFor`), so
+          // a box this app wrote comes back the size it went out and breaks
+          // where it broke.
           if (contentW > 0 && contentH > 0) {
-            x = Math.round(tf[4] + bb[0] - BOX_PAD);
-            y = Math.round(tf[5] + bb[1] - BOX_PAD);
-            w = Math.max(40, Math.round(contentW + BOX_PAD * 2));
-            h = Math.max(24, Math.round(contentH + BOX_PAD * 2));
+            x = Math.round(tf[4] + bb[0] - inset);
+            y = Math.round(tf[5] + bb[1] - inset);
+            w = Math.max(40, Math.round(contentW + inset * 2));
+            h = Math.max(24, Math.round(contentH + inset * 2));
           }
         }
 
@@ -1018,14 +1059,15 @@ export async function reconstructForeign(psd) {
             // flows a paragraph from the top of that rect, and so does the
             // writer above, which anchors the layer at the BLOCK's top rather
             // than the frame's. The box recovered here is that block plus
-            // padding, so the only vertical alignment that puts the words back
+            // the inset, so the only vertical alignment that puts the words back
             // where the file showed them is the one that means "at the top of
             // the box". The app's own default is 'middle', and taking it here
             // would re-centre every imported box inside a box that is already
             // the size of its text - a slow drift upward on every round trip
             // through a PSD whose embedded project Photoshop has rewritten.
             valign: 'top',
-            color: st.fillColor ? '#' + [st.fillColor.r, st.fillColor.g, st.fillColor.b].map((v) => (v | 0).toString(16).padStart(2, '0')).join('') : '#1a1a1a',
+            color: st.fillColor ? rgbHex(st.fillColor) : '#1a1a1a',
+            strokes,
           },
         });
       }

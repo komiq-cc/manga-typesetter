@@ -34,12 +34,24 @@ const { app, loadProjectPages, autoFitBox, refitPage, page, byId, placeActiveAt,
   await import('./store.svelte.js');
 const { record, undo, redo, resetHistory, initHistory } = await import('./editor/history.svelte.js');
 const { neededHeight } = await import('./typeset.js');
-const { setTypesetEnabled, layoutLines, applyCase } = await import('./measure.js');
+const { setTypesetEnabled, layoutLines, applyCase, textInset, contentWidth } = await import('./measure.js');
+const { defaultStyle } = await import('./data.js');
 // The heights below are the ones the shaped line breaker produces, and shaping
 // is a beta the user opts into - so it is switched on for this file.
 setTypesetEnabled(true);
 
 const CHAR = (size) => size * 0.55;
+
+// The text inset (`textInset` in measure.js): the box's 2px padding plus its
+// outline's reach, on every side. The lines are laid out in the box less that
+// much, and the auto height adds it above and below the block, so the outline
+// sits inside the box as well as the glyphs. `twoLiner()` turns its outline off
+// (`outlineWidth: 0`), so its inset is the bare padding; a fixture that names a
+// `style` of its own without that keeps the default 3px outline, and an inset of
+// 5 - which is 6px more height than the same box had before the inset counted
+// the outline.
+const BARE = 2;
+const OUTLINED = textInset(defaultStyle());
 
 // A box wide enough for one four-letter word and not two, at size 20: the
 // content width is `w - 4` and a word is `4 * 11 = 44` wide.
@@ -79,18 +91,20 @@ describe('the metric this file measures with', () => {
 });
 
 describe('the box grows to its text, anchored where the text is', () => {
-  // 2 lines * 20 * 1.1 = 44, plus the 2px padding on each edge.
-  const NEED = neededHeight(2, { size: 20, lineHeight: 1.1 }, 2);
+  // 2 lines * 20 * 1.1 = 44, plus the inset on each edge: 48 for `twoLiner()`
+  // with its outline off, 54 for a box that keeps the default outline.
+  const NEED = neededHeight(2, { size: 20, lineHeight: 1.1 }, BARE);
+  const NEED_OUTLINED = neededHeight(2, { size: 20, lineHeight: 1.1 }, OUTLINED);
 
   it('grows downward from a top-aligned box', () => {
     loadProjectPages(doc([twoLiner({ style: { size: 20, lineHeight: 1.1, valign: 'top' } })]));
-    expect(geom(page().boxes[0])).toEqual({ y: 500, h: NEED });
+    expect(geom(page().boxes[0])).toEqual({ y: 500, h: NEED_OUTLINED });
   });
 
   it('grows upward from a bottom-aligned box', () => {
     loadProjectPages(doc([twoLiner({ style: { size: 20, lineHeight: 1.1, valign: 'bottom' } })]));
-    // The bottom edge stays where the user put it: 500 + 20 === 472 + 48.
-    expect(geom(page().boxes[0])).toEqual({ y: 500 + 20 - NEED, h: NEED });
+    // The bottom edge stays where the user put it: 500 + 20 === 466 + 54.
+    expect(geom(page().boxes[0])).toEqual({ y: 500 + 20 - NEED_OUTLINED, h: NEED_OUTLINED });
   });
 
   it('opens equally in both directions when the text is centred', () => {
@@ -154,7 +168,7 @@ describe('the box grows to its text, anchored where the text is', () => {
     // `p.h` is 0 until something decodes the art, and clamping against that
     // would drag every box on an unvisited page to the top of it.
     loadProjectPages(doc([twoLiner({ style: { size: 20, lineHeight: 1.1, valign: 'top' } })], { w: 0, h: 0 }));
-    expect(geom(page().boxes[0])).toEqual({ y: 500, h: NEED });
+    expect(geom(page().boxes[0])).toEqual({ y: 500, h: NEED_OUTLINED });
   });
 
   it('is idempotent, so a second pass can never ratchet', () => {
@@ -167,7 +181,8 @@ describe('the box grows to its text, anchored where the text is', () => {
 });
 
 describe('auto-height across longstrip source seams', () => {
-  const NEED = neededHeight(2, { size: 20, lineHeight: 1.1 }, 2);
+  // Every box below keeps the default outline.
+  const NEED = neededHeight(2, { size: 20, lineHeight: 1.1 }, OUTLINED);
 
   beforeEach(() => {
     app.projectLayout = 'longstrip';
@@ -213,7 +228,7 @@ describe('a chapter load refits every page, not just the one on screen', () => {
       { id: 2, w: 800, h: 1200, lines: [], boxes: [twoLiner({ id: 'b2' })] },
     ]);
     expect(app.pageIndex).toBe(0);
-    expect(app.pages[1].boxes[0].h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, 2));
+    expect(app.pages[1].boxes[0].h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, BARE));
   });
 
   it('answers how many boxes it moved, so a caller can tell', () => {
@@ -245,9 +260,10 @@ describe('placement fits the box it just created', () => {
     const b = page().boxes[0];
     // The rect is 200x100, inset by 8 on every edge: 184 wide, 84 tall. At the
     // default size of 26 a word of eight letters is 114 wide and two of them do
-    // not fit the 180px content width, so the block is four lines.
+    // not fit the 174px content width (184 less the default outline's inset of
+    // 5 on each side), so the block is four lines.
     expect(b.w).toBe(184);
-    expect(b.h).toBe(neededHeight(4, { size: 26, lineHeight: 1.1 }, 2));
+    expect(b.h).toBe(neededHeight(4, { size: 26, lineHeight: 1.1 }, OUTLINED));
     expect(b.h).toBeGreaterThan(84);
     // Still centred on the bubble, which is the whole point of the anchor.
     expect(b.y + b.h / 2).toBe(150);
@@ -414,7 +430,7 @@ describe('undo restores the height an edit grew', () => {
     // No pair to restore, so the height is re-derived - grow-only, so the box
     // is at least big enough for the text the undo just put back in it.
     expect(byId('b1').style.size).toBe(20);
-    expect(byId('b1').h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, 2));
+    expect(byId('b1').h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, OUTLINED));
   });
 });
 
@@ -433,7 +449,7 @@ describe('a font arriving invalidates the fitted heights', () => {
     const seen = app.fontsVersion;
     expect(noteFontsChanged()).toBe(2);
     expect(app.fontsVersion).toBe(seen + 1);
-    for (const p of app.pages) expect(p.boxes[0].h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, 2));
+    for (const p of app.pages) expect(p.boxes[0].h).toBe(neededHeight(2, { size: 20, lineHeight: 1.1 }, BARE));
   });
 
   it('bumps the counter even when no box needed moving', async () => {
@@ -466,7 +482,7 @@ describe('the queue’s own text field is a path like any other', () => {
     p.lines[0].en = 'AAAA BBBB CCCC';
     // What `Queue.svelte`'s oninput does with the box behind the row.
     for (const b of p.boxes) if (b.lineN === 1) autoFitBox(b, p);
-    expect(byId('b1').h).toBe(neededHeight(3, { size: 20, lineHeight: 1.1 }, 2));
+    expect(byId('b1').h).toBe(neededHeight(3, { size: 20, lineHeight: 1.1 }, OUTLINED));
   });
 });
 
@@ -532,8 +548,8 @@ describe('a placed box is sized to a shape, not just to a width', () => {
   it('still describes its own text exactly', () => {
     const b = placed(LONG);
     const style = b.style;
-    const lines = layoutLines(applyCase(LONG, style), style, style.size, b.w - 4, null);
-    expect(b.h).toBe(neededHeight(lines.length, style, 2));
+    const lines = layoutLines(applyCase(LONG, style), style, style.size, contentWidth(b.w, style), null);
+    expect(b.h).toBe(neededHeight(lines.length, style, textInset(style)));
   });
 
   it('keeps the old constants for a row with nothing typed in it yet', () => {

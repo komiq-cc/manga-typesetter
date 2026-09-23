@@ -233,7 +233,8 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
 /* placed text box */
 .tbox{
   position:absolute; display:flex; align-items:center; justify-content:center;
-  text-align:center; cursor:move; padding:2px;
+  text-align:center; cursor:move;
+  /* padding: inline, the content box's inset (`textInset` in measure.js) */
   line-height:1.1; word-break:break-word; overflow:visible;
   pointer-events:auto;
 }

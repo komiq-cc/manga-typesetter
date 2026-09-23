@@ -54,7 +54,7 @@ const {
   setPageDims,
   BULK_PROPS,
 } = await import('./store.svelte.js');
-const { balloonWidthsFor, BOX_PAD, layoutLines, setTypesetEnabled } = await import('./measure.js');
+const { balloonWidthsFor, textInset, contentWidth, layoutLines, setTypesetEnabled } = await import('./measure.js');
 // Balloon layout is part of the typesetting beta, which is off until the user
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
@@ -392,9 +392,11 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
     expect(w.length).toBe(4);
     expect(new Set(w).size).toBe(1);
     // 120 wide, inset 10 a side by `safetyInset` (8% of the shorter side, which
-    // is the 120), then BOX_PAD off each edge because the text is drawn inside a
-    // box that pads itself.
-    expect(w[0]).toBe(120 - 2 * 10 - 2 * BOX_PAD);
+    // is the 120), then the box's own text inset off each edge because the text
+    // is broken inside a box that pads itself and leaves its outline room: the
+    // 2px padding plus the default 3px outline (OVF-3; it was the padding alone).
+    expect(textInset(b.style)).toBe(5);
+    expect(w[0]).toBe(120 - 2 * 10 - 2 * textInset(b.style));
   });
 
   it('narrows the first and last lines inside an ellipse', () => {
@@ -414,7 +416,7 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
   // middle lines would be laid out past the rectangle the user drags.
   it('never hands back more room than the box itself has', () => {
     const b = boxWith(ell);
-    const contentW = b.w - BOX_PAD * 2;
+    const contentW = contentWidth(b.w, b.style);
     for (const v of balloonWidthsFor(b, b.style, b.style.size)(6)) {
       expect(v).toBeLessThanOrEqual(contentW);
     }
@@ -436,12 +438,12 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
   it('changes the breaking of a real block', () => {
     const b = boxWith(ell);
     const text = 'THE WORLD IS ENDING AND NOBODY CARES AT ALL ABOUT IT OR ABOUT ANY OF US';
-    const flat = layoutLines(text, b.style, b.style.size, b.w - BOX_PAD * 2);
+    const flat = layoutLines(text, b.style, b.style.size, contentWidth(b.w, b.style));
     const shaped = layoutLines(
       text,
       b.style,
       b.style.size,
-      b.w - BOX_PAD * 2,
+      contentWidth(b.w, b.style),
       balloonWidthsFor(b, b.style, b.style.size),
     );
     expect(shaped).not.toEqual(flat);
@@ -473,10 +475,10 @@ describe('the PSD’s type layer breaks where the canvas does', () => {
       box.text,
       box.style,
       box.style.size,
-      box.w - BOX_PAD * 2,
+      contentWidth(box.w, box.style),
       balloonWidthsFor(box, box.style, box.style.size),
     );
-    const flat = layoutLines(box.text, box.style, box.style.size, box.w - BOX_PAD * 2);
+    const flat = layoutLines(box.text, box.style, box.style.size, contentWidth(box.w, box.style));
     expect(layer.text.text).toBe(want.join('\n'));
     expect(layer.text.text).not.toBe(flat.join('\n'));
   });

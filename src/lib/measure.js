@@ -3,6 +3,7 @@ import { fontCssFor } from './store.svelte.js';
 import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS } from './typeset.js';
 import { interiorLineWidths } from './balloon.js';
 import { normalizeFit } from './data.js';
+import { strokeExtent } from './text-paint.js';
 
 const _c = typeof document !== 'undefined' ? document.createElement('canvas') : null;
 const _ctx = _c ? _c.getContext('2d') : null;
@@ -15,13 +16,46 @@ export function canMeasure() {
   return _ctx != null;
 }
 
-// The padding a text box lays out inside, on every edge. It is 2px in the
-// editor (`padding:${2 * z}px` on `.tbox`, scaled with zoom so wrapping is
-// zoom-stable) and the same 2 in the exporter, which is why the exporter's
-// content width has always been `box.w - 4`. Named here because the auto-height
-// helper needs the same number, and three copies of a layout constant is two
-// copies too many.
+// The bare padding a text box lays out inside, on every edge, before its
+// outline is counted - see `textInset`, which is what every renderer actually
+// pads by. 2px, scaled with zoom in the editor so wrapping is zoom-stable.
 export const BOX_PAD = 2;
+
+// The box's CONTENT BOX: the box inset by this much on every side, in every
+// renderer. The padding plus the outline's reach, rounded up to a whole pixel,
+// so text laid out to the content box - a line that fills its width, a block
+// anchored to its top, a block the auto height sized - has its outline inside
+// the box as well as its glyphs.
+//
+// It used to be the padding alone, and the default outline is 3px against 2px of
+// padding: every line the breaker filled to the width had a pixel of its outline
+// outside the box, every left-aligned line starting on a letter with little or
+// no side bearing (T, J, W) - and every right-aligned one ending on one - had it
+// outside on the edge it was aligned to, where no growth can clear it, and every
+// auto height was a pixel short of its outline above and below (OVF-3). The outline is part of the lettering the reader sees - "inside
+// the box" is about what is painted, not about the glyphs' advances - so the
+// layout has to leave room for it, and the room is the outline's own width.
+// Rounded up so a fractional outline is never the reason a stroked line sits a
+// fraction of a pixel over the edge.
+//
+// One rule, read by everything that places text in a box, because they all have
+// to draw the same picture:
+//   the editor     `.tbox` is padded by it (TextBox.svelte, scaled with zoom),
+//                  so its flex layout and text-align put the block there;
+//   the width      `contentWidth` below: the lines are broken to it, by the
+//                  editor, `placeBlock` and the balloon's per-line widths;
+//   the anchors    `placeBlock`'s x for left- and right-aligned lines, and
+//                  `blockYFor`'s top and bottom;
+//   the height     auto height pads the block by it (`neededHeight`'s pad), and
+//                  so does the balanced size a new box is placed at;
+//   the exports    the raster exporter through `placeBlock`, and the PSD type
+//                  layer's origin and frame - with its importer undoing it.
+export function textInset(style) {
+  return BOX_PAD + Math.ceil(strokeExtent(style?.strokes));
+}
+export function contentWidth(boxW, style) {
+  return Math.max(1, boxW - textInset(style) * 2);
+}
 
 // Where a text block's top edge sits inside its box, as an offset from the
 // box's top-left, for straight (non-curved) text. `blockH` is the block's own
@@ -35,9 +69,12 @@ export const BOX_PAD = 2;
 // raster exporter draws from it (layoutBox in exporter.js), the auto-height
 // helper sizes boxes with it, and the PSD writer anchors a live Photoshop type
 // layer with it. When the writer did NOT - it anchored every type layer at
-// BOX_PAD, i.e. the top - a middle- or bottom-aligned box exported pixels the
-// app agreed with and engine data it did not, and the words jumped upward the
-// moment Photoshop re-rendered the layer.
+// the top - a middle- or bottom-aligned box exported pixels the app agreed with
+// and engine data it did not, and the words jumped upward the moment Photoshop
+// re-rendered the layer.
+//
+// The top and bottom are the content box's (`textInset`), which is where the
+// editor's padded flex layout puts a top- or bottom-aligned block.
 //
 // `inkShift` is the correction `inkShiftY` below works out, and it applies to
 // the middle alignment only: a centred block is centred on its INK, which is the
@@ -46,8 +83,8 @@ export const BOX_PAD = 2;
 // by its own ascender would move it off that edge.
 export function blockYFor(style, boxH, blockH, inkShift = 0) {
   if (style?.valign === 'middle') return (boxH - blockH) / 2 + (Number(inkShift) || 0);
-  if (style?.valign === 'bottom') return boxH - BOX_PAD - blockH;
-  return BOX_PAD;
+  if (style?.valign === 'bottom') return boxH - textInset(style) - blockH;
+  return textInset(style);
 }
 
 // ---- where the glyphs sit inside a line box ----
@@ -729,10 +766,11 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
 // Two adjustments to what `balloon.js` hands back, and both are the caller's own
 // debt rather than something that module could have done:
 //
-//   BOX_PAD per edge. `interiorLineWidths` returns the BALLOON's usable width.
-//   The text is drawn inside a box that pads itself by BOX_PAD on every edge -
-//   which is exactly why every flat call site says `box.w - BOX_PAD * 2` - so
-//   the same 2px each side comes off here.
+//   the inset per edge. `interiorLineWidths` returns the BALLOON's usable
+//   width. The text is laid out inside the box's content box, `textInset` in
+//   from every edge - the padding plus the outline's reach, which is what every
+//   flat call site takes off through `contentWidth` - so the same inset comes
+//   off each side here.
 //
 //   the box's own content width is a ceiling. The box is placed at the balloon's
 //   INSCRIBED rectangle, which for an ellipse is about 70% of its bounding box,
@@ -758,12 +796,13 @@ export function balloonWidthsFor(box, style, sizePx) {
   if (!box || !style || style.balloon === false) return null;
   const shape = normalizeFit(box.fit);
   if (!shape) return null;
-  const contentW = Math.max(1, box.w - BOX_PAD * 2);
+  const inset = textInset(style);
+  const contentW = contentWidth(box.w, style);
   const lineH = sizePx * (style.lineHeight ?? 1);
   const valign = style.valign ?? 'middle';
   const fn = (lineCount) =>
     interiorLineWidths(shape, lineH, lineCount, valign).map((w) =>
-      Math.max(1, Math.min(contentW, w - BOX_PAD * 2)),
+      Math.max(1, Math.min(contentW, w - inset * 2)),
     );
   // What this closure IS, written down, so `layoutLines` can memoise a result
   // that depends on it. A callback cannot be a cache key - two closures built
@@ -771,7 +810,7 @@ export function balloonWidthsFor(box, style, sizePx) {
   // the widths it hands back, means calling it, which is a share of the work
   // being avoided. Everything the closure captures is here; a `widthsFor` from
   // anywhere else carries no key and is simply not cached (see `memoKey`).
-  fn.key = JSON.stringify([shape, lineH, valign, contentW]);
+  fn.key = JSON.stringify([shape, lineH, valign, contentW, inset]);
   return fn;
 }
 
@@ -881,7 +920,7 @@ export const layoutMemoSize = () => memo.size;
 // editor and the exporter through the ordinary path anyway.
 export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor, opts) {
   // A pixel is the narrowest a column can be. Every caller computes the width as
-  // `box.w - BOX_PAD * 2` and a box may be narrower than its own padding, so the
+  // the box less its inset (`contentWidth`) and a box may be narrower than that, so the
   // width handed in can be zero or negative - and the editor clamped it while
   // the raster exporter and the PSD's type layers did not, which is three
   // renderers free to break the same box in three different places. Clamped here
@@ -934,9 +973,9 @@ export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor, opts
 // ratio so that being a factor of two too wide and a factor of two too tall cost
 // the same - on a plain difference, wide always looks cheaper.
 //
-// Returns a BOX size: the content width plus the padding a box lays out inside,
-// and the height through `neededHeight`, so the caller can use it as a rectangle
-// without knowing what BOX_PAD is.
+// Returns a BOX size: the content width plus the inset a box breaks its lines
+// inside (`textInset`), and the height through `neededHeight`, so the caller can
+// use it as a rectangle without knowing what either is.
 //
 // Null when there is nothing to measure: no text, or no size.
 //
@@ -980,8 +1019,8 @@ export function balancedBoxSize(text, style, opts = {}) {
   }
   if (!best) return null;
   return {
-    w: Math.ceil(best.contentW) + BOX_PAD * 2,
-    h: neededHeight(best.count, style, BOX_PAD),
+    w: Math.ceil(best.contentW) + textInset(style) * 2,
+    h: neededHeight(best.count, style, textInset(style)),
     lines: best.count,
   };
 }

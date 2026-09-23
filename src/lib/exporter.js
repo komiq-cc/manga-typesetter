@@ -1,6 +1,6 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { familyFor, fontShorthand, maxLineWidth, BOX_PAD } from './measure.js';
+import { familyFor, fontShorthand, maxLineWidth, textInset, contentWidth } from './measure.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import {
   strokeBands,
@@ -118,15 +118,16 @@ export async function pageSpace(p) {
 // that corner is where feTurbulence's user space starts.
 //
 // For straight text that element is the text stack: full content width, so its
-// left edge is the box's padding, and its top is wherever the block sits after
-// the vertical alignment. For curved text it is `.arcstack`, which is `inset:0`
+// left edge is the content box's (`textInset` in from the box's own - the
+// editor's padding), and its top is wherever the block sits after the vertical
+// alignment. For curved text it is `.arcstack`, which is `inset:0`
 // against the box itself. Getting this right is what keeps the same crumple on
 // the same letter in the export as on the canvas - the noise is a field in
 // space, and anchoring it anywhere else slides the whole pattern across the
 // glyphs.
 function noiseOrigin(L) {
   if (L.isCurve) return { x: L.ox, y: L.oy };
-  return { x: L.ox + BOX_PAD, y: L.oy + L.blockY };
+  return { x: L.ox + textInset(L.s), y: L.oy + L.blockY };
 }
 
 // The roughening, over the finished raster: exactly the filter the editor hangs
@@ -242,8 +243,9 @@ function layoutBox(box, p) {
     bottomExtra = Math.max(0, maxY - box.h / 2);
   } else {
     // The lines are `placeBlock`'s, which breaks them through `layoutLines` at
-    // the content width (the box less 2px of padding each side, clamped to a
-    // pixel) with the box's balloon as one width per line - the same helper and
+    // the content width (`contentWidth`: the box less its padding and its
+    // outline's reach each side, clamped to a pixel) with the box's balloon as
+    // one width per line - the same helper and
     // the same arguments as the editor and the PSD's type layers, so "the export
     // breaks where the canvas breaks" is a construction rather than a
     // coincidence. Shaping off, that function is still `wrapLinesDOM`.
@@ -257,25 +259,27 @@ function layoutBox(box, p) {
     // below is measured from them, so the footprint cannot disagree with the
     // painting.
     //
-    // The padding is what was missing. The editor's `.tbox` is `padding:2px` on
-    // every edge, and wrapping has always been done at `box.w - BOX_PAD * 2` to
-    // match - but the block was then anchored at the box's own edge, so a
-    // left-aligned box exported 2px further left and a top-aligned one 2px
-    // higher than the canvas showed. The auto-height maths made that worse
-    // rather than merely visible: `neededHeight` sizes a box as the block plus
-    // BOX_PAD on both sides, so every auto-fitted box exported with 4px of slack
-    // under its text. Centred alignments were always right and still are - the
-    // padding is symmetric, so it cancels.
+    // The padding is what was once missing. The editor's `.tbox` is padded on
+    // every edge - by `textInset` now, the padding plus the outline's reach -
+    // and the lines are broken to that content box to match, but the block was
+    // then anchored at the box's own edge, so a left-aligned box exported 2px
+    // further left and a top-aligned one 2px higher than the canvas showed. The
+    // auto-height maths made that worse rather than merely visible:
+    // `neededHeight` sizes a box as the block plus the inset on both sides, so
+    // every auto-fitted box exported with slack under its text. Centred
+    // alignments were always right and still are - the inset is symmetric, so
+    // it cancels.
     // `placeBlock` centres a middle-aligned block on its ink rather than on its
     // line boxes - see `inkShiftY`. The editor applies the same shift to the
     // same lines, so a centred block exports where the canvas shows it.
     blockY = place.blockY;
+    const inset = textInset(s);
     blockX =
       s.align === 'center'
         ? (box.w - blockW) / 2
         : s.align === 'right'
-          ? box.w - BOX_PAD - blockW
-          : BOX_PAD;
+          ? box.w - inset - blockW
+          : inset;
 
     topExtra = Math.max(0, -blockY);
     bottomExtra = Math.max(0, blockY + blockH - box.h);
@@ -308,9 +312,9 @@ function fillRect(box, L, line = -1) {
   const n = L.lines ? L.lines.length : 1;
   const top = L.oy + L.blockY + (line >= 0 ? line * L.lineH : 0);
   return {
-    x: L.ox + BOX_PAD,
+    x: L.ox + textInset(L.s),
     y: top,
-    w: Math.max(1, box.w - BOX_PAD * 2),
+    w: contentWidth(box.w, L.s),
     h: (line >= 0 ? 1 : n) * L.lineH,
   };
 }

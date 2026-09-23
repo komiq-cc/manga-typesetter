@@ -61,7 +61,8 @@ import {
   blockYFor,
   baselineInLine,
   blockInk,
-  BOX_PAD,
+  textInset,
+  contentWidth,
   arcLayout,
   circleLayout,
   pathLayout,
@@ -128,13 +129,16 @@ export function manualReason(cand) {
 //
 // For straight text:
 //   lines    the broken lines, through `layoutLines` with the same arguments
-//            the editor passes, so all three break in the same places
+//            the editor passes - the content width is `contentWidth`, the box
+//            less its padding and its outline's reach - so all three break in
+//            the same places
 //   inks     each line's ink off `lineInk`, measured once (`blockInk`)
 //   shift    the ink-centring shift for a middle-aligned block
 //   blockY   the block's top inside the box (`blockYFor`)
 //   anchorX  the x the canvas draws each line at, with `textAlign` set to the
-//            style's alignment: the padded content box's left edge, right edge
-//            or the box's centre
+//            style's alignment: the content box's left edge, right edge or the
+//            box's centre - `textInset` in from the box's edge, the padding the
+//            editor's `.tbox` lays out inside (measure.js)
 //   baseY    each baseline's offset inside its line box
 //
 // For curves, the glyph layout, positions relative to the box centre.
@@ -156,10 +160,11 @@ export function placeBlock(cand, opts) {
   // Guarded as `neededHeight` and `baselineInLine` guard it, so a style missing
   // the field is one line height to every reader rather than 0 to one of them.
   const lineH = size * (s.lineHeight > 0 ? s.lineHeight : 1);
-  const lines = layoutLines(text, s, size, Math.max(1, cand.w - BOX_PAD * 2), balloonWidthsFor(cand, s, size), opts);
+  const lines = layoutLines(text, s, size, contentWidth(cand.w, s), balloonWidthsFor(cand, s, size), opts);
   const { inks, shift } = blockInk(lines, s, size);
   const blockH = lines.length * lineH;
   const align = s.align === 'left' || s.align === 'right' ? s.align : 'center';
+  const inset = textInset(s);
   return {
     s,
     text,
@@ -170,7 +175,7 @@ export function placeBlock(cand, opts) {
     lineH,
     blockH,
     blockY: blockYFor(s, cand.h, blockH, shift),
-    anchorX: align === 'left' ? BOX_PAD : align === 'right' ? cand.w - BOX_PAD : cand.w / 2,
+    anchorX: align === 'left' ? inset : align === 'right' ? cand.w - inset : cand.w / 2,
     baseY: baselineInLine(s, size),
   };
 }
@@ -393,11 +398,11 @@ const withSize = (cand, size) => (size === cand.style.size ? cand : { ...cand, s
 // over is one pixel of growth rather than two.
 const growFor = (over) => Math.ceil(over - GROW_EPS);
 
-// One height step: at least the line boxes plus padding (what auto height has
-// always given), plus whatever the ink still needs. Null when it would not grow.
+// One height step: at least the line boxes inside the content box (what auto
+// height gives), plus whatever the ink still needs. Null when it would not grow.
 function heightStep(c, place, o, limit) {
   const s = place.s;
-  const lineNeed = place.isCurve ? 0 : neededHeight(place.lines.length, s, BOX_PAD);
+  const lineNeed = place.isCurve ? 0 : neededHeight(place.lines.length, s, textInset(s));
   const over = heightNeed(s, o);
   const want = Math.max(lineNeed, over > GROW_EPS ? c.h + growFor(over) : 0);
   const newH = Math.min(want, limit.y1 - limit.y0);

@@ -13,7 +13,7 @@ import {
   psdSelfTest,
 } from './psd.js';
 import { PAGE_W, PAGE_H, emptyFaces, defaultStyle, normalizeStyle } from './data.js';
-import { BOX_PAD } from './measure.js';
+import { BOX_PAD, textInset } from './measure.js';
 import { app } from './store.svelte.js';
 import { _setPostScriptNameFor, _clearPostScriptNames } from './fonts.js';
 
@@ -686,6 +686,29 @@ describe('textLayerFor', () => {
     expect(at(undefined)).toBeCloseTo(60 + BOX_PAD, 6);
   });
 
+  // The content box is the box less `textInset` - the padding plus the
+  // outline's reach - on every side, in every renderer: the editor pads `.tbox`
+  // by it and the raster exporter anchors the block by it. So an outlined box's
+  // type layer starts that much further in, and its frame is that much narrower
+  // on both sides - or Photoshop's re-render of a left- or top-aligned box lands
+  // the outline's width away from the cached pixels under it.
+  it('insets the type layer by the outline as well as the padding', () => {
+    const strokes = [
+      { color: '#ffffff', width: 3, opacity: 1 },
+      { color: '#000000', width: 2, opacity: 0.5 },
+    ];
+    const layer = textLayerFor(
+      page,
+      { lineN: null, text: 'hello', x: 100, y: 60, w: 160, h: 80, style: { ...baseStyle, rotation: 0, valign: 'top', strokes } },
+      rendered,
+    );
+    const inset = BOX_PAD + 3 + 2;
+    expect(textInset({ strokes })).toBe(inset);
+    expect(layer.text.boxBounds[2]).toBe(160 - inset * 2);
+    expect(layer.text.transform[4]).toBeCloseTo(100 + inset, 6);
+    expect(layer.text.transform[5]).toBeCloseTo(60 + inset, 6);
+  });
+
   it('rotates the padded content origin about the box frame centre rather than about the inset origin', () => {
     // When a box is rotated, the pivot point must remain the geometric centre
     // of the outer box frame (cx, cy), matching exporter.js raster painting.
@@ -1159,6 +1182,34 @@ describe('reconstructForeign', () => {
     expect(b.h).toBe(80);
     expect(b.text).toBe('Foreign text');
     expect(b.style.bold).toBe(true);
+  });
+
+  // ...and back. A box this app wrote comes back the size it went out, outline
+  // and all: the importer reads the outline off the layer's stroke effects -
+  // the writer's outermost-first outer edges, back to innermost-first widths -
+  // and undoes the same inset. Undoing the padding alone brought an outlined box
+  // back 10px narrower than it went out, so its lines broke somewhere else. A
+  // layer with no stroke effect comes back with no outline, rather than with
+  // the app's default: its frame was not laid out with the default's inset.
+  it('reads the outline back off the stroke effects and undoes its inset', async () => {
+    const strokes = [
+      { color: '#ffffff', width: 3, opacity: 1 },
+      { color: '#000000', width: 2, opacity: 0.5 },
+    ];
+    // One line at lineHeight 1, in a box exactly as tall as it and its inset:
+    // the height the importer recovers is the block's.
+    const style = normalizeStyle({ ...defaultStyle(), size: 24, lineHeight: 1, align: 'left', valign: 'top', strokes });
+    const box = { lineN: null, text: 'hello', x: 100, y: 60, w: 160, h: 24 + textInset(style) * 2, style };
+    const layer = textLayerFor({ lines: [] }, box, null);
+    const bare = textLayerFor({ lines: [] }, { ...box, style: { ...style, strokes: [] } }, null);
+    delete bare.effects;
+    const page = await reconstructForeign({ width: 800, height: 1200, children: [layer, bare] });
+    const [b, plain] = page.boxes;
+    expect(b.style.strokes).toEqual(strokes);
+    expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: 100, y: 60, w: 160, h: box.h });
+    expect(b.style.align).toBe('left');
+    expect(plain.style.strokes).toEqual([]);
+    expect({ x: plain.x, y: plain.y, w: plain.w, h: plain.h }).toEqual({ x: 100, y: 60, w: 160, h: 24 + BOX_PAD * 2 });
   });
 
   it('falls back to raster ink bounds when boxBounds or transform are absent', async () => {
