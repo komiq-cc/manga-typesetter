@@ -105,8 +105,8 @@ import enUsPatterns from 'hyphenation.en-us';
 // it is near zero for any line count that can be balanced, and `lineCost` is
 // what then picks the fewest of those. Raising `lineCost` makes the algorithm
 // accept a ragged two-line block rather than a tidy three-line one; lowering it
-// does the reverse. Those two, and nothing else, choose the line count - see
-// `pick`.
+// does the reverse. The profile gets a say as well, but a bounded one - see
+// `hourglass`.
 //
 // The hourglass rule is enforced twice, and the split is the interesting part.
 //
@@ -118,31 +118,43 @@ import enUsPatterns from 'hyphenation.en-us';
 //
 // `hourglass` is the half that judges the finished profile, which no per-line
 // cost can see. It cannot go inside the DP, so it is applied where a profile
-// exists: between two *complete* breakings of the SAME line count, one from the
-// ordinary search and one from a search that leans on interior shortfalls hard
-// enough to break the pinch (`pinchHard`). Both are then priced under the
-// ordinary weights, so the comparison is honest and the heavier search is only
-// ever a generator of candidates, never a scorer.
+// exists, and it is priced differently in the two places that is.
 //
-// That is a change of role, and it is why the weight can be this large. The term
-// used to be added to each line count's total, where it competed with `lineCost`
-// - so cranking it up stopped rejecting pinches and started rejecting line
-// counts, and the block grew two extra lines to dodge a dip nobody would have
-// noticed. At the weight that could not do that (6) it also could not do
-// anything else. Measured over a 3000-string corpus: zeroing it changed 20
-// outputs, and 151 blocks shipped with a pinched profile. Confined to a fixed
-// line count it cannot buy a line at ANY weight - the two breakings it chooses
-// between have the same number of them - so the deadband is what keeps it off
-// ordinary text and the weight is free to be big enough to matter. At 300 the
-// same corpus ships 133 pinched blocks against 167 with the term switched off,
-// and 133 is very nearly the floor: an exhaustive search of every breaking at
-// each block's own line count says 130 of them have no unpinched breaking at
-// all. The mean line count is identical either way (3.198), and the mean spread
-// between a block's widest and narrowest line moves from 0.235 to 0.238 - the
-// repairs are not being bought with raggedness.
+// Within one line count it is a repair. Two *complete* breakings of that count
+// are compared - one from the ordinary search and one from a search that leans
+// on interior shortfalls hard enough to break the pinch (`pinchHard`) - under
+// the ordinary weights plus the profile at this full weight. Both have the same
+// number of lines, so no weight can make the comparison buy one, and the weight
+// is free to be as big as it takes for a visible dip to outweigh the raggedness
+// a repair brings with it. The heavier search is only ever a generator of
+// candidates, never a scorer.
+//
+// Across line counts it is a price, and a capped one: the profile adds at most
+// `lineCost`, the price of one line, to what a count's best breaking costs. So a
+// block whose every breaking at its cheapest count is pinched moves to the next
+// count when that count is balanced to within a line's price, and no pinch can
+// buy more than that. Both ends of the cap were measured, on 7228 breakings (the
+// text of 1127 real boxes at 0.7, 1 and 1.4 times the box width and in the 233
+// fitted ellipses, under the stand-in metric and Comic Neue), counting a block
+// as pinched when its deepest notch passes the deadband:
+//
+//   the term off entirely                        1677 pinched
+//   the repair only, the count chosen without it 1585 pinched
+//   the repair, and the count at a line's price  1537 pinched, lines +0.23%
+//   the repair, and the count at the full weight 1405 pinched, lines +1.66%
+//
+// The full weight is the failure the old design was written to avoid: priced
+// like that, the profile outbids any number of lines, and blocks grew by as many
+// as five to dodge a dip, 660 more one-word lines among them. At a line's price
+// the count moves for 77 blocks: 50 lose their pinch and 2 gain one. Against
+// the code before it - the previous measure, repair only, 1644 pinched - 108
+// blocks are repaired, 1 is newly pinched (0.009 past the deadband), and
+// overflowing lines fall from 1533 to 1520. The cap is `lineCost` rather than a
+// knob of its own because "a pinch is worth at most a line" is the whole of the
+// rule, and a second number would be a second way to say it.
 //
 // `orphanCost` is the other constraint-as-cost. See the two passes at the bottom
-// of `balanceParagraph` for why the rule has to be relaxable at all.
+// of `breakParagraph` for why the rule has to be relaxable at all.
 export const TYPESET_DEFAULTS = {
   minOrphan: 3, // a word with fewer letters than this may not sit alone on a line
   maxLines: 16, // candidate line counts above this are not enumerated
@@ -152,7 +164,7 @@ export const TYPESET_DEFAULTS = {
   pinch: 3, // weight on an INTERIOR line falling short of the target
   pinchHard: 40, // the same weight, for the second search that tries to un-pinch
   orphanCost: 50, // flat cost of a line the orphan rule refuses, in the relaxed pass
-  hourglass: 300, // penalty on a wide→narrow→wide block, at a FIXED line count
+  hourglass: 300, // penalty on a notched block; capped at `lineCost` across counts
   hourglassTol: 0.12, // dip below which a profile is not called an hourglass
   lineCost: 0.12, // mild preference for fewer lines
 
@@ -359,11 +371,23 @@ function hyphenPointsFor(word, o) {
 }
 
 // The one shape rule that cannot be expressed as a per-line cost: it is about
-// the profile as a whole. An hourglass is both ends fuller than the middle, so
-// the measure is `min(first, last) - min(interior)`, and it is only ever
+// the profile as a whole. An hourglass is a line narrower than something above
+// it AND something below it, so the measure is the deepest notch: for each
+// interior line, the fuller of the lines above it and the fuller of the lines
+// below it, the lesser of those two, minus the line itself. It is only ever
 // positive for a genuine pinch. A block whose last line is short - the ordinary,
-// desirable case - has a small `edge` and scores zero here, which is the point:
-// this must not become a tax on normal text.
+// desirable case - has nothing full below its short line and scores zero here,
+// which is the point: this must not become a tax on normal text. Nor does an
+// oval, whose every line is at least as full as everything on one side of it.
+//
+// It used to be `min(first, last) - min(interior)`, which says the same thing
+// about a three-line block and can be talked out of it by any longer one: make
+// the FIRST line short and `min(first, last)` is short too, and a notch two
+// lines further down stops counting. Inside one line count that loophole cost
+// the search a ragged block to use, so it was rarely taken. Once the line count
+// is chosen on this term as well (see `hourglass`), another count is a cheap
+// way to shorten the first line - `Does / that / mean our / lectures / are /
+// ending?!` was the answer to a pinch at `are`, with the pinch still in it.
 //
 // The inputs are fill ratios, each line's ink over that line's own allowance,
 // which is what makes the rule survive a width that varies down the block. In an
@@ -371,11 +395,21 @@ function hyphenPointsFor(word, o) {
 // block and are not a dip, because they are as full as the room they were given;
 // what is a dip is a middle line loafing in the widest part of the balloon.
 function hourglassPenalty(ratios, weight, tol) {
-  if (ratios.length < 3) return 0;
-  let mid = Infinity;
-  for (let i = 1; i < ratios.length - 1; i++) mid = Math.min(mid, ratios[i]);
-  const edge = Math.min(ratios[0], ratios[ratios.length - 1]);
-  const dip = edge - mid - tol;
+  const L = ratios.length;
+  if (L < 3) return 0;
+  const above = new Array(L);
+  let full = -Infinity;
+  for (let i = 0; i < L; i++) {
+    above[i] = full;
+    full = Math.max(full, ratios[i]);
+  }
+  let below = -Infinity;
+  let notch = -Infinity;
+  for (let i = L - 1; i > 0; i--) {
+    if (i < L - 1) notch = Math.max(notch, Math.min(above[i], below) - ratios[i]);
+    below = Math.max(below, ratios[i]);
+  }
+  const dip = notch - tol;
   return dip > 0 ? weight * dip * dip : 0;
 }
 
@@ -409,14 +443,21 @@ function widthsResolver(spec) {
   return (L) => new Array(L).fill(w);
 }
 
-// One paragraph - no newlines - as an array of lines.
-function balanceParagraph(para, widthSpec, measureFn, o) {
+// One paragraph - no newlines - broken every way the search keeps: the best
+// breaking at each line count it could use (`byCount`, ascending), and the one
+// of those that wins (`best`). Both in the published shape; see `balanceScored`.
+function breakParagraph(para, widthSpec, measureFn, o) {
   const words = [];
   const re = /\S+/g;
   let m;
   while ((m = re.exec(para)) !== null) words.push({ s: m.index, e: m.index + m[0].length, t: m[0] });
   const n = words.length;
-  if (n === 0) return ['']; // a blank paragraph is still a line, as in wrapLinesDOM
+  // A blank paragraph is still a line, as in wrapLinesDOM, and it costs what any
+  // line costs, so a block's merit goes on counting its lines.
+  if (n === 0) {
+    const blank = { lines: [''], merit: o.lineCost, cost: o.lineCost, overflowLines: [], greedy: false, orphansRelaxed: false };
+    return { best: blank, byCount: [blank] };
+  }
 
   // Asked for once per line count and remembered, for two reasons. The cheap one
   // is that `solve` and `score` both want it. The load-bearing one is that the
@@ -434,6 +475,16 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
     }
     return v;
   };
+  // The same, for the scorer, which unlike the search can be handed a block
+  // longer than `maxLines`: the greedy fallback's. The callback is never asked
+  // about a count that high, so the rows past the last count it may be asked
+  // about take that count's last width - which is the allowance the fallback
+  // wrapped them against.
+  const rowsOf = (L) => {
+    if (L <= o.maxLines) return widthsOf(L);
+    const w = widthsOf(o.maxLines);
+    return Array.from({ length: L }, (_, k) => w[Math.min(k, w.length - 1)]);
+  };
 
   // Greedy is the floor, not the goal: it is what a text too long to enumerate
   // falls back to, and what answers when every candidate has been rejected. It
@@ -445,6 +496,9 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // which settles immediately for a constant width and within a couple of passes
   // for anything shaped. Capped rather than looped to convergence, because a
   // fallback that could oscillate is not a fallback.
+  //
+  // It works in words, `[first, end)` per line, because it never breaks inside
+  // one; `fallback` below turns those into the positions everything else uses.
   const wcache = new Map();
   const wordsWidth = (i, j) => {
     const k = i * (n + 1) + j;
@@ -461,11 +515,11 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
     let start = 0;
     for (let j = 2; j <= n; j++) {
       if (wordsWidth(start, j) > allow(out.length) + FIT_EPS) {
-        out.push(para.slice(words[start].s, words[j - 2].e));
+        out.push([start, j - 1]);
         start = j - 1;
       }
     }
-    out.push(para.slice(words[start].s, words[n - 1].e));
+    out.push([start, n]);
     return out;
   };
   const greedy = () => {
@@ -477,7 +531,9 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
     }
     return lines;
   };
-  if (n > o.maxWords) return greedy();
+  // Too long to enumerate: no break points inside words, because only the
+  // search below could ever use them.
+  const enumerate = n <= o.maxWords;
 
   // ===== the positions a line may begin and end at =====
   //
@@ -493,7 +549,7 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // Interior spacing, double spaces and the user's own characters survive the
   // round trip untouched for the same reason they always did.
   const hyphenPoints = [];
-  if (o.hyphenate) {
+  if (o.hyphenate && enumerate) {
     // The gate. A word is offered break points only when it fits on no line this
     // block could ever hand it - measured against the widest allowance across
     // every candidate line count, because if some line is wide enough, the
@@ -529,7 +585,10 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // `wStart` is the word a line beginning here starts in; `wEnd` the word a line
   // ending here ends in. Their difference plus one is the number of tokens on
   // the line, which is what both the fit rule and the orphan rule ask about.
+  // `endPos[j]` is the position at the space after word `j`, which is where the
+  // greedy fallback's lines end.
   const pos = [{ start: words[0].s, end: -1, hy: HY_NONE, wStart: 0, wEnd: -1 }];
+  const endPos = new Array(n);
   let hp = 0;
   for (let j = 0; j < n; j++) {
     while (hp < hyphenPoints.length && hyphenPoints[hp].w === j) {
@@ -544,9 +603,9 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
       wStart: j + 1,
       wEnd: j,
     });
+    endPos[j] = pos.length - 1;
   }
   const M = pos.length - 1; // the last position: the end of the paragraph
-  if (M === 1) return [words[0].t]; // one word, nowhere to break it
 
   const lineText = (a, b) =>
     para.slice(pos[a].start, pos[b].end) + (pos[b].hy === HY_ADDED ? '-' : '');
@@ -698,14 +757,16 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // What a finished breaking is worth, always under the standard weights, so two
   // breakings found by two different searches can be compared at all.
   //
-  //   merit  what the line-count race is run on: the separable costs plus the
-  //          price of another line, and NOT the profile. A shape penalty in here
-  //          is a shape penalty bidding against `lineCost`, which is how the
-  //          block ends up growing a line to dodge a dip.
-  //   cost   merit plus the profile penalty. Only ever compared between two
-  //          breakings of the same `L`, where the extra line is not on the table.
+  //   merit    the separable costs plus the price of another line: everything
+  //            but the profile.
+  //   penalty  the profile, which no per-line cost can see, at `hourglass`'s
+  //            full weight. What two breakings of the SAME line count are
+  //            compared on, with merit - see `shaped`.
+  //   cost     merit plus the profile at no more than one line's price. What
+  //            line counts are compared on, and what a caller is handed. See
+  //            `hourglass` for why the two prices differ.
   const score = (cuts, L) => {
-    const w = widthsOf(L);
+    const w = rowsOf(L);
     const T = targetFor(w);
     let base = 0;
     for (let k = 1; k <= cuts.length; k++) {
@@ -715,7 +776,7 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
     const ratios = cuts.map(([a, b], k) => width(a, b) / w[k]);
     const penalty = hourglassPenalty(ratios, o.hourglass, o.hourglassTol);
     const merit = base + o.lineCost * L;
-    return { cuts, L, merit, cost: merit + penalty, penalty };
+    return { cuts, L, merit, penalty, cost: merit + Math.min(penalty, o.lineCost) };
   };
 
   // The hourglass rule, applied where a profile exists and a line count is
@@ -723,36 +784,70 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // cannot see the profile it is building; when what it built is a pinched one,
   // this asks the same question again with interior shortfalls weighted hard
   // enough to force the short line somewhere else, and keeps that answer only if
-  // it is cheaper *under the ordinary weights plus the profile penalty*.
+  // it is cheaper *under the ordinary weights plus the profile penalty* - at its
+  // full weight, because the two breakings have the same number of lines and
+  // the only question left is which of them reads as a shape.
   //
-  // So the heavy weight never prices anything - it only proposes. A proposal
-  // that dodges the dip by making a mess of the raggedness loses on its own
-  // merit, which is the property that makes the big `hourglass` weight safe.
+  // So the heavy `pinchHard` weight never prices anything - it only proposes. A
+  // proposal that dodges the dip by making a mess of the raggedness loses on its
+  // own merit, which is the property that makes the big `hourglass` weight safe.
   const shaped = (cand, allowOrphan) => {
     if (!cand || cand.penalty === 0) return cand;
     const alt = solve(cand.L, allowOrphan, o.pinchHard);
     if (!alt) return cand;
     const scored = score(alt, cand.L);
-    return scored.cost < cand.cost ? scored : cand;
+    return scored.merit + scored.penalty < cand.merit + cand.penalty ? scored : cand;
   };
 
-  // Every line count from one up, and the cheapest wins. Ascending with a strict
-  // `<` is the second half of the tie-breaking rule: equal cost goes to the
-  // block with fewer lines.
-  //
-  // The ceiling is the number of break positions rather than the number of
-  // words, because a single hyphenatable word is a paragraph that can legally
-  // occupy three lines - which is the whole of the reference case.
+  // A scored breaking in the shape the callers get: the lines as they will be
+  // drawn, its prices, and which of them hang over their own row - the only
+  // lines that can are single tokens, and they are what a caller has to flag or
+  // shrink for, because no breaking of this text at this size puts them inside.
+  const publish = (cand, greedyPath, orphansRelaxed) => {
+    const w = rowsOf(cand.L);
+    const overflowLines = [];
+    cand.cuts.forEach(([a, b], k) => {
+      if (width(a, b) > w[k] + FIT_EPS) overflowLines.push(k);
+    });
+    return {
+      lines: cand.cuts.map(([a, b]) => lineText(a, b)),
+      merit: cand.merit,
+      cost: cand.cost,
+      overflowLines,
+      greedy: greedyPath,
+      orphansRelaxed,
+    };
+  };
+
+  // The fallback, scored like everything else so a caller comparing blocks
+  // compares them on one scale, and flagged, because no orphan, hyphen or shape
+  // rule has been applied to it and a caller may want to say so.
+  const fallback = () => {
+    const cuts = greedy().map(([i, j]) => [i === 0 ? 0 : endPos[i - 1], endPos[j - 1]]);
+    const only = publish(score(cuts, cuts.length), true, false);
+    return { best: only, byCount: [only] };
+  };
+  if (!enumerate) return fallback();
+
+  // The best breaking at exactly `L` lines: the ordinary search, then the
+  // profile repair.
+  const bestAt = (L, allowOrphan) => {
+    const cuts = solve(L, allowOrphan, o.pinch);
+    return cuts && shaped(score(cuts, L), allowOrphan);
+  };
+
+  // Every line count from one up. The ceiling is the number of break positions
+  // rather than the number of words, because a single hyphenatable word is a
+  // paragraph that can legally occupy three lines - which is the whole of the
+  // reference case.
   const maxL = Math.min(M, o.maxLines);
-  const pick = (allowOrphan) => {
-    let winner = null;
+  const everyCount = (allowOrphan) => {
+    const out = [];
     for (let L = 1; L <= maxL; L++) {
-      const cuts = solve(L, allowOrphan, o.pinch);
-      if (!cuts) continue;
-      const cand = score(cuts, L);
-      if (!winner || cand.merit < winner.merit) winner = cand;
+      const cand = bestAt(L, allowOrphan);
+      if (cand) out.push(cand);
     }
-    return shaped(winner, allowOrphan);
+    return out;
   };
 
   // The orphan rule is a hard constraint, and then it is not. Held hard, a text
@@ -769,26 +864,110 @@ function balanceParagraph(para, widthSpec, measureFn, o) {
   // nothing was left to prefer the legal breaking. As a per-line cost heavy
   // enough to dominate any shape difference (`orphanCost`), the only orphans
   // that survive are the ones no breaking could have avoided.
-  const winner = pick(false) ?? pick(true);
-  return (winner?.cuts.map(([a, b]) => lineText(a, b))) ?? greedy();
+  //
+  // And it is relaxed for the paragraph, not per line count: a count with no
+  // legal breaking is simply not on offer while another count has one, which is
+  // what keeps `byCount` and `best` telling the same story.
+  let orphansRelaxed = false;
+  let found = everyCount(false);
+  if (!found.length) {
+    orphansRelaxed = true;
+    found = everyCount(true);
+  }
+  if (!found.length) return fallback();
+  const byCount = found.map((cand) => publish(cand, false, orphansRelaxed));
+
+  // The cheapest wins. Ascending with a strict `<` is the second half of the
+  // tie-breaking rule: equal cost goes to the block with fewer lines.
+  let best = byCount[0];
+  for (const cand of byCount) if (cand.cost < best.cost) best = cand;
+  return { best, byCount };
 }
 
-// The public entry. `text` may contain newlines; each is a hard paragraph break
-// the user typed, and each paragraph is balanced on its own - a shape is a
-// property of a paragraph, and balancing across a deliberate break would move
-// words over a line the user put there.
+// A text's paragraphs. Each newline is a hard break the user typed, and each
+// paragraph is balanced on its own - a shape is a property of a paragraph, and
+// balancing across a deliberate break would move words over a line the user put
+// there.
+function paragraphsOf(text) {
+  return (text == null ? '' : String(text)).split('\n');
+}
+
+// A block is its paragraphs one after another: lines concatenated, prices
+// summed, overflowing lines renumbered to where their paragraph starts, and a
+// flag raised when any paragraph raised it.
+function joinParagraphs(parts) {
+  const out = { lines: [], merit: 0, cost: 0, overflowLines: [], greedy: false, orphansRelaxed: false };
+  for (const p of parts) {
+    for (const k of p.overflowLines) out.overflowLines.push(out.lines.length + k);
+    out.lines.push(...p.lines);
+    out.merit += p.merit;
+    out.cost += p.cost;
+    out.greedy = out.greedy || p.greedy;
+    out.orphansRelaxed = out.orphansRelaxed || p.orphansRelaxed;
+  }
+  return out;
+}
+
+// The public entries. `text` may contain newlines (see `paragraphsOf`).
 //
 // `width` is either a number, meaning the same allowance for every line, or a
 // callback `widthsFor(lineCount) -> number[]` handing back one allowance per
 // line of a block of that many lines. The callback is asked once per candidate
 // line count per paragraph and its answer is remembered, so it must be pure; it
 // is not asked for a line count above `maxLines`.
-export function balanceLines(text, width, measureFn, opts = {}) {
+//
+// `balanceScored` is the breaking the module chooses, with what it knows about
+// it:
+//
+//   lines           the lines, as they will be drawn
+//   merit, cost     its prices under the standard weights (see `score`), summed
+//                   over the paragraphs. Comparable between breakings of the
+//                   same text; not between two texts.
+//   overflowLines   indices into `lines` of the lines wider than their own row.
+//                   Only a single unbreakable token can be, so a non-empty list
+//                   means this text does not fit this width at this size.
+//   greedy          some paragraph fell back to greedy wrapping - too long to
+//                   enumerate, or no breaking within `maxLines` - and has had no
+//                   orphan, hyphen or shape rule applied.
+//   orphansRelaxed  some paragraph had no breaking that keeps every short word
+//                   company, and carries the cheapest orphans instead.
+export function balanceScored(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
-  const src = text == null ? '' : String(text);
-  const out = [];
-  for (const para of src.split('\n')) out.push(...balanceParagraph(para, width, measureFn, o));
-  return out.length ? out : [''];
+  return joinParagraphs(paragraphsOf(text).map((para) => breakParagraph(para, width, measureFn, o).best));
+}
+
+// The best breaking at every line count the text can be set in, ascending, each
+// in `balanceScored`'s shape - for a caller that has a reason of its own to want
+// a count other than the cheapest: a block that must fit a height, or a size
+// being traded against a count. The entry at the count `balanceScored` chooses
+// is the breaking it chooses.
+//
+// A text of several paragraphs is set at a given count by the cheapest split of
+// that count between them, which is a small min-plus product of each
+// paragraph's own table rather than a search over the whole block. A paragraph
+// that fell back to greedy offers its one count only.
+export function balanceCandidates(text, width, measureFn, opts = {}) {
+  const o = { ...TYPESET_DEFAULTS, ...opts };
+  let runs = new Map([[0, { cost: 0, parts: [] }]]);
+  for (const para of paragraphsOf(text)) {
+    const { byCount } = breakParagraph(para, width, measureFn, o);
+    const next = new Map();
+    for (const [L0, run] of runs) {
+      for (const cand of byCount) {
+        const L = L0 + cand.lines.length;
+        const cost = run.cost + cand.cost;
+        const held = next.get(L);
+        if (!held || cost < held.cost) next.set(L, { cost, parts: [...run.parts, cand] });
+      }
+    }
+    runs = next;
+  }
+  return [...runs.keys()].sort((a, b) => a - b).map((L) => joinParagraphs(runs.get(L).parts));
+}
+
+// The lines alone, which is all the renderer has ever needed.
+export function balanceLines(text, width, measureFn, opts = {}) {
+  return balanceScored(text, width, measureFn, opts).lines;
 }
 
 // ===== auto-height =====

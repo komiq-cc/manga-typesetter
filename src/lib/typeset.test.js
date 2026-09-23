@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   balanceLines,
+  balanceScored,
+  balanceCandidates,
   balancedBlockSize,
   neededHeight,
   growToFit,
@@ -32,14 +34,17 @@ const chars = (s) => s.length;
 const weighted = (s) => [...s].reduce((a, c) => a + (c === ' ' ? 0.5 : /[A-Z]/.test(c) ? 1.4 : 1), 0);
 
 const widths = (lines) => lines.map((l) => l.length);
-// The shape test, stated once. An hourglass is both ends wider than the middle;
-// a square and an oval are not, and neither is the ordinary block whose last
-// line runs short.
+// The shape test, stated once, the way the module states it: the deepest notch,
+// an interior line short of something above it AND something below it. A square
+// and an oval have none, and neither does the ordinary block whose last line
+// runs short.
 const dip = (lines, w) => {
-  if (lines.length < 3) return 0;
   const r = lines.map((l) => l.length / w);
-  const mid = Math.min(...r.slice(1, -1));
-  return Math.min(r[0], r[r.length - 1]) - mid;
+  let deepest = 0;
+  for (let i = 1; i < r.length - 1; i++) {
+    deepest = Math.max(deepest, Math.min(Math.max(...r.slice(0, i)), Math.max(...r.slice(i + 1))) - r[i]);
+  }
+  return deepest;
 };
 
 describe('balanceLines - the block reads as a square or an oval', () => {
@@ -89,8 +94,8 @@ describe('balanceLines - the block reads as a square or an oval', () => {
   // cannot tell which of them is doing the work, and the answer used to be that
   // `hourglass` did none. It was a modest weight competing with `lineCost` for
   // the choice of line count, where it could only ever be small; it is now a
-  // heavy weight choosing between two breakings of the SAME line count, where it
-  // cannot buy a line at all.
+  // heavy weight choosing between two breakings of the SAME line count, and a
+  // price capped at one line's when line counts are compared.
   it('rejects a pinch with the interior-shortfall term switched off', () => {
     // `pinch: 0`, so nothing inside the dynamic program prefers a short line at
     // the end - and the profile term alone still moves it there.
@@ -111,27 +116,58 @@ describe('balanceLines - the block reads as a square or an oval', () => {
     expect(dip(blind, 15)).toBeGreaterThan(0.12);
     const shaped = balanceLines(text, 15, chars);
     expect(dip(shaped, 15)).toBeLessThanOrEqual(0.12);
-    // And the repair is a different breaking, never a bigger block: the rule
-    // chooses break points at a line count that has already been settled.
+    // And the repair is a different breaking at the same count: a better one
+    // existed without spending a line.
     expect(shaped).toHaveLength(blind.length);
   });
 
-  it('cannot buy a line at any weight', () => {
-    // The line count is decided by raggedness and `lineCost` alone. Cranking the
-    // profile penalty to absurdity may change where a block breaks and must
-    // never change how many pieces it breaks into - which is exactly what a
-    // cross-candidate penalty did, and why it had to be kept small.
+  it('takes another line when every breaking at the cheapest count is pinched', () => {
+    // Twelve units wide, the six words fit on three lines exactly one way, and
+    // that way has CCC DDDD sitting short between two fuller lines. Nothing at
+    // three lines can repair it, so the repair has to be a line count - and four
+    // lines balance to within a line's price of three.
+    const text = 'AAAAA BBBB CCC DDDD EEEE FFFFFF';
+    const words = text.split(' ');
+    const threes = [];
+    for (let i = 1; i < words.length; i++) {
+      for (let j = i + 1; j < words.length; j++) {
+        const lines = [words.slice(0, i), words.slice(i, j), words.slice(j)].map((x) => x.join(' '));
+        if (lines.every((l) => l.length <= 12)) threes.push(lines);
+      }
+    }
+    expect(threes).toEqual([['AAAAA BBBB', 'CCC DDDD', 'EEEE FFFFFF']]);
+    expect(dip(threes[0], 12)).toBeGreaterThan(TYPESET_DEFAULTS.hourglassTol);
+
+    const [three, four] = balanceCandidates(text, 12, chars);
+    expect(three.lines).toEqual(threes[0]);
+    expect(three.merit).toBeLessThan(four.merit); // three is the tidier block...
+    expect(three.cost).toBeGreaterThan(three.merit); // ...and pays for its profile
+    expect(four.cost).toBe(four.merit); // which four does not have
+    expect(balanceLines(text, 12, chars)).toEqual(['AAAAA', 'BBBB CCC', 'DDDD EEEE', 'FFFFFF']);
+    expect(dip(balanceLines(text, 12, chars), 12)).toBeLessThanOrEqual(TYPESET_DEFAULTS.hourglassTol);
+    // With the profile unpriced the count goes back to three.
+    expect(balanceLines(text, 12, chars, { hourglass: 0 })).toEqual(threes[0]);
+  });
+
+  it('never spends more than one line’s price on the profile', () => {
+    // The failure that kept the term out of the choice of line count for so
+    // long: priced at its full weight it outbid any number of lines, and a block
+    // grew a column of one-word lines to dodge a dip. Capped, the block chosen
+    // is never more than `lineCost` worse on everything else than the tidiest
+    // count on offer - at the default weight, and at an absurd one.
     const texts = [
       'STOP ALWAYS WHY NEVER HELP NEVER A NEVER I NEVER',
       'THE WORLD IS ENDING AND NOBODY CARES AT ALL',
       'WE HAVE TO GET OUT OF HERE BEFORE IT FINDS US AGAIN',
       'DDDDD EEEEEE JJJJJJJ FFF BBB FFF FFF CC',
+      'AAAAA BBBB CCC DDDD EEEE FFFFFF',
     ];
     for (const text of texts) {
-      for (const w of [11, 13, 15, 18, 22]) {
-        const off = balanceLines(text, w, chars, { hourglass: 0 });
-        for (const weight of [TYPESET_DEFAULTS.hourglass, 5000]) {
-          expect(balanceLines(text, w, chars, { hourglass: weight })).toHaveLength(off.length);
+      for (const w of [11, 12, 13, 15, 18, 22]) {
+        for (const hourglass of [TYPESET_DEFAULTS.hourglass, 5000]) {
+          const tidiest = Math.min(...balanceCandidates(text, w, chars, { hourglass }).map((c) => c.merit));
+          const chosen = balanceScored(text, w, chars, { hourglass });
+          expect(chosen.merit).toBeLessThanOrEqual(tidiest + TYPESET_DEFAULTS.lineCost + 1e-12);
         }
       }
     }
@@ -317,6 +353,101 @@ describe('balanceLines - determinism', () => {
     const lines = balanceLines(text, 20, chars);
     expect(lines.join(' ').split(/\s+/)).toEqual(text.split(/\s+/));
     for (const l of lines) expect(l.length).toBeLessThanOrEqual(20);
+    // And says so, with a price on the same scale as everything else.
+    const scored = balanceScored(text, 20, chars);
+    expect(scored.greedy).toBe(true);
+    expect(Number.isFinite(scored.cost)).toBe(true);
+    expect(balanceCandidates(text, 20, chars)).toEqual([scored]);
+  });
+});
+
+// ===== what the choice knew =====
+//
+// `balanceScored` is `balanceLines` with its reasons attached, and
+// `balanceCandidates` is every line count it weighed, for a caller - the fitting
+// pass - that has a reason of its own to take a count other than the cheapest.
+
+describe('balanceScored and balanceCandidates', () => {
+  const texts = [
+    'THE WORLD IS ENDING AND NOBODY CARES AT ALL',
+    'STOP ALWAYS WHY NEVER HELP NEVER A NEVER I NEVER',
+    'AAAAA BBBB CCC DDDD EEEE FFFFFF',
+    'ONE TWO\nTHREE FOUR FIVE SIX',
+    'WE HAVE TO GET OUT OF HERE\n\nBEFORE IT FINDS US AGAIN',
+  ];
+
+  it('is balanceLines with its prices attached', () => {
+    for (const text of texts) {
+      for (const w of [9, 12, 15, 22]) {
+        for (const metric of [chars, weighted]) {
+          const scored = balanceScored(text, w, metric);
+          expect(scored.lines).toEqual(balanceLines(text, w, metric));
+          // The profile adds at most a line's price per paragraph.
+          const paragraphs = text.split('\n').length;
+          expect(scored.cost).toBeGreaterThanOrEqual(scored.merit);
+          expect(scored.cost).toBeLessThanOrEqual(scored.merit + paragraphs * TYPESET_DEFAULTS.lineCost + 1e-12);
+          expect(scored.greedy).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('offers the chosen breaking among every count, and nothing cheaper', () => {
+    for (const text of texts) {
+      for (const w of [9, 12, 15, 22]) {
+        const scored = balanceScored(text, w, chars);
+        const all = balanceCandidates(text, w, chars);
+        const counts = all.map((c) => c.lines.length);
+        expect(counts).toEqual([...counts].sort((a, b) => a - b));
+        expect(new Set(counts).size).toBe(counts.length);
+        expect(all.find((c) => c.lines.length === scored.lines.length)).toEqual(scored);
+        for (const c of all) expect(c.cost).toBeGreaterThanOrEqual(scored.cost);
+      }
+    }
+  });
+
+  it('sets a count across paragraphs by the cheapest split of it', () => {
+    // Checked against every way of adding the paragraphs' own tables together.
+    const text = 'WE HAVE TO GET OUT OF HERE\nBEFORE IT FINDS US AGAIN';
+    const [a, b] = text.split('\n').map((para) => balanceCandidates(para, 11, chars));
+    const cheapest = new Map();
+    for (const x of a) {
+      for (const y of b) {
+        const L = x.lines.length + y.lines.length;
+        const cost = x.cost + y.cost;
+        if (!cheapest.has(L) || cost < cheapest.get(L).cost) cheapest.set(L, { cost, lines: [...x.lines, ...y.lines] });
+      }
+    }
+    const all = balanceCandidates(text, 11, chars);
+    expect(all.map((c) => c.lines.length)).toEqual([...cheapest.keys()].sort((p, q) => p - q));
+    for (const c of all) {
+      const want = cheapest.get(c.lines.length);
+      expect(c.lines).toEqual(want.lines);
+      expect(c.cost).toBeCloseTo(want.cost, 12);
+    }
+  });
+
+  it('names the lines that hang over their row, and says when an orphan had to stay', () => {
+    // Twenty W is one token with no syllable in it, wider than the box, so no
+    // breaking puts it inside; and it cannot share a line, so "ok" is alone.
+    const scored = balanceScored('WWWWWWWWWWWWWWWWWWWW ok', 8, chars);
+    expect(scored.lines).toEqual(['WWWWWWWWWWWWWWWWWWWW', 'ok']);
+    expect(scored.overflowLines).toEqual([0]);
+    expect(scored.orphansRelaxed).toBe(true);
+    // Numbered within the whole block, after the paragraphs before it.
+    const two = balanceScored('OH NO\nWWWWWWWWWWWWWWWWWWWW', 8, chars);
+    expect(two.lines).toEqual(['OH NO', 'WWWWWWWWWWWWWWWWWWWW']);
+    expect(two.overflowLines).toEqual([1]);
+    expect(two.orphansRelaxed).toBe(false);
+    // Against each row's own width: nine units fit a nine-wide first row and
+    // not a six-wide second one.
+    const rows = balanceScored('WWWWWWWWW WWWWWWWWW', (L) => (L === 2 ? [9, 6] : new Array(L).fill(6)), chars);
+    expect(rows.lines).toEqual(['WWWWWWWWW', 'WWWWWWWWW']);
+    expect(rows.overflowLines).toEqual([1]);
+    // And ordinary text has none of it.
+    const plain = balanceScored('THE WORLD IS ENDING AND NOBODY CARES AT ALL', 18, chars);
+    expect(plain.overflowLines).toEqual([]);
+    expect(plain.orphansRelaxed).toBe(false);
   });
 });
 
