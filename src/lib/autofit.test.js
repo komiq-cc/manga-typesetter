@@ -107,9 +107,30 @@ describe('the box grows to its text, anchored where the text is', () => {
     expect(autoFitBox(b, page())).toBe(false);
   });
 
-  it('leaves the width alone - it is what the user aimed at the bubble', () => {
+  // The width is what the user aimed at the bubble, and nothing that is not an
+  // edit moves it: opening a chapter is grow-only, in height. An edit runs the
+  // containment ladder (contain.js), which may widen an auto box - but it tries
+  // the height first, so a box the height alone can make room in keeps its width.
+  it('leaves the width alone on opening, and on an edit the height can satisfy', () => {
     loadProjectPages(doc([twoLiner()]));
-    expect(page().boxes[0].w).toBe(60);
+    const b = page().boxes[0];
+    expect(b.w).toBe(60);
+    expect(autoFitBox(b, page())).toBe(false);
+    expect(b.w).toBe(60);
+  });
+
+  // ...and widens, symmetrically and no further than the text needs, when the
+  // height cannot: a page 30 tall holds one line of this text and not two.
+  it('widens on an edit only once the height is capped, and only as far as it must', () => {
+    loadProjectPages(doc([twoLiner({ y: 0, style: { size: 20, lineHeight: 1.1, valign: 'top', outlineWidth: 0 } })], { h: 30 }));
+    const b = page().boxes[0];
+    // Opening capped the height at the page and moved nothing sideways.
+    expect({ x: b.x, w: b.w, h: b.h }).toEqual({ x: 100, w: 60, h: 30 });
+    expect(autoFitBox(b, page())).toBe(true);
+    // One line: `AAAA BBBB` is 9 * 11 = 99 wide, plus the padding.
+    expect(b.w).toBe(99 + 4);
+    expect(b.x + b.w / 2).toBe(100 + 60 / 2);
+    expect(b.style.size).toBe(20);
   });
 
   it('declines for curved text, which is not laid out in lines at all', () => {

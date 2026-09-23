@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
-import { app, page, loadProjectPages, placeDetectedOnPage, fontCssFor } from './store.svelte.js';
+import { app, page, loadProjectPages, placeDetectedOnPage, fontCssFor, autoFitBox, boxText } from './store.svelte.js';
+import { boxCandidate, placeBlock, boxInkRect } from './contain.js';
 import {
   canMeasure,
   lineWidth,
@@ -232,8 +233,8 @@ describe('real glyph ink stays inside the box', () => {
     return { box, p, lines };
   }
 
-  // Holds today, and pins down the fixtures the two `it.fails` below use, so
-  // those are known to fail on their containment assertion and nothing else.
+  // Pins down the fixtures the two containment tests below use, so those are
+  // known to be about containment and nothing else.
   it('a full-width Comic Neue line, glyphs only', () => {
     const { box, p, lines } = fullWidthBox('Comic Neue', { strokes: [] });
     expect(lines).toEqual([FULL]);
@@ -242,24 +243,121 @@ describe('real glyph ink stays inside the box', () => {
     expect(styleFor('Comic Neue').strokes).toEqual([{ color: '#ffffff', width: 3, opacity: 1 }]);
   });
 
-  // KNOWN BUG OVF-3 (docs/typeset-review/01-overflow-containment.md): the
-  // default outline is 3px and the box pads its text by BOX_PAD = 2px, so the
-  // outline of a full-width line is drawn about a pixel outside the box. Fails
-  // today; when the containment fix lands (layout inset = BOX_PAD + stroke
-  // extent) it passes, `it.fails` turns red, and this becomes a plain `it`.
-  it.fails('a full-width Comic Neue line in the default 3px outline (OVF-3)', () => {
+  // The containment contract (OVF-2, contain.js): a box's painted ink is inside
+  // the box, or the box carries `box.review` saying it is not. Never overflowing
+  // and unflagged. Opening a saved chapter may only grow heights, so a box laid
+  // out too tight is FLAGGED on opening; an edit runs the ladder, which widens an
+  // auto box until the ink clears it.
+  function containedOrFlagged(box, p) {
+    const past = inkPastBox(box, p).worst;
+    expect(past <= TOLERANCE || !!box.review, `${past}px past the box, flag ${JSON.stringify(box.review)}`).toBe(true);
+    return past;
+  }
+
+  // The default outline is 3px and the box pads its text by BOX_PAD = 2px, so
+  // the outline of a full-width line was drawn about a pixel outside the box
+  // with nothing saying so (OVF-3).
+  it('a full-width Comic Neue line in the default 3px outline: inside, or flagged', () => {
     const { box, p } = fullWidthBox('Comic Neue');
+    containedOrFlagged(box, p);
+    autoFitBox(box, p);
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+    expect(box.review).toBeUndefined();
   });
 
-  // KNOWN BUG, found by this lane: Bangers' glyphs reach up to about 3.7px past
-  // their advance on the right at 26px (negative right side bearings), and the
-  // layout fits advances, not ink - OVF-10's "width uses advance, not ink", on an
-  // upright face. So a full-width Bangers line's GLYPHS sit outside the box with
-  // no outline at all. Fails today; passes once containment checks the real ink
-  // rectangle (OVF-2), and then becomes a plain `it`.
-  it.fails('a full-width Bangers line, glyphs only (ink past the advance, OVF-2/OVF-10)', () => {
+  // Found by this lane: Bangers' glyphs reach up to about 3.7px past their
+  // advance on the right at 26px (negative right side bearings), and the layout
+  // fits advances, not ink - OVF-10's "width uses advance, not ink", on an upright
+  // face. So a full-width Bangers line's GLYPHS sit outside the box with no
+  // outline at all - and the containment check, which reads the ink, sees it.
+  it('a full-width Bangers line, glyphs only: inside, or flagged', () => {
     const { box, p } = fullWidthBox('Bangers', { strokes: [] });
+    const past = containedOrFlagged(box, p);
+    expect(past).toBeGreaterThan(TOLERANCE);
+    expect(box.review.overflow.r).toBeGreaterThanOrEqual(Math.floor(past));
+    autoFitBox(box, p);
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+    expect(box.review).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The check and the painter describe the same ink (OVF-2 test 9)
+// ---------------------------------------------------------------------------
+// `boxInkRect` is geometry off `measureText`; the exporter's raster is pixels.
+// They are the same block only because both place it through `placeBlock` - so
+// for every face, alignment and outline here the two rectangles agree to the
+// raster's own resolution: half a pixel of supersample, plus the fraction of a
+// pixel antialiasing lights beyond a glyph's outline.
+//
+// The agreement is one-sided on purpose. Painted ink may reach past the check by
+// SLACK and no more - past that, a box the check calls clean would show ink over
+// its edge, which is the bug. The check may sit OUTSIDE the painted ink by up to
+// a further pixel: @napi-rs/canvas reports actualBoundingBoxAscent / Descent /
+// Left as whole pixels rounded outward (DejaVu Sans' "É" at 26px measures 25 up,
+// paints 24 at 2x), so in this lane the check is a pixel conservative at the top
+// of an accent. That direction only ever flags or grows a box a pixel early.
+// WebKit's bounds are fractional; the app does not pay that pixel.
+describe('boxInkRect is the ink the exporter paints', () => {
+  const SLACK = 0.5 + 0.15;
+  const ROUNDED_OUT = 1;
+  function rasterInk(box, p) {
+    const { canvas, ox, oy, ss } = renderBoxTexture(box, p);
+    const W = canvas.width;
+    const H = canvas.height;
+    const d = canvas.getContext('2d').getImageData(0, 0, W, H).data;
+    let minX = W;
+    let minY = H;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (d[(y * W + x) * 4 + 3] === 0) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return { x0: minX / ss - ox, y0: minY / ss - oy, x1: (maxX + 1) / ss - ox, y1: (maxY + 1) / ss - oy };
+  }
+
+  const CASES = [
+    ['Comic Neue', { align: 'center' }],
+    ['Comic Neue', { align: 'left', valign: 'top' }],
+    ['Bangers', { align: 'right', valign: 'bottom', strokes: [] }],
+    ['Bangers', { align: 'center', letterSpacing: 3 }],
+    ['DejaVu Sans', { align: 'left', italic: true, strokes: [] }],
+    ['DejaVu Sans', { align: 'center', lineHeight: 0.9, strokes: [{ color: '#ffffff', width: 5, opacity: 1 }] }],
+    ['Comic Neue', { align: 'center', shadows: [{ color: '#000000', x: 6, y: 4, blur: 0, opacity: 1 }] }],
+  ];
+
+  it.each(CASES)('%s %j', (font, extra) => {
+    const s = styleFor(font, extra);
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [],
+        boxes: [{ id: 'b1', lineN: null, text: 'Jumpy fjord, ÉTÉ! Wavy quilts', x: 200, y: 150, w: 170, h: 160, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    const cand = boxCandidate(box, boxText(box, p));
+    expect(placeBlock(cand).lines.length).toBeGreaterThan(1);
+    const geo = boxInkRect(cand);
+    const got = rasterInk(box, p);
+    const want = { x0: geo.x, y0: geo.y, x1: geo.x + geo.w, y1: geo.y + geo.h };
+    for (const k of ['x0', 'y0', 'x1', 'y1']) {
+      // How far the painted ink reaches past the check on this side: positive is
+      // ink the check missed, negative is check the ink never used.
+      const missed = k.endsWith('0') ? want[k] - got[k] : got[k] - want[k];
+      const msg = `${k}: raster ${got[k]} vs check ${want[k]}`;
+      expect(missed, msg).toBeLessThanOrEqual(SLACK);
+      expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT);
+    }
   });
 });

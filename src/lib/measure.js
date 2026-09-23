@@ -107,24 +107,39 @@ export function baselineInLine(style, sizePx) {
 // runner, where every metric is a stand-in and a shift written into a document
 // from one would be a lie), or a block with no ink in it.
 export function inkShiftY(lines, style, sizePx) {
-  if (!_ctx || !Array.isArray(lines) || lines.length === 0 || !(sizePx > 0)) return 0;
+  return blockInk(lines, style, sizePx).shift;
+}
+
+// Every line's ink (`lineInk`) and the centring shift above, from ONE
+// measurement per line. The shift needs each line's ascent and descent, and the
+// containment check in contain.js needs each line's whole ink box; asked
+// separately that is every line measured twice for every box, and the fitting
+// ladder asks for every candidate it tries. So the two answers come out of the
+// same pass, and `inkShiftY` is this function with the boxes thrown away - which
+// also makes "the exporter centres on the ink the check measured" true by
+// construction.
+//
+// The shift keeps its old refusals exactly: no canvas, a browser without ink
+// metrics, or a line whose ink lies wholly above or below its baseline (a row of
+// underscores has a negative ascent) gives a shift of zero for the whole block,
+// as it always has.
+export function blockInk(lines, style, sizePx) {
+  const list = Array.isArray(lines) ? lines : [];
+  const inks = list.map((ln) => lineInk(ln, style, sizePx));
+  if (!_ctx || list.length === 0 || !(sizePx > 0)) return { inks, shift: 0 };
   const lineH = sizePx * (style?.lineHeight > 0 ? style.lineHeight : 1);
   const base = baselineInLine(style, sizePx);
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
   let top = Infinity;
   let bottom = -Infinity;
-  for (let i = 0; i < lines.length; i++) {
-    const s = String(lines[i] ?? '').replace(/\s+$/, '');
-    if (!s) continue;
-    const m = _ctx.measureText(s);
-    const asc = m.actualBoundingBoxAscent;
-    const desc = m.actualBoundingBoxDescent;
-    if (!(asc >= 0) || !(desc >= 0)) return 0; // no ink metrics in this browser
-    top = Math.min(top, i * lineH + base - asc);
-    bottom = Math.max(bottom, i * lineH + base + desc);
+  for (let i = 0; i < inks.length; i++) {
+    const k = inks[i];
+    if (!k) continue;
+    if (k.approx || !(k.ascent >= 0) || !(k.descent >= 0)) return { inks, shift: 0 };
+    top = Math.min(top, i * lineH + base - k.ascent);
+    bottom = Math.max(bottom, i * lineH + base + k.descent);
   }
-  if (!(bottom > top)) return 0;
-  return (lines.length * lineH) / 2 - (top + bottom) / 2;
+  if (!(bottom > top)) return { inks, shift: 0 };
+  return { inks, shift: (list.length * lineH) / 2 - (top + bottom) / 2 };
 }
 
 // ---- typesetting engine switch (beta) ----
@@ -551,6 +566,116 @@ export function wrapLinesDOM(text, style, sizePx, contentWidthPx) {
   return out.length ? out : [''];
 }
 
+// ===== where one line's ink actually lands =====
+//
+// Everything above measures ADVANCES - how far the pen moves - because that is
+// what line breaking needs. The pixels are something else. An italic's last
+// stroke leans past its advance, a J or a j reaches back behind the pen, an
+// accented capital rises above the font's own ascent, a descender can run below
+// its descent, and a trailing letter-spacing gap is advance with no ink in it at
+// all. Containment - "does the text stay inside its box" - is a question about
+// the pixels, so it needs the glyphs' own bounding box: `actualBoundingBox*` off
+// `measureText`, which is the browser's answer for exactly the string it would
+// draw.
+//
+// Answered for the line as the raster exporter DRAWS it (`paintBox`): the
+// style's font, the style's letter spacing, `textAlign` set to the style's
+// alignment and an alphabetic baseline. So `left` and `right` are offsets from
+// the line's ANCHOR - its left edge, its centre or its right edge, whichever
+// `align` names - and `ascent`/`descent` are distances above and below its
+// baseline.
+//
+// The spacing is added by arithmetic rather than by setting `ctx.letterSpacing`
+// and measuring, and that is not a shortcut. The canvas draws a spaced line by
+// moving every glyph i gaps to the right, so the ink runs from the unspaced
+// ink's left edge to its right edge plus n-1 gaps (a negative spacing pulls the
+// left edge instead), and the ALIGNMENT places the whole advance - trailing gap
+// included, since the canvas and CSS both put a gap after the last glyph too.
+// Measuring with the property set would be simpler if every canvas answered it
+// honestly, and one does not: the node canvas the real-font tests draw with
+// paints a spaced line correctly and reports its ink box as if the spacing had
+// been applied twice over, which would make every spaced box look like it
+// overflowed. The arithmetic is the same on every canvas. It is also a bound
+// rather than an estimate: a glyph that overhangs further than the last one
+// still sits inside it.
+//
+// The line is measured exactly as it will be drawn, leading spaces and all,
+// because under a centre or right alignment a space moves the ink.
+// Null for a line with nothing to draw.
+//
+// No canvas - the node test runner - falls back to the same stand-in every other
+// function here uses: `size * 0.55` a character, the fallback font metrics for
+// the height, and no overhang. Consistent with the stand-in line breaker, so a
+// test sees ink that agrees with the breaks it was given.
+export function lineInk(line, style, sizePx) {
+  const str = String(line ?? '');
+  if (!/\S/.test(str) || !(sizePx > 0) || !style) return null;
+  const align = style.align === 'left' || style.align === 'right' ? style.align : 'center';
+  const ls = (Number(style.letterSpacing) || 0) * (style.size > 0 ? sizePx / style.size : 0);
+  const n = [...str].length;
+  const spread = Math.max(0, n - 1) * ls;
+  // Where the pen starts relative to the anchor, given the run's whole advance.
+  const start = (advance) => (align === 'left' ? 0 : align === 'right' ? -advance : -advance / 2);
+  if (!_ctx) {
+    const cw = sizePx * 0.55;
+    const lead = [...str].length - [...str.trimStart()].length;
+    const inked = [...str.trim()].length;
+    const x0 = start(n * (cw + ls)) + lead * (cw + ls);
+    const { ascent, descent } = fontMetrics(style, sizePx);
+    return { left: x0, right: x0 + inked * cw + Math.max(0, inked - 1) * ls, ascent, descent };
+  }
+  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
+  _ctx.textAlign = 'left';
+  _ctx.textBaseline = 'alphabetic';
+  const m = _ctx.measureText(str);
+  const x0 = start(m.width + n * ls);
+  const L = m.actualBoundingBoxLeft;
+  const R = m.actualBoundingBoxRight;
+  const A = m.actualBoundingBoxAscent;
+  const D = m.actualBoundingBoxDescent;
+  if ([L, R, A, D].every(Number.isFinite)) {
+    return { left: x0 - L + Math.min(0, spread), right: x0 + R + Math.max(0, spread), ascent: A, descent: D };
+  }
+  // A browser that predates the ink metrics: the advance, placed by the
+  // alignment, and the font's own ascent and descent. Loose, and the best there
+  // is - and marked, so the centring shift above can refuse it as it always
+  // refused a browser with no ink metrics.
+  const { ascent, descent } = fontMetrics(style, sizePx);
+  return { left: x0, right: x0 + m.width + spread, ascent, descent, approx: true };
+}
+
+// The ink of ONE glyph drawn the way the curved renderers draw it: centred on
+// its anchor, horizontally and vertically (`textAlign: 'center'`,
+// `textBaseline: 'middle'`), before the glyph's own rotation. Offsets from the
+// anchor, same shape as `lineInk`. The shared context is put back to the
+// alphabetic baseline afterwards, because `fontMetrics` and `inkShiftY` read
+// their numbers relative to whatever baseline is set and never set one.
+//
+// The stand-in is the stand-in advance wide and one em tall, centred - the em
+// square is what 'middle' centres, and the stand-in font's ascent and descent
+// are exactly one em between them.
+export function glyphInk(ch, style, sizePx) {
+  const str = String(ch ?? '');
+  if (!/\S/.test(str) || !(sizePx > 0) || !style) return null;
+  if (!_ctx) {
+    const hw = [...str].length * sizePx * 0.275;
+    return { left: -hw, right: hw, ascent: sizePx / 2, descent: sizePx / 2 };
+  }
+  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
+  _ctx.textAlign = 'center';
+  _ctx.textBaseline = 'middle';
+  const m = _ctx.measureText(str);
+  _ctx.textAlign = 'left';
+  _ctx.textBaseline = 'alphabetic';
+  const L = m.actualBoundingBoxLeft;
+  const R = m.actualBoundingBoxRight;
+  const A = m.actualBoundingBoxAscent;
+  const D = m.actualBoundingBoxDescent;
+  if ([L, R, A, D].every(Number.isFinite)) return { left: -L, right: R, ascent: A, descent: D };
+  const hw = (m.width || sizePx * 0.55) / 2;
+  return { left: -hw, right: hw, ascent: sizePx / 2, descent: sizePx / 2 };
+}
+
 // Measured width of a single wrapped line at sizePx, including letter-spacing
 // between characters (matches how wrapLines measures and how the canvas draws
 // with ctx.letterSpacing). Trailing spaces are trimmed like the app does.
@@ -747,7 +872,14 @@ export const layoutMemoSize = () => memo.size;
 // auto-height at once. Empty text still answers `['']`: a caller that asks for
 // the lines of an empty box gets one empty line to place a caret in, not
 // nothing to iterate.
-export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor) {
+//
+// `opts.cache: false` asks without remembering the answer. A hit is still used -
+// it costs nothing - but a miss is not written back. That is for the fitting
+// ladder in contain.js, which tries a dozen widths and sizes to find the one it
+// keeps: remembered, its rejected candidates would push out the entries the
+// editor is actually drawing from, and the one it keeps is laid out again by the
+// editor and the exporter through the ordinary path anyway.
+export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor, opts) {
   // A pixel is the narrowest a column can be. Every caller computes the width as
   // `box.w - BOX_PAD * 2` and a box may be narrower than its own padding, so the
   // width handed in can be zero or negative - and the editor clamped it while
@@ -776,7 +908,7 @@ export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor) {
   while (a < b && !/\S/.test(lines[a])) a++;
   while (b > a && !/\S/.test(lines[b - 1])) b--;
   const out = a === 0 && b === lines.length ? lines : b > a ? lines.slice(a, b) : [''];
-  if (key !== null) {
+  if (key !== null && opts?.cache !== false) {
     memo.set(key, out);
     // One over the bound, once per miss, so the oldest key is the only thing
     // that ever has to be found - `Map` iterates in insertion order.

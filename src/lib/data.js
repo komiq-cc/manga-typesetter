@@ -734,3 +734,52 @@ export function normalizeFit(f) {
   }
   return null;
 }
+
+// ---- the containment flag ----
+//
+// `box.review` is the ONE place the app says "this box's text does not fit
+// inside its rectangle", and it is absent whenever the text does. The check and
+// the ladder that tries to make it fit live in contain.js; this is only the
+// field's shape, stated beside `normalizeFit` for the same reason that one is
+// here - it is stored on the box, it rides every save, and what comes back off
+// disk was written by some build this one does not control.
+//
+//   { kind: 'overflow', overflow: { l, t, r, b }, reason }
+//
+// `overflow` is how far the ink reaches past each edge of the box, whole page px
+// rounded up, 0 for an edge it stays inside. `reason` is one of the strings
+// below - what failed, in words a person can act on, which is what the editor's
+// badge and the queue's list show.
+//
+// A flag with no overflow on any edge is not a flag, and neither is a kind this
+// build does not know: both load as "no review", which is what a box that fits
+// has. The next containment check writes a fresh one if the box needs it.
+export const REVIEW_REASONS = Object.freeze({
+  // The ladder ran and nothing between the box's own size and the smallest the
+  // text is allowed to shrink to fits inside the balloon.
+  minSize: 'cannot fit above minimum size',
+  // Ink past the edge the text is anchored to - left edge of left-aligned text,
+  // top of top-aligned text - which no amount of growing the box can reach,
+  // because the text moves with that edge.
+  alignedEdge: 'ink past the aligned edge',
+  // A single word wider than everything the balloon can offer it.
+  wideWord: 'word wider than balloon',
+  // Manual boxes: never resized or shrunk automatically, so the flag says why
+  // the tool left it alone.
+  manual: 'sized by hand',
+  curve: 'text on a curve',
+  warp: 'warped',
+  // An auto box found overflowing by a pass that only grows heights - a chapter
+  // opening, a font arriving - and so has not been refitted yet.
+  stale: 'no longer fits',
+});
+
+export function normalizeReview(r) {
+  if (!r || typeof r !== 'object' || r.kind !== 'overflow') return null;
+  const o = r.overflow && typeof r.overflow === 'object' ? r.overflow : {};
+  const px = (v) => (Number.isFinite(+v) && +v > 0 ? Math.ceil(+v) : 0);
+  const overflow = { l: px(o.l), t: px(o.t), r: px(o.r), b: px(o.b) };
+  if (!(overflow.l || overflow.t || overflow.r || overflow.b)) return null;
+  const reason = typeof r.reason === 'string' && r.reason.trim() ? r.reason : REVIEW_REASONS.stale;
+  return { kind: 'overflow', overflow, reason };
+}

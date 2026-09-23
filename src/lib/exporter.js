@@ -1,6 +1,7 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { familyFor, fontShorthand, applyCase, layoutLines, arcLayout, circleLayout, pathLayout, maxLineWidth, BOX_PAD, blockYFor, balloonWidthsFor, baselineInLine, inkShiftY } from './measure.js';
+import { familyFor, fontShorthand, maxLineWidth, BOX_PAD } from './measure.js';
+import { boxCandidate, placeBlock } from './contain.js';
 import {
   strokeBands,
   strokeExtent,
@@ -164,8 +165,14 @@ function roughen(ctx, L, SS) {
 // directly onto the page canvas (sharp glyphs) instead of rotating a raster.
 function layoutBox(box, p) {
   const s = box.style;
-  const text = applyCase(boxText(box, p), s);
-  const lineH = s.size * s.lineHeight;
+  // Where the block sits - its lines, its top, the x each line is drawn at, or
+  // the glyphs of a curve - comes from `placeBlock` (contain.js), which is the
+  // statement the containment check reads too. This function used to BE that
+  // statement; it was lifted out whole so that "the text fits its box" is
+  // decided about exactly the block this file paints, rather than about a second
+  // implementation that agrees with it today.
+  const place = placeBlock(boxCandidate(box, boxText(box, p)));
+  const lineH = s.size * (s.lineHeight > 0 ? s.lineHeight : 1);
   // How far past the glyphs the ink can reach, on every edge. Each term is one
   // thing that draws outside the letters: the outermost stroke (drawn at twice
   // its own outer edge, half of it inside the glyph), the furthest a shadow is
@@ -201,13 +208,12 @@ function layoutBox(box, p) {
   // Every glyph-by-glyph layout - the bezier path, the closed circle and the
   // arc - goes down the same "curve" path here: everything below it only
   // reads `layout`, and the precedence (path > circle > arc) is exactly what
-  // the editor states.
-  const isPath = s.path?.on && (s.path.pts?.length ?? 0) >= 2 && text.trim() !== '';
-  const isCircle = !isPath && s.circle?.on && text.trim() !== '';
-  const isCurve = isPath || isCircle || (s.curve && s.curve !== 0 && text.trim() !== '');
+  // the editor states (and `placeBlock` applies).
+  const isCurve = place.isCurve;
 
   let lines = null;
   let layout = null;
+  let anchorX = 0;
   let leftExtra = 0,
     rightExtra = 0,
     topExtra = 0,
@@ -218,11 +224,7 @@ function layoutBox(box, p) {
     blockY = 0;
 
   if (isCurve) {
-    layout = isPath
-      ? pathLayout(text, s, s.size, box.w, box.h)
-      : isCircle
-        ? circleLayout(text, s, s.size)
-        : arcLayout(text, s, s.size);
+    layout = place.layout;
     let minX = 0,
       maxX = 0,
       minY = 0,
@@ -239,28 +241,15 @@ function layoutBox(box, p) {
     topExtra = Math.max(0, -minY - box.h / 2);
     bottomExtra = Math.max(0, maxY - box.h / 2);
   } else {
-    // `box.w - BOX_PAD * 2` is the content width (2px horizontal padding each
-    // side), so export breaks lines exactly where the editor does - and it is
-    // `layoutLines` on both sides, at the same unzoomed size and the same
-    // content width, so "exactly" is by construction rather than by two
-    // implementations agreeing. Shaping off, that function is still
-    // `wrapLinesDOM` and this path is unchanged.
-    // The fifth argument is the box's balloon, as one width per line. Same
-    // helper, same arguments as the editor and as the PSD's type layers, which
-    // is what keeps "the export breaks where the canvas breaks" a construction
-    // rather than a coincidence - and null for an unfitted box, so this path is
-    // byte for byte what it was.
-    // Clamped to a pixel, as the editor clamps it: a box narrower than its own
-    // padding gives a negative content width, and the two renderers were free to
-    // disagree about what that breaks into.
-    lines = layoutLines(
-      text,
-      s,
-      s.size,
-      Math.max(1, box.w - BOX_PAD * 2),
-      balloonWidthsFor(box, s, s.size),
-    );
-    const blockH = lines.length * lineH;
+    // The lines are `placeBlock`'s, which breaks them through `layoutLines` at
+    // the content width (the box less 2px of padding each side, clamped to a
+    // pixel) with the box's balloon as one width per line - the same helper and
+    // the same arguments as the editor and the PSD's type layers, so "the export
+    // breaks where the canvas breaks" is a construction rather than a
+    // coincidence. Shaping off, that function is still `wrapLinesDOM`.
+    lines = place.lines;
+    anchorX = place.anchorX;
+    const blockH = place.blockH;
     const blockW = maxLineWidth(lines, s, s.size);
 
     // Where the block sits inside the box, as an offset from the box's top-left,
@@ -277,10 +266,10 @@ function layoutBox(box, p) {
     // BOX_PAD on both sides, so every auto-fitted box exported with 4px of slack
     // under its text. Centred alignments were always right and still are - the
     // padding is symmetric, so it cancels.
-    // The fourth argument centres the block on its ink rather than on its line
-    // boxes - see `inkShiftY`. The editor applies the same shift to the same
-    // lines, so a centred block exports where the canvas shows it.
-    blockY = blockYFor(s, box.h, blockH, inkShiftY(lines, s, s.size));
+    // `placeBlock` centres a middle-aligned block on its ink rather than on its
+    // line boxes - see `inkShiftY`. The editor applies the same shift to the
+    // same lines, so a centred block exports where the canvas shows it.
+    blockY = place.blockY;
     blockX =
       s.align === 'center'
         ? (box.w - blockW) / 2
@@ -304,8 +293,8 @@ function layoutBox(box, p) {
   const ch = Math.ceil(box.h + topExtra + bottomExtra + pad * 2);
   // Where each line's baseline sits inside its line box - the browser's own
   // placement, so the raster draws the glyphs where the editor does.
-  const baseY = baselineInLine(s, s.size);
-  return { s, lineH, baseY, pad, isCurve, lines, layout, leftExtra, topExtra, ox, oy, blockX, blockY, cw, ch };
+  const baseY = isCurve ? 0 : place.baseY;
+  return { s, lineH, baseY, pad, isCurve, lines, layout, leftExtra, topExtra, ox, oy, blockX, blockY, anchorX, cw, ch };
 }
 
 // The rectangle a gradient or a pattern is measured against, in the same
@@ -475,15 +464,11 @@ function paintBox(ctx, box, L) {
     // place it should be. `textAlign` decides which edge of the line `anchorX`
     // names, so the padded content box's own edge is the anchor - its left for
     // left-aligned text, its right for right-aligned, and the box's centre for
-    // centred text, which the symmetric padding leaves where it was.
+    // centred text, which the symmetric padding leaves where it was. The anchor
+    // is `placeBlock`'s, the one the containment check measured the ink from.
     const startY = L.oy + L.blockY;
     ctx.textAlign = s.align;
-    const anchorX =
-      s.align === 'left'
-        ? L.ox + BOX_PAD
-        : s.align === 'right'
-          ? L.ox + box.w - BOX_PAD
-          : L.ox + box.w / 2;
+    const anchorX = L.ox + L.anchorX;
     const drawAll = (fn) => {
       L.lines.forEach((ln, i) => fn(ln, anchorX, startY + i * L.lineH + L.baseY));
     };

@@ -16,7 +16,7 @@
 // the module it is writing into has finished evaluating.
 import { setTypesetEnabled } from './measure.js';
 import { setBoxDefaults } from './data.js';
-import { relayoutAll, app, setTool, setBrushToolAllowed } from './store.svelte.js';
+import { relayoutAll, app, setTool, setBrushToolAllowed, setMinFontSize } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
 
 const KEY = 'mt.prefs';
@@ -46,6 +46,17 @@ export const prefs = $state({
   defaultHyphenate: true,
   defaultBalloon: true,
   defaultMinOrphan: 3,
+  // The smallest size, in page px, the fit ladder may shrink a box's text to
+  // when it does not fit (see `autoFitBox` in the store). The ladder's working
+  // floor is relative - three quarters of the size the box's tag is set at - and
+  // this is the absolute one under it, for a tag that is small to begin with.
+  // 12: scan pages are mostly 1100-1600px wide and read fit-to-width at around
+  // 700-1000 CSS px, which puts 12 page px at 7-8px on screen - the bottom of
+  // what anything sets text at to be read rather than glanced at. Past that the
+  // ladder would be trading an overflow it can report for text nobody can read,
+  // and the flag is the better failure. No Settings control: it is a guard rail
+  // for the machine, not a style anyone is choosing.
+  minFontSize: 12,
   // Keyboard shortcut overrides, as { shortcutId: combo }. Only the ones the
   // user changed are in here; everything else answers to its default, so a
   // build that moves a default moves it for everyone who never rebound it.
@@ -74,7 +85,7 @@ const cleanNames = (v) =>
 // The box defaults, split by what a value of theirs may be. Named once so the
 // setter's validation and the loader's validation cannot drift apart.
 const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool'];
-const NUM_KEYS = { defaultMinOrphan: [1, 8] };
+const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
 
 // Push the box defaults to where a box is actually born. The store seeds a new
 // box's style through `applyBoxDefaults` in data.js, and data.js is a leaf - it
@@ -105,6 +116,7 @@ function persist() {
         defaultHyphenate: prefs.defaultHyphenate,
         defaultBalloon: prefs.defaultBalloon,
         defaultMinOrphan: prefs.defaultMinOrphan,
+        minFontSize: prefs.minFontSize,
         brushTool: prefs.brushTool,
         shortcuts: $state.snapshot(prefs.shortcuts),
         hiddenBuiltinFonts: $state.snapshot(prefs.hiddenBuiltinFonts),
@@ -156,6 +168,10 @@ export function setPref(key, value) {
       setTool('pan');
     }
   }
+  // Mirrored into the store the way the box defaults are mirrored into data.js.
+  // No relayout: it bounds what the next fit may do, and moves nothing already
+  // on the page.
+  if (key === 'minFontSize') setMinFontSize(value);
   // No relayout for these: they are what the NEXT box is born with, and boxes
   // already on the page keep the flags they carry. Re-measuring here would be
   // re-measuring nothing.
@@ -209,6 +225,7 @@ function load() {
   prefs.ocrModels = normalizeOcrModels(saved?.ocrModels);
   setTypesetEnabled(prefs.typeset);
   applyBoxDefaults();
+  setMinFontSize(prefs.minFontSize);
   setBrushToolAllowed(prefs.brushTool);
 }
 

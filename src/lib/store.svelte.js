@@ -10,6 +10,7 @@ import {
   normalizeFit,
   normalizeInkStroke,
   normalizeFinish,
+  normalizeReview,
 } from './data.js';
 // The tag module reaches back for nothing - it takes the pages it works on as
 // arguments - so this stays a one-way edge and the two cannot cycle. What comes
@@ -53,15 +54,21 @@ import {
 // metrics. The alternative was a second measurer living in the store, which is
 // exactly how the editor and the exporter would start disagreeing about where a
 // line breaks.
+import { canMeasure, BOX_PAD, balancedBoxSize, clearLayoutMemo } from './measure.js';
+// Containment - whether a box's text stays inside the box, and the ladder that
+// makes it. Pure, and it joins the lazy store <-> measure cycle above on the
+// same terms: nothing in it runs at evaluation time.
 import {
-  layoutLines,
-  applyCase,
-  canMeasure,
-  BOX_PAD,
-  balloonWidthsFor,
-  balancedBoxSize,
-  clearLayoutMemo,
-} from './measure.js';
+  boxCandidate,
+  placeBlock,
+  placeAtHeight,
+  containBox,
+  fitBox,
+  reviewFor,
+  isAutoBox,
+  manualReason,
+  REVIEW_REASONS,
+} from './contain.js';
 import { neededHeight, growToFit, hasHangul } from './typeset.js';
 // The pixel half of balloon fitting, and the two halves of getting pixels to it.
 // `balloon.js` is pure and knows nothing about this app; `page-pixels.js` is the
@@ -133,6 +140,13 @@ function sanitizeLine(l) {
   out.tags = names;
   return out;
 }
+
+// `box.review` off disk: through `normalizeReview`, and only when there is one,
+// so a box that fit is saved and loaded without the key at all.
+const reviewField = (r) => {
+  const review = normalizeReview(r);
+  return review ? { review } : null;
+};
 
 export function loadProjectPages(rawPages) {
   const takenBoxes = new Set();
@@ -228,6 +242,12 @@ export function loadProjectPages(rawPages) {
           // component reading `box.fit` subscribes to it before anything writes
           // one.
           fit: normalizeFit(b.fit),
+          // The containment flag, as saved - absent when the box fit. Carried
+          // through rather than dropped because it is the one record of a box
+          // the user has not dealt with yet; the refit below re-checks every box
+          // against this build's measurements and brings it up to date, keeping
+          // the saved reason when the box still does not fit.
+          ...reviewField(b.review),
         };
       }),
       activeLineN: null,
@@ -493,27 +513,31 @@ export function boxOwnText(b, p = page()) {
   if (b?.lineN != null && b.lineN < 0) return lineByN(p ?? page(), b.lineN)?.en ?? null;
   return b?.text ?? null;
 }
-export function setBoxText(b, v, p = page()) {
+// `opts.fit: false` writes the text and fits nothing - for the history, which
+// puts back the geometry it recorded rather than deriving one (see `restoreFit`
+// in history.svelte.js). A fit run first would be a ladder that can move, widen
+// and shrink the box, overwritten a moment later by the record.
+export function setBoxText(b, v, p = page(), opts) {
   if (!b) return;
+  const fit = opts?.fit !== false;
   if (b.lineN != null && b.lineN < 0) {
     const ln = lineByN(p ?? page(), b.lineN);
     // A free box whose line has gone is a document that has already lost the
     // text; writing `b.text` here would resurrect it as an override nothing
     // else in the app knows how to reach.
     if (ln) ln.en = v ?? '';
-    // Same reason as below: the text changed, so the box's height may no longer
-    // describe it.
-    autoFitBox(b, p);
+    // Same reason as below: the text changed, so the box may no longer fit it.
+    if (fit) autoFitBox(b, p);
     return;
   }
   b.text = v;
-  autoFitBox(b, p);
+  if (fit) autoFitBox(b, p);
 }
 function clamp(v, a, b) {
   return Math.max(a, Math.min(b, v));
 }
 
-// ---------- auto-height ----------
+// ---------- auto-height, and containment ----------
 // The box's rectangle has to describe its text. It did not: the editor renders
 // with `overflow:visible` and the exporter grows a footprint of its own
 // (`topExtra`/`bottomExtra` in `layoutBox`), so four wrapped lines in a box sized
@@ -523,92 +547,193 @@ function clamp(v, a, b) {
 // and a rectangle that lies about its contents makes every one of those gestures
 // guesswork.
 //
-// So the height follows the text, and this is the one function that makes it do
-// so. Every path that can change what the box has to fit calls it - inline
+// The rule is now the user's, and it is stricter than "the height follows the
+// text": text never goes outside its box, measured in PIXELS - italic overhang,
+// accents, strokes, shadows - and it is never clipped to get there. A box either
+// fits or carries `box.review` saying it does not (see contain.js, which decides
+// both, and data.js for the flag's shape). Two ways that gets enforced:
+//
+//   the ladder     `autoFitBox`. After an edit or a placement, an AUTO box (auto
+//                  sizing on, straight text, no mesh warp) that does not fit is
+//                  grown - height, then width, within its balloon and the page -
+//                  and then its font is shrunk, no lower than `minSizeFor`; only
+//                  if that fails is it flagged. A MANUAL box is never moved,
+//                  resized or shrunk here: it gets the verdict and nothing else.
+//   grow-only      `refitBox` and `autoFitBoxTo`. A chapter opening, a font
+//                  arriving, the component's own safety net: the height grows
+//                  to the line count as it always has, and the flag is brought
+//                  up to date. Nothing else moves - opening a chapter must never
+//                  change a box's size, width or position, so a box laid out by
+//                  an older engine that no longer fits is flagged, not refitted.
+//
+// Every path that can change what the box has to fit calls one of them - inline
 // typing, the Inspector's text field and style controls, the queue's own
 // translation field, a bulk apply, a tag apply, a width drag, a placement, a
 // chapter load, and a font arriving after all of those (`noteFontsChanged`) -
 // because a `$effect` in the component would only ever cover the boxes rendered
-// on the page currently on screen. The one path that does NOT call it is an undo
-// or redo, which restores the recorded geometry directly rather than re-deriving
-// it; see below.
+// on the page currently on screen. An undo or redo restores the recorded
+// geometry directly rather than re-deriving it, and then re-checks.
 //
-// WIDTH IS NEVER TOUCHED. The width is what the user aimed at the bubble; it is
-// the input to the line breaking, not an output of it.
-//
-// Records nothing of its own. The grow is not an edit - it is a consequence of
-// an edit the user has already made, and giving it its own history entry would
+// Records nothing of its own. The fit is not an edit - it is a consequence of an
+// edit the user has already made, and giving it its own history entry would
 // charge two presses of undo for one gesture. Instead every record whose edit
-// can trigger a grow carries the box's `y`/`h` on both sides of it (`geomBefore`
-// / `geomAfter` - see `fitGeom` below and the `style`, `text` and `bulk` kinds in
-// history.svelte.js), so one press puts back the geometry the box actually had.
-// It used to re-run this on the way back instead, which cannot work: the fit is
-// grow-only by design, so an undo could never give back the height the grow took
-// - and an undo that restored `autoHeight:false` could not even try.
+// can trigger a fit carries the box's geometry and size on both sides of it
+// (`geomBefore` / `geomAfter` - see `fitGeom` below and the `style`, `text` and
+// `bulk` kinds in history.svelte.js), so one press puts back the box the user
+// actually had. It used to re-run the fit on the way back instead, which cannot
+// work: the fit never shrinks a box, so an undo could never give back the height
+// the grow took.
 //
-// Answers true when it changed something, so a caller can tell.
+// Answers true when it changed the box's geometry or size, so a caller can tell.
+// A change of flag alone is not a change to the document's layout and does not
+// count.
 export function autoFitBox(b, p = page()) {
-  const s = b?.style;
-  if (!fitApplies(b, s)) return false;
-  const text = applyCase(boxText(b, p), s);
-  // The fourth caller of `layoutLines`, and the one that is easy to forget: this
-  // does not draw anything, it decides how TALL the box is. Handed the flat
-  // width while the editor lays the same box out to the balloon's per-line
-  // ones, it would count a different number of lines and the box's rectangle
-  // would stop describing its own text - which is the exact bug this function
-  // exists to prevent. Same helper, same arguments, same answer.
-  const lines = layoutLines(
-    text,
-    s,
-    s.size,
-    Math.max(1, b.w - BOX_PAD * 2),
-    balloonWidthsFor(b, s, s.size),
-  );
-  return autoFitBoxTo(b, lines.length, p);
+  if (!b?.style || !canMeasure()) return false;
+  const cand = boxCandidate(b, boxText(b, p));
+  if (!isAutoBox(cand)) {
+    reviewBox(b, p);
+    return false;
+  }
+  const r = fitBox(cand, { page: p, strip: stripOf(p), minSize: minSizeFor(b, p) });
+  const changed = writeFit(b, r);
+  writeReview(b, r.review);
+  return changed;
 }
 
-// The guards, once, because there are now two ways in. Split out rather than
-// duplicated: a caller that skips the line breaking must still be refused for
-// all the same reasons, and a fifth reason added here has to reach both.
-function fitApplies(b, s) {
-  if (!s || s.autoHeight === false) return false;
-  // Curved text is laid out along an arc by `arcLayout`, one glyph at a time,
-  // and never wrapped into lines - there is no line count here to grow to.
-  if (s.curve) return false;
-  // Text on a bezier path is placed glyph by glyph, never wrapped into lines.
-  if (s.path?.on && (s.path.pts?.length ?? 0) >= 2) return false;
-  // Ring text is placed glyph by glyph, never wrapped into lines.
-  if (s.circle?.on) return false;
-  // No metrics, no fitting. Under node every measurement falls back to a
-  // stand-in (`text.length * size * 0.55`), which is fine for keeping a layout
-  // function total and not fine for writing a number into the user's document.
-  if (!canMeasure()) return false;
-  return b.w > 0;
+// The smallest a ladder may shrink a box's font to. The larger of two floors:
+//
+//   the preference, `prefs.minFontSize` - an absolute size below which text is
+//   not worth reading, whatever it was set at (mirrored here by the prefs
+//   module, which the store cannot import - see `setMinFontSize`);
+//   three quarters of the size this kind of text is set at - the size remembered
+//   for the line's tag (`tagSize`), or the box's own when there is none. A
+//   quarter smaller is about as far as a letterer shrinks one balloon before it
+//   reads as a different voice from the balloons around it; past that, the text
+//   needs a decision - a bigger balloon, fewer words - and the flag asks for it.
+let minFontSize = 12;
+export function setMinFontSize(v) {
+  const n = Number(v);
+  if (n > 0) minFontSize = n;
+}
+function minSizeFor(b, p) {
+  const line = b.lineN != null && p ? lineByN(p, b.lineN) : null;
+  const ref = tagSize(sizeKeyFor(line)) ?? b.style.size;
+  return Math.max(minFontSize, 0.75 * ref);
+}
+
+const stripOf = (p) => (isLongstrip() ? stripPageExtent(app.pages, p?.id) : null);
+
+// The ladder's answer, written back. Only the fields that moved are written,
+// so a box that already fits is not dirtied field by field.
+function writeFit(b, r) {
+  let changed = false;
+  for (const k of ['x', 'y', 'w', 'h']) {
+    if (b[k] !== r[k]) {
+      b[k] = r[k];
+      changed = true;
+    }
+  }
+  if (b.style.size !== r.size) {
+    b.style.size = r.size;
+    changed = true;
+  }
+  return changed;
+}
+
+// THE writer of `box.review`, and it writes only when the flag changes: every
+// component showing a badge subscribes to the field, and a fresh-but-equal
+// object per keystroke would repaint every one of them for nothing. Absent - not
+// null - when the box fits, so a box that has never overflowed looks exactly
+// like one saved before the field existed.
+function writeReview(b, review) {
+  if (!review) {
+    if (b.review !== undefined) delete b.review;
+    return;
+  }
+  const cur = b.review;
+  if (
+    cur &&
+    cur.kind === review.kind &&
+    cur.reason === review.reason &&
+    cur.overflow?.l === review.overflow.l &&
+    cur.overflow?.t === review.overflow.t &&
+    cur.overflow?.r === review.overflow.r &&
+    cur.overflow?.b === review.overflow.b
+  ) {
+    return;
+  }
+  b.review = review;
+}
+
+// The verdict alone: check the box as it stands and bring its flag up to date.
+// Moves nothing. The reason a flag already carries is kept - it was written by
+// whatever last tried to fit the box, and that is still the explanation - and a
+// new flag says why the box was left as it is: an auto box found by a pass that
+// only grows heights "no longer fits", a manual one names what makes it manual.
+//
+// No metrics, no verdict, for the reason `autoFitBox` asks the same question: a
+// flag computed from stand-in widths would be a number invented by the test
+// runner and written into the user's document.
+//
+// `place` is for a caller that has just placed the block for the box exactly as
+// it stands (`placeBlock`), so the lines are not measured twice.
+export function reviewBox(b, p = page(), place) {
+  if (!b?.style || !canMeasure()) return;
+  const cand = boxCandidate(b, boxText(b, p));
+  const v = containBox(cand, place ?? placeBlock(cand));
+  if (v.fits) {
+    writeReview(b, null);
+    return;
+  }
+  const reason = b.review?.reason ?? (isAutoBox(cand) ? REVIEW_REASONS.stale : manualReason(cand));
+  writeReview(b, reviewFor(v, reason));
+}
+
+// Grow-only by line count, and the verdict. The chapter-open and font-arrival
+// path (`refitPage`), and the history's fallback for an entry that recorded no
+// geometry: neither is an edit, so neither may resize anything but the height,
+// and that only upward.
+export function refitBox(b, p = page()) {
+  if (!b?.style || !canMeasure()) return false;
+  const cand = boxCandidate(b, boxText(b, p));
+  const place = placeBlock(cand);
+  const changed = isAutoBox(cand) ? growHeightTo(b, place.lines.length, p) : false;
+  // The growth moved `y` and `h` and nothing else, which the lines do not read.
+  reviewBox(b, p, changed ? placeAtHeight(place, boxCandidate(b, cand.text)) : place);
+  return changed;
 }
 
 // ===== the same fit, for a caller that has already broken the lines =====
 //
-// `autoFitBox` above is the answer for everything that only knows the box: the
-// Inspector, a bulk apply, a chapter load, the queue. The editor is not one of
-// those. A `TextBox` has just laid its own lines out to draw them - identical
-// text, identical style, identical width, identical balloon - and then called
-// `autoFitBox`, which broke the very same block a second time to count it. On a
-// page of fifteen boxes with the typesetting beta on, that second pass was
-// measured at half of a page turn's entire JavaScript cost.
+// `refitBox` above is the answer for everything that only knows the box. The
+// editor is not one of those. A `TextBox` has just laid its own lines out to draw
+// them - identical text, identical style, identical width, identical balloon -
+// and breaking the very same block a second time to count it was measured at
+// half of a page turn's entire JavaScript cost with the typesetting beta on.
 //
-// So the component hands the count it already has to this instead. It is the
-// tail of `autoFitBox` with the breaking removed and nothing else changed, which
-// is what makes the two agree by construction: there is one grow rule, one set
-// of guards, and one place either of them can be edited.
+// So the component hands the count it already has to this instead: its safety
+// net, grow-only by that count plus the verdict. It is deliberately NOT the
+// ladder. The component calls it from an effect on every relevant change, and a
+// ladder there would resize boxes as a side effect of rendering them; the edits
+// that should run the ladder all call `autoFitBox` themselves.
 //
 // `lineCount` is trusted. It has to be - the whole point is not to re-derive it
 // - and the one caller is the one place in the app that cannot get it wrong,
 // because the number it passes is the number of lines it is about to draw.
 export function autoFitBoxTo(b, lineCount, p = page()) {
-  const s = b?.style;
-  if (!fitApplies(b, s)) return false;
+  if (!b?.style || !canMeasure()) return false;
+  const changed = isAutoBox(boxCandidate(b, boxText(b, p))) ? growHeightTo(b, lineCount, p) : false;
+  reviewBox(b, p);
+  return changed;
+}
+
+// The grow-only height rule, once: the line boxes plus padding, anchored by
+// `valign`, capped by the page - or by the whole strip in a longstrip document,
+// where a box may hang over a seam.
+function growHeightTo(b, lineCount, p) {
+  const s = b.style;
   const need = neededHeight(lineCount, s, BOX_PAD);
-  const extent = isLongstrip() ? stripPageExtent(app.pages, p?.id) : null;
+  const extent = stripOf(p);
   const next = extent && extent.total > 0
     ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)
     : growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
@@ -619,19 +744,77 @@ export function autoFitBoxTo(b, lineCount, p = page()) {
   return true;
 }
 
-// The two fields the fit is allowed to move, as the history records them. Taken
-// on either side of an edit that can grow a box, so an undo restores what the
-// user was looking at rather than what a re-derivation would produce now.
-export const fitGeom = (b) => ({ y: b.y, h: b.h });
+// The fields a fit is allowed to move, as the history records them. Taken on
+// either side of an edit that can fit a box, so an undo restores what the user
+// was looking at rather than what a re-derivation would produce now. The size is
+// the style's, and `setFields` in history.svelte.js knows to put it back there.
+export const fitGeom = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size });
+
+// ===== the flag's own commands =====
+//
+// "Fit now": the ladder, once, on any box - including a manual one, because the
+// user asking is exactly what a manual box waits for. A box whose geometry is
+// its own - text on a curve, a mesh warp - keeps its rectangle and may only have
+// its font shrunk; a box sized by hand is grown within its balloon like an auto
+// box, and stays manual afterwards. One undo entry, and none when nothing moved.
+export function fitBoxNow(boxId = app.selectedId, p = page()) {
+  const b = (p?.boxes ?? []).find((x) => x.id === boxId);
+  if (!b?.style || !canMeasure()) return false;
+  settleEdits();
+  const before = cloneStyle(b.style);
+  const geomBefore = fitGeom(b);
+  const cand = boxCandidate(b, boxText(b, p));
+  const lockGeom = manualReason(cand) !== REVIEW_REASONS.manual;
+  const r = fitBox(cand, { page: p, strip: stripOf(p), minSize: minSizeFor(b, p), geometry: !lockGeom });
+  const changed = writeFit(b, r);
+  writeReview(b, r.review);
+  if (!changed) return false;
+  recordEdit({ t: 'style', pageId: p.id, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
+  markUnsaved();
+  return true;
+}
+
+// "Make auto": auto sizing back on, and the ladder run on the result - one undo
+// entry for both. A curved or warped box turns its flag on and stays manual,
+// since what makes it manual is not the flag.
+export function makeBoxAuto(boxId = app.selectedId, p = page()) {
+  const b = (p?.boxes ?? []).find((x) => x.id === boxId);
+  if (!b?.style) return false;
+  settleEdits();
+  const before = cloneStyle(b.style);
+  const geomBefore = fitGeom(b);
+  const was = b.style.autoHeight;
+  b.style.autoHeight = true;
+  const moved = autoFitBox(b, p);
+  if (was !== false && !moved) return false;
+  recordEdit({ t: 'style', pageId: p.id, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
+  markUnsaved();
+  return true;
+}
+
+// Every flagged box, in page order: what the queue's list and the export's
+// pre-flight read. Reactive when read inside a `$derived` - it reads each box's
+// `review`, and `writeReview` only writes when a flag actually changes.
+export function flaggedBoxes(pages = app.pages) {
+  const out = [];
+  for (const pg of pages ?? []) {
+    for (const b of pg?.boxes ?? []) if (b.review) out.push({ pageId: pg.id, boxId: b.id, review: b.review });
+  }
+  return out;
+}
 
 // Every box on a page, for the moments a whole page's worth of text arrives at
 // once rather than being typed: a chapter opening from disk, a project imported
 // from a PSD. Both land boxes whose height was decided by an older build, or by
 // a hand-edited file, or by a font that has since been replaced.
+//
+// Grow-only and verdict-only (`refitBox`), never the ladder: opening a chapter
+// must not change the size, width or position of anything in it. What no longer
+// fits is flagged, and stays as the user left it until they ask.
 export function refitPage(p) {
   if (!p) return 0;
   let n = 0;
-  for (const b of p.boxes) if (autoFitBox(b, p)) n++;
+  for (const b of p.boxes) if (refitBox(b, p)) n++;
   return n;
 }
 
@@ -2406,8 +2589,10 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   b.fit = fit;
   // The height follows: a box laid out to a curve breaks into a different number
   // of lines than the same box laid out flat, and the rectangle has to describe
-  // that. Grow-only as always.
-  autoFitBox(b, p);
+  // that. Grow-only, and never the ladder: this writes no history entry, so a
+  // width or a size it changed could not be undone. What no longer fits is
+  // flagged.
+  refitBox(b, p);
   if (fit) toast(`Fitted to the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box`);
   else if (before) toast('No balloon found under this box - layout is rectangular again');
   else toast('No balloon found under this box');
@@ -2443,7 +2628,7 @@ export function toggleBalloonFit(boxId = app.selectedId, p = page()) {
   // on top of it - the same reason `pasteStyle`'s caller settles first.
   settleEdits();
   const before = cloneStyle(b.style);
-  const geomBefore = { y: b.y, h: b.h };
+  const geomBefore = fitGeom(b);
   const on = b.style.balloon !== false;
   b.style.balloon = !on;
   if (!on && !b.fit) b.fit = balloonFitFor(p, [b.x, b.y, b.x + b.w, b.y + b.h]);
@@ -2457,7 +2642,7 @@ export function toggleBalloonFit(boxId = app.selectedId, p = page()) {
     before,
     after: cloneStyle(b.style),
     geomBefore,
-    geomAfter: { y: b.y, h: b.h },
+    geomAfter: fitGeom(b),
   });
   markUnsaved();
   if (on) toast('Balloon fit off for this box');
@@ -2661,6 +2846,10 @@ export function duplicateBox(id = app.selectedId) {
     // original does even though it sits at the offset.
     fit: normalizeFit($state.snapshot(src.fit)),
   };
+  // The copy's own verdict, before the record takes its snapshot. Not the
+  // source's flag copied across: the copy sits somewhere else and reads its
+  // text off a line of its own.
+  reviewBox(b, p);
   p.boxes.push(b);
   // One entry for the whole gesture, and the same kind a free-typed placement
   // records: undo takes the box and its line back out together. No queue fields
@@ -2791,6 +2980,11 @@ export function resizeBox(pageId, boxId, geom, base = null) {
   if (Number.isFinite(geom.size)) {
     b.style.size = geom.size;
   }
+  // A drag is the user choosing the box, so it never runs the ladder - but the
+  // flag has to describe the box they chose. A height-only drag changes nothing
+  // the component's own fit effect watches, so this is the only place that
+  // would notice the text no longer fits.
+  reviewBox(b, p);
   return b;
 }
 

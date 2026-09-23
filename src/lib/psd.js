@@ -15,7 +15,8 @@ import { renderBoxLayer, pageSpace, settleNoise } from './exporter.js';
 import { settleBoxTips } from './brush-tips.js';
 import { fontCssFor, fontNameFor } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
-import { applyCase, canMeasure, layoutLines, BOX_PAD, blockYFor, balloonWidthsFor, inkShiftY } from './measure.js';
+import { applyCase, canMeasure, BOX_PAD, blockYFor } from './measure.js';
+import { boxCandidate, placeBlock } from './contain.js';
 import { normalizeFit } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
 import { warpActive } from './warp.js';
@@ -392,6 +393,14 @@ export function isRasterOnly(style) {
 // embedded project to read (see reconstructForeign).
 export const RASTER_MARK = ' [raster, not editable in Photoshop]';
 
+// Written onto the layer name of a box whose text the app could not fit inside
+// it (`box.review`, see contain.js), so the person opening the PSD sees which
+// boxes were left for them to decide about - the same flag the editor shows,
+// carried to the one place a Photoshop user looks. On a raster layer it goes
+// BEFORE the raster marker, which has to stay last for the importer to find it,
+// and the importer takes it back off before the name becomes the box's text.
+export const REVIEW_MARK = ' [needs review]';
+
 // Build one layer for a box. The common case is a live, editable Photoshop
 // type layer backed by the box's exact pixels (`rendered`, from
 // renderBoxLayer) as its cached rasterization, so it displays pixel-identical
@@ -411,6 +420,7 @@ export const RASTER_MARK = ' [raster, not editable in Photoshop]';
 export function textLayerFor(p, box, rendered) {
   const s = box.style;
   const raw = boxTextFor(p, box);
+  const flag = box.review ? REVIEW_MARK : '';
 
   if (isRasterOnly(s)) {
     // If the box paints no pixels (e.g. empty or whitespace-only text),
@@ -435,7 +445,7 @@ export function textLayerFor(p, box, rendered) {
     const name = (raw || `line ${box.lineN ?? '·'}`).slice(0, 40);
 
     return {
-      name: `${name}${RASTER_MARK}`,
+      name: `${name}${flag}${RASTER_MARK}`,
       ...bounds,
       imageData: rendered.imageData,
       opacity: s.opacity ?? 1,
@@ -468,27 +478,15 @@ export function textLayerFor(p, box, rendered) {
   // and the typesetting the letterer did is gone. The cached pixels carry the
   // shaped breaks, but they are exactly what a re-render discards.
   //
-  // Measured through `layoutLines`, the same function and the same arguments
-  // the editor and the raster exporter use, so all three agree by construction.
-  // It needs a canvas to measure with; without one (the node test environment)
-  // the paragraph goes in unbroken, as it always did.
-  const cased = applyCase(raw, s);
-  // The fifth argument carries the balloon the box was fitted to, so the hard
-  // returns written into the type layer are the same breaks the canvas shows and
-  // the raster exporter draws. It is null for an unfitted box, which is the
-  // whole of the old behaviour.
-  const shaped = canMeasure()
-    ? layoutLines(
-        cased,
-        s,
-        s.size,
-        // Clamped as the editor and the raster exporter clamp it, so a box
-        // narrower than its own padding breaks the same way in all three.
-        Math.max(1, box.w - BOX_PAD * 2),
-        balloonWidthsFor(box, s, s.size),
-      )
-    : null;
-  const content = shaped ? shaped.join('\n') : cased;
+  // Placed by `placeBlock` (contain.js) - the lines, the block's height and its
+  // top - which is the statement the raster exporter paints from and the
+  // containment check measures, and which breaks through `layoutLines` with the
+  // editor's own arguments (the content width, the balloon the box was fitted
+  // to), so all of them agree by construction. It needs a canvas to measure
+  // with; without one (the node test environment) the paragraph goes in
+  // unbroken, as it always did.
+  const place = canMeasure() ? placeBlock(boxCandidate(box, raw)) : null;
+  const content = place ? place.lines.join('\n') : applyCase(raw, s);
   const rot = ((s.rotation || 0) * Math.PI) / 180;
   const cos = Math.cos(rot);
   const sin = Math.sin(rot);
@@ -517,15 +515,13 @@ export function textLayerFor(p, box, rendered) {
   // words jumped up by half the slack. `valign` defaults to 'middle', so that
   // was nearly every box.
   //
-  // `blockYFor` is the exporter's own rule, imported rather than repeated, and
-  // the line count is the only thing needed to size the block: `content` is the
-  // shaped text with the app's own breaks already in it.
+  // The block's top is `placeBlock`'s - the exporter's own rule, with the same
+  // ink-centring the exporter and the editor apply, so the anchor describes the
+  // block the cached pixels actually show. Without a measurer the block is
+  // sized off the line count, which is all an unbroken paragraph has.
   const lineH = (s.lineHeight || 1.1) * s.size;
-  const shapedLines = content.split('\n');
-  const blockH = shapedLines.length * lineH;
-  // With the same ink-centring the exporter and the editor apply, so the anchor
-  // describes the block the cached pixels actually show.
-  const blockY = blockYFor(s, box.h, blockH, inkShiftY(shapedLines, s, s.size));
+  const blockH = place ? place.blockH : content.split('\n').length * lineH;
+  const blockY = place ? place.blockY : blockYFor(s, box.h, blockH, 0);
   const ox = box.x + BOX_PAD;
   const oy = box.y + blockY;
   const tx = cx + (ox - cx) * cos - (oy - cy) * sin;
@@ -619,7 +615,7 @@ export function textLayerFor(p, box, rendered) {
   const hasEffects = Boolean(effects.stroke || effects.dropShadow || effects.gradientOverlay);
 
   return {
-    name,
+    name: `${name}${flag}`,
     ...bounds,
     imageData: rendered ? rendered.imageData : undefined,
     opacity: s.opacity ?? 1,
@@ -951,9 +947,11 @@ export async function reconstructForeign(psd) {
       else if (!n.text && typeof n.name === 'string' && n.name.endsWith(RASTER_MARK)) {
         const left = n.left ?? 0;
         const top = n.top ?? 0;
+        const named = n.name.slice(0, -RASTER_MARK.length);
         boxes.push({
           lineN: null,
-          text: n.name.slice(0, -RASTER_MARK.length),
+          // The review marker is the app's note about the box, not its words.
+          text: named.endsWith(REVIEW_MARK) ? named.slice(0, -REVIEW_MARK.length) : named,
           x: left,
           y: top,
           w: Math.max(40, (n.right ?? left + 200) - left),
@@ -1341,13 +1339,7 @@ export async function psdSelfTest(p) {
         textGroup.children.every((l, i) => {
           const box = layerBoxes[i]?.box;
           if (!l.text || !box) return true; // raster-only layers carry no text
-          const want = layoutLines(
-            applyCase(boxTextFor(src, box), box.style),
-            box.style,
-            box.style.size,
-            Math.max(1, box.w - BOX_PAD * 2),
-            balloonWidthsFor(box, box.style, box.style.size),
-          );
+          const want = placeBlock(boxCandidate(box, boxTextFor(src, box))).lines;
           return l.text.text === want.join('\n');
         });
       if (!report.checks.shapedBreaksInText) report.ok = false;

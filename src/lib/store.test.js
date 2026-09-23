@@ -3520,11 +3520,15 @@ describe('resetBoxRotation', () => {
       expect(log[0].t).toBe('style');
       expect(log[0].boxId).toBe('b1');
       // The undo has to know where it is going back to, and the fit fields have
-      // to be there or the style kind cannot restore the box's height.
+      // to be there or the style kind cannot restore the box. All five of them:
+      // the containment ladder (contain.js) may widen a box, move it sideways
+      // and shrink its font as well as grow it, so `fitGeom` is x/y/w/h and the
+      // size, where it used to be the height and its anchor alone.
       expect(log[0].before.rotation).toBe(37);
       expect(log[0].after.rotation).toBe(0);
-      expect(log[0].geomBefore).toEqual({ y: 0, h: 10 });
-      expect(log[0].geomAfter).toEqual({ y: 0, h: 10 });
+      const size = normalizeStyle({}).size;
+      expect(log[0].geomBefore).toEqual({ x: 0, y: 0, w: 10, h: 10, size });
+      expect(log[0].geomAfter).toEqual({ x: 0, y: 0, w: 10, h: 10, size });
     } finally {
       off();
     }

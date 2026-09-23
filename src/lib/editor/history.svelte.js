@@ -13,7 +13,8 @@ import {
   cloneStyle,
   settleEdits,
   setBoxText,
-  autoFitBox,
+  refitBox,
+  reviewBox,
 } from '../store.svelte.js';
 
 export const MAX_STEPS = 5;
@@ -74,11 +75,31 @@ const setFields = (b, from) => {
 // that wrote them, and a caller that changed a style without measuring anything
 // (the rotate drag) has no geometry to offer; both mean "nobody recorded a
 // height here", and re-deriving one is what this code did for every entry until
-// now - safe, because grow-only cannot make a box too small for its text.
+// now - safe, because grow-only cannot make a box too small for its text. It is
+// the grow-only fit (`refitBox`), not the ladder: a step through the history is
+// not an edit, and a ladder here could shrink a font no entry accounts for.
+//
+// A pair written before the fit could move anything but `y`/`h` puts back just
+// those two, which is all that build's fit could have changed.
+//
+// Either way the containment flag is brought up to date for the box as it now
+// stands, so an undo never leaves a flag describing the geometry it undid.
 const restoreFit = (b, e, dir, p) => {
   const g = dir === 'undo' ? e.geomBefore : e.geomAfter;
-  if (g) setFields(b, g);
-  else autoFitBox(b, p);
+  if (g) {
+    setFields(b, g);
+    reviewBox(b, p);
+  } else refitBox(b, p);
+};
+
+// The flag of every box a step put back into the document. A box comes back
+// from its snapshot with the flag it had then; the page around it - its line's
+// text, a font - may have moved on since.
+const recheck = (p, boxes) => {
+  for (const snap of boxes) {
+    const b = p.boxes.find((x) => x.id === snap.id);
+    if (b) reviewBox(b, p);
+  }
 };
 
 // Every command type, and how to walk it in each direction. `apply` throws a
@@ -128,6 +149,7 @@ const KINDS = {
           if (ln) ln.placed = true;
         }
         p.boxes.splice(Math.min(e.index, p.boxes.length), 0, structuredClone(e.box));
+        recheck(p, [e.box]);
         setActive(p, e.activeAfter);
       }
     },
@@ -158,6 +180,7 @@ const KINDS = {
           }
           p.boxes.splice(Math.min(item.index, p.boxes.length), 0, structuredClone(item.box));
         }
+        recheck(p, e.items.map((item) => item.box));
         setActive(p, e.activeAfter);
       }
     },
@@ -176,6 +199,7 @@ const KINDS = {
         // `index` is what puts the box back where it sat in the stacking order
         // rather than on top of everything drawn since.
         p.boxes.splice(Math.min(e.index, p.boxes.length), 0, structuredClone(e.box));
+        recheck(p, [e.box]);
         setActive(p, e.activeBefore);
       } else {
         const i = p.boxes.findIndex((b) => b.id === e.box.id);
@@ -192,6 +216,9 @@ const KINDS = {
       const b = boxOf(e);
       if (!b) throw missing(e);
       setFields(b, dir === 'undo' ? e.before : e.after);
+      // A move in a paged document cannot change what fits, but the flag is
+      // cheap to confirm and a longstrip box can be moved across a seam.
+      reviewBox(b, pageById(e.pageId));
     },
   },
   resize: {
@@ -200,6 +227,7 @@ const KINDS = {
       const b = boxOf(e);
       if (!b) throw missing(e);
       setFields(b, dir === 'undo' ? e.before : e.after);
+      reviewBox(b, pageById(e.pageId));
     },
   },
   style: {
@@ -227,11 +255,11 @@ const KINDS = {
       // and its queue row saying different things, with no gesture that could
       // put them back in step.
       const p = pageById(e.pageId);
-      setBoxText(b, dir === 'undo' ? e.before : e.after, p);
-      // `setBoxText` fits as it writes, which is right for an edit and wrong for
-      // a step: what the box's height was on this side of the edit is recorded,
-      // not derived. Grow-only means the fit it just did cannot be undone by
-      // another fit, so the recorded pair is written over the top of it.
+      // Without its fit: what the box's geometry was on this side of the edit is
+      // recorded, not derived, and a fit run first - a ladder that can widen the
+      // box and shrink its font - would only be written over by the record, or,
+      // for a record older than the ladder that carries y/h alone, survive it.
+      setBoxText(b, dir === 'undo' ? e.before : e.after, p, { fit: false });
       restoreFit(b, e, dir, p);
     },
   },
@@ -249,7 +277,17 @@ const KINDS = {
       const ln = p.lines.find((l) => l.n === e.lineN);
       if (!ln) throw new Error('the queue line is gone');
       ln.en = dir === 'undo' ? e.before : e.after;
-      for (const b of p.boxes) if (b.lineN === e.lineN) autoFitBox(b, p);
+      // A writer that recorded the bound boxes' geometry on both sides of the
+      // edit (`boxes: [{ boxId, geomBefore, geomAfter }]`) gets it put back, as
+      // the `text` kind does. One that did not - every entry written so far -
+      // gets the grow-only refit this kind always had, and the flag.
+      const recorded = new Map((e.boxes ?? []).map((g) => [g.boxId, g]));
+      for (const b of p.boxes) {
+        if (b.lineN !== e.lineN) continue;
+        const g = recorded.get(b.id);
+        if (g) restoreFit(b, g, dir, p);
+        else refitBox(b, p);
+      }
     },
   },
   bulk: {
