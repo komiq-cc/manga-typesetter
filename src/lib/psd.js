@@ -211,6 +211,11 @@ export function serializePage(p) {
 
 const JUSTIFY = { left: 'left', center: 'center', right: 'right' };
 
+// Float noise in a type layer's frame, which rounding the frame up must not
+// turn into a whole pixel: five lines of 1.1 x 14 are 77.00000000000001, and
+// a content width of 116 can arrive as 116.00000000000003.
+const FRAME_EPS = 1e-6;
+
 // Page-scoped text resolver (store.boxText() reads the *current* page, wrong
 // during an export-all of another page).
 function boxTextFor(p, box) {
@@ -523,10 +528,29 @@ export function textLayerFor(p, box, rendered) {
   // ink-centring the exporter and the editor apply, so the anchor describes the
   // block the cached pixels actually show. Without a measurer the block is
   // sized off the line count, which is all an unbroken paragraph has.
+  //
+  // The frame is whole pixels, rounded UP (OVF-10). Photoshop reflows a line
+  // wider than the frame and hides a line that falls below it, so a frame
+  // rounded down - `Math.round` - by a fraction of a pixel could re-break the
+  // widest line of a block that fills its content box, or push the last line
+  // out of sight, the first time the layer re-rendered. Rounded up, the frame
+  // holds the block the app broke. The fraction it gains goes on the side the
+  // text is not aligned to - the anchor moves left by all of it for
+  // right-aligned text and by half for centred - so the edge Photoshop aligns
+  // each line to is the one the canvas aligned it to, and the anchor stays
+  // inside the box (the inset is at least BOX_PAD, and the fraction is under a
+  // pixel). Vertically nothing moves: Photoshop flows from the frame's top, and
+  // the extra fraction is below the last line. The top itself stays the
+  // block's even when that is above the box - line boxes taller than the box -
+  // because that is where the cached pixels show the text; moving it inside
+  // would make the first re-render jump.
   const lineH = (s.lineHeight || 1.1) * s.size;
   const blockH = place ? place.blockH : content.split('\n').length * lineH;
   const blockY = place ? place.blockY : blockYFor(s, box.h, blockH, 0);
-  const ox = box.x + textInset(s);
+  const frameW = Math.ceil(contentWidth(box.w, s) - FRAME_EPS);
+  const frameH = Math.ceil(blockH - FRAME_EPS);
+  const gain = Math.max(0, frameW - contentWidth(box.w, s));
+  const ox = box.x + textInset(s) - (s.align === 'right' ? gain : s.align === 'left' ? 0 : gain / 2);
   const oy = box.y + blockY;
   const tx = cx + (ox - cx) * cos - (oy - cy) * sin;
   const ty = cy + (ox - cx) * sin + (oy - cy) * cos;
@@ -642,7 +666,7 @@ export function textLayerFor(p, box, rendered) {
       // content box, because that is what the app breaks its lines to and
       // Photoshop reflows at; height is the block rather than the rest of the
       // frame, so the box Photoshop draws in is the box the app drew.
-      boxBounds: [0, 0, Math.round(contentWidth(box.w, s)), Math.round(blockH)],
+      boxBounds: [0, 0, frameW, frameH],
       style: {
         font: { name: face.name },
         fontSize,

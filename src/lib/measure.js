@@ -918,7 +918,19 @@ export const layoutMemoSize = () => memo.size;
 // keeps: remembered, its rejected candidates would push out the entries the
 // editor is actually drawing from, and the one it keeps is laid out again by the
 // editor and the exporter through the ordinary path anyway.
+//
+// A tab comes out as one space (OVF-10). Nothing that draws these lines agrees
+// on what a tab is: a browser's canvas turns it into a space before it measures
+// or paints (the spec says to), the node canvas the real-font tests draw with
+// measures it as a glyph of its own, wider than a space, and the editor's
+// `.tline` - `white-space: pre` - advances it to the next of CSS's tab stops,
+// eight spaces apart. So a box with a tab in it broke to one width, painted to a
+// second and showed a third, up to seven spaces wider than the breaker had
+// room for, past the edge of the box on the canvas where no check could see it.
+// A space is the one thing all of them draw alike, so the lines every renderer
+// takes from here hold spaces; the stored text keeps its tab.
 export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor, opts) {
+  if (typeof text === 'string' && text.includes('\t')) text = text.replace(/\t/g, ' ');
   // A pixel is the narrowest a column can be. Every caller computes the width as
   // the box less its inset (`contentWidth`) and a box may be narrower than that, so the
   // width handed in can be zero or negative - and the editor clamped it while

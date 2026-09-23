@@ -842,6 +842,46 @@ describe('a manual box', () => {
   });
 });
 
+// ===== the small ones (OVF-10) =====
+
+describe('what a line is drawn with that its advance does not say', () => {
+  // Letter spacing: the breaker counts the n-1 gaps between the glyphs, and the
+  // canvas and CSS both centre the whole advance - a gap after the last glyph
+  // included - so a spaced, centred line is drawn half a gap left of where its
+  // n-1 width would put it. At 6px of spacing that is 3px, past the 2px of
+  // padding. The check places the line as it is drawn: the box is flagged on
+  // opening, and an edit widens it by what the ink needs.
+  it('counts the gap after the last glyph that a spaced line is centred with', () => {
+    const spaced = style({ letterSpacing: 6 });
+    const w = measure.lineWidth('WAIT', spaced, S) + BOX_PAD * 2 + 0.01;
+    expect(measure.lineWidth('WAIT', spaced, S)).toBeCloseTo(4 * ADV + 3 * 6, 6);
+    const p = load([{ id: 'b1', lineN: null, text: 'WAIT', x: 100, y: 100, w, h: 40, style: spaced }]);
+    const b = byId('b1');
+    expect(placeBlock(boxCandidate(b, 'WAIT')).lines).toEqual(['WAIT']);
+    // W's ink starts 0.2px behind its pen, and the pen half a gap left of the
+    // content box.
+    expect(verdict(b).overflow.l).toBeCloseTo(6 / 2 + 0.2 - BOX_PAD - 0.005, 6);
+    expect(b.review?.reason).toBe(REVIEW_REASONS.stale);
+    autoFitBox(b, p);
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    expect(b.style.size).toBe(S);
+  });
+
+  // A tab: nothing that draws a box agrees on its width (see `layoutLines`), so
+  // the lines every renderer takes hold a space where the text has a tab, and
+  // the box is checked, painted and shown with that space.
+  it('lays a tab out as the space every renderer draws alike', () => {
+    expect(measure.layoutLines('WAIT\tWHAT', style(), S, 400)).toEqual(['WAIT WHAT']);
+    expect(measure.layoutLines('ONE\tTWO THREE\tFOUR', style(), S, 100)).toEqual(
+      measure.layoutLines('ONE TWO THREE FOUR', style(), S, 100),
+    );
+    const tabbed = cand({ text: 'WAIT\tWHAT', w: 90, h: 60, style: style({ align: 'right' }) });
+    expect(placeBlock(tabbed).lines).toEqual(placeBlock({ ...tabbed, text: 'WAIT WHAT' }).lines);
+    expect(boxInkRect(tabbed)).toEqual(boxInkRect({ ...tabbed, text: 'WAIT WHAT' }));
+  });
+});
+
 describe('the grow-only paths', () => {
   it('never change a width, a position across, or a size on opening', () => {
     const p = load([{ id: 'b1', lineN: null, text: 'AAAAAARRRRRGGGGGHHHH', x: 350, y: 280, w: 100, h: 10, style: style() }]);

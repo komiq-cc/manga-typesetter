@@ -87,6 +87,17 @@ describe('measure.js with a real canvas', () => {
     expect(lineWidth('WAVE', styleFor('DejaVu Sans', { italic: true }), SIZE)).not.toBeCloseTo(upright, 1);
   });
 
+  // OVF-10: this canvas measures a tab as a glyph of its own, wider than a
+  // space; a browser's canvas turns it into a space; the editor's DOM advances
+  // it to the next tab stop, up to eight spaces out. The lines every renderer
+  // draws come out of `layoutLines`, and they hold a space.
+  it('lays a tab out as one space, which is not what this canvas measures a tab as', () => {
+    const css = `400 ${SIZE}px 'Comic Neue'`;
+    expect(skiaWidth(css, 'A\tB')).toBeGreaterThan(skiaWidth(css, 'A B') + 1);
+    const s = styleFor('Comic Neue');
+    expect(layoutLines('WAIT\tWHAT', s, SIZE, 400)).toEqual(['WAIT WHAT']);
+  });
+
   it('applies kerning, which no per-character metric can', () => {
     const s = styleFor('Comic Neue');
     expect(lineWidth('WA', s, 100)).toBeLessThan(lineWidth('W', s, 100) + lineWidth('A', s, 100) - 2);
@@ -332,6 +343,37 @@ describe('real glyph ink stays inside the box', () => {
     expect(box.review).toBeUndefined();
   });
 
+  // OVF-10: an italic leans past its advance, and the breaker fits advances.
+  // At 60px the top of DejaVu Sans Oblique's final T leans past the 2px of
+  // padding a full-width line has at its right edge. Opening a chapter may not
+  // widen a box, so it opens flagged; the first edit runs the ladder, which
+  // widens it by the lean.
+  it('a full-width DejaVu Sans Oblique line at 60px: flagged on opening, widened by an edit', () => {
+    const text = 'WAIT';
+    const s = styleFor('DejaVu Sans', { italic: true, align: 'left', strokes: [], size: 60 });
+    const w = lineWidth(text, s, 60) + textInset(s) * 2 + 0.01;
+    loadProjectPages([
+      {
+        id: 1,
+        w: 600,
+        h: 400,
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, x: 200, y: 150, w, h: 20, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    expect(placeBlock(boxCandidate(box, text)).lines).toEqual([text]);
+    expect(inkPastBox(box, p).right).toBeGreaterThan(TOLERANCE);
+    expect(box.review?.reason).toBe(REVIEW_REASONS.stale);
+    expect(box.review.overflow.r).toBeGreaterThan(0);
+    autoFitBox(box, p);
+    expect(box.review).toBeUndefined();
+    expect(box.w).toBeGreaterThan(w);
+    expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+  });
+
   // OVF-8: the height a chapter opens at is the ink's as well as the lines'.
   // Accented capitals over a line of descenders, at a line height of 0.8 and in
   // the default outline, stand taller than their line boxes; sized from the
@@ -467,6 +509,30 @@ describe('boxInkRect is the ink the exporter paints', () => {
       expect(missed, msg).toBeLessThanOrEqual(SLACK);
       expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT);
     }
+  });
+
+  // OVF-10: a tab is painted as the space it was laid out as. One line, with
+  // the tab inside it (a tab the breaker breaks at is gone either way), and
+  // right-aligned, so a tab this canvas drew at its own width would start the
+  // line further left.
+  it('paints a tab as the space it was laid out as', () => {
+    const inkOf = (text) => {
+      loadProjectPages([
+        {
+          id: 1,
+          w: 800,
+          h: 600,
+          lines: [],
+          boxes: [{ id: 'b1', lineN: null, text, x: 200, y: 150, w: 300, h: 60, style: styleFor('Comic Neue', { align: 'right' }) }],
+          detect: null,
+        },
+      ]);
+      const p = page();
+      const box = p.boxes[0];
+      expect(placeBlock(boxCandidate(box, text)).lines).toEqual(['WAIT WHAT NOW']);
+      return rasterInk(box, p);
+    };
+    expect(inkOf('WAIT\tWHAT NOW')).toEqual(inkOf('WAIT WHAT NOW'));
   });
 
   // Text on a curve (OVF-6): every glyph's own ink rectangle, turned by its

@@ -646,8 +646,9 @@ describe('textLayerFor', () => {
     // (frame minus padding on both sides), because that is what both the app and
     // Photoshop reflow at, and the block's own height rather than the rest of
     // the frame, because Photoshop starts the paragraph at the top of this rect.
-    // `baseStyle` has no explicit lineHeight, so one line is 24 * 1.1.
-    expect(layer.text.boxBounds).toEqual([0, 0, 120 - BOX_PAD * 2, Math.round(24 * 1.1)]);
+    // `baseStyle` has no explicit lineHeight, so one line is 24 * 1.1 - 26.4,
+    // which the frame rounds UP to whole pixels (OVF-10, below).
+    expect(layer.text.boxBounds).toEqual([0, 0, 120 - BOX_PAD * 2, Math.ceil(24 * 1.1)]);
 
     // The transform matrix [cos, sin, -sin, cos, tx, ty] for an unrotated box
     // must place the content origin at (box.x + BOX_PAD, box.y + blockY), and
@@ -707,6 +708,43 @@ describe('textLayerFor', () => {
     expect(layer.text.boxBounds[2]).toBe(160 - inset * 2);
     expect(layer.text.transform[4]).toBeCloseTo(100 + inset, 6);
     expect(layer.text.transform[5]).toBeCloseTo(60 + inset, 6);
+  });
+
+  // OVF-10. The frame is whole pixels rounded UP, never down: a frame a
+  // fraction narrower than the content box re-breaks its widest line when
+  // Photoshop re-renders the layer, and one a fraction shorter than the block
+  // hides the last line. The fraction goes on the side the text is not aligned
+  // to, so each line's aligned edge is where the canvas put it, and the anchor
+  // stays inside the box.
+  it.each([
+    ['left', 0],
+    ['center', 0.5],
+    ['right', 1],
+  ])('rounds the frame up, and keeps a %s-aligned edge where the canvas has it', (align, share) => {
+    const w = 120.4;
+    const layer = textLayerFor(page, { lineN: null, text: 'hello', x: 100, y: 60, w, h: 80, style: { ...baseStyle, rotation: 0, align } }, rendered);
+    const content = w - BOX_PAD * 2; // 116.4, which `Math.round` made 116
+    const [x0, y0, fw, fh] = layer.text.boxBounds;
+    expect([x0, y0, fw, fh]).toEqual([0, 0, 117, 27]);
+    const tx = layer.text.transform[4];
+    expect(tx).toBeCloseTo(100 + BOX_PAD - share * (fw - content), 6);
+    // The frame's left edge, centre or right edge is the content box's.
+    expect(tx + share * fw).toBeCloseTo(100 + BOX_PAD + share * content, 6);
+    expect(tx).toBeGreaterThan(100);
+    expect(layer.text.transform[5]).toBeCloseTo(60 + BOX_PAD, 6);
+  });
+
+  it('adds nothing to a frame that is already whole pixels, float noise and all', () => {
+    // Five lines of 1.1 x 14 are 77.00000000000001, and 116 of content can
+    // arrive as 116.00000000000003: a pixel of frame each, rounded up bare.
+    expect(5 * (1.1 * 14)).toBeGreaterThan(77);
+    const layer = textLayerFor(
+      page,
+      { lineN: null, text: 'a\nb\nc\nd\ne', x: 100, y: 60, w: 120 + 3e-14, h: 90, style: { ...baseStyle, rotation: 0, align: 'right', lineHeight: 1.1, size: 14 } },
+      rendered,
+    );
+    expect(layer.text.boxBounds).toEqual([0, 0, 116, 77]);
+    expect(layer.text.transform[4]).toBeCloseTo(100 + BOX_PAD, 6);
   });
 
   it('rotates the padded content origin about the box frame centre rather than about the inset origin', () => {
@@ -1210,6 +1248,23 @@ describe('reconstructForeign', () => {
     expect(b.style.align).toBe('left');
     expect(plain.style.strokes).toEqual([]);
     expect({ x: plain.x, y: plain.y, w: plain.w, h: plain.h }).toEqual({ x: 100, y: 60, w: 160, h: 24 + BOX_PAD * 2 });
+  });
+
+  // OVF-10: the frame the writer rounds up comes back as a box no narrower than
+  // the one that went out, so its lines do not re-break on the way in - the
+  // old `Math.round` brought a 120.4 box back 120 wide, 0.4px short of the
+  // width its widest line was broken to - and its aligned edge is where it
+  // was, to the importer's own whole-pixel rounding.
+  it('brings a box of fractional width back no narrower than it went out', async () => {
+    const style = normalizeStyle({ ...defaultStyle(), size: 24, lineHeight: 1.1, align: 'right', valign: 'top', strokes: [] });
+    const box = { lineN: null, text: 'hello', x: 100.3, y: 60, w: 120.4, h: 40, style };
+    const layer = textLayerFor({ lines: [] }, box, null);
+    delete layer.effects;
+    const pg = await reconstructForeign({ width: 800, height: 1200, children: [layer] });
+    const [b] = pg.boxes;
+    expect(b.w).toBeGreaterThanOrEqual(box.w);
+    expect(b.h - BOX_PAD * 2).toBeGreaterThanOrEqual(24 * 1.1);
+    expect(Math.abs(b.x + b.w - (box.x + box.w))).toBeLessThanOrEqual(0.5);
   });
 
   it('falls back to raster ink bounds when boxBounds or transform are absent', async () => {
