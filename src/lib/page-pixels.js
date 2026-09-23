@@ -88,6 +88,52 @@ function promote(pageId, entry) {
   cache.set(pageId, entry);
 }
 
+// ===== the one draw-then-read =====
+//
+// An already-loaded `<img>` in, its `ImageData` out - or null, for a picture
+// that has not decoded or a canvas that refuses. Two callers, and they must not
+// be two implementations: the cache below, which files what it reads, and the
+// chapter-wide fit in chapter-fit.js, which reads pages it is not allowed to
+// file. A batch fit measured off a different read than the one a click would
+// have made is exactly the "same page, different answer" that module exists to
+// remove.
+//
+// The canvas is given back before this returns. It is scratch - written once,
+// read once - and after the read it is a second full copy of the page in its
+// backing store that nothing will look at again. Dropping the reference leaves
+// that memory to the collector, which is in no hurry about canvases; zeroing the
+// size hands it back now. On a click that is one page's worth held a little
+// longer than it had to be. In a chapter-wide pass it is one per page.
+export function decodeImagePixels(image) {
+  const w = image?.naturalWidth | 0;
+  const h = image?.naturalHeight | 0;
+  if (!w || !h || !canDecode()) return null;
+  let c = null;
+  try {
+    c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    // No `willReadFrequently`. It is exactly the wrong hint here: it asks the
+    // browser for a SOFTWARE-backed canvas on the assumption that many reads
+    // are coming, and this canvas is written once and read once - so the hint
+    // bought a slower `drawImage` to optimise a second `getImageData` that
+    // never happens.
+    const ctx = c.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(image, 0, 0);
+    return ctx.getImageData(0, 0, w, h);
+  } catch {
+    // A decode that fails - a tainted canvas, a browser refusing the allocation
+    // - costs the fit and nothing else. The caller falls back.
+    return null;
+  } finally {
+    if (c) {
+      c.width = 0;
+      c.height = 0;
+    }
+  }
+}
+
 // Decode an already-loaded `<img>` into an `ImageData` and remember it under
 // this page's id. Called from the canvas's own `onload`, which is the one moment
 // in the app where a decoded page raster exists and nothing has to be fetched.
@@ -130,28 +176,8 @@ export function rememberPagePixels(pageId, src, image) {
     promote(pageId, held);
     return held.image;
   }
-  const w = image?.naturalWidth | 0;
-  const h = image?.naturalHeight | 0;
-  if (!w || !h) return null;
-  let data = null;
-  try {
-    const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    // No `willReadFrequently`. It is exactly the wrong hint here: it asks the
-    // browser for a SOFTWARE-backed canvas on the assumption that many reads
-    // are coming, and this canvas is written once and read once - so the hint
-    // bought a slower `drawImage` to optimise a second `getImageData` that
-    // never happens.
-    const ctx = c.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(image, 0, 0);
-    data = ctx.getImageData(0, 0, w, h);
-  } catch {
-    // A decode that fails - a tainted canvas, a browser refusing the allocation
-    // - costs the fit and nothing else. The caller falls back.
-    return null;
-  }
+  const data = decodeImagePixels(image);
+  if (!data) return null;
   promote(pageId, { src, image: data, bytes: bytesOf(data) });
   evict();
   return data;
@@ -219,6 +245,29 @@ export function pagePixelsFor(p) {
   const note = pending.get(id);
   if (note && note.src === src) return rememberPagePixels(id, src, note.image);
   return null;
+}
+
+// The same lookup for a reader that is not a click: an entry for this exact
+// raster, already here, or null - and nothing else happens either way.
+//
+// `pagePixelsFor` is a read with two side effects, both right for a click and
+// both wrong for a batch. A hit promotes, because the page a user clicks is the
+// page they are on - but the chapter-wide fit walks every page in order, and
+// promoting as it goes would leave the least-recently-used order sorted by page
+// number rather than by what the user has been looking at, so the canvas's next
+// decode would evict whichever cached page comes first in the chapter - which
+// may well be the one under the cursor. And a pending note is turned into an
+// entry on the spot, which is a batch filing pages into the click cache on its
+// own schedule. That is the one thing chapter-fit.js must never do: in a cache
+// this small every entry a batch adds is one the reader loses.
+//
+// A miss costs the caller a decode of its own, which it was prepared to do for
+// every page anyway.
+export function peekPagePixels(p) {
+  const id = p?.id;
+  if (id == null) return null;
+  const entry = cache.get(id);
+  return entry && entry.src === pageRasterSrc(p) ? entry.image : null;
 }
 
 // Drop one page, or the lot. The src check above already covers a raster being

@@ -3,6 +3,8 @@ import {
   rememberPagePixels,
   notePageImage,
   pagePixelsFor,
+  peekPagePixels,
+  decodeImagePixels,
   forgetPagePixels,
   pagePixelsHeld,
   pagePixelNotesHeld,
@@ -24,22 +26,30 @@ import {
 // pixels from another's.
 const realDocument = globalThis.document;
 let decodes;
+// Every canvas the module asked for, so a test can see what state it was left
+// in - a scratch canvas that keeps its size is a second copy of the page.
+let canvases;
 
-const fakeCanvas = () => ({
-  width: 0,
-  height: 0,
-  getContext: () => ({
-    drawImage(img) {
-      decodes.push(img.tag);
-    },
-    getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
-  }),
-});
+const fakeCanvas = () => {
+  const c = {
+    width: 0,
+    height: 0,
+    getContext: () => ({
+      drawImage(img) {
+        decodes.push(img.tag);
+      },
+      getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    }),
+  };
+  canvases.push(c);
+  return c;
+};
 
 const img = (tag, w = 4, h = 4) => ({ tag, naturalWidth: w, naturalHeight: h });
 
 beforeEach(() => {
   decodes = [];
+  canvases = [];
   globalThis.document = { createElement: () => fakeCanvas() };
   forgetPagePixels();
 });
@@ -57,6 +67,61 @@ describe('pageRasterSrc', () => {
     expect(pageRasterSrc({ raw: 'blob:r', cleaned: 'blob:c' })).toBe('blob:c');
     expect(pageRasterSrc({ raw: 'blob:r', cleaned: null })).toBe('blob:r');
     expect(pageRasterSrc(null)).toBe(null);
+  });
+});
+
+// ===========================================================================
+// The one draw-then-read
+// ===========================================================================
+// Shared by the click cache and the chapter-wide fit, so the two cannot come to
+// different answers about what a page's pixels are.
+describe('decodeImagePixels', () => {
+  it('reads a decoded picture at its natural size', () => {
+    const data = decodeImagePixels(img('a', 6, 8));
+    expect([data.width, data.height]).toEqual([6, 8]);
+    expect(decodes).toEqual(['a']);
+  });
+
+  // The canvas is scratch, written once and read once. Left at its size it is a
+  // second full copy of the page in a backing store nothing will look at again,
+  // held until the collector gets round to the element.
+  it('gives its canvas back before it returns', () => {
+    decodeImagePixels(img('a', 6, 8));
+    expect(canvases.map((c) => [c.width, c.height])).toEqual([[0, 0]]);
+  });
+
+  // A tainted canvas throws on the read - the case a page loaded without
+  // `crossOrigin` produces - and that must cost the fit, not the canvas.
+  it('gives the canvas back when the read throws', () => {
+    const tainted = { width: 0, height: 0 };
+    tainted.getContext = () => ({
+      drawImage() {},
+      getImageData: () => {
+        throw new Error('SecurityError');
+      },
+    });
+    globalThis.document = { createElement: () => tainted };
+    expect(decodeImagePixels(img('a', 6, 8))).toBe(null);
+    expect([tainted.width, tainted.height]).toEqual([0, 0]);
+  });
+
+  it('refuses a picture that has not decoded without asking for a canvas', () => {
+    expect(decodeImagePixels(img('a', 0, 0))).toBe(null);
+    expect(decodeImagePixels(null)).toBe(null);
+    expect(canvases).toEqual([]);
+  });
+
+  it('is a no-op where there is nothing to decode with', () => {
+    globalThis.document = undefined;
+    expect(decodeImagePixels(img('a'))).toBe(null);
+  });
+
+  // The cache reads through the same function, so a page it files gives its
+  // canvas back too.
+  it('is what the cache reads through', () => {
+    rememberPagePixels(1, 'blob:r1', img('a', 6, 8));
+    expect(decodes).toEqual(['a']);
+    expect(canvases.map((c) => [c.width, c.height])).toEqual([[0, 0]]);
   });
 });
 
@@ -266,6 +331,54 @@ describe('a click that beats the idle callback', () => {
       expect(pagePixelsFor({ id: 1, raw: 'blob:r1', cleaned: 'blob:c1' })).not.toBe(null);
       expect(decodes).toEqual(['old', 'new']);
     });
+  });
+});
+
+// ===========================================================================
+// A look that changes nothing
+// ===========================================================================
+// The chapter-wide fit reads the cache too, and it is not a click: it walks
+// every page in order, so everything `pagePixelsFor` does besides answering -
+// promoting a hit, decoding a note into an entry - would be a batch reordering
+// or filling a cache that exists for the page under the cursor.
+describe('peekPagePixels', () => {
+  const p = (id) => ({ id, raw: `blob:r${id}` });
+  const remember = (id) => rememberPagePixels(id, `blob:r${id}`, img(`i${id}`));
+
+  it('answers from the cache for the raster the page draws', () => {
+    const data = remember(1);
+    expect(peekPagePixels(p(1))).toBe(data);
+    expect(decodes).toEqual(['i1']);
+  });
+
+  it('misses on anything else, exactly as a click would', () => {
+    remember(1);
+    expect(peekPagePixels({ id: 1, raw: 'blob:r1', cleaned: 'blob:c1' })).toBe(null);
+    expect(peekPagePixels({ id: 1, raw: null, cleaned: null })).toBe(null);
+    expect(peekPagePixels(p(2))).toBe(null);
+    expect(peekPagePixels(null)).toBe(null);
+  });
+
+  // Read in page order and promoted as it went, the order would end up sorted
+  // by page number - and the next decode would evict whichever page comes first
+  // in the chapter, not whichever the user looked at longest ago.
+  it('does not promote what it reads', () => {
+    for (let i = 1; i <= 8; i++) remember(i);
+    peekPagePixels(p(1));
+    remember(9);
+    expect(pagePixelsFor(p(1))).toBe(null);
+    expect(pagePixelsFor(p(2))).not.toBe(null);
+  });
+
+  // The note is the canvas's, and turning it into an entry is the canvas's
+  // idle callback's job. A batch that did it would be filing pages into the
+  // click cache on its own schedule.
+  it('neither decodes a note nor files anything', () => {
+    notePageImage(1, 'blob:r1', img('a'));
+    expect(peekPagePixels(p(1))).toBe(null);
+    expect(decodes).toEqual([]);
+    expect(pagePixelsHeld()).toBe(0);
+    expect(pagePixelNotesHeld()).toBe(1);
   });
 });
 
