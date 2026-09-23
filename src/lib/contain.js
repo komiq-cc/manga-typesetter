@@ -68,6 +68,7 @@ import {
   blockYFor,
   baselineInLine,
   blockInk,
+  glyphInk,
   textInset,
   contentWidth,
   arcLayout,
@@ -207,9 +208,10 @@ const unite = (r, x0, y0, x1, y1) =>
 // Everything the box paints, as one box-local rectangle, or null when it paints
 // nothing. The pieces, in the order the exporter paints them:
 //
-//   the glyphs   each line's ink at its anchor and baseline. A curve's glyphs,
-//                one generous square per glyph around its anchor - the margin
-//                the exporter pads a curved footprint by.
+//   the glyphs   each line's ink at its anchor and baseline. A curve's glyphs
+//                one by one: each glyph's own ink (`glyphInk` - centred on its
+//                anchor, on a middle baseline, the way every curved renderer
+//                draws it) turned by the glyph's rotation (OVF-6, below).
 //   the strokes  outset by the outermost band's outer edge (`strokeExtent`) on
 //                every side: the bands are round-joined outlines of the glyphs.
 //   the shadows  each one the stroked silhouette moved by its own offset and
@@ -229,8 +231,10 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
   if (place.isCurve) {
     const cx = cand.w / 2;
     const cy = cand.h / 2;
-    const half = s.size * 0.75;
-    for (const g of place.layout) r = unite(r, cx + g.x - half, cy + g.y - half, cx + g.x + half, cy + g.y + half);
+    for (const g of place.layout) {
+      const k = glyphInk(g.ch, s, s.size);
+      if (k) r = unite(r, ...turnedInk(k, g.rot, cx + g.x, cy + g.y));
+    }
   } else {
     for (let i = 0; i < place.lines.length; i++) {
       const k = place.inks[i];
@@ -253,6 +257,46 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
   if (s.flipH) u = { ...u, x0: cand.w - u.x1, x1: cand.w - u.x0 };
   if (s.flipV) u = { ...u, y0: cand.h - u.y1, y1: cand.h - u.y0 };
   return { x: u.x0, y: u.y0, w: u.x1 - u.x0, h: u.y1 - u.y0 };
+}
+
+// OVF-6. Text on an arc, a ring or a path is drawn glyph by glyph, each one
+// translated to its anchor and rotated to the curve (`ctx.rotate(g.rot)` in the
+// exporter, `rotate()` on the editor's span), so where its ink lands is the
+// glyph's own ink rectangle turned by that angle. The bounds of the four turned
+// corners hold every pixel of the glyph at any angle: exact for an upright or a
+// quarter-turned glyph, and a little generous for one turned part-way, whose
+// ink need not reach its rectangle's corners - a round or slanted letter near
+// 45 degrees is the loosest case (about 0.3 em for an italic at the end of an
+// arc, in the real-font lane).
+//
+// What this replaced was a square one and a half em across around every
+// anchor, the margin the exporter pads a curved footprint by: generous enough
+// never to miss ink and a third of an em or more past it on every side, so a
+// ring or an arc inside its box with less than that to spare was flagged, and
+// every flag's numbers were the padding's rather than the text's. The review's case was an
+// arc whose glyphs span 368px in a box 120 across; it is flagged either way,
+// but only these rectangles say by how much.
+//
+// Canvas rotation, y down: (u, v) goes to (u cos - v sin, u sin + v cos).
+function turnedInk(k, rot, ax, ay) {
+  const a = Number(rot) || 0;
+  const cos = Math.cos(a);
+  const sin = Math.sin(a);
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const u of [k.left, k.right]) {
+    for (const v of [-k.ascent, k.descent]) {
+      const x = u * cos - v * sin;
+      const y = u * sin + v * cos;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  return [ax + x0, ay + y0, ax + x1, ay + y1];
 }
 
 // The verdict: how far the ink reaches past each edge of the box, and whether

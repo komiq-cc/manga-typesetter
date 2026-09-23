@@ -434,6 +434,66 @@ describe('the flag', () => {
   });
 });
 
+// ===== text on a curve (OVF-6) =====
+//
+// The stub's glyphs, drawn the curved renderers' way - centred on the anchor,
+// on the middle of the em square, which is 0.3 em above the alphabetic
+// baseline - reach 0.235 em either side of the anchor (W 0.285, T 0.275),
+// 0.4 em above it for a capital and 0.3 em below.
+
+describe('boxInkRect, on a curve', () => {
+  // As the curve flattens, the glyphs lie along a line again, and their ink is
+  // the straight line's: from W's ink to T's, 44.2px across, where the squares
+  // this replaced made it 63.
+  it("is the glyphs' own ink, not a square around each", () => {
+    const c = cand({ text: 'WAIT', w: 100, h: 40, style: style({ curve: 1 }) });
+    const r = boxInkRect(c);
+    expect(r.x).toBeCloseTo(50 - 22 - 0.2, 0);
+    expect(r.x + r.w).toBeCloseTo(50 + 22, 0);
+    expect(r.y).toBeCloseTo(20 - 0.4 * S, 0);
+    expect(r.y + r.h).toBeCloseTo(20 + 0.3 * S, 0);
+    expect(containBox(c).fits).toBe(true);
+  });
+
+  // A closed ring of four capitals turned so they sit at twelve, three, six
+  // and nine o'clock: every glyph is upright or a quarter turn, so its
+  // rectangle is exact, and the one at three o'clock is its HEIGHT across. The
+  // ring's radius is 44px of advance over 2 pi, 7.0px, and every glyph's top
+  // points out, 0.4 em past it - so 15px from the centre on every side, which
+  // a 32px box holds and a 28px one does not.
+  it('turns each glyph with its rotation', () => {
+    const ring = style({ circle: { on: true, angle: -45, inside: false, r: 0 } });
+    const R = (4 * ADV) / (2 * Math.PI);
+    const reach = R + 0.4 * S;
+    const r = boxInkRect(cand({ text: 'OOOO', w: 32, h: 32, style: ring }));
+    expect(r.x).toBeCloseTo(16 - reach, 6);
+    expect(r.y).toBeCloseTo(16 - reach, 6);
+    expect(r.x + r.w).toBeCloseTo(16 + reach, 6);
+    expect(r.y + r.h).toBeCloseTo(16 + reach, 6);
+    expect(containBox(cand({ text: 'OOOO', w: 32, h: 32, style: ring })).fits).toBe(true);
+    const small = containBox(cand({ text: 'OOOO', w: 28, h: 28, style: ring }));
+    expect(small.fits).toBe(false);
+    for (const k of ['l', 't', 'r', 'b']) expect(small.overflow[k]).toBeCloseTo(reach - 14, 6);
+  });
+
+  // Text longer than its path runs off both ends along the end tangents, and
+  // the check follows it there.
+  it('follows text off the ends of a path that is too short for it', () => {
+    const path = { on: true, pts: [{ x: 10, y: 20 }, { x: 70, y: 20 }] };
+    const text = 'AROUND AND AROUND';
+    const c = cand({ text, w: 80, h: 40, style: style({ path }) });
+    const v = containBox(c);
+    expect(v.fits).toBe(false);
+    // Centred on the path's middle, which is the box's: 187px of advance, 93.5
+    // either side of x 40, less the first and last glyphs' side bearings.
+    const run = (text.length * ADV) / 2 - 0.04 * S;
+    expect(v.overflow.l).toBeCloseTo(run - 40, 6);
+    expect(v.overflow.r).toBeCloseTo(run - 40, 6);
+    expect(v.overflow.t).toBe(0);
+    expect(v.overflow.b).toBe(0);
+  });
+});
+
 // ===== the ladder =====
 
 describe('the ladder, on an auto box', () => {
@@ -751,6 +811,34 @@ describe('a manual box', () => {
     expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: before.x, y: before.y, w: before.w, h: before.h });
     expect(b.style.size).toBeLessThanOrEqual(before.size);
     expect(!!b.review).toBe(!verdict(b).fits);
+  });
+
+  // OVF-6: the curve's ink is its glyphs', one by one. "Fit now" on a curved
+  // box keeps the box and searches the size; the rectangles are what let it
+  // find the size that fits, because the squares they replaced were 0.75 em out
+  // from every glyph whatever its size and flagged boxes that fit.
+  it('"Fit now" shrinks the font of a curve that is a little too wide until it fits', () => {
+    // WAIT on a nearly flat arc: 44.3px of ink at 20px in a 40px box.
+    const p = load([{ id: 'b1', lineN: null, text: 'WAIT', x: 100, y: 100, w: 40, h: 40, style: style({ curve: 1 }) }]);
+    const b = byId('b1');
+    const before = geomOf(b);
+    expect(b.review?.reason).toBe(REVIEW_REASONS.curve);
+    expect(b.review.overflow.l).toBeGreaterThan(0);
+    expect(b.review.overflow.r).toBeGreaterThan(0);
+    expect(b.review.overflow.t + b.review.overflow.b).toBe(0);
+    expect(fitBoxNow('b1', p)).toBe(true);
+    expect({ x: b.x, y: b.y, w: b.w, h: b.h }).toEqual({ x: before.x, y: before.y, w: before.w, h: before.h });
+    expect(b.style.size).toBeLessThan(S);
+    expect(b.style.size).toBeGreaterThanOrEqual(0.75 * S);
+    expect(verdict(b).fits).toBe(true);
+    expect(b.review).toBeUndefined();
+    // The largest size that fits, in half-px steps: half a pixel more does not.
+    const bigger = { ...boxCandidate(b, b.text), style: { ...b.style, size: b.style.size + 0.5 } };
+    expect(containBox(bigger).fits).toBe(false);
+    // One undo puts the size back, and the flag with it.
+    hist.undo();
+    expect(geomOf(byId('b1'))).toEqual(before);
+    expect(byId('b1').review?.reason).toBe(REVIEW_REASONS.curve);
   });
 });
 

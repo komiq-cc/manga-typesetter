@@ -468,4 +468,48 @@ describe('boxInkRect is the ink the exporter paints', () => {
       expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT);
     }
   });
+
+  // Text on a curve (OVF-6): every glyph's own ink rectangle, turned by its
+  // rotation. The check must still hold every painted pixel - that side keeps
+  // the raster's slack and nothing more. The other side is looser than for a
+  // straight line, by design: the bounds of a turned rectangle are exact for an
+  // upright glyph and generous for one turned part-way, most of all for a
+  // slanted italic near the end of an arc (0.3 em here). The squares this
+  // replaced stood 0.75 em out from every anchor.
+  const CURVES = [
+    ['Comic Neue', { curve: 60 }],
+    ['DejaVu Sans', { curve: -45, italic: true, strokes: [] }],
+    ['Bangers', { circle: { on: true, angle: 20 } }],
+    ['Comic Neue', { circle: { on: true, inside: true, r: 60 } }],
+    ['DejaVu Sans', { path: { on: true, pts: [{ x: 10, y: 160, ox: 60, oy: -120 }, { x: 230, y: 160, ix: -60, iy: -120 }] } }],
+    ['Comic Neue', { curve: 30, shadows: [{ color: '#000000', x: 6, y: 4, blur: 0, opacity: 1 }] }],
+  ];
+  const TURNED = 0.35 * SIZE;
+
+  it.each(CURVES)('%s on a curve, %j', (font, extra) => {
+    const s = styleFor(font, extra);
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [],
+        boxes: [{ id: 'b1', lineN: null, text: 'Jumpy fjord! ÉTÉ WOW', x: 200, y: 150, w: 240, h: 240, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    const cand = boxCandidate(box, boxText(box, p));
+    expect(placeBlock(cand).isCurve).toBe(true);
+    const geo = boxInkRect(cand);
+    const got = rasterInk(box, p);
+    const want = { x0: geo.x, y0: geo.y, x1: geo.x + geo.w, y1: geo.y + geo.h };
+    for (const k of ['x0', 'y0', 'x1', 'y1']) {
+      const missed = k.endsWith('0') ? want[k] - got[k] : got[k] - want[k];
+      const msg = `${k}: raster ${got[k]} vs check ${want[k]}`;
+      expect(missed, msg).toBeLessThanOrEqual(SLACK);
+      expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT + TURNED);
+    }
+  });
 });
