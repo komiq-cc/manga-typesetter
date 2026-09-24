@@ -20,6 +20,7 @@
     focusPage,
     resizeBox,
     isLongstrip,
+    reviewBox,
   } from './store.svelte.js';
   import { stripDragYBounds } from './editor/strip.js';
 
@@ -1030,6 +1031,10 @@
       ac.abort();
       const after = cloneStyle(box.style);
       if (JSON.stringify(after.path) !== JSON.stringify(styleBefore.path)) {
+        // The glyphs follow the curve, so where they land decides the flag -
+        // and nothing else asks: the fit effect does not read the path. Once,
+        // at the end, as the mesh gestures do.
+        reviewBox(box, pg);
         record({ t: 'style', pageId, boxId: box.id, before: styleBefore, after });
       }
     };
@@ -1071,10 +1076,14 @@
     return [cx + dx * Math.cos(rad) - dy * Math.sin(rad), cy + dx * Math.sin(rad) + dy * Math.cos(rad)];
   }
 
+  // A shape changes the verdict as well as the picture: an include mask cuts
+  // the ink the check counts (contain.js), and the fit effect does not read the
+  // mask, so the flag is brought up to date here.
   function commitMaskShape(shape) {
     const styleBefore = cloneStyle(box.style);
     s.clip.shapes = [...s.clip.shapes, shape];
     markUnsaved();
+    reviewBox(box, pg);
     record({ t: 'style', pageId: pg.id, boxId: box.id, before: styleBefore, after: cloneStyle(box.style) });
   }
 
@@ -1275,6 +1284,7 @@
     const styleBefore = cloneStyle(box.style);
     s.path.pts = next;
     markUnsaved();
+    reviewBox(box, pg);
     record({ t: 'style', pageId: pg.id, boxId: box.id, before: styleBefore, after: cloneStyle(box.style) });
   }
 
