@@ -16,7 +16,7 @@
 // names ("Manga Temple Bold") would instead have meant teaching every one of
 // those call sites - and every style.font string already saved to disk - about
 // names that did not exist when the document was written.
-import { app, toast, noteFontsChanged, allFonts } from './store.svelte.js';
+import { app, toast, noteFontsChanged, fontByName } from './store.svelte.js';
 import { FACE_SLOTS, emptyFaces } from './data.js';
 
 export { FACE_SLOTS };
@@ -322,7 +322,7 @@ export function groupFontFiles(filenames) {
 }
 
 function findGroup(fontName) {
-  return allFonts().find((f) => f.name === fontName) || null;
+  return fontByName(fontName);
 }
 
 // ---- the fonts installed on this machine ----

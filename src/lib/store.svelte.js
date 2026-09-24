@@ -3862,12 +3862,40 @@ export const FALLBACK_FONT = 'Comic Neue';
 // a box already set in one keeps its face.
 export const allFonts = () => [...app.fonts.user, ...app.fonts.builtin, ...app.fonts.system];
 
+// The family entry for a name, first list wins - the order `allFonts` states.
+//
+// Indexed rather than searched, because this sits under every text measurement:
+// `measure.js` resolves the family on each `measureText`, and one line-balancing
+// pass makes a few hundred of those. Spreading and scanning every list twice per
+// call - the whole installed system font list included, hundreds of entries on a
+// Mac - made a single box resize cost tens of milliseconds per pointer move.
+//
+// Rebuilt when any list is replaced or changes length, which covers every way
+// the app changes them (a scan assigns, removal filters, an added family is
+// pushed). Those same reads are what a reactive caller subscribes to, so a
+// derived that resolved a font before its family arrived still re-runs.
+let fontIndex = null;
+let fontIndexOf = [];
+export function fontByName(name) {
+  const { user, builtin, system } = app.fonts;
+  const k = fontIndexOf;
+  if (
+    !fontIndex ||
+    k[0] !== user || k[1] !== builtin || k[2] !== system ||
+    k[3] !== user.length || k[4] !== builtin.length || k[5] !== system.length
+  ) {
+    fontIndex = new Map();
+    for (const f of allFonts()) if (!fontIndex.has(f.name)) fontIndex.set(f.name, f);
+    fontIndexOf = [user, builtin, system, user.length, builtin.length, system.length];
+  }
+  return fontIndex.get(name) ?? null;
+}
+
 export function fontNameFor(name) {
-  const known = allFonts().some((x) => x.name === name);
-  return known ? name : FALLBACK_FONT;
+  return fontByName(name) ? name : FALLBACK_FONT;
 }
 
 export function fontCssFor(name) {
-  const f = allFonts().find((x) => x.name === fontNameFor(name));
+  const f = fontByName(fontNameFor(name));
   return f ? f.css : "'Comic Neue', cursive";
 }
