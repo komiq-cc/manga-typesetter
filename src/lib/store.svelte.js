@@ -12,6 +12,7 @@ import {
   normalizeFinish,
   normalizeReview,
   normalizeTypesetting,
+  normalizeAuto,
 } from './data.js';
 // The tag module reaches back for nothing - it takes the pages it works on as
 // arguments - so this stays a one-way edge and the two cannot cycle. What comes
@@ -153,6 +154,10 @@ const reviewField = (r) => {
   const review = normalizeReview(r);
   return review ? { review } : null;
 };
+const autoField = (a) => {
+  const auto = normalizeAuto(a);
+  return auto ? { auto } : null;
+};
 
 export function loadProjectPages(rawPages) {
   const takenBoxes = new Set();
@@ -259,6 +264,9 @@ export function loadProjectPages(rawPages) {
           // against this build's measurements and brings it up to date, keeping
           // the saved reason when the box still does not fit.
           ...reviewField(b.review),
+          // The solver's record (FIT-5), absent on a box it has never managed.
+          // Carried and nothing more: a load re-checks, it never re-solves.
+          ...autoField(b.auto),
         };
       }),
       activeLineN: null,

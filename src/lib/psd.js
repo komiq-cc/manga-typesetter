@@ -17,7 +17,7 @@ import { fontCssFor, fontNameFor } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
 import { applyCase, canMeasure, textInset, contentWidth, blockYFor } from './measure.js';
 import { boxCandidate, placeBlock } from './contain.js';
-import { normalizeFit } from './data.js';
+import { normalizeFit, normalizeAuto } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
 import { warpActive } from './warp.js';
 import { withPageImages } from './page-images.js';
@@ -193,6 +193,11 @@ export function serializePage(p) {
       // of the page rebuilt from it are the same JSON, which is what
       // `psdSelfTest` compares.
       fit: normalizeFit(b.fit),
+      // The solver's record (FIT-5): the size the user chose and what is
+      // locked. Lost here, a re-imported box would be solved from the size it
+      // was shrunk to and ratchet smaller. Null for a box the solver never
+      // managed, and always present, for the same reason `fit` is.
+      auto: normalizeAuto(b.auto),
     })),
     detect: p.detect
       ? {

@@ -842,3 +842,39 @@ export function normalizeReview(r) {
   const reason = typeof r.reason === 'string' && r.reason.trim() ? r.reason : REVIEW_REASONS.stale;
   return { kind: 'overflow', overflow, reason };
 }
+
+// ---- the solver's record ----
+//
+// `box.auto` marks a box the auto-layout solver (auto-layout.js) manages, and
+// holds what it needs to solve it again:
+//
+//   { on, refSize, minSize?, locks: { size, width, height, pos, breaks }, status, reason }
+//
+// `refSize` is the size the user chose - the solver never goes above it, and
+// shrinks from it only as far as the balloon needs, so it is kept apart from
+// `style.size`, which is the size the solver last settled on. `status` is the
+// last solve's answer (`solveLayout`'s), or null for a box not solved yet, and
+// `reason` the REVIEW_REASONS string it gave for an overflow.
+//
+// A box without the field is a box the solver has never touched - every box
+// saved before it existed - and stays manual: nothing solves it on load.
+// Anything unreadable degrades to that same state rather than to a guess.
+export const AUTO_STATUSES = Object.freeze(['ok', 'shrunk', 'overflow', 'no-region']);
+const AUTO_LOCKS = ['size', 'width', 'height', 'pos', 'breaks'];
+
+export function normalizeAuto(a) {
+  if (!a || typeof a !== 'object') return null;
+  const refSize = Number(a.refSize);
+  if (!(Number.isFinite(refSize) && refSize > 0)) return null;
+  const minSize = Number(a.minSize);
+  const locks = {};
+  for (const k of AUTO_LOCKS) locks[k] = a.locks?.[k] === true;
+  return {
+    on: a.on !== false,
+    refSize,
+    ...(Number.isFinite(minSize) && minSize > 0 ? { minSize } : null),
+    locks,
+    status: AUTO_STATUSES.includes(a.status) ? a.status : null,
+    reason: typeof a.reason === 'string' && a.reason.trim() ? a.reason : null,
+  };
+}
