@@ -3,7 +3,7 @@ import {
   stripOffsets,
   stripPageExtent,
   stripDragYBounds,
-  boxEffectPad,
+  boxPaintReach,
   boxPaintedStripSpan,
   stripResidentWindow,
   isBoxInStripWindow,
@@ -21,6 +21,7 @@ import {
   RESIDENT_MIN,
   RESIDENT_MAX,
 } from './strip.js';
+import { normalizeInkStroke } from '../data.js';
 
 const pages = (...hs) => hs.map((h, i) => ({ id: i + 1, w: 800, h }));
 
@@ -76,21 +77,54 @@ describe('owner-local geometry across strip seams', () => {
 });
 
 describe('boxPaintedStripSpan and effect reach', () => {
-  it('calculates conservative effect pads for strokes, shadows, blur, and ink', () => {
-    expect(boxEffectPad(null)).toBe(0);
-    expect(boxEffectPad({})).toBe(4);
+  const inkLine = (pts, size = 10) => normalizeInkStroke({ pts: pts.map(([x, y]) => [x, y, 1]), size, color: '#000000' });
+  const sides = (l, t, r, b) => ({ l, t, r, b });
 
-    const s = {
-      strokes: [{ width: 4 }, { width: 6 }],
-      shadows: [{ y: 5, blur: 4 }],
-      blur: 3,
-      motionBlur: { on: true, y: 4, amount: 2 },
-      roughen: { on: true, amount: 3 },
-      ink: { on: true, strokes: [{ size: 10 }] },
+  it('reaches nothing for a box with no style, and the antialiasing for a plain one', () => {
+    expect(boxPaintReach({ y: 0, w: 100, h: 50 })).toEqual(sides(0, 0, 0, 0));
+    expect(boxPaintReach({ y: 0, w: 100, h: 50, style: {} })).toEqual(sides(4, 4, 4, 4));
+  });
+
+  it('reaches each way by what paints that way, not one pad all round', () => {
+    const box = (style) => ({ y: 0, w: 200, h: 80, style });
+    // A shadow thrown 30px down reaches down, and only its blur's spread up.
+    expect(boxPaintReach(box({ shadows: [{ x: 0, y: 30, blur: 2 }] }))).toEqual(sides(8, 4, 8, 38));
+    // A vertical smear reaches up and down and not across.
+    const smear = boxPaintReach(box({ motionBlur: { on: true, x: 0, y: 4, amount: 2 } }));
+    expect(smear.l).toBe(4);
+    expect(smear.t).toBe(smear.b);
+    expect(smear.b).toBeGreaterThan(4);
+    // Mirrored with the flip, which mirrors the finished picture.
+    expect(boxPaintReach(box({ shadows: [{ x: 0, y: 30, blur: 2 }], flipV: true }))).toEqual(sides(8, 38, 8, 4));
+  });
+
+  it("counts hand-drawn ink past the far edges, with its outline and shadow", () => {
+    // Drawn from inside the box to 50px past its bottom: the old pad measured
+    // the ink from the box's corner and saw none of that.
+    const style = {
+      ink: { on: true, strokes: [inkLine([[100, 40], [100, 125]])] },
+      strokes: [{ width: 3 }],
+      shadows: [{ x: 0, y: 6, blur: 0 }],
     };
-    // The editor must retain at least this much painted reach. The shared
-    // painter's shadow and motion blur bounds are deliberately more generous.
-    expect(boxEffectPad(s)).toBeGreaterThanOrEqual(50);
+    const e = boxPaintReach({ y: 0, w: 200, h: 80, style });
+    expect(e.b).toBe(50 + 3 + 6 + 4);
+    expect(e.t).toBe(3 + 4);
+  });
+
+  it("takes the containment check's overflow where the text runs past the box", () => {
+    const b = { y: 100, w: 200, h: 80, style: {}, review: { kind: 'overflow', overflow: { l: 0, t: 0, r: 0, b: 120 }, reason: 'x' } };
+    expect(boxPaintReach(b).b).toBe(124);
+    expect(boxPaintedStripSpan(b, 500)).toEqual({ top: 596, bottom: 804 });
+  });
+
+  it('keeps a box on one page whose ink hangs over the seam into the next window', () => {
+    // Page 1 ends at 1000; the resident window starts there. The box ends 20px
+    // short of the seam and its shadow is thrown 60px down, over it.
+    const b = { y: 900, w: 200, h: 80, style: { shadows: [{ x: 0, y: 60, blur: 0 }] } };
+    expect(isBoxInStripWindow(b, 0, 1000, 2000)).toBe(true);
+    const inked = { y: 900, w: 200, h: 80, style: { ink: { on: true, strokes: [inkLine([[100, 50], [100, 130]])] } } };
+    expect(isBoxInStripWindow(inked, 0, 1000, 2000)).toBe(true);
+    expect(isBoxInStripWindow({ ...inked, style: {} }, 0, 1000, 2000)).toBe(false);
   });
 
   it('computes painted strip span taking rotation and effects into account', () => {

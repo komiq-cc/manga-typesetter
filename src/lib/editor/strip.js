@@ -1,5 +1,5 @@
 // Arithmetic and layout functions for longstrip webtoon columns.
-import { strokeExtent, shadowExtent, motionBlurExtent, inkReach } from '../text-paint.js';
+import { styleReach } from '../paint-reach.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -36,41 +36,59 @@ export function stripDragYBounds(pages, ownerId, boxHeight, retained = 20) {
   };
 }
 
-// Use the same effect extents as the exporter so virtualization cannot cull a
-// box whose stroke, shadow or smear still paints into the resident window.
-export function boxEffectPad(style) {
-  if (!style) return 0;
-  const stroke = strokeExtent(style.strokes);
-  const shadow = shadowExtent(style.shadows);
-  const roughen = style.roughen?.on ? Math.max(0, style.roughen.amount ?? 0) + 2 : 0;
-  const blur = Math.max(0, style.blur ?? 0) * 3;
-  const motion = motionBlurExtent(style.motionBlur);
-  const reach = Math.max(stroke, shadow > 0 ? stroke + shadow : 0, roughen, inkReach(style));
-  // The text rasterizer reserves the same four pixels for antialiasing around
-  // its footprint even when no named effect is active.
-  return Math.ceil(reach + blur + motion + 4);
+// The text rasterizer reserves this much for antialiasing around its footprint
+// even when no named effect is active (the exporter's `+ 4`).
+const AA_PAD = 4;
+
+// How far past each edge of the box - its own frame, before the rotation - it
+// can paint, page px: `{ l, t, r, b }`. The strip culls boxes by this, both the
+// editor's mounted window and the exporter's slices, so it has to reach at
+// least as far as the export draws on every side; and it is asked of every box
+// in a chapter per window or per slice, so it must not lay text out. The larger
+// of two answers on each side, plus the antialiasing:
+//
+//   the check's   `box.review.overflow`: contain.js's `boxInkRect` - the text
+//                 laid out, every effect counted - against the box, written on
+//                 the box whenever its ink is outside it. So glyphs past the
+//                 box, a curve, a mesh: everything a style alone cannot place.
+//                 Absent when the box fits.
+//   the style's   `styleReach`: the ink, the outline, each shadow by its own
+//                 offset, the blurs and the crumple, around the box.
+//
+// It used to be one pad on every side, and not the right one for any of them:
+// the ink's overhang past the right and the bottom was not in it at all (it was
+// measured from the box's corner), nor was text overflowing the box, so a box
+// on one page whose ink hung over the seam into the next could be culled from
+// that page's window, or left out of the slice that should have drawn it.
+export function boxPaintReach(box) {
+  const s = box?.style;
+  if (!s) return { l: 0, t: 0, r: 0, b: 0 };
+  const st = styleReach(s, Math.max(0, box.w ?? 0), Math.max(0, box.h ?? 0));
+  const o = box.review?.overflow ?? {};
+  const side = (a, b) => Math.ceil(Math.max(a, Number(b) || 0)) + AA_PAD;
+  return { l: side(st.l, o.l), t: side(st.t, o.t), r: side(st.r, o.r), b: side(st.b, o.b) };
 }
 
-// Vertical span of a box in unzoomed strip coordinates, accounting for
-// rotation and conservative effect reach.
+// Vertical span of a box in unzoomed strip coordinates: what it paints (above),
+// turned with the box about its centre.
 export function boxPaintedStripSpan(box, ownerTop = 0) {
   const y = box?.y ?? 0;
   const w = Math.max(0, box?.w ?? 0);
   const h = Math.max(0, box?.h ?? 0);
   const rot = box?.style?.rotation || 0;
-  const pad = boxEffectPad(box?.style);
-  let top = y;
-  let bottom = y + h;
-  if (rot) {
-    const a = (rot * Math.PI) / 180;
-    const half = (Math.abs(Math.sin(a)) * w + Math.abs(Math.cos(a)) * h) / 2;
-    const cy = y + h / 2;
-    top = cy - half;
-    bottom = cy + half;
-  }
+  const e = boxPaintReach(box);
+  if (!rot) return { top: ownerTop + y - e.t, bottom: ownerTop + y + h + e.b };
+  // The painted rectangle about the box's centre, (u, v); turned, a point's
+  // height is u sin + v cos, which is lowest and highest at its corners.
+  const a = (rot * Math.PI) / 180;
+  const sin = Math.sin(a);
+  const cos = Math.cos(a);
+  const us = [(-w / 2 - e.l) * sin, (w / 2 + e.r) * sin];
+  const vs = [(-h / 2 - e.t) * cos, (h / 2 + e.b) * cos];
+  const cy = ownerTop + y + h / 2;
   return {
-    top: ownerTop + top - pad,
-    bottom: ownerTop + bottom + pad,
+    top: cy + Math.min(...us) + Math.min(...vs),
+    bottom: cy + Math.max(...us) + Math.max(...vs),
   };
 }
 

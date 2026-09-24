@@ -1,11 +1,11 @@
 // ===== how far past each edge of its box a box paints =====
 //
-// Per side, in the box's own frame (before rotation and flip), page px. The
-// exact answer is contain.js's `boxInkRect`, which lays the text out; these are
-// the answers that do not need a layout, for the places that must not pay for
-// one.
+// Per side, `{ l, t, r, b }` in page px, in the box's own frame before its
+// rotation. The exact answer is contain.js's `boxInkRect`, which lays the text
+// out; these are the answers that do not need a layout, for the places that
+// must not pay for one.
 
-import { inkActive, inkBounds, strokeExtent, shadowExtent } from './text-paint.js';
+import { inkActive, inkBounds, strokeExtent, shadowExtent, motionBlurTaps } from './text-paint.js';
 
 const NONE = Object.freeze({ l: 0, t: 0, r: 0, b: 0 });
 
@@ -23,4 +23,72 @@ export function inkOverhang(style, w, h) {
   const finish = Math.ceil(strokeExtent(style.strokes) + shadowExtent(style.shadows));
   const side = (v) => Math.ceil(Math.max(0, v)) + finish;
   return { l: side(-k.minX), t: side(-k.minY), r: side(k.maxX - w), b: side(k.maxY - h) };
+}
+
+// Everything the box's style can paint past each edge, on the assumption that
+// the glyphs themselves are inside the box: the hand-drawn ink, then outset
+// the way `boxInkRect` outsets the glyphs - the outline bands, each shadow
+// moved by its OWN offset and spread by its blur (so a shadow thrown down and
+// right reaches down and right, not all round), the whole-picture blur at three
+// sigma, the smear along each axis to its furthest tap, and the crumple - then
+// mirrored with the flip, which mirrors the finished picture. An include mask
+// could only take some of it away, and is left out.
+//
+// Glyphs past the box are the one thing this cannot see without a layout. The
+// containment check can, and a box whose glyphs overflow carries the check's
+// numbers in `box.review` - see `boxPaintReach` in editor/strip.js, which
+// takes the larger of the two per side.
+export function styleReach(style, w, h) {
+  if (!style) return NONE;
+  let x0 = 0;
+  let y0 = 0;
+  let x1 = w;
+  let y1 = h;
+  if (inkActive(style.ink)) {
+    const k = inkBounds(style.ink);
+    if (k) {
+      x0 = Math.min(x0, k.minX);
+      y0 = Math.min(y0, k.minY);
+      x1 = Math.max(x1, k.maxX);
+      y1 = Math.max(y1, k.maxY);
+    }
+  }
+  const so = strokeExtent(style.strokes);
+  const sil = { x0: x0 - so, y0: y0 - so, x1: x1 + so, y1: y1 + so };
+  const u = { ...sil };
+  for (const sh of style.shadows ?? []) {
+    if (!(Number(sh?.opacity ?? 1) > 0)) continue;
+    const dx = Number(sh?.x) || 0;
+    const dy = Number(sh?.y) || 0;
+    const spread = 2 * Math.max(0, Number(sh?.blur) || 0);
+    u.x0 = Math.min(u.x0, sil.x0 + dx - spread);
+    u.y0 = Math.min(u.y0, sil.y0 + dy - spread);
+    u.x1 = Math.max(u.x1, sil.x1 + dx + spread);
+    u.y1 = Math.max(u.y1, sil.y1 + dy + spread);
+  }
+  // The filters grow the whole of that, one after another, as they do there.
+  const blur = 3 * Math.max(0, Number(style.blur) || 0);
+  let mx = 0;
+  let my = 0;
+  if (style.motionBlur?.on) {
+    for (const t of motionBlurTaps(style.motionBlur.x, style.motionBlur.y, style.motionBlur.amount)) {
+      mx = Math.max(mx, Math.abs(t.dx));
+      my = Math.max(my, Math.abs(t.dy));
+    }
+  }
+  const rough = style.roughen?.on ? Math.abs(Number(style.roughen.amount) || 0) / 2 : 0;
+  const gx = blur + mx + rough;
+  const gy = blur + my + rough;
+  const out = {
+    l: Math.max(0, gx - u.x0),
+    t: Math.max(0, gy - u.y0),
+    r: Math.max(0, u.x1 + gx - w),
+    b: Math.max(0, u.y1 + gy - h),
+  };
+  return {
+    l: style.flipH ? out.r : out.l,
+    r: style.flipH ? out.l : out.r,
+    t: style.flipV ? out.b : out.t,
+    b: style.flipV ? out.t : out.b,
+  };
 }
