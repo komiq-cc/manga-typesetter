@@ -20,6 +20,7 @@ import { renderBox, renderBoxTexture } from './exporter.js';
 import { systemFontEntry } from './fonts.js';
 import { defaultStyle, normalizeStyle, REVIEW_REASONS } from './data.js';
 import { neededHeight } from './typeset.js';
+import { fitBalloonShape } from './balloon.js';
 
 // ===========================================================================
 // Text measured with real fonts
@@ -486,6 +487,69 @@ describe('real glyph ink stays inside the box', () => {
     expect(containBox(cand, place).fits).toBe(true);
     expect(box.review).toBeUndefined();
     expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+  });
+
+  // GEO-5: a balloon leaning 20 degrees is stored as its rows. The box goes on
+  // their frame, every line is inside the room its row has about the axis, and
+  // every pixel of painted ink is inside the balloon itself - not just the box.
+  it.each(['Comic Neue', 'DejaVu Sans'])('%s: a tilted balloon keeps its text inside the curve', (font) => {
+    const text = 'You never listen to me, do you?';
+    const [cx, cy, a, b, t] = [400, 300, 150, 95, (20 * Math.PI) / 180];
+    const inside = (x, y) => {
+      const u = (x - cx) * Math.cos(t) + (y - cy) * Math.sin(t);
+      const v = (y - cy) * Math.cos(t) - (x - cx) * Math.sin(t);
+      return (u / a) ** 2 + (v / b) ** 2 <= 1;
+    };
+    const rows = [];
+    let y0 = null;
+    for (let y = cy - a; y <= cy + a; y++) {
+      let l = Infinity;
+      let r = -Infinity;
+      for (let x = cx - a; x <= cx + a; x++) {
+        if (!inside(x + 0.5, y + 0.5)) continue;
+        l = Math.min(l, x);
+        r = Math.max(r, x);
+      }
+      if (r < l) continue;
+      if (y0 === null) y0 = y;
+      rows.push([l, r]);
+    }
+    const fit = fitBalloonShape({ y: y0, rows, holes: 0, escaped: false }).shape;
+    expect(fit.kind).toBe('rows');
+    const g = fittedRect({ w: 800, h: 600 }, fit);
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, ...g, fit, style: styleFor(font) }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    const cand = boxCandidate(box, boxText(box, p));
+    const place = placeBlock(cand);
+    const n = place.lines.length;
+    expect(n).toBeGreaterThan(1);
+    const widths = balloonWidthsFor(box, box.style, SIZE)(n);
+    place.lines.forEach((ln, i) => expect(lineWidth(ln, box.style, SIZE)).toBeLessThanOrEqual(widths[i] + 1e-6));
+    expect(containBox(cand, place).fits).toBe(true);
+    expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
+    const { canvas, ox, oy, ss } = renderBoxTexture(box, p);
+    const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let ink = 0;
+    let outside = 0;
+    for (let py = 0; py < canvas.height; py++) {
+      for (let px = 0; px < canvas.width; px++) {
+        if (d[(py * canvas.width + px) * 4 + 3] === 0) continue;
+        ink++;
+        if (!inside(box.x - ox + (px + 0.5) / ss, box.y - oy + (py + 0.5) / ss)) outside++;
+      }
+    }
+    expect(ink).toBeGreaterThan(500);
+    expect(outside).toBe(0);
   });
 });
 

@@ -30,8 +30,9 @@
 // What crosses the boundary between them is a mask; what crosses out of the
 // module is a handful of numbers. That matters: the fitted shape is stored on
 // the box, written into `chapter.json` and carried through the PSD's embedded
-// project, so it has to be plain JSON - `{ kind:'ellipse', cx, cy, rx, ry }` or
-// `{ kind:'rect', x, y, w, h }` - and never a mask.
+// project, so it has to be plain JSON - `{ kind:'ellipse', cx, cy, rx, ry }`,
+// `{ kind:'rect', x, y, w, h }` or, for a body neither formula matches, bands
+// of its rows (`rowsOf`) - and never a mask.
 
 // The knobs, and what each one is trading off. Every one of them is overridable
 // per call, because a page of tiny four-panel gag strips and a page of splash
@@ -81,6 +82,15 @@ export const BALLOON_DEFAULTS = {
   minCoverage: 0.9, // fraction of the rows inside the fitted span that must be inliers
   minSpan: 0.7, // fraction of the region's rows the fitted shape must actually claim
   maxTailWidth: 0.5, // a spike outside the fitted span is a tail only while it stays this narrow
+  // An accepted oval whose edges miss its rows by more than this (RMS, as a
+  // fraction of the half-width) is stored as those rows instead (`rowsOf`,
+  // GEO-5): a tilted bubble, or a wobbly one the gate lets through. A clean
+  // oval scores well under it and keeps its five numbers.
+  rowsTol: 0.03,
+  // ...in at most this many bands, about a kilobyte stored. A band is the
+  // narrowest of its rows and the margin is taken band by band, so coarser bands
+  // cost the outer lines width - a 3-row band about a tenth of a line's room.
+  rowsMaxBands: 128,
 
   // ---- the click-point probe (placement with no detected block) ----
   // Placing from the queue does not always have a detector block to seed from:
@@ -1024,13 +1034,98 @@ function fitEllipse(pts, o) {
   return best;
 }
 
+// A tilted oval. No upright ellipse describes one - the gate refuses a 90x60
+// bubble leaning 20 degrees - but its rows are still an ellipse's: the midpoints
+// of parallel chords of an ellipse lie on one straight line, and the half-widths
+// keep the form `lsEllipse` solves. So the row centres get a straight line, the
+// rows are slid back onto a vertical one, and the ordinary fit runs on those.
+// The line is weighted by the squared half-width, as `lsEllipse`'s regression
+// is, so a narrow tail barely moves it.
+//
+// Returns `fitEllipse`'s answer in the slid rows, plus the `slope` and `ym`
+// that put a row's centre back: `cx + slope·(y − ym)`.
+function fitTiltedEllipse(pts, o) {
+  let sw = 0;
+  let sy = 0;
+  let sc = 0;
+  let syy = 0;
+  let syc = 0;
+  for (const p of pts) {
+    const w = p.hw * p.hw;
+    sw += w;
+    sy += w * p.y;
+    sc += w * p.c;
+    syy += w * p.y * p.y;
+    syc += w * p.y * p.c;
+  }
+  const den = sw * syy - sy * sy;
+  if (!(sw > 0) || !(Math.abs(den) > 1e-9)) return null;
+  const slope = (sw * syc - sy * sc) / den;
+  const ym = sy / sw;
+  const slid = pts.map((p) => {
+    const d = slope * (p.y - ym);
+    return { y: p.y, l: p.l - d, r: p.r - d, c: p.c - d, hw: p.hw };
+  });
+  const fit = fitEllipse(slid, o);
+  return fit && { ...fit, slope, ym };
+}
+
+// The rows a fitted body leaves for text, stored as rows (GEO-5):
+//
+//   { kind: 'rows', y0, step, spans: [[l, r] | null, ...] }
+//
+// Band `i` covers page rows `[y0 + i·step, y0 + (i+1)·step)` and `[l, r)` is
+// the interior across all of them, in page x. Each pixel row is the measured
+// run cut to the body's chord at that row: the measurement keeps the tilt and
+// the wobble no formula here can, and the body cuts off the tail and anything
+// else the fit refused. A band is the narrowest of its rows, rounded inward, so
+// it never claims room one of them does not have. A row the mask has nothing
+// for - a hole, which one fill cannot make - takes the chord alone.
+//
+// The profile is walked in whole bands, so up to `step - 1` rows are left off,
+// split between the two ends. Null for a body with no rows in it.
+function rowsOf(profile, pts, body, o) {
+  const { cx, cy, rx, ry } = body.shape;
+  const slope = body.slope ?? 0;
+  const ym = body.ym ?? cy;
+  const at = new Map(pts.map((p) => [Math.floor(p.y), p]));
+  const from = Math.max(Math.floor(cy - ry), profile.y);
+  const to = Math.min(Math.ceil(cy + ry), profile.y + profile.rows.length);
+  if (!(to > from) || !(rx > 0) || !(ry > 0)) return null;
+  const step = Math.max(1, Math.ceil((to - from) / o.rowsMaxBands));
+  const count = Math.floor((to - from) / step);
+  let y0 = from + Math.floor((to - from - count * step) / 2);
+  const spans = [];
+  for (let i = 0; i < count; i++) {
+    let l = -Infinity;
+    let r = Infinity;
+    for (let y = y0 + i * step; y < y0 + (i + 1) * step; y++) {
+      const dy = clamp((y + 0.5 - cy) / ry, -1, 1);
+      const hw = rx * Math.sqrt(1 - dy * dy);
+      const c = cx + slope * (y + 0.5 - ym);
+      const p = at.get(y);
+      l = Math.max(l, c - hw, p ? p.l : -Infinity);
+      r = Math.min(r, c + hw, p ? p.r : Infinity);
+    }
+    l = Math.ceil(l);
+    r = Math.floor(r);
+    spans.push(r > l ? [l, r] : null);
+  }
+  while (spans.length && !spans[0]) {
+    spans.shift();
+    y0 += step;
+  }
+  while (spans.length && !spans[spans.length - 1]) spans.pop();
+  return spans.length ? { kind: 'rows', y0, step, spans } : null;
+}
+
 // Classify, fit, and say how much of it to believe.
 //
 // Returns a plain object every time - there is no throwing path and no null
 // return, because "this is not a balloon" is an answer the caller has to handle
 // anyway and it may as well arrive in the same shape as the others:
 //
-//   { kind,        'ellipse' | 'rect' | 'irregular'
+//   { kind,        'ellipse' | 'rect' | 'rows' | 'irregular'
 //     shape,       the storable JSON, or null when `kind` is 'irregular'
 //     confidence,  0..1
 //     residual,    RMS edge error as a fraction of the half-width
@@ -1066,10 +1161,11 @@ export function fitBalloonShape(profile, opts = {}) {
   const pts = rowPoints(profile);
   if (pts.length < o.minRows) return refuse('tiny');
 
-  const finish = (cand) => {
+  const finish = (cand, rows = null) => {
     const s = cand.shape;
-    const shape =
-      s.kind === 'ellipse'
+    const shape = rows
+      ? rows
+      : s.kind === 'ellipse'
         ? { kind: 'ellipse', cx: r2(s.cx), cy: r2(s.cy), rx: r2(s.rx), ry: r2(s.ry) }
         : { kind: 'rect', x: r2(s.x), y: r2(s.y), w: r2(s.w), h: r2(s.h) };
     return {
@@ -1091,7 +1187,17 @@ export function fitBalloonShape(profile, opts = {}) {
   const rect = fitRect(pts, o);
   if (rect && rect.gate && accepted(rect.ev, o)) return finish(rect);
   const ell = fitEllipse(pts, o);
-  if (ell && accepted(ell.ev, o)) return finish(ell);
+  const oval = ell && accepted(ell.ev, o);
+  if (oval && ell.ev.residual <= o.rowsTol) return finish(ell);
+  // A body its formula does not describe closely: a tilted oval, or a wobbly one
+  // the gate lets through. Whichever of the two explains the rows better is the
+  // body, and its rows are what is stored.
+  const body = [ell, fitTiltedEllipse(pts, o)]
+    .filter((c) => c && accepted(c.ev, o))
+    .sort((a, b) => a.merit - b.merit)[0];
+  const rows = body && rowsOf(profile, pts, body, o);
+  if (rows) return finish(body, rows);
+  if (oval) return finish(ell);
   const best = [rect, ell].filter(Boolean).sort((a, b) => a.merit - b.merit)[0];
   return refuse(
     'irregular',
@@ -1102,6 +1208,17 @@ export function fitBalloonShape(profile, opts = {}) {
 
 // ---------- layout inside a fitted shape ----------
 
+// Every function below takes all three kinds. A rows fit is laid out the way an
+// oval is: centred text, on one vertical axis - the median centre of its bands -
+// and a band's room is what it has on BOTH sides of that axis, twice the nearer
+// side. The top rows of a tilted oval lean off to one side, and a centred line
+// there only gets the part of the row that straddles the axis.
+const rowsAxis = (spans) => {
+  const c = sortedCopy(spans.filter(Boolean).map(([l, r]) => (l + r) / 2));
+  return c.length ? quantile(c, 0.5) : 0;
+};
+const roomAt = (span, axis) => (span ? 2 * Math.max(0, Math.min(axis - span[0], span[1] - axis)) : 0);
+
 // The gap between the text and the outline. A fraction of the shape's shorter
 // side so a small SFX label is not eaten by a margin sized for a splash page,
 // bounded at both ends so it is never invisible and never dominant - and, by
@@ -1109,9 +1226,9 @@ export function fitBalloonShape(profile, opts = {}) {
 // box laid out through this module gets the same inset it gets today.
 export function safetyInset(shape, opts = {}) {
   const o = { ...BALLOON_DEFAULTS, ...opts };
-  if (!shape) return o.insetMin;
-  const short =
-    shape.kind === 'ellipse' ? 2 * Math.min(shape.rx, shape.ry) : Math.min(shape.w, shape.h);
+  const b = shapeBounds(shape);
+  if (!b) return o.insetMin;
+  const short = Math.min(b.w, b.h);
   return clamp(Math.round(short * o.insetFrac), o.insetMin, o.insetMax);
 }
 
@@ -1121,6 +1238,15 @@ export function shapeBounds(shape) {
   if (!shape) return null;
   if (shape.kind === 'ellipse') {
     return { x: shape.cx - shape.rx, y: shape.cy - shape.ry, w: 2 * shape.rx, h: 2 * shape.ry };
+  }
+  if (shape.kind === 'rows') {
+    const on = shape.spans.map((sp, i) => (sp ? i : -1)).filter((i) => i >= 0);
+    if (!on.length) return null;
+    const x = Math.min(...on.map((i) => shape.spans[i][0]));
+    const r = Math.max(...on.map((i) => shape.spans[i][1]));
+    const i0 = on[0];
+    const i1 = on[on.length - 1];
+    return { x, y: shape.y0 + i0 * shape.step, w: r - x, h: (i1 - i0 + 1) * shape.step };
   }
   return { x: shape.x, y: shape.y, w: shape.w, h: shape.h };
 }
@@ -1139,6 +1265,10 @@ export function shapeContainsPoint(shape, x, y) {
     const dy = (y - shape.cy) / shape.ry;
     return dx * dx + dy * dy <= 1;
   }
+  if (shape.kind === 'rows') {
+    const sp = shape.spans[Math.floor((y - shape.y0) / shape.step)];
+    return !!sp && x >= sp[0] && x <= sp[1];
+  }
   return x >= shape.x && x <= shape.x + shape.w && y >= shape.y && y <= shape.y + shape.h;
 }
 
@@ -1147,8 +1277,34 @@ export function shapeContainsPoint(shape, x, y) {
 // inset of clearance at the four extreme points and slightly more in between,
 // which errs the safe way, and it keeps the result an ellipse - which every
 // other function here needs it to be.
+//
+// Rows are eroded by a disc of radius `inset`, which is a true offset: a band
+// keeps the x whose disc fits inside every band it reaches. A band `d` px away
+// vertically takes `√(inset² − d²)` off each side, its own and the touching
+// ones the whole inset. A band past the profile has no room at all, so the
+// bands within `inset` of either end lose theirs - the vertical half of the
+// same margin. The result carries the axis of the rows it came from, so the
+// margin never moves it.
 function insetShape(shape, o) {
   const inset = Number.isFinite(o.inset) ? o.inset : safetyInset(shape, o);
+  if (shape.kind === 'rows') {
+    const { y0, step, spans } = shape;
+    const k = Math.ceil(inset / step);
+    const eroded = spans.map((_, i) => {
+      let l = -Infinity;
+      let r = Infinity;
+      for (let j = i - k; j <= i + k; j++) {
+        const sp = spans[j];
+        if (!sp) return null;
+        const d = Math.max(0, Math.abs(j - i) - 1) * step;
+        const e = Math.sqrt(Math.max(0, inset * inset - d * d));
+        l = Math.max(l, sp[0] + e);
+        r = Math.min(r, sp[1] - e);
+      }
+      return r > l ? [l, r] : null;
+    });
+    return { kind: 'rows', y0, step, spans: eroded, axis: rowsAxis(spans) };
+  }
   if (shape.kind === 'ellipse') {
     return {
       kind: 'ellipse',
@@ -1181,6 +1337,20 @@ export function inscribedRect(shape, opts = {}) {
   const o = { ...BALLOON_DEFAULTS, ...opts };
   const s = insetShape(shape, o);
   if (s.kind === 'rect') return { x: s.x, y: s.y, w: s.w, h: s.h };
+  if (s.kind === 'rows') {
+    // The largest-area rectangle centred on the axis, over every run of bands.
+    const room = s.spans.map((sp) => roomAt(sp, s.axis));
+    let best = { x: s.axis, y: s.y0, w: 0, h: 0 };
+    for (let i = 0; i < room.length; i++) {
+      let w = Infinity;
+      for (let j = i; j < room.length && room[j] > 0; j++) {
+        w = Math.min(w, room[j]);
+        const h = (j - i + 1) * s.step;
+        if (w * h > best.w * best.h) best = { x: s.axis - w / 2, y: s.y0 + i * s.step, w, h };
+      }
+    }
+    return best;
+  }
   const w = s.rx * Math.SQRT2;
   const h = s.ry * Math.SQRT2;
   return { x: s.cx - w / 2, y: s.cy - h / 2, w, h };
@@ -1204,11 +1374,26 @@ export function inscribedRect(shape, opts = {}) {
 // here as the text needs, as it always has.
 //
 // A rectangle is its own frame: the inset rectangle, exactly `inscribedRect`.
+// Rows get the same rule an oval does: the widest band's room, over the run of
+// bands around it with at least 1/√2 of that - which for an ellipse is exactly
+// its inscribed height.
 export function balloonFrame(shape, opts = {}) {
   if (!shape) return null;
   const o = { ...BALLOON_DEFAULTS, ...opts };
   const s = insetShape(shape, o);
   if (s.kind === 'rect') return { x: s.x, y: s.y, w: s.w, h: s.h };
+  if (s.kind === 'rows') {
+    const room = s.spans.map((sp) => roomAt(sp, s.axis));
+    let at = 0;
+    for (let i = 1; i < room.length; i++) if (room[i] > room[at]) at = i;
+    const w = room[at];
+    if (!(w > 0)) return { x: s.axis, y: s.y0, w: 0, h: 0 };
+    let i0 = at;
+    let i1 = at;
+    while (i0 > 0 && room[i0 - 1] >= w / Math.SQRT2) i0--;
+    while (i1 < room.length - 1 && room[i1 + 1] >= w / Math.SQRT2) i1++;
+    return { x: s.axis - w / 2, y: s.y0 + i0 * s.step, w, h: (i1 - i0 + 1) * s.step };
+  }
   const w = 2 * s.rx;
   const h = s.ry * Math.SQRT2;
   return { x: s.cx - w / 2, y: s.cy - h / 2, w, h };
@@ -1235,7 +1420,8 @@ export function balloonFrame(shape, opts = {}) {
 // tallest glyphs of the top line - the capitals and the ascenders, which live at
 // the very top of the band - straight through the outline. So each line gets the
 // narrowest interior width across the whole band it occupies, which for an
-// ellipse is the width at the band edge furthest from the centre line.
+// ellipse is the width at the band edge furthest from the centre line, and for
+// a rows fit the narrowest stored band it touches (`rowsLineWidths`).
 //
 // For a rectangle every band gives the same answer and the result is a constant
 // width repeated `lineCount` times, which is precisely today's behaviour: a
@@ -1267,6 +1453,7 @@ export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middl
   const s = insetShape(shape, o);
   const lh = lineHeight > 0 ? lineHeight : 0;
   if (s.kind === 'rect') return new Array(n).fill(Math.max(o.minLineWidth, s.w));
+  if (s.kind === 'rows') return rowsLineWidths(s, lh, n, valign, o);
 
   const blockH = n * lh;
   if (blockH > 2 * s.ry) return new Array(n).fill(Math.max(o.minLineWidth, 2 * s.rx));
@@ -1290,6 +1477,36 @@ export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middl
     const far = Math.min(s.ry, Math.max(Math.abs(a - s.cy), Math.abs(b - s.cy)));
     const k = s.ry > 0 ? far / s.ry : 1;
     out[i] = Math.max(o.minLineWidth, 2 * s.rx * Math.sqrt(Math.max(0, 1 - k * k)));
+  }
+  return out;
+}
+
+// `interiorLineWidths` for a rows fit, by the same rules: a line gets the
+// narrowest room of every band its band of height `lh` touches, a block taller
+// than the rows gets the widest room on every row, and a given top is clamped
+// into the rows.
+function rowsLineWidths(s, lh, n, valign, o) {
+  const room = s.spans.map((sp) => roomAt(sp, s.axis));
+  const first = room.findIndex((w) => w > 0);
+  if (first < 0) return new Array(n).fill(o.minLineWidth);
+  let last = room.length - 1;
+  while (!(room[last] > 0)) last--;
+  const top0 = s.y0 + first * s.step;
+  const bot0 = s.y0 + (last + 1) * s.step;
+  const blockH = n * lh;
+  if (blockH > bot0 - top0) return new Array(n).fill(Math.max(o.minLineWidth, ...room));
+  let top;
+  if (Number.isFinite(o.top)) top = clamp(o.top, top0, bot0 - blockH);
+  else if (valign === 'top') top = top0;
+  else if (valign === 'bottom') top = bot0 - blockH;
+  else top = (top0 + bot0 - blockH) / 2;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor((top + i * lh - s.y0) / s.step + 1e-9);
+    const b = Math.max(a + 1, Math.ceil((top + (i + 1) * lh - s.y0) / s.step - 1e-9));
+    let w = Infinity;
+    for (let j = a; j < b; j++) w = Math.min(w, room[j] ?? 0);
+    out[i] = Math.max(o.minLineWidth, w);
   }
   return out;
 }

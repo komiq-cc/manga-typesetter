@@ -753,21 +753,29 @@ export function defaultPathPts(w, h) {
 // `box.fit` is the shape `balloon.js` recovered from the page's pixels, in page
 // coordinates, and it is stored on the box because it has to survive a save: it
 // is what the line breaker lays text out inside, and re-deriving it would mean
-// re-decoding a page every time a box is drawn. Two kinds only, both plain JSON:
+// re-decoding a page every time a box is drawn. Three kinds, all plain JSON:
 //
 //   { kind: 'ellipse', cx, cy, rx, ry }
 //   { kind: 'rect',    x,  y,  w,  h  }
+//   { kind: 'rows',    y0, step, spans: [[l, r] | null, ...] }
+//
+// The third is a body neither formula matches - a tilted or wobbly balloon -
+// kept as bands of its interior (`rowsOf` in balloon.js, GEO-5). Band `i`
+// covers page rows `[y0 + i·step, y0 + (i+1)·step)`; a null band has no room.
+// It is bounded, like everything else read off disk: at least one band with
+// room, `l < r` in each, and no more than `MAX_FIT_BANDS` of them.
 //
 // This is the gate every reader of that field goes through, and it exists
 // because the field arrives from places this build does not control: a
-// chapter.json a future version wrote with a third kind in it, a PSD's embedded
-// project, a hand-edited file. A shape that is not one of the two, or whose
+// chapter.json a future version wrote with a fourth kind in it, a PSD's embedded
+// project, a hand-edited file. A shape that is not one of the three, or whose
 // numbers are not finite, or whose extent is not positive, is not an error to
 // throw on - it is a box with no fit, which is a state the whole layout path
 // already handles because it is what every box had before fitting existed.
 //
 // Returns a fresh plain object, so a caller cannot alias the document, and null
 // for anything it does not recognise.
+const MAX_FIT_BANDS = 1024;
 export function normalizeFit(f) {
   if (!f || typeof f !== 'object') return null;
   const n = (v) => (Number.isFinite(v) ? Number(v) : NaN);
@@ -786,6 +794,27 @@ export function normalizeFit(f) {
     const h = n(f.h);
     if (!Number.isFinite(x + y + w + h) || !(w > 0) || !(h > 0)) return null;
     return { kind: 'rect', x, y, w, h };
+  }
+  if (f.kind === 'rows') {
+    const y0 = n(f.y0);
+    const step = n(f.step);
+    const src = f.spans;
+    if (!Number.isFinite(y0) || !(step > 0) || !Array.isArray(src)) return null;
+    if (src.length === 0 || src.length > MAX_FIT_BANDS) return null;
+    const spans = [];
+    for (const sp of src) {
+      if (sp === null) {
+        spans.push(null);
+        continue;
+      }
+      if (!Array.isArray(sp) || sp.length !== 2) return null;
+      const l = n(sp[0]);
+      const r = n(sp[1]);
+      if (!Number.isFinite(l + r) || !(r > l)) return null;
+      spans.push([l, r]);
+    }
+    if (!spans.some(Boolean)) return null;
+    return { kind: 'rows', y0, step, spans };
   }
   return null;
 }

@@ -109,6 +109,23 @@ function drawEllipse(img, cx, cy, rx, ry, ring = 3) {
   }
 }
 
+// The same balloon leaning `deg` - which no upright ellipse describes (GEO-5).
+function drawTiltedEllipse(img, cx, cy, rx, ry, deg, ring = 3) {
+  const t = (deg * Math.PI) / 180;
+  const r = (x, y, g) => {
+    const dx = x + 0.5 - cx;
+    const dy = y + 0.5 - cy;
+    return Math.hypot((dx * Math.cos(t) + dy * Math.sin(t)) / (rx + g), (dy * Math.cos(t) - dx * Math.sin(t)) / (ry + g));
+  };
+  const e = rx + ring + 2;
+  for (let y = Math.floor(cy - e); y <= Math.ceil(cy + e); y++) {
+    for (let x = Math.floor(cx - e); x <= Math.ceil(cx + e); x++) {
+      if (r(x, y, 0) <= 1) put(img, x, y, PAPER);
+      else if (r(x, y, ring) <= 1) put(img, x, y, INK);
+    }
+  }
+}
+
 function drawBox(img, x, y, w, h, ring = 3) {
   fillRect(img, x - ring, y - ring, w + 2 * ring, h + 2 * ring, INK);
   fillRect(img, x, y, w, h, PAPER);
@@ -198,6 +215,28 @@ describe('placement, when the page can be looked at', () => {
     expect(b.w).toBeGreaterThan(150);
     expect(b.h).toBeLessThan(110);
     expect(b.w).toBeGreaterThan(b.h);
+  });
+
+  // GEO-5: a leaning balloon is stored as its rows, the box goes on their frame,
+  // and the centred block is broken to the room each row has about the axis.
+  it('places a box on a tilted balloon by its rows', () => {
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    const img = pageImage(500, 500);
+    drawTiltedEllipse(img, 250, 250, 130, 75, 25);
+    drawGlyphColumn(img, 240, 180, 20, 140);
+    pixels = img;
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    expect(b.fit.kind).toBe('rows');
+    expect(JSON.parse(JSON.stringify(b.fit))).toEqual(b.fit);
+    const r = balloonFrame(b.fit);
+    expect([b.x, b.y, b.w, b.h].map(round2)).toEqual([r.x, r.y, r.w, r.h].map(round2));
+    expect(b.x + b.w / 2).toBeCloseTo(250, -1);
+    b.style = normalizeStyle({ ...b.style, size: 20, lineHeight: 1, valign: 'middle' });
+    const rows = balloonWidthsFor(b, b.style, 20)(3);
+    expect(rows[1]).toBeGreaterThan(rows[0]);
+    expect(rows[1]).toBeGreaterThan(rows[2]);
+    for (const w of rows) expect(w).toBeLessThanOrEqual(contentWidth(b.w, b.style));
   });
 
   // The transpose is for the case where nothing better is known. When a balloon
@@ -665,6 +704,47 @@ describe('the fit survives a save and a round trip', () => {
     expect(normalizeFit(null)).toBe(null);
     // A fresh object, so a caller cannot write through it into the document.
     expect(normalizeFit(good)).not.toBe(good);
+  });
+
+  // GEO-5: the third kind rides every path the other two do - disk, PSD,
+  // rescale - through the same gate.
+  const rows = { kind: 'rows', y0: 180, step: 2, spans: [null, [220, 280], [200, 300], [210, 290]] };
+
+  it('takes a rows fit off disk and into the PSD as it went on', () => {
+    loadProjectPages(docWith(rows));
+    expect(page().boxes[0].fit).toEqual(rows);
+    const out = serializePage({ id: 3, w: 500, h: 500, lines: [], boxes: [{ ...page().boxes[0] }] });
+    expect(out.boxes[0].fit).toEqual(rows);
+    const n = normalizeFit(rows);
+    expect(n.spans).not.toBe(rows.spans);
+    expect(n.spans[1]).not.toBe(rows.spans[1]);
+  });
+
+  it('rescales a rows fit with the page', () => {
+    loadProjectPages(docWith(rows));
+    setPageDims(page(), 1000, 250);
+    expect(page().boxes[0].fit).toEqual({
+      kind: 'rows',
+      y0: 90,
+      step: 1,
+      spans: [null, [440, 560], [400, 600], [420, 580]],
+    });
+  });
+
+  it('refuses a rows fit with nothing sound in it', () => {
+    for (const bad of [
+      { ...rows, step: 0 },
+      { ...rows, y0: '180' },
+      { ...rows, spans: [] },
+      { ...rows, spans: [null, null] },
+      { ...rows, spans: [[10, 10]] },
+      { ...rows, spans: [[10, 20, 30]] },
+      { ...rows, spans: [[10, NaN]] },
+      { ...rows, spans: 'wide' },
+      { ...rows, spans: Array.from({ length: 2000 }, () => [0, 1]) },
+    ]) {
+      expect(normalizeFit(bad)).toBe(null);
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   BALLOON_DEFAULTS,
+  balloonFrame,
   detectBalloon,
   detectBalloonAt,
   fillFromPoint,
@@ -15,6 +16,7 @@ import {
   safetyInset,
   shapeBounds,
 } from './balloon.js';
+import { normalizeFit } from './data.js';
 
 // Every page in this file is built by hand as an `ImageData`-shaped object -
 // `{ width, height, data }` with a plain `Uint8ClampedArray` - because a canvas
@@ -1155,5 +1157,234 @@ describe('fitBalloonShape counts the holes itself when the profile does not', ()
 
   it('fits a sound one just the same', () => {
     expect(fitBalloonShape({ ...rectProfile(0, 0, 50, 40), holes: undefined }).kind).toBe('rect');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GEO-5: a body no formula matches is kept as its rows
+// ---------------------------------------------------------------------------
+// An oval leaning 30 degrees, as pixel runs straight from the geometry.
+function tiltedProfile(cx, cy, a, b, deg) {
+  const t = (deg * Math.PI) / 180;
+  const c = Math.cos(t);
+  const s = Math.sin(t);
+  const A = (c * c) / (a * a) + (s * s) / (b * b);
+  const rows = [];
+  let y0 = null;
+  for (let y = Math.floor(cy - a - b); y <= cy + a + b; y++) {
+    const v = y + 0.5 - cy;
+    const B = 2 * v * c * s * (1 / (a * a) - 1 / (b * b));
+    const C = (v * s) ** 2 / (a * a) + (v * c) ** 2 / (b * b) - 1;
+    const D = B * B - 4 * A * C;
+    const l = D < 0 ? 0 : Math.round(cx + (-B - Math.sqrt(D)) / (2 * A));
+    const r = D < 0 ? -1 : Math.round(cx + (-B + Math.sqrt(D)) / (2 * A)) - 1;
+    if (r < l) {
+      if (y0 !== null) break;
+      continue;
+    }
+    if (y0 === null) y0 = y;
+    rows.push([l, r]);
+  }
+  return { y: y0, rows, holes: 0, escaped: false };
+}
+
+// An upright oval whose outline wobbles by `amp` of its half-width.
+function wobblyProfile(y, cx, cy, rx, ry, amp) {
+  const rows = [];
+  for (let yy = y; yy < cy + ry; yy++) {
+    const dy = (yy + 0.5 - cy) / ry;
+    if (Math.abs(dy) > 1) continue;
+    const hw = rx * Math.sqrt(1 - dy * dy) * (1 + amp * Math.sin(yy * 0.25));
+    rows.push([Math.round(cx - hw), Math.round(cx + hw) - 1]);
+  }
+  return { y: Math.ceil(cy - ry), rows, holes: 0, escaped: false };
+}
+
+// Every stored band against the rows it stands for: never wider than any of
+// them, and at most `tol` narrower than the narrowest.
+function bandMisses(fit, profile) {
+  let worst = 0;
+  fit.spans.forEach((sp, i) => {
+    if (!sp) return;
+    let l = -Infinity;
+    let r = Infinity;
+    for (let y = fit.y0 + i * fit.step; y < fit.y0 + (i + 1) * fit.step; y++) {
+      const run = profile.rows[y - profile.y];
+      l = Math.max(l, run[0]);
+      r = Math.min(r, run[1] + 1);
+    }
+    expect(sp[0]).toBeGreaterThanOrEqual(l);
+    expect(sp[1]).toBeLessThanOrEqual(r);
+    worst = Math.max(worst, sp[0] - l, r - sp[1]);
+  });
+  return worst;
+}
+
+// An oval leaning `deg`, drawn the way `drawEllipse` draws an upright one.
+function drawTiltedEllipse(img, cx, cy, rx, ry, deg, ring = 3) {
+  const t = (deg * Math.PI) / 180;
+  const radius = (x, y, g) => {
+    const dx = x + 0.5 - cx;
+    const dy = y + 0.5 - cy;
+    const u = dx * Math.cos(t) + dy * Math.sin(t);
+    const v = -dx * Math.sin(t) + dy * Math.cos(t);
+    return Math.hypot(u / (rx + g), v / (ry + g));
+  };
+  const e = rx + ring + 2;
+  for (let y = Math.floor(cy - e); y <= Math.ceil(cy + e); y++) {
+    for (let x = Math.floor(cx - e); x <= Math.ceil(cx + e); x++) {
+      if (radius(x, y, 0) <= 1) put(img, x, y, PAPER);
+      else if (radius(x, y, ring) <= 1) put(img, x, y, INK);
+    }
+  }
+}
+
+describe('fitBalloonShape - a body no formula matches is kept as its rows (GEO-5)', () => {
+  it('keeps a tilted oval as the rows it has, which no upright oval matches', () => {
+    const profile = tiltedProfile(300, 300, 90, 60, 30);
+    const fit = fitBalloonShape(profile);
+    expect(fit.kind).toBe('rows');
+    expect(fit.shape.kind).toBe('rows');
+    expect(fit.confidence).toBeGreaterThan(0.9);
+    expect(bandMisses(fit.shape, profile)).toBeLessThanOrEqual(1);
+    // All of the body, in a few hundred bytes.
+    const b = shapeBounds(fit.shape);
+    expect(b.h).toBeGreaterThan(profile.rows.length - 2 * fit.shape.step);
+    expect(fit.shape.spans.length).toBeLessThanOrEqual(BALLOON_DEFAULTS.rowsMaxBands);
+    expect(JSON.stringify(fit.shape).length).toBeLessThan(1500);
+    // ...and it is the plain JSON the schema stores: through a save and back it
+    // is the same fit.
+    expect(normalizeFit(JSON.parse(JSON.stringify(fit.shape)))).toEqual(fit.shape);
+    // The same bubble standing upright keeps its five numbers.
+    expect(fitBalloonShape(tiltedProfile(300, 300, 90, 60, 0)).kind).toBe('ellipse');
+  });
+
+  it('keeps a wobbly oval the gate accepts as its rows, and a clean one as an oval', () => {
+    const profile = wobblyProfile(100, 250, 160, 90, 60, 0.08);
+    const fit = fitBalloonShape(profile);
+    expect(fit.kind).toBe('rows');
+    // The bulges past the fitted body are cut back to it; the rest is the row.
+    expect(bandMisses(fit.shape, profile)).toBeLessThanOrEqual(0.1 * 90);
+    expect(fitBalloonShape(wobblyProfile(100, 250, 160, 90, 60, 0.02)).kind).toBe('ellipse');
+  });
+
+  it('recovers a tilted balloon from the pixels, inside its outline', () => {
+    const img = page(600, 600);
+    drawTiltedEllipse(img, 300, 300, 110, 65, 25);
+    drawGlyphColumn(img, 290, 250, 20, 100);
+    const fit = detectBalloon(img, [290, 250, 310, 350]);
+    expect(fit.escaped).toBe(false);
+    expect(fit.kind).toBe('rows');
+    expect(fit.confidence).toBeGreaterThan(0.8);
+    const t = (25 * Math.PI) / 180;
+    const inside = (x, y) => {
+      const u = (x - 300) * Math.cos(t) + (y - 300) * Math.sin(t);
+      const v = -(x - 300) * Math.sin(t) + (y - 300) * Math.cos(t);
+      return (u / 110) ** 2 + (v / 65) ** 2 <= 1.001;
+    };
+    const { y0, step, spans } = fit.shape;
+    spans.forEach((sp, i) => {
+      if (!sp) return;
+      for (const y of [y0 + i * step, y0 + (i + 1) * step]) {
+        expect(inside(sp[0], y) || inside(sp[0], y0 + (i + 0.5) * step)).toBe(true);
+        expect(inside(sp[1], y) || inside(sp[1], y0 + (i + 0.5) * step)).toBe(true);
+      }
+    });
+    expect(shapeContainsPoint(fit.shape, 300, 300)).toBe(true);
+    expect(shapeContainsPoint(fit.shape, 300, 240)).toBe(true);
+    expect(shapeContainsPoint(fit.shape, 200, 240)).toBe(false);
+  });
+
+  it('still refuses what it refused: a cloud, a burst, a jagged profile', () => {
+    const cloud = page(600, 600);
+    drawEllipse(cloud, 300, 300, 160, 110, { bumps: 11 });
+    expect(detectBalloon(cloud, [280, 250, 320, 350]).kind).toBe('irregular');
+    const burst = page(400, 400);
+    drawBurst(burst, 200, 200, 120);
+    expect(detectBalloon(burst, [170, 170, 230, 230]).kind).toBe('irregular');
+  });
+});
+
+describe('layout inside a rows fit', () => {
+  // An upright oval written out as rows, one band per row, and the oval itself:
+  // the two have to lay text out the same way, to within the rounding of a band
+  // and the square margin rows get.
+  const oval = { kind: 'ellipse', cx: 250, cy: 200, rx: 120, ry: 80 };
+  const asRows = (step) => {
+    const spans = [];
+    for (let y = 120; y < 280; y += step) {
+      let l = -Infinity;
+      let r = Infinity;
+      for (let yy = y; yy < y + step; yy++) {
+        const dy = Math.min(1, Math.abs(yy + 0.5 - 200) / 80);
+        const hw = 120 * Math.sqrt(1 - dy * dy);
+        l = Math.max(l, Math.ceil(250 - hw));
+        r = Math.min(r, Math.floor(250 + hw));
+      }
+      spans.push(r > l ? [l, r] : null);
+    }
+    return { kind: 'rows', y0: 120, step, spans };
+  };
+
+  // One-row bands are the oval to a few pixels. Coarser bands give up some room
+  // on the outer lines and never gain any.
+  it('answers what the oval answers, band by band', () => {
+    for (const [step, slack] of [[1, 5], [3, 20]]) {
+      const rows = asRows(step);
+      expect(safetyInset(rows)).toBe(safetyInset(oval));
+      for (const n of [2, 4, 6]) {
+        const want = interiorLineWidths(oval, 24, n, 'middle');
+        const got = interiorLineWidths(rows, 24, n, 'middle');
+        got.forEach((w, i) => {
+          expect(w).toBeLessThanOrEqual(want[i]);
+          expect(w).toBeGreaterThan(want[i] - slack);
+        });
+      }
+      const f = balloonFrame(rows);
+      const fo = balloonFrame(oval);
+      expect(f.x + f.w / 2).toBeCloseTo(250, 0);
+      expect(f.w).toBeLessThanOrEqual(fo.w);
+      expect(f.w).toBeGreaterThan(fo.w - 5);
+      expect(Math.abs(f.h - fo.h)).toBeLessThanOrEqual(3 * step + 6);
+      const ins = inscribedRect(rows);
+      const io = inscribedRect(oval);
+      expect(ins.w * ins.h).toBeGreaterThan(0.9 * io.w * io.h);
+      if (step === 1) expect(shapeBounds(rows)).toEqual({ x: 131, y: 120, w: 238, h: 160 });
+    }
+  });
+
+  it('gives a rectangle of rows one width, and a block too tall for it the widest', () => {
+    const rows = { kind: 'rows', y0: 50, step: 2, spans: Array.from({ length: 40 }, () => [100, 300]) };
+    const inset = safetyInset(rows);
+    expect(interiorLineWidths(rows, 20, 3, 'top')).toEqual([200 - 2 * inset, 200 - 2 * inset, 200 - 2 * inset]);
+    expect(interiorLineWidths(rows, 20, 9, 'middle')).toEqual(new Array(9).fill(200 - 2 * inset));
+  });
+
+  // The rows of a leaning oval are centred on one axis, and a centred line has
+  // only the room that straddles it: every line, at the width it is given, lies
+  // inside every band it crosses, less the margin.
+  it('keeps a centred line inside every band it crosses, on a tilted oval', () => {
+    const profile = tiltedProfile(300, 300, 90, 60, 30);
+    const fit = fitBalloonShape(profile).shape;
+    const inset = safetyInset(fit);
+    const frame = balloonFrame(fit);
+    const axis = frame.x + frame.w / 2;
+    expect(axis).toBeCloseTo(300, -1);
+    // Three lines of 22 about the middle, and a little either way - all tops the
+    // rows have room for, so none of them is clamped.
+    for (const top of [267, 259, 275]) {
+      const widths = interiorLineWidths(fit, 22, 3, 'top', { top });
+      widths.forEach((w, i) => {
+        for (let y = top + i * 22; y < top + (i + 1) * 22; y++) {
+          const run = profile.rows[y - profile.y];
+          expect(axis - w / 2).toBeGreaterThanOrEqual(run[0] + inset - 1e-6);
+          expect(axis + w / 2).toBeLessThanOrEqual(run[1] + 1 - inset + 1e-6);
+        }
+      });
+      if (top === 267) {
+        expect(widths[1]).toBeGreaterThan(widths[0]);
+        expect(widths[1]).toBeGreaterThan(widths[2]);
+      }
+    }
   });
 });

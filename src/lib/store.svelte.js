@@ -1784,7 +1784,8 @@ export function rescaleStyle(st, sx, sy) {
 // arrives at another resolution would keep every box's text laid out to a
 // curve measured in the old coordinate space - the boxes would follow the art
 // and their line breaks would not. An axis-aligned ellipse scaled per axis is
-// still an axis-aligned ellipse, so this is exact for both kinds.
+// still an axis-aligned ellipse, and bands of rows are still bands of rows, so
+// this is exact for every kind.
 const scaleFit = (f, sx, sy) => {
   if (!f) return f;
   if (f.kind === 'ellipse') {
@@ -1792,6 +1793,10 @@ const scaleFit = (f, sx, sy) => {
   }
   if (f.kind === 'rect') {
     return { kind: 'rect', x: f.x * sx, y: f.y * sy, w: f.w * sx, h: f.h * sy };
+  }
+  if (f.kind === 'rows') {
+    const spans = f.spans.map((sp) => sp && [sp[0] * sx, sp[1] * sx]);
+    return { kind: 'rows', y0: f.y0 * sy, step: f.step * sy, spans };
   }
   return null;
 };

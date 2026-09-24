@@ -1756,7 +1756,7 @@
           <div class="insp-rule"></div>
           {@render secHead('Typeset · beta')}
           <div class="grp">
-            <span class="lbl">{box.fit ? (box.fit.kind === 'ellipse' ? 'Fitted · oval balloon' : 'Fitted · rectangular panel') : 'Not fitted · rectangular layout'}</span>
+            <span class="lbl">{box.fit ? (box.fit.kind === 'ellipse' ? 'Fitted · oval balloon' : box.fit.kind === 'rows' ? 'Fitted · balloon outline' : 'Fitted · rectangular panel') : 'Not fitted · rectangular layout'}</span>
             <!-- A verb, not a segment: it sat alone in a shell that implies
                  mutually exclusive choices it has none of. -->
             <button type="button" class="rbtn" title="Measure the balloon under this box again, from where the box is now" onclick={() => refitBalloon(box.id)}>
