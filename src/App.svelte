@@ -33,6 +33,7 @@
   import './lib/prefs.svelte.js';
   import { library, initRoot, openChapter, flushBeforeLeaving } from './lib/library.svelte.js';
   import { route, goBack } from './lib/route.svelte.js';
+  import { installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
 
   let fontModalOpen = $state(false);
   let settingsOpen = $state(false);
@@ -46,9 +47,13 @@
   let booted = $state(false);
   // Releases the beforeunload/pagehide fallback - see `armUnloadFlush`.
   let releaseUnloadFlush = null;
+  let releaseContextMenu = null;
 
   onMount(async () => {
     initTheme();
+    if (typeof document !== 'undefined') {
+      releaseContextMenu = installContextMenuGuard(document);
+    }
     // Register history and page-switch hooks.
     initHistory();
     releasePageSwitch?.();
@@ -305,6 +310,8 @@
     releaseShortcuts();
     releaseUnloadFlush?.();
     releaseUnloadFlush = null;
+    releaseContextMenu?.();
+    releaseContextMenu = null;
   });
 
   function deleteSelected() {
@@ -326,13 +333,19 @@
   // Is the caret somewhere that owns the keyboard? Text fields and the canvas's
   // own in-place editor both count, and `app.editingId` is the second because
   // the box being typed into is a contenteditable that may have lost focus to a
-  // panel button without the edit ending.
+  // panel button without the edit ending. Context menu guards do not exempt
+  // <select>, but typing targets still include it.
   function isTypingTarget(t) {
     if (!(t instanceof Element)) return false;
-    return t.matches('input,textarea,select') || t.isContentEditable;
+    return isEditableTarget(t) || t.matches('select');
   }
 
   function onKeydown(e) {
+    // Reload is never wanted in a desktop app: Mod+R, Mod+Shift+R and F5
+    // tear down the webview and lose unsaved edits. The page's default is
+    // blocked everywhere, even while typing, but the key carries on below so a
+    // shortcut the user has bound to one of these combos still fires.
+    if (isReloadKey(e)) e.preventDefault();
     // An IME mid-composition owns the keyboard: isComposing is the standard
     // flag, keyCode 229 is how some engines mark the synthetic keys. Acting
     // on either would steal keystrokes from the composition window.
