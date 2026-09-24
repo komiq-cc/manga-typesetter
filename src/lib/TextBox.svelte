@@ -47,7 +47,6 @@
     drawClipShapes,
     clipActive,
     inkActive,
-    inkReach,
     drawInk,
     ensureNoisePhase,
     OCTAVES,
@@ -63,6 +62,7 @@
   import { liquifySettings } from './liquify-tool.svelte.js';
   import { liquifyMeshGesture, frameScaleFor } from './liquify-mesh.js';
   import { reviewReach, reviewTitle } from './review-label.js';
+  import { inkOverhang } from './paint-reach.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   let { box, pageFrameEl, pg = page() } = $props();
@@ -227,9 +227,10 @@
   // reaches outside it - a stroke drawn over the edge must not be cut off here
   // any more than it is on export.
   let inkEl = $state(null);
-  // Padded by however far the ink reaches outside the box, so a stroke that
-  // overhangs the edge is not cut off here any more than it is on export.
-  const inkPad = $derived(inkReach(s));
+  // Padded on each side by however far the ink reaches past that edge, with its
+  // finish (`inkOverhang`): a stroke carried past the right or the bottom edge
+  // is drawn whole, as the export draws it.
+  const inkPad = $derived(inkOverhang(s, box.w, box.h));
   // The strokes and shadows are in the key because they are in the picture:
   // they wrap the ink (see `drawInk`), so a change to either repaints it.
   const inkKey = $derived(
@@ -262,15 +263,15 @@
   // strokes themselves are drawn on the brush board and placed here whole; a
   // box never takes a stroke from the pointer directly.
   function paintInk(el, tips) {
-    const w = Math.max(1, Math.round((box.w + inkPad * 2) * z));
-    const h = Math.max(1, Math.round((box.h + inkPad * 2) * z));
+    const w = Math.max(1, Math.round((box.w + inkPad.l + inkPad.r) * z));
+    const h = Math.max(1, Math.round((box.h + inkPad.t + inkPad.b) * z));
     if (el.width !== w) el.width = w;
     if (el.height !== h) el.height = h;
     const ctx = el.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
     ctx.scale(z, z);
-    ctx.translate(inkPad, inkPad);
+    ctx.translate(inkPad.l, inkPad.t);
     drawInk(ctx, s.ink, undefined, tips, s);
   }
 
@@ -1498,7 +1499,7 @@
       <canvas
         class="inkl"
         bind:this={inkEl}
-        style="left:{-inkPad * z}px;top:{-inkPad * z}px;width:{(box.w + inkPad * 2) * z}px;height:{(box.h + inkPad * 2) * z}px"
+        style="left:{-inkPad.l * z}px;top:{-inkPad.t * z}px;width:{(box.w + inkPad.l + inkPad.r) * z}px;height:{(box.h + inkPad.t + inkPad.b) * z}px"
         aria-hidden="true"
       ></canvas>
     {/if}
