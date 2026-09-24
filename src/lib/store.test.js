@@ -4142,7 +4142,7 @@ describe('placeDetectedInChapter', () => {
     resetHistory();
   });
 
-  it('places every detected bubble on every page and leaves the reader where it started', () => {
+  it('places every detected bubble on every page and leaves the reader where it started', async () => {
     loadProjectPages([
       pageWith(
         1,
@@ -4163,7 +4163,7 @@ describe('placeDetectedInChapter', () => {
     ]);
     const startIndex = app.pageIndex;
 
-    expect(placeDetectedInChapter()).toBe(3);
+    expect(await placeDetectedInChapter()).toBe(3);
     expect(app.pages[0].boxes.length).toBe(1);
     expect(app.pages[1].boxes.length).toBe(2);
     // No page turn: the batch reaches the other pages without moving the reader.
@@ -4171,7 +4171,7 @@ describe('placeDetectedInChapter', () => {
     expect(app.toast?.msg).toContain('3 boxes across 2 pages');
   });
 
-  it('says so rather than doing nothing when every bubble already has a box', () => {
+  it('says so rather than doing nothing when every bubble already has a box', async () => {
     loadProjectPages([
       pageWith(
         1,
@@ -4179,8 +4179,8 @@ describe('placeDetectedInChapter', () => {
         [{ n: 1, box: [100, 100, 500, 300], vertical: false, font_size: 20 }],
       ),
     ]);
-    expect(placeDetectedInChapter()).toBe(1);
-    expect(placeDetectedInChapter()).toBe(0);
+    expect(await placeDetectedInChapter()).toBe(1);
+    expect(await placeDetectedInChapter()).toBe(0);
     expect(app.toast?.msg).toContain('No detected bubbles left to place in this chapter');
   });
 });

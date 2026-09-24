@@ -79,6 +79,7 @@ import { neededHeight, growToFit, hasHangul } from './typeset.js';
 // the fallback path exactly as a page nobody has opened does.
 import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint } from './balloon.js';
 import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
+import { measureChapterFits } from './chapter-fit.js';
 // One-way, and it must stay that way: the brush tool's state module knows only
 // its own defaults, so `setTool` can disarm it without the two ever cycling.
 import { setBrushMode } from './brush-tool.svelte.js';
@@ -208,7 +209,12 @@ export function loadProjectPages(rawPages) {
       detect: p.detect
         ? {
             panels: (p.detect.panels ?? []).slice(),
-            boxes: (p.detect.boxes ?? []).map((b) => ({ ...b })),
+            // A measured fit (see `placeDetectedInChapter`) through the same
+            // `normalizeFit` a box's goes through. Absent stays absent: that is
+            // "not measured", which is not the same answer as null.
+            boxes: (p.detect.boxes ?? []).map((b) =>
+              b.fit === undefined ? { ...b } : { ...b, fit: normalizeFit(b.fit) },
+            ),
           }
         : null,
       // NOT migrated: a box already on disk with `lineN: null` is loaded as it
@@ -431,6 +437,7 @@ export const app = $state({
   sidecar: { status: 'unknown', device: null, info: null }, // in-process detection engine health
   detecting: false, // detection/OCR request in flight
   detectBatch: null, // { done, total } while a whole-chapter detect runs, else null
+  chapterPlace: null, // { done, total } while "Place chapter" measures its balloons, else null
   chapterRef: null, // { projectId, chapterId } while a chapter is open
   // The open chapter's workflow mode, mirrored from its chapter.json - see
   // CHAPTER_MODES. It is a property of the chapter and not a preference of the
@@ -1737,23 +1744,24 @@ export function rescaleStyle(st, sx, sy) {
 }
 
 
+// The balloon a box was fitted to is page geometry like the box's own
+// rectangle, and it moves with it. Left behind, a chapter whose cleaned raster
+// arrives at another resolution would keep every box's text laid out to a
+// curve measured in the old coordinate space - the boxes would follow the art
+// and their line breaks would not. An axis-aligned ellipse scaled per axis is
+// still an axis-aligned ellipse, so this is exact for both kinds.
+const scaleFit = (f, sx, sy) => {
+  if (!f) return f;
+  if (f.kind === 'ellipse') {
+    return { kind: 'ellipse', cx: f.cx * sx, cy: f.cy * sy, rx: f.rx * sx, ry: f.ry * sy };
+  }
+  if (f.kind === 'rect') {
+    return { kind: 'rect', x: f.x * sx, y: f.y * sy, w: f.w * sx, h: f.h * sy };
+  }
+  return null;
+};
+
 export function rescalePageGeometry(p, sx, sy) {
-  // The balloon a box was fitted to is page geometry like the box's own
-  // rectangle, and it moves with it. Left behind, a chapter whose cleaned raster
-  // arrives at another resolution would keep every box's text laid out to a
-  // curve measured in the old coordinate space - the boxes would follow the art
-  // and their line breaks would not. An axis-aligned ellipse scaled per axis is
-  // still an axis-aligned ellipse, so this is exact for both kinds.
-  const scaleFit = (f) => {
-    if (!f) return f;
-    if (f.kind === 'ellipse') {
-      return { kind: 'ellipse', cx: f.cx * sx, cy: f.cy * sy, rx: f.rx * sx, ry: f.ry * sy };
-    }
-    if (f.kind === 'rect') {
-      return { kind: 'rect', x: f.x * sx, y: f.y * sy, w: f.w * sx, h: f.h * sy };
-    }
-    return null;
-  };
   for (const b of p.boxes ?? []) {
     // The rectangle. A rotated box is stored as an axis-aligned x/y/w/h plus
     // `style.rotation`, so a NON-UNIFORM rescale of it is an approximation: the
@@ -1767,7 +1775,7 @@ export function rescalePageGeometry(p, sx, sy) {
     b.y *= sy;
     b.w *= sx;
     b.h *= sy;
-    if (b.fit) b.fit = scaleFit(b.fit);
+    if (b.fit) b.fit = scaleFit(b.fit, sx, sy);
     // The type is page geometry too. Without this the boxes follow the art and
     // the text inside them does not: a chapter re-cleaned at 2x came back with
     // every line half the size it was drawn at, hairline strokes and shadows
@@ -1792,6 +1800,8 @@ export function rescalePageGeometry(p, sx, sy) {
     // upright glyph's height in the space it was detected in, and the axis it
     // was measured along is known. The style's `size` has no axis at all.
     if (Number.isFinite(db.font_size)) db.font_size *= sy;
+    // The balloon measured for the block, when one was (`placeDetectedInChapter`).
+    if (db.fit) db.fit = scaleFit(db.fit, sx, sy);
   }
 }
 
@@ -2194,9 +2204,12 @@ export function fittedRect(p, shape, align) {
 //   unconvincing the fit is below `MIN_FIT_CONFIDENCE`.
 //
 // Every one of them lands the caller on exactly today's behaviour.
-export function balloonFitFor(p, block) {
+//
+// `pixels` is for a caller that has the page's pixels in hand rather than in the
+// click cache - the chapter-wide measure (`placeDetectedInChapter`).
+export function balloonFitFor(p, block, pixels) {
   if (!Array.isArray(block) || block.length !== 4) return null;
-  const image = pagePixelsFor(p);
+  const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
   const res = detectBalloon(image, block);
   if (!res || !res.shape || res.escaped) return null;
@@ -2237,9 +2250,9 @@ export function balloonFitFor(p, block) {
 // what makes this safe to call on every placement rather than only on the ones
 // somebody expects to succeed: a click on artwork is refused by a 13x13 sample
 // of pixels and never reaches a flood fill.
-export function balloonFitAt(p, imgX, imgY) {
+export function balloonFitAt(p, imgX, imgY, pixels) {
   if (!Number.isFinite(+imgX) || !Number.isFinite(+imgY)) return null;
-  const image = pagePixelsFor(p);
+  const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
   const res = detectBalloonAt(image, imgX, imgY);
   if (!res || !res.shape || res.escaped) return null;
@@ -2346,14 +2359,19 @@ export function placementRect(p, rect, imgX, imgY, fallbackW = 220, fallbackH = 
 // inherits `lastStyle` - the font, colour and strokes chosen by hand on the
 // last box touched - plus the preferences for the five typesetting flags
 // (see `applyBoxDefaults`).
-function bornBox(p, ln, imgX, imgY) {
+//
+// `measured` is a fit already measured for this line's block, or null for one
+// measured and found irregular (`placeDetectedInChapter`); undefined measures
+// here.
+function bornBox(p, ln, imgX, imgY, measured) {
   const style = inheritedStyleFor(ln);
   const det = detectedEntryFor(p, ln.n, imgX, imgY);
   // The block first: a detected rectangle is a measurement of where the Japanese
   // in THIS line sat, so it seeds the fill closer to the right balloon than a
   // click can when the two disagree. The click is the answer when there is no
   // block, which is most of the time in paste mode.
-  let fit = balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY);
+  let fit =
+    measured !== undefined ? measured : (balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY));
   let g = fit ? fittedRect(p, fit, style.align) : null;
   // The two are dropped together, deliberately: a fit the box was not sized from
   // is a fit the box should not be laid out to either, and carrying one while
@@ -2482,17 +2500,20 @@ export function placeActiveAt(imgX, imgY, target = null) {
 export function placeableDetectedLines(p) {
   if (!p?.lines) return [];
   const placed = placedLineNs(p);
-  const dets = p.detect?.boxes ?? [];
-  return p.lines.filter((l) => {
-    if (!l || isFreeLine(l) || placed.has(l.n)) return false;
-    return dets.some(
+  return p.lines.filter((l) => l && !isFreeLine(l) && !placed.has(l.n) && detectedBlockOf(p, l.n));
+}
+
+// The detected entry for a line whose block is a usable rectangle, or null.
+function detectedBlockOf(p, n) {
+  return (
+    (p.detect?.boxes ?? []).find(
       (d) =>
-        d?.n === l.n &&
+        d?.n === n &&
         Array.isArray(d.box) &&
         d.box.length === 4 &&
         d.box.every((v) => typeof v === 'number' && Number.isFinite(v)),
-    );
-  });
+    ) ?? null
+  );
 }
 
 // One page's worth of the batch, with nothing around it: no page turn, no
@@ -2507,25 +2528,23 @@ export function placeableDetectedLines(p) {
 //
 // Returns the boxes placed, as the `placeMany` items, so the caller can select
 // the last one when the page is the one on screen.
+//
+// A block with a fit stored on it (`placeDetectedInChapter`) is placed with that
+// fit rather than measured again; one without is measured from whatever pixels
+// the click cache has.
 function placeDetectedInto(p) {
   const lines = placeableDetectedLines(p);
   if (!lines.length) return [];
   const activeBefore = p.activeLineN;
   const items = [];
-  const dets = p.detect?.boxes ?? [];
   for (const ln of lines) {
     ln.placed = true;
-    const det = dets.find(
-      (d) =>
-        d?.n === ln.n &&
-        Array.isArray(d.box) &&
-        d.box.length === 4 &&
-        d.box.every((v) => typeof v === 'number' && Number.isFinite(v)),
-    );
+    const det = detectedBlockOf(p, ln.n);
     const [x1, y1, x2, y2] = det.box;
     const cx = (x1 + x2) / 2;
     const cy = (y1 + y2) / 2;
-    const b = bornBox(p, ln, cx, cy);
+    // A copy: the box's fit is its own from here on, not the block's.
+    const b = bornBox(p, ln, cx, cy, det.fit && { ...det.fit });
     p.boxes.push(b);
     items.push({ index: p.boxes.length - 1, box: $state.snapshot(b) });
   }
@@ -2577,48 +2596,128 @@ export function placeDetectedOnPage(target = null) {
 // done last and keeps the selection, so the editor ends where it started rather
 // than on whichever page happened to be last in the list.
 //
-// A page whose art is not decoded still places: `bornBox`'s size ladder falls
-// back to the detector's own rectangle when there are no pixels to flood-fill
-// (see the comment above it), so an off-screen page gets boxes the right size
-// and shape and can be re-fitted per box afterwards. Nothing here decodes a
-// page, which is deliberate - a fifty-page chapter would be fifty megabytes of
-// raster held at once, which is the leak `setResidentWindow` exists to stop.
-export function placeDetectedInChapter() {
-  if (isTranslateMode()) return 0;
+// Measured first, then placed (DET-1). Placement fits each box to its balloon
+// from the page's pixels, and synchronously the only pixels there are the ones
+// the click cache holds - the pages loaded around the reading position. So this
+// used to place those pages fitted and every other page with the detector's
+// rectangle, and one chapter placed from two reading positions came out as two
+// documents. Now every page's balloons are measured before anything is placed,
+// by `measureChapterFits` (chapter-fit.js), which reads one page at a time and
+// lets it go. The answers are stored on the detected blocks (`det.fit`: a shape,
+// or null for measured and irregular; absent is not measured), so a second press
+// - or a page placed by itself - reads them instead of the pixels again. They
+// move with `rescalePageGeometry`, go with a new detection (which replaces
+// `detect`), and are dropped by a new clean (`respacePage` in library.svelte.js).
+//
+// Then one synchronous pass places everything, one undo entry per page as
+// before. The run takes seconds and the document is live under it, so before
+// anything is committed:
+//
+//   the run must not have been cancelled - the Queue's Cancel or Esc
+//   (`cancelChapterPlace`), or the library closing or opening a chapter or
+//   switching this one to translate, which cancel it the moment they start;
+//   the chapter must still be the one measured and still be typeset work;
+//   a page whose detection, raster or coordinate space changed under the run is
+//   left alone rather than placed from answers about another picture, and the
+//   toast says so;
+//   a line placed by hand in the meantime is not placed twice -
+//   `placeableDetectedLines` is asked again at commit.
+//
+// Cancelled, it changes nothing: no box, no history entry, no stored fit.
+let chapterRun = null;
+
+export function cancelChapterPlace() {
+  chapterRun?.abort();
+}
+
+export async function placeDetectedInChapter() {
+  if (isTranslateMode() || chapterRun) return 0;
   if (!app.pages.length) return 0;
+  const pages = app.pages;
+  const run = (chapterRun = new AbortController());
+  const before = new Map(pages.map((p) => [p, rasterOf(p)]));
+  let fits;
+  try {
+    fits = await measureChapterFits(pages, {
+      blocksFor: unmeasuredBlocks,
+      fitFor: measureBlock,
+      signal: run.signal,
+      onProgress: (progress) => {
+        app.chapterPlace = progress;
+      },
+    });
+  } finally {
+    chapterRun = null;
+    app.chapterPlace = null;
+  }
+  if (!fits || run.signal.aborted || app.pages !== pages || isTranslateMode()) {
+    if (app.pages === pages) toast('Place chapter cancelled - nothing was placed');
+    return 0;
+  }
   settleEdits();
   const here = page();
   let total = 0;
   let pagesTouched = 0;
-  let lastItems = [];
-  for (const p of app.pages) {
-    if (p === here) continue;
+  let changed = 0;
+  const placeOn = (p) => {
+    const was = before.get(p);
+    const now = rasterOf(p);
+    if (!was || was.detect !== now.detect || was.file !== now.file || was.w !== now.w || was.h !== now.h) {
+      if (placeableDetectedLines(p).length) changed++;
+      return [];
+    }
+    for (const d of p.detect?.boxes ?? []) if (fits.has(d)) d.fit = fits.get(d);
     const items = placeDetectedInto(p);
-    if (!items.length) continue;
-    total += items.length;
-    pagesTouched++;
-  }
-  lastItems = placeDetectedInto(here);
-  if (lastItems.length) {
-    total += lastItems.length;
-    pagesTouched++;
-  }
+    if (items.length) {
+      total += items.length;
+      pagesTouched++;
+    }
+    return items;
+  };
+  for (const p of app.pages) if (p !== here) placeOn(p);
+  const lastItems = placeOn(here);
+  // The stored answers are document too, placed or not.
+  if (total || fits.size) markUnsaved();
+  const changedStr = changed ? ` · ${changed} page${changed === 1 ? '' : 's'} changed while fitting, place again` : '';
   if (!total) {
-    toast('No detected bubbles left to place in this chapter');
+    toast(`No detected bubbles left to place in this chapter${changedStr}`);
     return 0;
   }
   if (here.activeLineN == null && app.tool === 'place') {
     setTool('text');
   }
-  markUnsaved();
   const lastBox = lastItems[lastItems.length - 1]?.box;
   if (lastBox) selectBox(lastBox.id, { remember: false });
   const remaining = app.pages.reduce((n, p) => n + undetectedRemaining(p), 0);
   const countStr = `${total} box${total === 1 ? '' : 'es'}`;
   const pageStr = `${pagesTouched} page${pagesTouched === 1 ? '' : 's'}`;
   const leftStr = remaining > 0 ? ` · ${remaining} left with no detected bubble` : '';
-  toast(`Placed ${countStr} across ${pageStr}${leftStr}`);
+  toast(`Placed ${countStr} across ${pageStr}${leftStr}${changedStr}`);
   return total;
+}
+
+// What a page's measured fits are answers about: its detection, its raster's
+// durable name, and its coordinate space.
+const rasterOf = (p) => ({ detect: p.detect, file: p.cleanedFile ?? p.file, w: p.w, h: p.h });
+
+// The blocks a chapter place will ask a fit for and has none stored.
+const unmeasuredBlocks = (p) =>
+  placeableDetectedLines(p)
+    .map((ln) => detectedBlockOf(p, ln.n))
+    .filter((d) => d.fit === undefined);
+
+// The fit `bornBox` would measure for a detected block - the block, then its
+// centre as a click - from pixels in hand. The pixels are the raster at its
+// natural size; a page whose space is another size has the block mapped into
+// the pixels and the answer mapped back.
+function measureBlock(p, det, pixels) {
+  const sx = p.w > 0 ? pixels.width / p.w : 1;
+  const sy = p.h > 0 ? pixels.height / p.h : 1;
+  const [x1, y1, x2, y2] = det.box;
+  const fit =
+    balloonFitFor(p, [x1 * sx, y1 * sy, x2 * sx, y2 * sy], pixels) ??
+    balloonFitAt(p, ((x1 + x2) / 2) * sx, ((y1 + y2) / 2) * sy, pixels);
+  return sx === 1 && sy === 1 ? fit : scaleFit(fit, 1 / sx, 1 / sy);
 }
 
 // ---------- re-running a fit by hand ----------

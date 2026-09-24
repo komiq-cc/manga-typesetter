@@ -18,6 +18,7 @@
     placeableDetectedLines,
     placeDetectedOnPage,
     placeDetectedInChapter,
+    cancelChapterPlace,
   } from './store.svelte.js';
   import { record } from './editor/history.svelte.js';
   import { fontGroups, isFontOffered } from './font-menu.js';
@@ -277,7 +278,17 @@
   $effect(() => () => {
     if (followRaf) cancelAnimationFrame(followRaf);
   });
+
+  // Esc stops a "Place chapter" that is still measuring - unless a modal is up,
+  // whose Esc it is (the markup contract `App.svelte` relies on too).
+  function cancelOnEscape(e) {
+    if (e.key !== 'Escape' || !app.chapterPlace) return;
+    if (document.querySelector('.modal-overlay.open')) return;
+    cancelChapterPlace();
+  }
 </script>
+
+<svelte:window onkeydown={cancelOnEscape} />
 
 <div class="qlist" bind:this={listEl}>
   <!-- The batch placement, at the top of the panel rather than under the queue.
@@ -299,14 +310,26 @@
            a pass over every page's lines AND every page's boxes, and as a
            `$derived` it would re-run on every keystroke in the panel. The button
            says so itself when there is nothing left to do. -->
-      <button
-        class="qtop-btn"
-        title="Put a text box on every detected bubble in the whole chapter that has none yet"
-        disabled={app.pages.length === 0}
-        onclick={() => placeDetectedInChapter()}
-      >
-        Place chapter
-      </button>
+      <!-- Every balloon in the chapter is measured before anything is placed,
+           which takes a moment per page; cancelling before the end places
+           nothing. -->
+      {#if app.chapterPlace}
+        <button class="qtop-btn" disabled>
+          Fitting {app.chapterPlace.done}/{app.chapterPlace.total}
+        </button>
+        <button class="qtop-btn" title="Stop fitting and place nothing (Esc)" onclick={cancelChapterPlace}>
+          Cancel
+        </button>
+      {:else}
+        <button
+          class="qtop-btn"
+          title="Put a text box on every detected bubble in the whole chapter that has none yet"
+          disabled={app.pages.length === 0}
+          onclick={() => placeDetectedInChapter()}
+        >
+          Place chapter
+        </button>
+      {/if}
     </div>
   {/if}
   <ReviewList />

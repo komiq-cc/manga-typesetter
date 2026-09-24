@@ -29,6 +29,7 @@ import {
   normalizeLayout,
   normalizeOcrLanguage,
   toast,
+  cancelChapterPlace,
 } from './store.svelte.js';
 import { buildTextJson } from './text-json.js';
 import { carryTagsForward, bindTags, unbindTags, sanitizeTags, sanitizeTagSizes } from './tags.svelte.js';
@@ -1301,6 +1302,19 @@ function respacePage(pg, size, notes) {
   const w = size?.w ?? 0;
   const h = size?.h ?? 0;
   const known = hasPageSpace(pg);
+  // The balloons measured for the detected blocks (`placeDetectedInChapter` in
+  // the store) are answers about the raster being replaced, whatever the new
+  // one's size, so they go. A key naming the raster could not do this: a clean
+  // redelivered twice can get its first file name back (`copyInto`).
+  if (pg.detect?.boxes?.some((d) => d.fit !== undefined)) {
+    pg = {
+      ...pg,
+      detect: {
+        ...pg.detect,
+        boxes: pg.detect.boxes.map(({ fit, ...d }) => d),
+      },
+    };
+  }
   // Written only when it is true. A `false` on every page of every record this
   // touches would be noise in a file people read and hand-edit - and it has to
   // be said explicitly either way, because the flag can already be on the page
@@ -1657,6 +1671,9 @@ export async function setChapterMode(projectId, chapterId, mode) {
       deselect();
       closeBulk();
       setTool('pan');
+      // Nothing places a box in a translate chapter, including a "Place
+      // chapter" still measuring.
+      cancelChapterPlace();
     }
     c.mode = next;
     markUnsaved();
@@ -1713,6 +1730,9 @@ export async function openChapter(projectId, chapterId) {
   if (c.unreadable) throw new Error('This chapter could not be read');
 
   const token = ++openSeq;
+  // Async chapter work stops with the ticket, before an await can let the old
+  // chapter's images go - see chapter-fit.js.
+  cancelChapterPlace();
   // Superseded: a newer open has taken the state over, and nothing this one is
   // still carrying is an improvement on it.
   const mine = () => openSeq === token;
@@ -2087,6 +2107,8 @@ export function closeChapter() {
   // `pages: []` over a real chapter's only copy. Bumping the sequence makes the
   // in-flight load fail its own `mine()` check at the next await instead.
   openSeq++;
+  // And async chapter work with it, before the images below are released.
+  cancelChapterPlace();
   // Before the pages go, because the live page's stack is only in memory until
   // this runs - without it the last 800ms of records never reach disk. The id
   // comes off the page itself rather than `page()`, whose empty-document

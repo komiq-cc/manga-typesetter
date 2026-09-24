@@ -1553,6 +1553,24 @@ describe('the chapter sources sheet', () => {
     expect(fsx._tree.files.get(`${c.dir}/cleaned/x-2.png`)).toEqual(new Uint8Array([30]));
   });
 
+  // The balloons "Place chapter" measured are answers about the raster, and a
+  // new clean is a new raster - whatever it is called. A name alone would not
+  // do: a page redelivered twice gets `x.png` back (`x.png`, `x-2.png`, `x.png`).
+  it('drops the balloons measured for the raster a per-page set replaced', async () => {
+    const { p, c } = await seedThree([fakeFile('x.png', 9)]);
+    const record = chapterJson(c);
+    const fit = { kind: 'ellipse', cx: 50, cy: 50, rx: 30, ry: 20 };
+    for (const pg of record.pages) {
+      pg.detect = { panels: [], boxes: [{ n: 1, box: [40, 40, 60, 60], fit }, { n: 2, box: [0, 0, 9, 9], fit: null }] };
+    }
+    fsx._tree.files.set(`${c.dir}/chapter.json`, JSON.stringify(record));
+    await setPageCleaned(p.id, c.id, record.pages[0].id, fakeFile('x.png', 30));
+    const [first, second] = chapterJson(c).pages;
+    expect(first.detect.boxes.map((d) => 'fit' in d)).toEqual([false, false]);
+    expect(first.detect.boxes[0].box).toEqual([40, 40, 60, 60]);
+    expect(second.detect.boxes.map((d) => d.fit)).toEqual([fit, null]);
+  });
+
   it('unlinks one page without touching the others', async () => {
     const { p, c } = await seedThree([fakeFile('x.png', 9), fakeFile('y.png', 8)]);
     await clearPageCleaned(p.id, c.id, chapterJson(c).pages[0].id);
