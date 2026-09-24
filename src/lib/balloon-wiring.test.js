@@ -811,11 +811,15 @@ describe('re-fitting by hand', () => {
 
   // UX-2: the button is an edit like any other, and the ladder can move the
   // rectangle and the size as well as the fit, none of which an undo can
-  // re-derive.
+  // re-derive. The line is long so that the ladder really does change the
+  // size: with no text it never moves `style.size`, and the size half of the
+  // claim would pass without being tested.
   it('is one undo step: fit, rectangle and size', () => {
     hist.initHistory();
     hist.resetHistory();
-    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    const pages = withDetect([240, 180, 260, 320], true);
+    pages[0].lines[0].en = LONG;
+    loadProjectPages(pages);
     pixels = null;
     placeActiveAt(250, 250);
     const b = page().boxes[0];
@@ -824,12 +828,15 @@ describe('re-fitting by hand', () => {
     const placed = hist.peekStack().undo.length;
     refitBalloon(b.id);
     const fitted = geom(b);
-    expect(fitted).not.toEqual(fallback);
+    expect(fitted.fit?.kind).toBe('ellipse');
+    expect(fitted.size).not.toBe(fallback.size);
     expect(hist.peekStack().undo.length).toBe(placed + 1);
     hist.undo();
     expect(geom(b)).toEqual(fallback);
+    expect(b.style.size).toBe(fallback.size);
     hist.redo();
     expect(geom(b)).toEqual(fitted);
+    expect(b.style.size).toBe(fitted.size);
   });
 
   it('records nothing when the press changed nothing', () => {
