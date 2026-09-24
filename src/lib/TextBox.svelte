@@ -24,6 +24,8 @@
   import { stripDragYBounds } from './editor/strip.js';
 
   import { untrack } from 'svelte';
+  import { neededHeight } from './typeset.js';
+  import { resizeBoxMath } from './resize-math.js';
   import { record } from './editor/history.svelte.js';
   import {
     createFieldUndo,
@@ -747,7 +749,8 @@
   // merely fast: it is derived from exactly the inputs listed below, so the
   // effect can no longer run against a line count from before the change that
   // woke it. It cannot loop either - `shaped` reads the text, the style and
-  // `box.w`, and the only things written here are `box.y` and `box.h`.
+  // `box.w`, and `autoFitBoxTo` / `growToFit` is grow-only and writes `box.h`
+  // only when it actually changes.
   //
   // `shaped` is null in the two states that have no lines to count: a box being
   // typed into (one contenteditable element, the browser's own wrapping) and a
@@ -757,6 +760,7 @@
   $effect(() => {
     text;
     box.w;
+    box.h;
     s.font;
     s.size;
     s.lineHeight;
@@ -874,7 +878,6 @@
     const sx = e.clientX, sy = e.clientY;
 
     const o = { x: box.x, y: box.y, w: box.w, h: box.h, size: s.size };
-    const autoHeightBefore = s.autoHeight;
     const isRot = dir === 'rot';
     const hasInk = !!(box.style?.ink?.on && box.style?.ink?.strokes?.length);
     const inkBefore = hasInk ? cloneStyle(box.style).ink : null;
@@ -909,27 +912,18 @@
         const cos = Math.cos(rad), sin = Math.sin(rad);
         const sdx = (ev.clientX - sx) / zz, sdy = (ev.clientY - sy) / zz;
         const dx = sdx * cos - sdy * sin, dy = sdx * sin + sdy * cos;
-        const hasE = dir.includes('e'), hasW = dir.includes('w'), hasN = dir.includes('n'), hasS = dir.includes('s');
-        const corner = (hasE || hasW) && (hasN || hasS);
-        if ((hasN || hasS) && !corner) {
-          box.style.autoHeight = false;
-        }
-        let nw = o.w, nh = o.h;
-        if (hasE) nw = Math.max(40, o.w + dx);
-        if (hasW) nw = Math.max(40, o.w - dx);
-        if (hasS) nh = Math.max(30, o.h + dy);
-        if (hasN) nh = Math.max(30, o.h - dy);
-        // Opposite edge anchor for rotated box scaling.
-        const shiftX = hasE ? (nw - o.w) / 2 : hasW ? (o.w - nw) / 2 : 0;
-        const shiftY = hasS ? (nh - o.h) / 2 : hasN ? (o.h - nh) / 2 : 0;
-        const nx = o.x + o.w / 2 + (shiftX * cos + shiftY * sin) - nw / 2;
-        const ny = o.y + o.h / 2 + (shiftY * cos - shiftX * sin) - nh / 2;
-
-        const newSize = corner && o.h > 0 ? clamp(Math.round(o.size * (nh / o.h)), 6, 200) : undefined;
+        // Auto-height keeps its promise through the drag: an edge can make the
+        // box roomier but never shorter than its text. `shaped` is null for
+        // curved and path text, which auto-height does not fit either. Capped at
+        // the page, as the fit itself is.
+        const floor = s.autoHeight !== false && shaped
+          ? Math.min(neededHeight(shaped.length, s, textInset(s)), pg?.h || Infinity)
+          : 30;
+        const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
         resizeBox(
           pageId,
           box.id,
-          { x: nx, y: ny, w: nw, h: nh, size: newSize },
+          geom,
           inkBefore ? { w: o.w, h: o.h, ink: inkBefore } : null
         );
       }
@@ -968,11 +962,7 @@
       if (inkBefore) before.ink = inkBefore;
       const after = { x: box.x, y: box.y, w: box.w, h: box.h, size: box.style.size };
       if (box.style?.ink?.on) after.ink = cloneStyle(box.style).ink;
-      if (box.style.autoHeight !== autoHeightBefore) {
-        before.autoHeight = autoHeightBefore;
-        after.autoHeight = box.style.autoHeight;
-      }
-      const geomKeys = ['x', 'y', 'w', 'h', 'size', 'autoHeight'];
+      const geomKeys = ['x', 'y', 'w', 'h', 'size'];
       if (geomKeys.some((k) => after[k] !== before[k])) {
         markUnsaved();
         record({ t: 'resize', pageId, boxId: box.id, before, after });
