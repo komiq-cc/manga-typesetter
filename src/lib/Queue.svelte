@@ -45,6 +45,7 @@
     isAtomicInput,
   } from './editor/field-undo.svelte.js';
   import { modKey } from './format.js';
+  import ReviewList from './ReviewList.svelte';
 
   const p = $derived(page());
   // Which lines already have a box, in one pass over the page's boxes rather
@@ -308,6 +309,7 @@
       </button>
     </div>
   {/if}
+  <ReviewList />
   {#if p.lines.length === 0}
     <div class="qhint">
       No lines yet.<br />{translate

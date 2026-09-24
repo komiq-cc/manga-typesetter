@@ -15,6 +15,9 @@
      blocks, with the same values, so the "does not invert" part is explicit
      rather than an omission someone later fills in. */
   --tint:rgba(42,38,32,.45); --tintline:#2c2b28; --warn:#8a3f2a;
+  /* The "needs review" flag on a box: on-page chrome too, so it does not
+     invert either - the light theme's warning red, on paper in both themes. */
+  --flagline:#8a3f2a;
   --edge:0 1px 1px rgba(42,38,32,.05), 0 5px 14px rgba(42,38,32,.07);
   --edge-soft:0 1px 2px rgba(42,38,32,.05);
   --scrim:rgba(42,38,32,.28);
@@ -49,6 +52,7 @@
   --accent:#e9e8e5; --accent-fg:#141514; --accent-soft:rgba(233,232,229,.10);
   /* Deliberately identical to light: see the note above. */
   --tint:rgba(42,38,32,.45); --tintline:#2c2b28; --warn:#d98b6a;
+  --flagline:#8a3f2a;
   --edge:0 0 0 1px rgba(255,255,255,.05), 0 6px 20px rgba(0,0,0,.42);
   --edge-soft:0 0 0 1px rgba(255,255,255,.05);
   --scrim:rgba(0,0,0,.6);
@@ -258,6 +262,20 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
   background:var(--tintline); color:var(--paper); font-size:12px; font-weight:800;
   box-shadow:var(--edge-soft);
 }
+
+/* The "needs review" flag (UX-6): a box whose text does not fit it. A dashed
+   outline in the flag colour whenever the box's own selection outline is not
+   up, and a pill over its top-left corner saying how far the ink reaches -
+   clear of the corner handle and the rotation grip. The reason is its tooltip. */
+.tbox.flagged:not(.selected):not(.editing){ outline:1.5px dashed var(--flagline); }
+.review-badge{
+  position:absolute; left:-1px; bottom:calc(100% + 9px); z-index:6;
+  display:flex; align-items:center; gap:3px; height:17px; padding:0 6px 0 5px;
+  border-radius:999px; background:var(--flagline); color:var(--paper);
+  font-size:10.5px; font-weight:800; line-height:1; white-space:nowrap;
+  font-variant-numeric:tabular-nums; box-shadow:var(--edge-soft);
+}
+.review-badge span{ font-weight:600; }
 
 /* Source reference pill (Japanese or Korean) - sits above the box, outside the editable text */
 .jp-pill{

@@ -62,6 +62,7 @@
   import { inkTipIds, settleTips } from './brush-tips.js';
   import { liquifySettings } from './liquify-tool.svelte.js';
   import { liquifyMeshGesture, frameScaleFor } from './liquify-mesh.js';
+  import { reviewReach, reviewTitle } from './review-label.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   let { box, pageFrameEl, pg = page() } = $props();
@@ -1355,6 +1356,7 @@
   class:editing
   class:bulk-on={bulkOn}
   class:bulk-target={bulkTarget}
+  class:flagged={!!box.review}
   data-id={box.id}
   style={boxStyle}
   onpointerdown={onBoxPointerDown}
@@ -1407,6 +1409,16 @@
 
   {#if selected && jp}
     <div class="jp-pill" class:sfx={isSfx} contenteditable="false">{jp}</div>
+  {/if}
+
+  {#if box.review}
+    <!-- The "needs review" flag (UX-6): the text does not fit this box, and by
+         how far - the containment check's verdict, never a clip. Outside the
+         clip wrapper so a mask cannot hide it; it turns with the box, as the
+         handles do. The reason is in the tooltip and in the queue's list. -->
+    <div class="review-badge" contenteditable="false" role="img" title={reviewTitle(box.review)} aria-label={reviewTitle(box.review)}>
+      !<span>{reviewReach(box.review)}px</span>
+    </div>
   {/if}
 
   <!-- The wrapper exists for the mask: `mask-image` needs an element whose
