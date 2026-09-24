@@ -238,9 +238,9 @@ describe('a chapter load refits every page, not just the one on screen', () => {
   });
 });
 
-// The box a click places is sized from the bubble the detector found. That is
-// the right width and rarely the right height, because the height belongs to the
-// English rather than to the Japanese it is replacing.
+// A click on a detected block with no balloon found under it places the box
+// where the Japanese sat. The block is a location, not a size (GEO-3): the width
+// and the height belong to the English that replaces it.
 describe('placement fits the box it just created', () => {
   const detected = () => [
     {
@@ -253,20 +253,73 @@ describe('placement fits the box it just created', () => {
     },
   ];
 
-  it('places at the height the text needs, not the height of the bubble', () => {
+  // Changed by GEO-3: this pinned the box at the rectangle's width (200 inset
+  // by 8 on every edge, 184) with the text broken to fit it.
+  it('sizes the box from the text and centres it on the block', () => {
     loadProjectPages(detected());
     page().activeLineN = 1;
     placeActiveAt(200, 150);
     const b = page().boxes[0];
-    // The rect is 200x100, inset by 8 on every edge: 184 wide, 84 tall. At the
-    // default size of 26 a word of eight letters is 114 wide and two of them do
-    // not fit the 174px content width (184 less the default outline's inset of
-    // 5 on each side), so the block is four lines.
-    expect(b.w).toBe(184);
+    // At the default size of 26 a word of eight letters is 114.4 wide. Two to a
+    // line is a strip (243 by 57), so the block that reads best is four lines of
+    // one word each, in a box one word wide plus the default outline's inset of
+    // 5 on each side.
+    expect(b.w).toBe(125);
     expect(b.h).toBe(neededHeight(4, { size: 26, lineHeight: 1.1 }, OUTLINED));
-    expect(b.h).toBeGreaterThan(84);
-    // Still centred on the bubble, which is the whole point of the anchor.
-    expect(b.y + b.h / 2).toBe(150);
+    // Centred on the block, which is all the block now says.
+    expect(b.x + b.w / 2).toBeCloseTo(200, 6);
+    expect(b.y + b.h / 2).toBeCloseTo(150, 6);
+    expect(b.auto.status).toBe('no-region');
+  });
+
+  // GEO-3: a detected block narrower than a word of the English, read as
+  // horizontal, used to be the English box - 40 px wide, the minimum, and a
+  // stack of one-word lines.
+  describe('a narrow block is a location, not the width', () => {
+    const TEXT = 'I TOLD YOU WE SHOULD HAVE LEFT BEFORE THE RAIN STARTED TODAY';
+    const narrow = () => [
+      {
+        id: 1,
+        w: 1000,
+        h: 2000,
+        lines: [{ n: 1, type: 'dialogue', jp: 'あ', en: TEXT }],
+        boxes: [],
+        detect: { panels: [], boxes: [{ n: 1, box: [300, 300, 340, 500], vertical: false, font_size: 20 }] },
+      },
+    ];
+    const placed = () => {
+      loadProjectPages(narrow());
+      page().activeLineN = 1;
+      placeActiveAt(320, 400);
+      return page().boxes[0];
+    };
+
+    it('takes the width the solver gives the English', () => {
+      const b = placed();
+      const s = b.style;
+      const lines = layoutLines(applyCase(TEXT, s), s, s.size, contentWidth(b.w, s), null);
+      expect(b.auto.status).toBe('no-region');
+      expect(b.w).toBeGreaterThan(80);
+      // A block, not a column: wider than tall, and two words or more to a line
+      // where the 40 px box gave every word a line of its own.
+      expect(b.w).toBeGreaterThan(b.h);
+      expect(lines.length).toBeLessThanOrEqual(TEXT.split(' ').length / 2);
+      expect(b.h).toBe(neededHeight(lines.length, s, textInset(s)));
+      expect(b.x + b.w / 2).toBeCloseTo(320, 6);
+      expect(b.y + b.h / 2).toBeCloseTo(400, 6);
+    });
+
+    it('takes the balanced width while the face is loading and the solver cannot run', () => {
+      vi.stubGlobal('document', { fonts: { check: () => false, load: () => Promise.resolve([]) } });
+      try {
+        const b = placed();
+        expect(b.auto.status).toBe(null);
+        expect(b.w).toBe(balancedBoxSize(TEXT, b.style).w);
+        expect(b.x + b.w / 2).toBeCloseTo(320, 6);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   it('records the placement at the height the user is looking at', () => {

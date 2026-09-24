@@ -2438,28 +2438,30 @@ const ontoPage = (p, r) => {
 //                  is sized from the balloon it finds. This is the paste-mode
 //                  case: a translation in the queue, a page nobody analysed,
 //                  and a user pointing at the bubble they want it in.
-//   the block      no fit either way. The detector's rectangle, inset - today's
-//                  answer - transposed first when the Japanese in it was set
+//   the text       no fit either way, so the box is sized from what has to go
+//                  in it: the width that makes the text a balanced block rather
+//                  than the fixed 220 that made it a column. Centred on the
+//                  detector's rectangle when there is one - a location, not a
+//                  size (GEO-3) - and on the click when not.
+//   the block      ...and with no text to measure, the detector's rectangle,
+//                  inset, transposed first when the Japanese in it was set
 //                  vertically, since a tall narrow column is the one shape
 //                  English does not want. No transpose in the fitted branches
 //                  above: the balloon is already the right aspect for the real
 //                  bubble, and swapping its sides would be a heuristic
 //                  overruling a measurement.
-//   the text       nothing detected and nothing under the pointer worth
-//                  fitting, so the box is sized from what has to go in it: the
-//                  width that makes the text a balanced block rather than the
-//                  fixed 220 that made it a column.
-//   the constants  ...and 220x92 when there is not even text to measure - an
-//                  empty queue row, or an environment with no metrics.
+//   the constants  ...and 220x92 when there is not even that - an empty queue
+//                  row on a page nobody detected, or an environment with no
+//                  metrics.
 //
 // With text to set, the solver (auto-layout.js) takes it from there: the size,
 // the width and the lines together, from the line's reference size down to the
-// largest size that fits the balloon (FIT-1). The block keeps the width its
-// rectangle gives it. The box is born with its solver record (`box.auto`), so
-// the size the user chose outlives the size the balloon allowed. Without text,
-// metrics or the face the text is set in, the box is placed as before and the
-// ladder fits it; its record carries the reference size and no status, since
-// nothing was solved.
+// largest size that fits the balloon (FIT-1), and with no balloon, the width
+// whose block reads best (GEO-3). The box is born with its solver record
+// (`box.auto`), so the size the user chose outlives the size the balloon
+// allowed. Without text, metrics or the face the text is set in, the box is
+// placed by the list above and the ladder fits it; its record carries the
+// reference size and no status, since nothing was solved.
 //
 // Per-tag font size (untagged is its own group), everything else still
 // inherits `lastStyle` - the font, colour and strokes chosen by hand on the
@@ -2481,23 +2483,28 @@ function bornBox(p, ln, imgX, imgY, measured) {
   let fit =
     measured !== undefined ? measured : (balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY));
   let g = fit ? fittedRect(p, fit, style.align) : null;
-  let rect = null;
+  let at = { x: imgX, y: imgY };
   // The two are dropped together, deliberately: a fit the box was not sized from
   // is a fit the box should not be laid out to either, and carrying one while
   // placing from the block would leave the rectangle and its line breaks
   // describing two different bubbles.
   if (!g) {
     fit = null;
-    rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
-    // Skipped whenever there IS a rect, because `placementRect` ignores the
-    // fallback pair in that case and the measurement could not change the answer.
+    const rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
+    // The block says where the Japanese sat - which bubble, and its centre - and
+    // nothing about how much room the English needs: a short line, or a column
+    // read as a row, was a box as narrow as the 40 px minimum and a stack of
+    // one-word lines (GEO-3). So text is sized from itself and centred on the
+    // block - by the solver below, or here by the balanced size when the solver
+    // cannot run - and only a box with no text to measure takes the block's size.
+    if (rect) at = { x: (rect[0] + rect[2]) / 2, y: (rect[1] + rect[3]) / 2 };
     // Skipped when the solver is about to size the box from the text anyway.
     // And skipped with no canvas, for the reason `autoFitBox` asks the same
     // question: every metric is a stand-in there, which is fine for deciding a
     // line break in a test and not fine for a number written into the user's
-    // document. Either way the old constants stand.
-    const bal = rect || solvable || !canMeasure() ? null : balancedBoxSize(text, style);
-    g = placementRect(p, rect, imgX, imgY, bal?.w ?? 220, bal?.h ?? 92);
+    // document. Either way the block, or the old constants, stand.
+    const bal = solvable || !canMeasure() ? null : balancedBoxSize(text, style);
+    g = bal ? placementRect(p, null, at.x, at.y, bal.w, bal.h) : placementRect(p, rect, imgX, imgY);
   }
   const b = {
     id: 'b' + boxSeq++,
@@ -2533,29 +2540,26 @@ function bornBox(p, ln, imgX, imgY, measured) {
   // already has its translation typed in the queue is placed at the size that
   // text needs; an empty one is placed at the bubble's size and grows as it is
   // filled in, through `setBoxText`.
-  if (!(solvable && solveBorn(b, p, text, rect ? g : null, imgX, imgY))) autoFitBox(b, p);
+  if (!(solvable && solveBorn(b, p, text, at))) autoFitBox(b, p);
   return b;
 }
 
-// The solver's answer, written onto a box being born. `block` is the inset
-// detector rectangle when the box was placed from one: its width is kept and
-// its centre is where the box goes. Answers false when there was nothing the
-// solver would lay out (text on a curve), so the caller places the box as
-// before.
-function solveBorn(b, p, text, block, imgX, imgY) {
+// The solver's answer, written onto a box being born: in its balloon, or with
+// none, centred on `at` - the detected block's centre, or the click. Answers
+// false when there was nothing the solver would lay out (text on a curve), so
+// the caller places the box as before.
+function solveBorn(b, p, text, at) {
   const refSize = b.auto.refSize;
-  const region = b.fit ?? (block ? { kind: 'hint', ...block } : { kind: 'hint', x: imgX, y: imgY, w: 0, h: 0 });
+  const region = b.fit ?? { kind: 'hint', x: at.x, y: at.y, w: 0, h: 0 };
   const r = solveLayout({
     text,
     style: b.style,
     refSize,
     region,
-    locks: block ? { width: true } : null,
     opts: {
       minSize: Math.max(minFontSize, 0.75 * refSize),
       minW: MIN_BOX_W,
       minH: MIN_BOX_H,
-      box: block,
       page: p,
       strip: stripOf(p),
     },

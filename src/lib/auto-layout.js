@@ -214,13 +214,13 @@ function trial(ctx, size, w) {
 // flat and have to fit the rows they sit on. Flush text is set flat, so its box
 // starts at the inscribed rectangle, the one box whose rows all sit inside the
 // curve, and widens only for a word that rectangle cannot hold. A rectangle has
-// one width. With nothing but a location, scored (`score`): the widths that
-// break the text into a balanced block: the closed
-// form's line count (`balancedBlockSize`) and two either side of it, each as
-// the width that gives that many lines with the breaker's slack -
-// `balancedBoxSize`'s search, which reads the layout memo and so cannot be
-// called from here - with every width no narrower than the longest word, so a
-// word the breaker cannot split is never the reason a width fails.
+// one width. With nothing but a location, scored (`score`), narrowest first so
+// a tie goes to the box that hugs its text: the widths that break the text into
+// a balanced block - the closed form's line count (`balancedBlockSize`) and two
+// either side of it, each as the width that gives that many lines with the
+// breaker's slack - `balancedBoxSize`'s search, which reads the layout memo and
+// so cannot be called from here - with every width no narrower than the longest
+// word, so a word the breaker cannot split is never the reason a width fails.
 function widthsAt(ctx, size) {
   const minW = ctx.minW;
   if (ctx.lk.width) return [ctx.box.w];
@@ -249,7 +249,7 @@ function widthsAt(ctx, size) {
   const lo = Math.max(1, paras.length, seed.lines - 2);
   const hi = Math.max(lo, Math.min(Math.round(o.maxLines), seed.lines + 2));
   const out = new Set();
-  for (let n = lo; n <= hi; n++) {
+  for (let n = hi; n >= lo; n--) {
     const cw = Math.max(o.minWidth, (total / n) * o.slack, word);
     out.add(Math.max(minW, Math.ceil(cw) + 2 * ctx.ti));
   }
