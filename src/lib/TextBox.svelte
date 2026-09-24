@@ -732,12 +732,11 @@
     const lines = shaped ?? (editing ? applyCase(text, s).split('\n') : null);
     return lines ? inkShiftY(lines, s, effSize) : 0;
   });
-  // The shift goes FIRST in the transform list so it is applied in the box's
-  // frame: written after a mirror it would be flipped along with the glyphs and
-  // move a vertically-mirrored block the wrong way.
-  const stackTransform = $derived(
-    inkShift || mirror ? `transform:translateY(${inkShift}px)${mirror ? ' ' + mirror : ''};` : '',
-  );
+  // In the unflipped frame, inside the mirror (which is the clip wrapper's -
+  // see `wrapMirror`): the export centres the block on its ink and then flips
+  // the finished picture, so a vertically mirrored block is shifted the other
+  // way on the page, and here it is too.
+  const stackTransform = $derived(inkShift ? `transform:translateY(${inkShift}px);` : '');
 
   // Reactive auto-fit effect for text metrics.
   //
@@ -790,6 +789,16 @@
   const mirror = $derived(
     s.flipH || s.flipV ? `scale(${s.flipH ? -1 : 1}, ${s.flipV ? -1 : 1})` : '',
   );
+  // The flip, as the export makes it: of the box's FINISHED picture - type,
+  // ink, and the mask already cut out of them - about the box's centre
+  // (`paintBoxOnPage` mirrors the bitmap `renderBox` composited, the mask
+  // included). So it goes on the clip wrapper, whose border box is the box and
+  // which carries the mask: a CSS mask is applied in the element's own frame,
+  // before its transform, which is the export's order. It used to sit on the
+  // text alone, under the mask, so a mask cut the flipped text where the
+  // unflipped text is cut on export, and the ink was not flipped at all.
+  // Not while typing: the caret gets the text the right way round.
+  const wrapMirror = $derived(mirror && !editing ? `transform:${mirror};` : '');
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
@@ -1060,9 +1069,8 @@
   const maskDraft = $state({ shape: null, poly: null });
 
   // A pointer event in box-local page px: page coords from the page frame,
-  // then inverse-rotated around the box centre - the same frame the shapes
-  // are stored in and the mask is painted in (the mirror flip lives inside,
-  // on the text, so it does not enter into it).
+  // then inverse-rotated around the box centre. What the mesh tools work in;
+  // the mask tool takes one step more (`maskLocal`).
   function maskPoint(ev) {
     const r = pageFrameEl.getBoundingClientRect();
     const px = (ev.clientX - r.left) / app.zoom - box.x;
@@ -1074,6 +1082,14 @@
     const dx = px - cx;
     const dy = py - cy;
     return [cx + dx * Math.cos(rad) - dy * Math.sin(rad), cy + dx * Math.sin(rad) + dy * Math.cos(rad)];
+  }
+
+  // The same point in the frame mask shapes are stored in: unflipped, because
+  // the mask is cut before the flip (`wrapMirror`), so a shape lands - once
+  // mirrored with the box - under the pointer that drew it.
+  function maskLocal(ev) {
+    const [x, y] = maskPoint(ev);
+    return [s.flipH ? box.w - x : x, s.flipV ? box.h - y : y];
   }
 
   // A shape changes the verdict as well as the picture: an include mask cuts
@@ -1091,7 +1107,7 @@
     if (e.button !== 0 || !maskArmed || !pageFrameEl) return;
     e.preventDefault();
     e.stopPropagation();
-    const p = maskPoint(e);
+    const p = maskLocal(e);
     // The polygon is click-built rather than dragged; the other two are drags.
     if (maskTool.id === 'poly') {
       maskDraft.poly = [...(maskDraft.poly ?? []), p];
@@ -1104,7 +1120,7 @@
     else maskDraft.shape = { kind: 'ellipse', cx: p[0], cy: p[1], rx: 0, ry: 0 };
     const move = (ev) => {
       if (ev.pointerId !== pid || !maskDraft.shape) return;
-      const q = maskPoint(ev);
+      const q = maskLocal(ev);
       if (maskDraft.shape.kind === 'stroke') {
         const last = maskDraft.shape.pts[maskDraft.shape.pts.length - 1];
         if (Math.hypot(q[0] - last[0], q[1] - last[1]) > 1.5) maskDraft.shape.pts.push(q);
@@ -1436,10 +1452,11 @@
        (0,0) is the box's own top-left, and the text stack is a centred flex
        child with no fixed origin. It replicates the box's flex layout and
        padding, so with the mask off it changes nothing. The selection
-       handles and the jp pill stay outside it, unmasked. -->
+       handles and the jp pill stay outside it, unmasked. It also carries the
+       flip, over the mask, as the export does (`wrapMirror`). -->
   <div
     class="clipwrap"
-    style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{warped ? '' : maskCss}"
+    style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{warped ? '' : maskCss}{wrapMirror}"
   >
   {#if warped}
     <!-- The whole box as one picture: type, ink and every filter, carried
@@ -1450,18 +1467,14 @@
          inside these pixels, because `renderBox` composites it before the mesh
          carries the texture, and applying it a second time in box coordinates
          would crop the warped picture against the unwarped shape.
-         The mirror IS applied here, for the opposite reason: the export flips
-         the finished bitmap around the box's centre rather than baking the flip
-         into it (see paintBoxOnPage), so the editor has to do the same, about
-         the same point - which sits `ox`/`oy` in from this canvas's corner. -->
+         The mirror IS applied, by the wrapper, for the opposite reason: the
+         export flips the finished bitmap around the box's centre rather than
+         baking the flip into it (see paintBoxOnPage). -->
     <canvas
       class="warpl"
       bind:this={warpEl}
       style={warpGeom
-        ? `left:${-warpGeom.ox * z}px;top:${-warpGeom.oy * z}px;width:${warpGeom.cw * z}px;height:${warpGeom.ch * z}px;` +
-          (mirror
-            ? `transform:${mirror};transform-origin:${(warpGeom.ox + box.w / 2) * z}px ${(warpGeom.oy + box.h / 2) * z}px;`
-            : '')
+        ? `left:${-warpGeom.ox * z}px;top:${-warpGeom.oy * z}px;width:${warpGeom.cw * z}px;height:${warpGeom.ch * z}px;`
         : 'left:0;top:0;width:0;height:0'}
       aria-hidden="true"
     ></canvas>
@@ -1479,7 +1492,7 @@
     <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
          full set of glyph spans; they are all absolutely positioned already, so
          no layer has to hold the others up. -->
-    <div class="arcstack" style="{mirror ? `transform:${mirror};` : ''}{filterCss}">
+    <div class="arcstack" style={filterCss}>
       {#each layers as ly, li (li)}
         <div class="arc" style={ly.arc}>
           {#each layout as g, i (i)}
@@ -1537,7 +1550,15 @@
          a tool is armed - a full-coverage capture surface that turns the
          pointer into shapes. Outside the clip wrapper on purpose: the
          outlines must stay visible where the mask has hidden the letters. -->
-    <svg class="mask-gizmo" class:excl={s.clip.mode === 'exclude'} width={box.w * z} height={box.h * z} aria-hidden="true">
+    <!-- Mirrored with the box, as the mask it outlines is. -->
+    <svg
+      class="mask-gizmo"
+      class:excl={s.clip.mode === 'exclude'}
+      width={box.w * z}
+      height={box.h * z}
+      style={mirror ? `transform:${mirror};transform-origin:${(box.w * z) / 2}px ${(box.h * z) / 2}px;` : ''}
+      aria-hidden="true"
+    >
       {#if maskArmed}
         <rect
           class="capture"
