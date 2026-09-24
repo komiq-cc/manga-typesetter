@@ -486,8 +486,9 @@
           {@render toggle('defaultAutoHeight', 'Auto height', prefs.defaultAutoHeight)}
         </div>
         <div class="qhint">
-          The box grows and shrinks so its text fits, anchored by its vertical
-          alignment. Its width is never touched.
+          The box grows taller so its text fits, anchored by its vertical
+          alignment. It never shrinks a box you made roomier, and its width is
+          never touched.
         </div>
         <div class="ts-defaults" class:dim={!prefs.typeset}>
           <div class="field">
