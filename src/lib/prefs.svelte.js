@@ -39,10 +39,11 @@ export const prefs = $state({
   // Their starting values are exactly `defaultStyle()`'s, which is what makes
   // an absent key in storage indistinguishable from a fresh install.
   defaultAutoHeight: true,
-  // Boolean here, `'auto' | 'off'` on the style - the style's third state was
-  // never reachable from any switch, and a preference with two values should
-  // not pretend otherwise. `applyBoxDefaults` does the translation.
+  // Boolean here - shaped or plain - and the shape a shaped block aims for
+  // beside it (BRK-3): `style.shape` is 'off' or one of these three, and
+  // `applyBoxDefaults` does the translation.
   defaultShape: true,
+  defaultBlockShape: 'auto',
   defaultHyphenate: true,
   defaultBalloon: true,
   defaultMinOrphan: 3,
@@ -86,6 +87,7 @@ const cleanNames = (v) =>
 // setter's validation and the loader's validation cannot drift apart.
 const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool'];
 const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
+const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'] };
 
 // Push the box defaults to where a box is actually born. The store seeds a new
 // box's style through `applyBoxDefaults` in data.js, and data.js is a leaf - it
@@ -96,9 +98,9 @@ const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
 function applyBoxDefaults() {
   setBoxDefaults({
     autoHeight: prefs.defaultAutoHeight,
-    // Boolean here, `'auto' | 'off'` on the style - the translation happens once,
-    // at the edge, so nothing downstream has to know the preference is narrower.
-    shape: prefs.defaultShape ? 'auto' : 'off',
+    // Two preferences here, one `style.shape` - the translation happens once,
+    // at the edge, so nothing downstream has to know they are two.
+    shape: prefs.defaultShape ? prefs.defaultBlockShape : 'off',
     hyphenate: prefs.defaultHyphenate,
     balloon: prefs.defaultBalloon,
     minOrphan: prefs.defaultMinOrphan,
@@ -113,6 +115,7 @@ function persist() {
         typeset: prefs.typeset,
         defaultAutoHeight: prefs.defaultAutoHeight,
         defaultShape: prefs.defaultShape,
+        defaultBlockShape: prefs.defaultBlockShape,
         defaultHyphenate: prefs.defaultHyphenate,
         defaultBalloon: prefs.defaultBalloon,
         defaultMinOrphan: prefs.defaultMinOrphan,
@@ -150,6 +153,8 @@ export function setPref(key, value) {
     value = Math.min(hi, Math.max(lo, n));
   } else if (BOOL_KEYS.includes(key)) {
     value = !!value;
+  } else if (key in ENUM_KEYS && !ENUM_KEYS[key].includes(value)) {
+    return;
   }
   prefs[key] = value;
   // Applying is part of setting. Nothing else in the app watches `prefs`, so a
@@ -199,6 +204,9 @@ function load() {
   for (const [k, [lo, hi]] of Object.entries(NUM_KEYS)) {
     const n = saved && typeof saved[k] === 'number' ? Math.round(saved[k]) : NaN;
     if (Number.isFinite(n)) prefs[k] = Math.min(hi, Math.max(lo, n));
+  }
+  for (const [k, values] of Object.entries(ENUM_KEYS)) {
+    if (saved && values.includes(saved[k])) prefs[k] = saved[k];
   }
   // Shortcut overrides are a string->string map and nothing else; a value of
   // any other shape is dropped rather than handed to the key matcher. What is

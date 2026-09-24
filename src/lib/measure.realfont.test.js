@@ -142,6 +142,28 @@ describe('measure.js with a real canvas', () => {
       for (const ln of out) expect(lineWidth(ln, st, SIZE)).toBeLessThanOrEqual(180);
     }
   });
+
+  // BRK-3: a box's block shape reaches the breaker, is its own layout (not the
+  // memoised 'auto' one), and `placeBlock` - the path the exporter and the PSD
+  // writer break through - draws the same lines.
+  it('breaks to the block shape the box asks for, on every path', () => {
+    const text = 'WHAT ARE YOU EVEN DOING HERE AT THIS HOUR OF THE NIGHT?';
+    const out = {};
+    for (const shape of ['auto', 'oval', 'rect']) {
+      const st = styleFor('Comic Neue', { shape });
+      out[shape] = layoutLines(text, st, SIZE, 200);
+      const box = { x: 0, y: 0, w: 200 + 2 * textInset(st), h: 400, style: st };
+      expect(placeBlock(boxCandidate(box, text)).lines).toEqual(out[shape]);
+      for (const ln of out[shape]) expect(lineWidth(ln, st, SIZE)).toBeLessThanOrEqual(200);
+    }
+    // The oval sets a short head over a wider middle; auto and rect keep the
+    // lines even.
+    expect(out.oval).not.toEqual(out.auto);
+    expect(lineWidth(out.oval[0], styleFor('Comic Neue'), SIZE)).toBeLessThan(
+      lineWidth(out.oval[2], styleFor('Comic Neue'), SIZE),
+    );
+    expect(out.rect).toEqual(out.auto);
+  });
 });
 
 // ---------------------------------------------------------------------------

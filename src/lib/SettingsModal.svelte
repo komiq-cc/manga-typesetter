@@ -495,6 +495,20 @@
             <span>Shaped line breaks</span>
             {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape, !prefs.typeset)}
           </div>
+          <!-- The silhouette a shaped block aims for (BRK-3). Auto picks an oval
+               in a balloon and a rectangle in a caption. -->
+          <div class="field">
+            <span>Block shape</span>
+            <div class="seg" role="group" aria-label="Block shape">
+              {#each [['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rectangle']] as [v, label]}
+                <button
+                  class:on={prefs.defaultBlockShape === v}
+                  disabled={!prefs.typeset || !prefs.defaultShape}
+                  onclick={() => setPref('defaultBlockShape', v)}
+                >{label}</button>
+              {/each}
+            </div>
+          </div>
           <div class="field">
             <span>Hyphenate long words</span>
             {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate, !prefs.typeset)}

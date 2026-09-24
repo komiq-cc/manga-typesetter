@@ -284,8 +284,11 @@ export function defaultStyle() {
     curve: 0,
     // ---- typesetting (see typeset.js) ----
     // How lines are broken. 'auto' is the scanlation shaping - square or oval
-    // block, no hourglass, no orphaned short words, no word ever split. 'off'
-    // hands the job back to plain greedy CSS wrapping.
+    // block, no hourglass, no orphaned short words, no word ever split - with
+    // each line filling the room its row has. 'oval' and 'rect' are the same
+    // shaping aiming for a tapered or an even block within that room (BRK-3;
+    // `shape` in typeset.js). 'off' hands the job back to plain greedy CSS
+    // wrapping.
     shape: 'auto',
     // A word with fewer letters than this never sits alone on a line.
     minOrphan: 3,
@@ -327,6 +330,7 @@ export function defaultStyle() {
 // A style that already carries `strokes` / `shadows` is taken as written; the
 // legacy keys are then dropped so nothing downstream can read a stale copy.
 const STROKE_DEF = { color: '#ffffff', width: 3, opacity: 1 };
+const BLOCK_SHAPES = ['auto', 'oval', 'rect', 'off'];
 const SHADOW_DEF = { x: 2, y: 2, blur: 2, color: '#000000', opacity: 0.6 };
 const num = (v, d) => (Number.isFinite(+v) ? +v : d);
 // Exactly the lengths CSS reads as hex: 3/4-digit shorthand and 6/8-digit full
@@ -663,6 +667,9 @@ export function normalizeStyle(s) {
   const out = {
     ...d,
     ...flat,
+    // Anything else - a typo in a hand-edited file, a value from a newer build -
+    // is the default, not a string every layout would have to second-guess.
+    shape: BLOCK_SHAPES.includes(flat.shape) ? flat.shape : d.shape,
     blur: Math.max(0, num(src.blur, 0)),
     motionBlur: mb,
     path: pth,

@@ -811,8 +811,14 @@ import {
             <div class="insp-sub-body">
               <div class="brow" class:off={!app.bulk.mask.shape}>
                 {@render tick('shape')}
-                <span class="lbl">Shaped breaks</span>
-                <div class="switch" class:on={s.shape !== 'off'} role="switch" aria-checked={s.shape !== 'off'} tabindex="0" onclick={() => set('shape', s.shape === 'off' ? 'auto' : 'off')} onkeydown={(e) => e.key === 'Enter' && set('shape', s.shape === 'off' ? 'auto' : 'off')}><span class="knob"></span></div>
+                <span class="lbl">Line breaks</span>
+                <!-- Plain wraps like the browser; the other three are the
+                     shaped breaker and the silhouette it aims for (BRK-3). -->
+                <div class="seg">
+                  {#each [['off', 'Plain'], ['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rect']] as [v, label] (v)}
+                    <button class:on={(s.shape ?? 'auto') === v} onclick={() => set('shape', v)}>{label}</button>
+                  {/each}
+                </div>
               </div>
               <div class="brow" class:off={!app.bulk.mask.minOrphan}>
                 {@render tick('minOrphan')}

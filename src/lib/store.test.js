@@ -3569,6 +3569,7 @@ describe('the typesetting defaults a new box is born with', () => {
   const DEFAULTS = {
     defaultAutoHeight: true,
     defaultShape: true,
+    defaultBlockShape: 'auto',
     defaultHyphenate: true,
     defaultBalloon: true,
     defaultMinOrphan: 3,
@@ -3580,7 +3581,7 @@ describe('the typesetting defaults a new box is born with', () => {
     app.lastStyle = defaultStyle();
   });
   // Preferences are app-wide and this file does not run alone, so every case
-  // puts all five back rather than the one it changed.
+  // puts all of them back rather than the one it changed.
   afterEach(() => {
     for (const [k, v] of Object.entries(DEFAULTS)) setPref(k, v);
   });
@@ -3593,6 +3594,17 @@ describe('the typesetting defaults a new box is born with', () => {
     expect(s.autoHeight).toBe(false);
     expect(s.shape).toBe('off');
     expect(s.minOrphan).toBe(6);
+  });
+
+  // BRK-3: the block shape rides on the shaped switch - it names which shaped
+  // breaking a box gets, and a box that is not shaped at all has no shape.
+  it('seeds the block shape, and plain wrapping still wins over it', () => {
+    setPref('defaultBlockShape', 'oval');
+    expect(byId(addEmptyBox(100, 100)).style.shape).toBe('oval');
+    setPref('defaultBlockShape', 'hexagon');
+    expect(byId(addEmptyBox(100, 300)).style.shape).toBe('oval');
+    setPref('defaultShape', false);
+    expect(byId(addEmptyBox(100, 500)).style.shape).toBe('off');
   });
 
   it('seeds a queue-placed box from them too', () => {

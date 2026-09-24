@@ -390,6 +390,13 @@ describe('a style written before strokes and shadows were lists', () => {
     const s = normalizeStyle({ pattern: { on: true, kind: 'moire-of-the-future', fg: '#000000', bg: '#ffffff' } });
     expect(s.pattern.kind).toBe(defaultStyle().pattern.kind);
   });
+
+  it('keeps a block shape it knows and folds any other back to auto', () => {
+    for (const shape of ['auto', 'oval', 'rect', 'off']) expect(normalizeStyle({ shape }).shape).toBe(shape);
+    expect(normalizeStyle({ shape: 'hexagon' }).shape).toBe('auto');
+    expect(normalizeStyle({ shape: 3 }).shape).toBe('auto');
+    expect(normalizeStyle({}).shape).toBe(defaultStyle().shape);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -729,6 +736,7 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
     const d = defaultStyle();
     expect(prefs.defaultAutoHeight).toBe(d.autoHeight);
     expect(prefs.defaultShape).toBe(d.shape !== 'off');
+    expect(prefs.defaultBlockShape).toBe(d.shape);
     expect(prefs.defaultHyphenate).toBe(d.hyphenate);
     expect(prefs.defaultBalloon).toBe(d.balloon);
     expect(prefs.defaultMinOrphan).toBe(d.minOrphan);
@@ -743,6 +751,11 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
     const b = await withStorage('{"defaultBalloon":"yes","defaultMinOrphan":900}');
     expect(b.prefs.defaultBalloon).toBe(true);
     expect(b.prefs.defaultMinOrphan).toBe(8);
+    // A block shape the control does not offer is dropped too (BRK-3).
+    const c = await withStorage('{"defaultBlockShape":"rect"}');
+    expect(c.prefs.defaultBlockShape).toBe('rect');
+    const e = await withStorage('{"defaultBlockShape":"off"}');
+    expect(e.prefs.defaultBlockShape).toBe('auto');
   });
 });
 

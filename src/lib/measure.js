@@ -745,6 +745,10 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
     // missing key means "the default", which is what `normalizeStyle` would
     // have supplied anyway had the style come through it.
     hyphenate: style.hyphenate ?? true,
+    // The silhouette the block aims for inside the room its rows have (BRK-3):
+    // 'auto' fills each row, 'oval' tapers to the ends, 'rect' keeps the lines
+    // even. 'off' never gets here - `layoutLines` wraps plainly for it.
+    shape: style.shape ?? 'auto',
   });
 }
 
