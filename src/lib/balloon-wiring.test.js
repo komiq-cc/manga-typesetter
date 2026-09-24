@@ -53,7 +53,11 @@ const {
   refitBalloon,
   setPageDims,
   BULK_PROPS,
+  selectBox,
+  autoFitBox,
 } = await import('./store.svelte.js');
+const { tags } = await import('./tags.svelte.js');
+const { containBox, boxCandidate, REVIEW_REASONS } = await import('./contain.js');
 const { balloonWidthsFor, textInset, contentWidth, layoutLines, lineWidth, setTypesetEnabled } = await import(
   './measure.js'
 );
@@ -1245,5 +1249,96 @@ describe('a page whose cleaned raster is replaced is re-decoded, not re-used', (
     const refitted = page().boxes[2];
     expect(refitted.fit).toEqual(fitted.fit);
     expect([refitted.w, refitted.h]).toEqual([fitted.w, fitted.h]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIT-1: a placed box's font size is chosen for the balloon it lands in, from
+// the size the user chose for this kind of text down to the largest that fits -
+// and what is remembered for the next box is the size the user chose, never
+// the size a balloon made it shrink to.
+describe('placement chooses the size (FIT-1)', () => {
+  const TEXT = 'WE CAN STILL CATCH THE LAST TRAIN.';
+  const ovalPage = () => {
+    const img = pageImage(500, 500);
+    drawEllipse(img, 250, 250, 130, 80);
+    return img;
+  };
+  const placeAt = (size, en = TEXT) => {
+    loadProjectPages(noDetect(en));
+    app.lastStyle = { ...defaultStyle(), size };
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    return page().boxes[0];
+  };
+  const inside = (b) => {
+    expect(containBox(boxCandidate(b, TEXT)).fits).toBe(true);
+    expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
+    expect(b.y + b.h).toBeLessThanOrEqual(b.fit.cy + b.fit.ry);
+  };
+
+  beforeEach(() => {
+    tags.sizes = {};
+  });
+
+  it('keeps the size the user chose when the balloon holds it', () => {
+    const b = placeAt(26);
+    expect(b.style.size).toBe(26);
+    expect(b.auto).toMatchObject({ on: true, refSize: 26, status: 'ok', reason: null });
+    inside(b);
+  });
+
+  it('shrinks a size the balloon cannot hold instead of growing the box out of it', () => {
+    const a = placeAt(26);
+    const b = placeAt(32);
+    expect(b.style.size).toBeLessThan(32);
+    expect(Math.abs(b.style.size - a.style.size)).toBeLessThanOrEqual(3);
+    // On the half-pixel grid, so the editor and both exporters get one number.
+    expect(b.style.size * 2).toBe(Math.round(b.style.size * 2));
+    expect(b.auto).toMatchObject({ refSize: 32, status: 'shrunk' });
+    expect(b.review).toBeUndefined();
+    inside(b);
+  });
+
+  // A quarter below the reference is the floor every fit shares (`minSizeFor`):
+  // past it the text reads as another voice, and needs a decision, not a guess.
+  it('flags a size it cannot fit within a quarter of, rather than shrinking past it', () => {
+    const b = placeAt(40);
+    expect(b.style.size).toBe(30);
+    expect(b.auto).toMatchObject({ refSize: 40, status: 'overflow', reason: REVIEW_REASONS.minSize });
+  });
+
+  it('remembers the size the user chose, not the size the balloon allowed', () => {
+    const b = placeAt(32);
+    selectBox(b.id);
+    expect(tags.sizes['']).toBeUndefined();
+    page().lines.push({ n: 2, type: 'dialogue', jp: 'い', en: TEXT });
+    page().activeLineN = 2;
+    placeActiveAt(250, 250);
+    expect(page().boxes[1].auto.refSize).toBe(32);
+  });
+
+  it('takes a size typed on the placed box as its new reference, whatever the fit then does', () => {
+    const b = placeAt(26);
+    selectBox(b.id);
+    // What the Inspector's size field does: write the size, then fit.
+    b.style.size = 38;
+    autoFitBox(b, page());
+    expect(b.auto.refSize).toBe(38);
+    expect(tags.sizes['']).toBe(38);
+    expect(b.style.size).toBeLessThanOrEqual(38);
+  });
+
+  // DET-4: a face the page has asked for and not got measures as the fallback.
+  it('places as before, unsolved, while the face the text is set in is still loading', () => {
+    const load = vi.fn(() => Promise.resolve([]));
+    vi.stubGlobal('document', { fonts: { check: () => false, load } });
+    try {
+      const b = placeAt(32);
+      expect(b.auto).toMatchObject({ refSize: 32, status: null });
+      expect(load).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

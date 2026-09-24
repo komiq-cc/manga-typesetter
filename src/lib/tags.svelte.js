@@ -135,12 +135,15 @@ function save() {
   }
 }
 
-// Size memory per tag group. Read at placement (see `inheritedStyleFor`),
-// written whenever a box's style is remembered.
+// Size memory per tag group: the REFERENCE size the user chose for the group,
+// which placement solves down from (FIT-1). Read at placement (see
+// `inheritedStyleFor`), written on a deliberate size change and nothing else
+// (see `rememberSizeFor`). An unchanged size is not a write, so it does not
+// reach project.json.
 export const tagSize = (key) => (isNum(tags.sizes[key]) ? tags.sizes[key] : null);
 
 export function rememberTagSize(key, size) {
-  if (typeof key !== 'string' || !isNum(size)) return;
+  if (typeof key !== 'string' || !isNum(size) || tags.sizes[key] === size) return;
   tags.sizes[key] = size;
   save();
 }

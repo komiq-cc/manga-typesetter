@@ -56,7 +56,16 @@ import {
 // metrics. The alternative was a second measurer living in the store, which is
 // exactly how the editor and the exporter would start disagreeing about where a
 // line breaks.
-import { canMeasure, textInset, balancedBoxSize, clearLayoutMemo, setTypesetEnabled } from './measure.js';
+import {
+  canMeasure,
+  textInset,
+  balancedBoxSize,
+  clearLayoutMemo,
+  setTypesetEnabled,
+  fontShorthand,
+  familyFor,
+} from './measure.js';
+import { solveLayout } from './auto-layout.js';
 // Containment - whether a box's text stays inside the box, and the ladder that
 // makes it. Pure, and it joins the lazy store <-> measure cycle above on the
 // same terms: nothing in it runs at evaluation time.
@@ -618,6 +627,9 @@ function clamp(v, a, b) {
 // count.
 export function autoFitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
+  // Before the ladder can shrink it: a size the user has just typed or dragged
+  // is their reference size, and the answer below is only what fits.
+  noteSizeEdit(b, p);
   const cand = boxCandidate(b, boxText(b, p));
   if (!isAutoBox(cand)) {
     reviewBox(b, p);
@@ -635,7 +647,9 @@ export function autoFitBox(b, p = page()) {
 //   not worth reading, whatever it was set at (mirrored here by the prefs
 //   module, which the store cannot import - see `setMinFontSize`);
 //   three quarters of the size this kind of text is set at - the size remembered
-//   for the line's tag (`tagSize`), or the box's own when there is none. A
+//   for the line's tag (`tagSize`), or the box's own reference size when there
+//   is none (`refSizeOf`: not the size it was shrunk to, or every shrink would
+//   lower the floor for the next). A
 //   quarter smaller is about as far as a letterer shrinks one balloon before it
 //   reads as a different voice from the balloons around it; past that, the text
 //   needs a decision - a bigger balloon, fewer words - and the flag asks for it.
@@ -646,7 +660,7 @@ export function setMinFontSize(v) {
 }
 function minSizeFor(b, p) {
   const line = b.lineN != null && p ? lineByN(p, b.lineN) : null;
-  const ref = tagSize(sizeKeyFor(line)) ?? b.style.size;
+  const ref = tagSize(sizeKeyFor(line)) ?? refSizeOf(b);
   return Math.max(minFontSize, 0.75 * ref);
 }
 
@@ -666,6 +680,7 @@ function writeFit(b, r) {
     b.style.size = r.size;
     changed = true;
   }
+  seeSize(b);
   return changed;
 }
 
@@ -985,27 +1000,67 @@ export function cloneStyle(s) {
 // Persisted beside the tag registry, in project.json, and for the same reason:
 // "sfx is about 60 here" is a fact about this series, not about the person or
 // about any one chapter - see `bindTags`.
+//
+// What is remembered is a REFERENCE size (FIT-1): the size the user chose for
+// this kind of text, which the solver starts from and never exceeds - not the
+// size a balloon made it shrink to, which fed back in would ratchet every later
+// box smaller. So it is written on a deliberate size change and on nothing
+// else. It used to be written on every `selectBox` too, which made it "the last
+// size clicked": one click on a big SFX box set every later SFX box.
 export const sizeKeyFor = (line) => (line ? lineTags(line)[0] ?? '' : '');
 
+// The size the user chose for a box: its solver record's `refSize`, or - for a
+// box the solver does not manage - the size it is set at, which nothing but the
+// user changes.
+export const refSizeOf = (b) => (b?.auto?.on && b.auto.refSize > 0 ? b.auto.refSize : b?.style?.size);
+
+// A deliberate size change: the box's reference size, and its group's memory.
 // A legacy free box (`lineN == null`) has no line and lands in the untagged group.
 export function rememberSizeFor(p, box) {
   if (!box?.style || typeof box.style.size !== 'number' || !Number.isFinite(box.style.size)) return;
+  if (box.auto) box.auto.refSize = box.style.size;
+  seeSize(box);
   const line = box.lineN != null && p ? lineByN(p, box.lineN) : null;
   rememberTagSize(sizeKeyFor(line), box.style.size);
 }
 
-// Remember the active box's style so the next placed box inherits it.
+// Telling the user's size from the program's. Every deliberate size change -
+// the Inspector's field, a preset, a corner drag - lands on the SELECTED box
+// and is followed by an `autoFitBox` or a `rememberStyle`, and neither of those
+// is told why it runs. So the selected box's size is marked when it is selected
+// and again after every fit writes it (`writeFit`); a size that differs from
+// the mark at the next fit or remember was written by neither, and is the
+// user's. One mark, not one per box: a size is only ever edited on the box in
+// front of the user, and the bulk editor, which edits many, says so itself
+// (`rememberSizeFor`).
+let sizeMark = { id: null, size: null };
+function markSize(b) {
+  sizeMark = { id: b.id, size: b.style?.size };
+}
+function seeSize(b) {
+  if (sizeMark.id === b.id) sizeMark.size = b.style.size;
+}
+function noteSizeEdit(b, p) {
+  if (sizeMark.id !== b.id || b.style.size === sizeMark.size) return;
+  rememberSizeFor(p, b);
+  if (app.lastStyle) app.lastStyle.size = b.style.size;
+}
+
+// Remember the active box's style so the next placed box inherits it - all of
+// it but the size, which follows only a deliberate size change (see above).
 export function rememberStyle(box) {
   const b = box ?? (app.selectedId ? byId(app.selectedId) : null);
-  if (b?.style) {
-    app.lastStyle = cloneStyle(b.style);
-    rememberSizeFor(page(), b);
-  }
+  if (!b?.style) return;
+  noteSizeEdit(b, page());
+  const size = app.lastStyle?.size;
+  app.lastStyle = cloneStyle(b.style);
+  if (size > 0) app.lastStyle.size = size;
 }
 
 // The style a box is born with: `lastStyle` under the line's tag defaults,
 // with the size taken from the line's own group when that group has been
 // seen before. A group with no memory yet falls back to `lastStyle.size`.
+// Either way a reference size (see above), which placement solves down from.
 export function inheritedStyleFor(ln) {
   const style = styleForLine(ln, applyBoxDefaults(cloneStyle(app.lastStyle)));
   const size = tagSize(sizeKeyFor(ln));
@@ -1511,7 +1566,8 @@ export const prevPage = () => gotoPage(app.pageIndex - 1);
 
 // ---------- selection ----------
 // Selecting a box ADOPTS its style: the next box placed follows the one the user
-// last put their hands on, size and rotation included. Without this the only
+// last put their hands on, rotation included - all but the size, which follows
+// only a deliberate size change (FIT-1, see `rememberStyle`). Without this the only
 // writers of `lastStyle` were the Inspector's own edits, so clicking a box and
 // then placing another produced the style of whatever box was edited before it -
 // the "one behind" the user kept hitting. Clicking is the whole of the gesture
@@ -1541,6 +1597,9 @@ export function selectBox(id, { remember = true, activate = remember } = {}) {
   app.selectedId = id;
   if (app.editingId && app.editingId !== id) app.editingId = null;
   const b = id ? byId(id) : null;
+  // Looking at a box is not choosing its size (FIT-1): the mark only lets a
+  // later edit of it be told apart from what the fit wrote.
+  if (b?.style) markSize(b);
   if (remember && b) rememberStyle(b);
   if (activate && b && b.lineN != null) page().activeLineN = b.lineN;
 }
@@ -2359,23 +2418,20 @@ export function placementRect(p, rect, imgX, imgY, fallbackW = 220, fallbackH = 
   // origin and the bubble the detector found was thrown away. Off the page is
   // recoverable by dragging; a pile of boxes in the top-left corner is what the
   // user has to undo.
-  const onPage = (v, size, extent) =>
-    extent > 0 ? clamp(v, 0, Math.max(0, extent - size)) : Math.max(0, v);
-  return {
-    x: onPage(cx - w / 2, w, p.w),
-    y: onPage(cy - h / 2, h, p.h),
-    w,
-    h,
-  };
+  return ontoPage(p, { x: cx - w / 2, y: cy - h / 2, w, h });
 }
+const ontoPage = (p, r) => {
+  const at = (v, size, extent) => (extent > 0 ? clamp(v, 0, Math.max(0, extent - size)) : Math.max(0, v));
+  return { x: at(r.x, r.w, p?.w ?? 0), y: at(r.y, r.h, p?.h ?? 0), w: r.w, h: r.h };
+};
 
-// The sizes a box can be placed at, in order of how much is known about the
-// bubble under it:
+// Where a box is placed, in order of how much is known about the bubble under
+// it:
 //
 //   the balloon    the page's pixels are in hand and the flood fill recovered
-//                  a shape it believes. The box is the largest rectangle that
-//                  fits inside that shape, and the shape is kept so the line
-//                  breaker can lay text out to the curve.
+//                  a shape it believes. The text is laid out inside that shape,
+//                  and the shape is kept so the line breaker can lay text out
+//                  to the curve.
 //   the click      no detection, or a detection that missed this bubble - but
 //                  the pixels under the pointer are a solid light colour, so
 //                  the same flood fill runs from the click itself and the box
@@ -2386,15 +2442,25 @@ export function placementRect(p, rect, imgX, imgY, fallbackW = 220, fallbackH = 
 //                  answer - transposed first when the Japanese in it was set
 //                  vertically, since a tall narrow column is the one shape
 //                  English does not want. No transpose in the fitted branches
-//                  above: the inscribed rect of the real balloon is already the
-//                  right aspect for the real bubble, and swapping its sides
-//                  would be a heuristic overruling a measurement.
+//                  above: the balloon is already the right aspect for the real
+//                  bubble, and swapping its sides would be a heuristic
+//                  overruling a measurement.
 //   the text       nothing detected and nothing under the pointer worth
 //                  fitting, so the box is sized from what has to go in it: the
 //                  width that makes the text a balanced block rather than the
-//                  fixed 220 that made it a column. See `balancedBoxSize`.
+//                  fixed 220 that made it a column.
 //   the constants  ...and 220x92 when there is not even text to measure - an
 //                  empty queue row, or an environment with no metrics.
+//
+// With text to set, the solver (auto-layout.js) takes it from there: the size,
+// the width and the lines together, from the line's reference size down to the
+// largest size that fits the balloon (FIT-1). The block keeps the width its
+// rectangle gives it. The box is born with its solver record (`box.auto`), so
+// the size the user chose outlives the size the balloon allowed. Without text,
+// metrics or the face the text is set in, the box is placed as before and the
+// ladder fits it; its record carries the reference size and no status, since
+// nothing was solved.
+//
 // Per-tag font size (untagged is its own group), everything else still
 // inherits `lastStyle` - the font, colour and strokes chosen by hand on the
 // last box touched - plus the preferences for the five typesetting flags
@@ -2405,6 +2471,8 @@ export function placementRect(p, rect, imgX, imgY, fallbackW = 220, fallbackH = 
 // here.
 function bornBox(p, ln, imgX, imgY, measured) {
   const style = inheritedStyleFor(ln);
+  const text = lineText(ln);
+  const solvable = /\S/.test(text) && canMeasure() && faceReady(style);
   const det = detectedEntryFor(p, ln.n, imgX, imgY);
   // The block first: a detected rectangle is a measurement of where the Japanese
   // in THIS line sat, so it seeds the fill closer to the right balloon than a
@@ -2413,20 +2481,22 @@ function bornBox(p, ln, imgX, imgY, measured) {
   let fit =
     measured !== undefined ? measured : (balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY));
   let g = fit ? fittedRect(p, fit, style.align) : null;
+  let rect = null;
   // The two are dropped together, deliberately: a fit the box was not sized from
   // is a fit the box should not be laid out to either, and carrying one while
   // placing from the block would leave the rectangle and its line breaks
   // describing two different bubbles.
   if (!g) {
     fit = null;
-    const rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
+    rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
     // Skipped whenever there IS a rect, because `placementRect` ignores the
     // fallback pair in that case and the measurement could not change the answer.
+    // Skipped when the solver is about to size the box from the text anyway.
     // And skipped with no canvas, for the reason `autoFitBox` asks the same
     // question: every metric is a stand-in there, which is fine for deciding a
     // line break in a test and not fine for a number written into the user's
     // document. Either way the old constants stand.
-    const bal = rect || !canMeasure() ? null : balancedBoxSize(lineText(ln), style);
+    const bal = rect || solvable || !canMeasure() ? null : balancedBoxSize(text, style);
     g = placementRect(p, rect, imgX, imgY, bal?.w ?? 220, bal?.h ?? 92);
   }
   const b = {
@@ -2445,10 +2515,10 @@ function bornBox(p, ln, imgX, imgY, measured) {
     // unchanged: there is no path from `updateTag` to a box, only from a
     // deliberate apply. A line with no tags, or tags with nothing set, comes
     // back with the inherited style untouched, which is what makes tags optional.
-    // Computed above rather than here, because the balanced fallback size has to
-    // measure this line's text in the style it is about to be set in - a box
-    // sized against the inherited size and then born at a tag's larger one would
-    // be the wrong shape from its first frame.
+    // Computed above rather than here, because the box has to be sized from this
+    // line's text in the style it is about to be set in - a box sized against
+    // the inherited size and then born at a tag's larger one would be the wrong
+    // shape from its first frame.
     style,
     // The balloon this box was fitted to, or null when it was not. Written on
     // every placed box either way so the field is never absent - see the same
@@ -2456,14 +2526,67 @@ function bornBox(p, ln, imgX, imgY, measured) {
     // below (`$state.snapshot(b)` takes the whole box), so an undo of a
     // placement takes the fit with it.
     fit,
+    auto: normalizeAuto({ refSize: style.size }),
   };
   // Before the push and before the record, so the one `place` entry this gesture
-  // writes carries the height the user is actually looking at. A box whose line
+  // writes carries the box the user is actually looking at. A box whose line
   // already has its translation typed in the queue is placed at the size that
   // text needs; an empty one is placed at the bubble's size and grows as it is
   // filled in, through `setBoxText`.
-  autoFitBox(b, p);
+  if (!(solvable && solveBorn(b, p, text, rect ? g : null, imgX, imgY))) autoFitBox(b, p);
   return b;
+}
+
+// The solver's answer, written onto a box being born. `block` is the inset
+// detector rectangle when the box was placed from one: its width is kept and
+// its centre is where the box goes. Answers false when there was nothing the
+// solver would lay out (text on a curve), so the caller places the box as
+// before.
+function solveBorn(b, p, text, block, imgX, imgY) {
+  const refSize = b.auto.refSize;
+  const region = b.fit ?? (block ? { kind: 'hint', ...block } : { kind: 'hint', x: imgX, y: imgY, w: 0, h: 0 });
+  const r = solveLayout({
+    text,
+    style: b.style,
+    refSize,
+    region,
+    locks: block ? { width: true } : null,
+    opts: {
+      minSize: Math.max(minFontSize, 0.75 * refSize),
+      minW: MIN_BOX_W,
+      minH: MIN_BOX_H,
+      box: block,
+      page: p,
+      strip: stripOf(p),
+    },
+  });
+  if (!r) return false;
+  Object.assign(b, ontoPage(p, r));
+  b.style.size = r.size;
+  writeReview(b, r.review);
+  b.auto.status = r.status;
+  b.auto.reason = r.reasons[0] ?? null;
+  return true;
+}
+
+// Whether the face a style names is loaded, so a measurement of it is a
+// measurement of what will be drawn (DET-4). One the page has asked for and
+// not got yet measures as the fallback family, and a size solved against that
+// is a size for a font nobody sees - so the box is placed as before instead,
+// and the face is asked for so the next placement has it. True where there is
+// no font set to ask (node, the realfont lane), and for a font string the set
+// cannot parse, which measures as the fallback on either path.
+function faceReady(style) {
+  const set = typeof document === 'undefined' ? null : document.fonts;
+  if (typeof set?.check !== 'function') return true;
+  const font = fontShorthand(style, style.size, familyFor(style));
+  try {
+    if (set.check(font)) return true;
+    set.load?.(font)?.catch?.(() => {});
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 // `target` is the page the click landed on. It defaults to the current one,

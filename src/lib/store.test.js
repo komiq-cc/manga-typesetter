@@ -3714,8 +3714,11 @@ describe('the style the next placed box follows', () => {
     expect(b.style.rotation).toBe(30);
   });
 
-  // The second half: no edit at all, just a click. Selecting a box adopts it.
-  it('is the box last clicked, even when nothing about it was changed', () => {
+  // The second half: no edit at all, just a click. Selecting a box adopts it -
+  // all but its size, which only a deliberate size change moves (FIT-1). This
+  // pinned the size following the click as well; that was the bug where one
+  // click on a big box set the size of every box placed after it.
+  it('is the box last clicked, even when nothing about it was changed, except for the size', () => {
     const c = place(1, 100, 100);
     c.style.size = 40;
     c.style.rotation = -20;
@@ -3728,7 +3731,7 @@ describe('the style the next placed box follows', () => {
     // Back to C, by clicking it. Nothing else happens.
     selectBox(c.id);
     const d = place(3, 400, 400);
-    expect(d.style.size).toBe(40);
+    expect(d.style.size).toBe(12);
     expect(d.style.rotation).toBe(-20);
   });
 
@@ -4022,6 +4025,56 @@ describe('font size remembered per tag', () => {
     tags.sizes[''] = 55;
     const id = addEmptyBox(100, 100);
     expect(byId(id).style.size).toBe(55);
+  });
+
+  // FIT-1: the memory is the size the user chose, so looking at a box is not
+  // choosing it. One click on a big SFX box used to set every later SFX box.
+  it('is not written by selecting a box, by click or by Tab', () => {
+    activateLine(2);
+    placeActiveAt(200, 200);
+    const sfx = page().boxes.find((b) => b.lineN === 2);
+    sfx.style.size = 60;
+    rememberStyle(sfx);
+    activateLine(4);
+    placeActiveAt(400, 400);
+    const big = page().boxes.find((b) => b.lineN === 4);
+    // Made big by something that is not a size edit on the selected box - an
+    // undo, a rescale, an older build - and then only clicked.
+    big.style.size = 120;
+    selectBox(null);
+    selectBox(big.id);
+    selectBox(sfx.id);
+    selectBox(big.id);
+    expect(tags.sizes.sfx).toBe(60);
+    expect(app.lastStyle.size).not.toBe(120);
+  });
+
+  it('is written by a size edit on the selected box, and nothing else about it', () => {
+    activateLine(1);
+    placeActiveAt(100, 100);
+    const b = page().boxes.find((x) => x.lineN === 1);
+    selectBox(b.id);
+    b.style.color = '#ff0000';
+    rememberStyle(b);
+    expect(tags.sizes['']).toBeUndefined();
+    b.style.size = 33;
+    rememberStyle(b);
+    expect(tags.sizes['']).toBe(33);
+    expect(app.lastStyle.size).toBe(33);
+  });
+
+  it('writes the reference size onto a box the solver manages', () => {
+    activateLine(1);
+    placeActiveAt(100, 100);
+    const b = page().boxes.find((x) => x.lineN === 1);
+    // Born with its record whether or not anything could be solved here, and
+    // with the size it was born at as its reference.
+    expect(b.auto).toMatchObject({ on: true, refSize: b.style.size, status: null });
+    selectBox(b.id);
+    b.style.size = 31;
+    rememberStyle(b);
+    expect(b.auto.refSize).toBe(31);
+    expect(tags.sizes['']).toBe(31);
   });
 
   it('restyleForBulk calls rememberSizeFor only when bulk mask includes size', () => {
