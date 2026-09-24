@@ -632,6 +632,71 @@ describe('re-fitting by hand', () => {
     loadProjectPages([{ id: 1, w: 500, h: 500, lines: [], boxes: [] }]);
     expect(refitBalloon('nope')).toBe(false);
   });
+
+  // DET-2. The same oval and column as the placement tests above, with a line
+  // long enough that its box grows past the balloon's outline. The fill used to
+  // be seeded from that grown rectangle, started on the paper outside the
+  // balloon, escaped - and the first refit of a box nobody had touched cleared
+  // its fit and grew it again (h 319 -> 405 in the review's measurement).
+  const ovalPage = () => {
+    const img = pageImage(500, 500);
+    drawEllipse(img, 250, 250, 130, 80);
+    drawGlyphColumn(img, 240, 180, 20, 140);
+    return img;
+  };
+  const LONG = 'We have to get out of here before the whole building comes down on top of us';
+  const geom = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size, fit: b.fit });
+
+  it('leaves an untouched box exactly as placement left it, however often it is pressed', () => {
+    const pages = withDetect([240, 180, 260, 320], true);
+    pages[0].lines[0].en = LONG;
+    loadProjectPages(pages);
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    const placed = geom(b);
+    expect(placed.fit?.kind).toBe('ellipse');
+    expect(refitBalloon(b.id)).toBe(true);
+    expect(geom(b)).toEqual(placed);
+    expect(refitBalloon(b.id)).toBe(true);
+    expect(geom(b)).toEqual(placed);
+  });
+
+  // The case the review measured: a box taller than its balloon crosses the
+  // outline, and a fill seeded from the box's own edges starts on the paper
+  // outside and escapes.
+  it('keeps the balloon of a box that reaches past its outline', () => {
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    const fit = b.fit;
+    b.y = 60;
+    b.h = 380;
+    expect(refitBalloon(b.id)).toBe(true);
+    expect(b.fit).toEqual(fit);
+  });
+
+  // The other half: a box placed while its page was not decoded took the
+  // detector's rectangle. Refitting it once the pixels are there has to give
+  // the box a fresh fitted placement would have given, not the fallback's
+  // x and w with a fit bolted on.
+  it('turns a fallback box into the box a fitted placement makes', () => {
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const want = geom(page().boxes[0]);
+
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = null;
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    expect(b.fit).toBe(null);
+
+    pixels = ovalPage();
+    expect(refitBalloon(b.id)).toBe(true);
+    expect(geom(b)).toEqual(want);
+  });
 });
 
 // ===========================================================================

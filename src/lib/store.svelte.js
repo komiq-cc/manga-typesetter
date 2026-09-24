@@ -2618,13 +2618,31 @@ export function placeDetectedInChapter() {
 // every render is not an option - it is a flood fill over a megapixel - so it is
 // a button, and this is what the button calls.
 //
-// The block is the BOX's own rectangle rather than the detector's, and that is
-// the whole reason this can answer a question placement could not: the box is
-// where the user has put it, so seeding a fill from inside it finds the balloon
-// the box is on now. A box sitting on bare paper, on a burst, or on a page whose
-// pixels are not decoded gets its fit cleared rather than left pointing at a
-// bubble it has been dragged away from - a stale fit is worse than none, because
-// the text is laid out to a curve that is no longer under it.
+// The fill is never seeded from the box's own rectangle. That rectangle is the
+// output of the last height fit, and a box whose text outgrew its balloon crosses
+// the outline: the fill's edge seeds start on the paper outside and it escapes,
+// so pressing the button on a box nobody touched cleared the fit it was placed
+// with (DET-2). The seeds, in order, each only while the box still covers its
+// centre - a box dragged onto another bubble has left all of them behind:
+//
+//   the detected block of the box's line - what placement seeded from, so an
+//   untouched box finds the balloon it was placed in;
+//   the stored fit's own rectangle, which lies inside the balloon it describes;
+//   and a click at the box's centre (`balloonFitAt`) - the box is where the user
+//   put it, and this finds the balloon it is on now.
+//
+// A box sitting on bare paper, on a burst, or on a page whose pixels are not
+// decoded gets its fit cleared rather than left pointing at a bubble it has been
+// dragged away from - a stale fit is worse than none, because the text is laid
+// out to a curve that is no longer under it.
+//
+// A fit that appears where there was none resizes an auto box to the balloon, the
+// way placement sizes it (`fittedRect`), so a box placed with the rectangle
+// fallback and refitted once its page is decoded ends up where a fitted
+// placement would have put it. A box that already had a fit keeps its rectangle:
+// the user may have sized it. Either way the ladder runs, as it does at
+// placement, so the same box on the same balloon gives the same answer however
+// often the button is pressed.
 //
 // Not recorded in the undo history. The fit is derived geometry rather than an
 // edit with a before and an after that the user typed, and every history entry
@@ -2637,19 +2655,38 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
   if (!b) return false;
   const before = b.fit;
-  const fit = balloonFitFor(p, [b.x, b.y, b.x + b.w, b.y + b.h]);
+  const fit = balloonUnder(p, b);
   b.fit = fit;
+  if (fit && !before && isAutoBox(boxCandidate(b, boxText(b, p)))) {
+    const g = fittedRect(p, fit);
+    if (g) Object.assign(b, g);
+  }
   // The height follows: a box laid out to a curve breaks into a different number
   // of lines than the same box laid out flat, and the rectangle has to describe
-  // that. Grow-only, and never the ladder: this writes no history entry, so a
-  // width or a size it changed could not be undone. What no longer fits is
-  // flagged.
-  refitBox(b, p);
+  // that. What no longer fits is flagged.
+  autoFitBox(b, p);
   if (fit) toast(`Fitted to the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box`);
   else if (before) toast('No balloon found under this box - layout is rectangular again');
   else toast('No balloon found under this box');
   markUnsaved();
   return !!fit;
+}
+
+// The balloon a box sits in, from the seeds `refitBalloon` describes.
+function balloonUnder(p, b) {
+  const covers = (x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  const centreOf = ([x1, y1, x2, y2]) => [(x1 + x2) / 2, (y1 + y2) / 2];
+  const blocks = [];
+  const det = (p.detect?.boxes ?? []).find((d) => d.n === b.lineN && Array.isArray(d.box) && d.box.length === 4);
+  if (det) blocks.push(det.box);
+  const room = b.fit && inscribedRect(b.fit);
+  if (room) blocks.push([room.x, room.y, room.x + room.w, room.y + room.h]);
+  for (const block of blocks) {
+    if (!covers(...centreOf(block))) continue;
+    const fit = balloonFitFor(p, block);
+    if (fit) return fit;
+  }
+  return balloonFitAt(p, b.x + b.w / 2, b.y + b.h / 2);
 }
 
 // ---------- turning balloon fit on and off for one box ----------
@@ -2683,7 +2720,7 @@ export function toggleBalloonFit(boxId = app.selectedId, p = page()) {
   const geomBefore = fitGeom(b);
   const on = b.style.balloon !== false;
   b.style.balloon = !on;
-  if (!on && !b.fit) b.fit = balloonFitFor(p, [b.x, b.y, b.x + b.w, b.y + b.h]);
+  if (!on && !b.fit) b.fit = balloonUnder(p, b);
   // The height follows the flag: a box laid out to a curve breaks into a
   // different number of lines than the same box laid out flat.
   autoFitBox(b, p);
