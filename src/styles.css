@@ -757,9 +757,14 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
 /* inline editing */
 .tbox.editing{ outline:1.5px solid var(--tintline); cursor:text; }
 .txt.editable{
-  width:100%; outline:none; cursor:text; white-space:pre-wrap; word-break:break-word;
+  width:100%; outline:none; cursor:text; white-space:pre; tab-size:1;
   user-select:text; -webkit-user-select:text; caret-color:var(--tintline);
 }
+/* One element per line of the result (edit-lines.js), so, as with .tline, the
+   browser must not break them again. A tab is broken as a space. Curved text,
+   or text the lines cannot be laid over, is one element the browser wraps. */
+.txt.editable .el.wrap{ white-space:pre-wrap; word-break:break-word; }
+.txt.editable .ehy::after{ content:'-'; }
 
 /* curved (arc) text */
 .tbox .arc{ position:absolute; inset:0; }

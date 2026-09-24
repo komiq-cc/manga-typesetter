@@ -37,7 +37,7 @@
     caretAfter,
     isAtomicInput,
   } from './editor/field-undo.svelte.js';
-  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, textInset, contentWidth, balloonWidthsFor, inkShiftY } from './measure.js';
+  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, textInset, contentWidth, balloonWidthsFor, inkShiftY, charWidths } from './measure.js';
   import {
     strokeBands,
     rgba,
@@ -64,6 +64,7 @@
   import { liquifyMeshGesture, frameScaleFor } from './liquify-mesh.js';
   import { reviewReach, reviewTitle } from './review-label.js';
   import { inkOverhang } from './paint-reach.js';
+  import { editLines, drawEditLines, rawOffset, domPoint, stepChar } from './edit-lines.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   let { box, pageFrameEl, pg = page() } = $props();
@@ -694,20 +695,24 @@
   // has a curve to follow, else the closed circle, else the arc. All three
   // return the same shape, so the markup below draws any of them without
   // knowing which.
+  const curved = $derived(!!((s.path?.on && (s.path.pts?.length ?? 0) >= 2) || s.circle?.on || s.curve));
   const layout = $derived.by(() => {
-    if (editing || text === '') return null;
+    if (editing || text === '' || !curved) return null;
     if (s.path?.on && (s.path.pts?.length ?? 0) >= 2)
       return pathLayout(applyCase(text, s), s, effSize, box.w, box.h);
     if (s.circle?.on) return circleLayout(applyCase(text, s), s, effSize);
-    return s.curve && s.curve !== 0 ? arcLayout(applyCase(text, s), s, effSize) : null;
+    return arcLayout(applyCase(text, s), s, effSize);
   });
 
   // The lines this box draws, and the ONLY thing that draws them: the editor
   // renders what `layoutLines` returns rather than handing the raw text to the
   // browser, so what is on the canvas is what the exporter puts in the file -
-  // including the leading and trailing blank lines that function drops.
+  // including the leading and trailing blank lines that function drops. While
+  // it is being typed into too (`editSegs`), so the text does not jump when
+  // the edit ends - except curved text, which is not broken into lines at all
+  // and is typed into flat.
   const shaped = $derived.by(() => {
-    if (editing || layout) return null;
+    if (layout || (editing && curved)) return null;
     // Invalidate breaks when fonts load.
     app.fontsVersion;
     // Line breaking layout using box style dimensions and balloon fit.
@@ -723,10 +728,10 @@
   // How far the centred block moves so its INK, not its line boxes, is centred
   // in the box - the exporter's `inkShiftY`, in zoomed px because it is applied
   // to the zoomed text. Zero for any other `valign` and for curved text, which
-  // is placed glyph by glyph from the box centre. While the box is being typed
-  // into there are no shaped lines, so the typed paragraphs stand in: their
-  // first ascender and last descender are the ones that decide the shift, and
-  // measuring them keeps the text from jumping when the edit starts and ends.
+  // is placed glyph by glyph from the box centre. While curved text is being
+  // typed into there are no shaped lines, so the typed paragraphs stand in:
+  // their first ascender and last descender are the ones that decide the shift,
+  // and measuring them keeps the text from jumping when the edit starts and ends.
   const inkShift = $derived.by(() => {
     if (s.valign !== 'middle' || layout) return 0;
     const lines = shaped ?? (editing ? applyCase(text, s).split('\n') : null);
@@ -754,11 +759,9 @@
   // `box.w`, and `autoFitBoxTo` / `growToFit` is grow-only and writes `box.h`
   // only when it actually changes.
   //
-  // `shaped` is null in the two states that have no lines to count: a box being
-  // typed into (one contenteditable element, the browser's own wrapping) and a
-  // curved box (glyphs along an arc, never wrapped). Both fall back to
-  // `autoFitBox`, which does its own breaking - and for the curved one refuses
-  // outright, exactly as it always has.
+  // `shaped` is null only for a curved box (glyphs along an arc, never
+  // wrapped), drawn or being typed into. It falls back to `autoFitBox`, which
+  // refuses it outright, exactly as it always has.
   $effect(() => {
     text;
     box.w;
@@ -1315,38 +1318,159 @@
   // Inline contenteditable undo stack.
   const fieldUndo = createFieldUndo();
 
-  function focusSelect(node) {
+  // ===== typing into the box (UX-4) =====
+  // The box being typed into shows the lines the result draws - `shaped`, laid
+  // over the raw text by `editLines` and drawn by `drawEditLines`, one element
+  // per line - instead of letting the browser wrap the raw text its own way. So
+  // the browser cannot be allowed to change that DOM: every edit is made to the
+  // raw text here, from where the browser says it goes, and the lines are drawn
+  // again from the result. Composition (an IME) is the one exception, because
+  // its text is not final until it ends; it is left to the browser and read
+  // back then.
+  const editSegs = $derived(editing && shaped ? editLines(text, applyCase(text, s), shaped) : null);
+  // What a line's hidden head or tail would take up on it, in zoomed px.
+  const hangWidth = (str) => charWidths(str, s, effSize).reduce((a, w) => a + w + effLs, 0);
+  // Where the caret goes when the lines are next drawn, as a raw offset.
+  let caretNext = null;
+  let composing = false;
 
-    node.textContent = boxText(box, pg);
-    resyncField(fieldUndo, node.textContent);
-    const sel = () => {
-      node.focus();
-      const r = document.createRange();
-      r.selectNodeContents(node);
-      const s = window.getSelection();
-      s.removeAllRanges();
-      s.addRange(r);
-    };
-    sel();
-    return {};
+  function editField(node) {
+    let first = true;
+    $effect(() => {
+      editSegs;
+      text;
+      effSize;
+      effLs;
+      if (composing) return;
+      untrack(() => {
+        if (first) {
+          first = false;
+          resyncField(fieldUndo, text);
+          node.focus();
+          drawEdit(node, null);
+        } else drawEdit(node, caretNext ?? caretNow(node) ?? text.length);
+        caretNext = null;
+      });
+    });
+  }
+
+  // Draws the lines and puts the caret at raw offset `caret`, or selects all.
+  function drawEdit(node, caret) {
+    drawEditLines(node, text, editSegs, hangWidth);
+    const r = document.createRange();
+    if (caret == null) r.selectNodeContents(node);
+    else {
+      const [c, i] = domPoint(node, Math.min(caret, text.length));
+      r.setStart(c, i);
+      r.collapse(true);
+    }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
+  function caretNow(node) {
+    const sel = window.getSelection();
+    return sel.rangeCount ? rawOffset(node, sel.focusNode, sel.focusOffset) : null;
+  }
+
+  // The raw span an edit replaces: where the browser says it goes, else the
+  // selection.
+  function editSpan(node, e) {
+    const sel = window.getSelection();
+    const r = e?.getTargetRanges?.()[0] ?? (sel.rangeCount ? sel.getRangeAt(0) : null);
+    if (!r) return null;
+    const a = rawOffset(node, r.startContainer, r.startOffset);
+    const b = rawOffset(node, r.endContainer, r.endOffset);
+    return a == null || b == null ? null : [Math.min(a, b), Math.max(a, b)];
   }
 
   // setBoxText routes text to line for free-typed boxes.
-  function onEditInput(e) {
-    const v = e.currentTarget.innerText;
+  function commitEdit(v, caret, inputType) {
+    if (v === text) return;
+    caretNext = caret;
     setBoxText(box, v);
-    recordFieldEdit(fieldUndo, v, { atomic: isAtomicInput(e.inputType) });
+    recordFieldEdit(fieldUndo, v, { atomic: isAtomicInput(inputType) });
     markUnsaved();
   }
+
+  function replaceSpan(node, [a, b], ins, inputType) {
+    const v = node.textContent;
+    commitEdit(v.slice(0, a) + ins + v.slice(b), a + ins.length, inputType);
+  }
+
+  function onEditBeforeInput(e) {
+    const t = e.inputType;
+    if (e.isComposing || t.includes('Composition')) return;
+    e.preventDefault();
+    const node = e.currentTarget;
+    if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
+    const span = editSpan(node, e);
+    if (!span) return;
+    if (t === 'insertParagraph' || t === 'insertLineBreak') return replaceSpan(node, span, '\n', t);
+    if (t.startsWith('insert')) {
+      const ins = e.data ?? e.dataTransfer?.getData('text/plain');
+      if (ins != null) replaceSpan(node, span, ins.replace(/\r\n?/g, '\n'), t);
+      return;
+    }
+    if (!t.startsWith('delete')) return;
+    // A Backspace at the start of a line is given as the join of two line
+    // elements, which is no text at all; in the raw text it is the character
+    // before (the space the line wrapped at, the Return).
+    const [a, b] = span;
+    const v = node.textContent;
+    const back = t.includes('Backward');
+    replaceSpan(node, a < b ? span : back ? [stepChar(v, a, -1), a] : [a, stepChar(v, a, 1)], '', t);
+  }
+
+  function onEditPaste(e) {
+    e.preventDefault();
+    const node = e.currentTarget;
+    const span = editSpan(node);
+    const ins = e.clipboardData?.getData('text/plain') ?? '';
+    if (span) replaceSpan(node, span, ins.replace(/\r\n?/g, '\n'), 'insertFromPaste');
+  }
+
+  // The browser's copy of the lines has a Return at every wrap and the hidden
+  // spaces; what was selected is a slice of the raw text.
+  function onEditCopy(e) {
+    const node = e.currentTarget;
+    const span = editSpan(node);
+    if (!span || span[0] === span[1]) return;
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', node.textContent.slice(...span));
+    if (e.type === 'cut') replaceSpan(node, span, '', 'deleteByCut');
+  }
+
+  // Whatever the browser did change - a composition, an input it would not let
+  // be cancelled - is read back as raw text, and the lines drawn again.
+  function readBack(node) {
+    if (!node.isConnected) return;
+    const caret = caretNow(node);
+    const v = node.textContent;
+    if (v !== text) commitEdit(v, caret ?? v.length, 'insertText');
+    else drawEdit(node, caret ?? v.length);
+  }
+  function onEditInput(e) {
+    if (!composing) readBack(e.currentTarget);
+  }
+  function onCompositionStart() {
+    composing = true;
+  }
+  function onCompositionEnd(e) {
+    composing = false;
+    const node = e.currentTarget;
+    // WebKit ends the composition before its last input lands.
+    setTimeout(() => readBack(node));
+  }
+
   function onEditBlur(e) {
-    endEdit(e.currentTarget.innerText);
+    endEdit(e.currentTarget.textContent);
   }
   function onEditKey(e) {
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-
       e.preventDefault();
-      const next = e.shiftKey ? redoField(fieldUndo) : undoField(fieldUndo);
-      if (next != null) restoreEdit(e.currentTarget, next);
+      stepField(e.currentTarget, e.shiftKey);
       return;
     }
     if (e.key === 'Escape') {
@@ -1355,20 +1479,12 @@
     }
   }
 
-  // Restore plain text content and caret position.
-  function restoreEdit(node, value) {
-    const caret = caretAfter(node.innerText, value);
-    node.textContent = value;
-    const t = node.firstChild;
-    const r = document.createRange();
-    if (t) r.setStart(t, Math.min(caret, t.textContent.length));
-    else r.setStart(node, 0);
-    r.collapse(true);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(r);
-
-    setBoxText(box, value);
+  // One step of the field's own undo; the caret goes where the text changed.
+  function stepField(node, redo) {
+    const next = redo ? redoField(fieldUndo) : undoField(fieldUndo);
+    if (next == null) return;
+    caretNext = caretAfter(node.textContent, next);
+    setBoxText(box, next);
     markUnsaved();
   }
 
@@ -1483,8 +1599,15 @@
       class="txt editable"
       contenteditable="true"
       style="{editStyle}{inkShift ? `transform:translateY(${inkShift}px);` : ''}"
-      use:focusSelect
+      use:editField
+      onbeforeinput={onEditBeforeInput}
       oninput={onEditInput}
+      oncompositionstart={onCompositionStart}
+      oncompositionend={onCompositionEnd}
+      onpaste={onEditPaste}
+      oncopy={onEditCopy}
+      oncut={onEditCopy}
+      ondragstart={(e) => e.preventDefault()}
       onblur={onEditBlur}
       onkeydown={onEditKey}
     ></div>
