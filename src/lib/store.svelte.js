@@ -77,7 +77,7 @@ import { neededHeight, growToFit, hasHangul } from './typeset.js';
 // app's answer to "where do the pixels come from", and it answers null wherever
 // there is no canvas - which is to say under node, where every test below takes
 // the fallback path exactly as a page nobody has opened does.
-import { detectBalloon, detectBalloonAt, inscribedRect, shapeContainsPoint } from './balloon.js';
+import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint } from './balloon.js';
 import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
 // One-way, and it must stay that way: the brush tool's state module knows only
 // its own defaults, so `setTool` can disarm it without the two ever cycling.
@@ -2144,15 +2144,26 @@ export function transposeRect(rect) {
 // rectangle is a better answer than. Real fits on real bubbles score above 0.8.
 const MIN_FIT_CONFIDENCE = 0.5;
 
-// The box geometry a fitted shape implies: the largest rectangle that fits
-// inside the balloon, minus the safety inset `balloon.js` applies for us, pushed
-// onto the page by the same clamp `placementRect` uses.
+// The box geometry a fitted shape implies: `balloonFrame` - the balloon less the
+// safety inset `balloon.js` applies for us, as wide as it is at its widest and
+// as tall as its inscribed rectangle - pushed onto the page by the same clamp
+// `placementRect` uses.
+//
+// It used to be the inscribed rectangle, whose width is about 70% of the
+// balloon's. The lines are capped at the box, so every one of them came out that
+// wide and a fitted box laid its text out as a rectangle (GEO-1). At the full
+// width the balloon's rows decide every line and the box still holds them all.
+//
+// Flush text still gets the inscribed rectangle. Only centred text follows the
+// balloon's rows (`balloonWidthsFor`); a left- or right-aligned block sets flat
+// from the box's edge, and the one rectangle whose every row is inside the curve
+// is the inscribed one.
 //
 // Pure and exported for the same reason `placementRect` is - "what size is a box
 // on this bubble" is arithmetic worth pinning down without a canvas anywhere
 // near it.
-export function fittedRect(p, shape) {
-  const r = inscribedRect(shape);
+export function fittedRect(p, shape, align) {
+  const r = align === 'left' || align === 'right' ? inscribedRect(shape) : balloonFrame(shape);
   if (!r || !(r.w > 0) || !(r.h > 0)) return null;
   const w = Math.max(MIN_BOX_W, r.w);
   const h = Math.max(MIN_BOX_H, r.h);
@@ -2343,7 +2354,7 @@ function bornBox(p, ln, imgX, imgY) {
   // click can when the two disagree. The click is the answer when there is no
   // block, which is most of the time in paste mode.
   let fit = balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY);
-  let g = fit ? fittedRect(p, fit) : null;
+  let g = fit ? fittedRect(p, fit, style.align) : null;
   // The two are dropped together, deliberately: a fit the box was not sized from
   // is a fit the box should not be laid out to either, and carrying one while
   // placing from the block would leave the rectangle and its line breaks
@@ -2660,7 +2671,7 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   const fit = balloonUnder(p, b);
   b.fit = fit;
   if (fit && !before && isAutoBox(boxCandidate(b, boxText(b, p)))) {
-    const g = fittedRect(p, fit);
+    const g = fittedRect(p, fit, b.style.align);
     if (g) Object.assign(b, g);
   }
   // The height follows: a box laid out to a curve breaks into a different number

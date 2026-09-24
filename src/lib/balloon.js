@@ -1186,6 +1186,34 @@ export function inscribedRect(shape, opts = {}) {
   return { x: s.cx - w / 2, y: s.cy - h / 2, w, h };
 }
 
+// The text box a fitted shape is placed at: as wide as the inset shape is at its
+// widest, and as tall as its inscribed rectangle.
+//
+// The width is the point (GEO-1). A centred block is broken to the balloon's own
+// rows (`interiorLineWidths`), and the layout caps every row at the box's content
+// width so no line is ever wider than the rectangle the user drags. A box at the
+// inscribed rectangle is only 70% of the ellipse across, and every row inside
+// its height has at least that much room - so the cap bound on every line of
+// every block that fitted, and the oval came out a rectangle. At the inset
+// shape's full width the widest row IS the box: the cap never binds, the top and
+// bottom lines keep their taper, and the box still encloses every line, because
+// no row is wider than the inset shape.
+//
+// The height stays the inscribed rectangle's. A block placed at the full height
+// would start on a top row with no room in it; auto height grows the box from
+// here as the text needs, as it always has.
+//
+// A rectangle is its own frame: the inset rectangle, exactly `inscribedRect`.
+export function balloonFrame(shape, opts = {}) {
+  if (!shape) return null;
+  const o = { ...BALLOON_DEFAULTS, ...opts };
+  const s = insetShape(shape, o);
+  if (s.kind === 'rect') return { x: s.x, y: s.y, w: s.w, h: s.h };
+  const w = 2 * s.rx;
+  const h = s.ry * Math.SQRT2;
+  return { x: s.cx - w / 2, y: s.cy - h / 2, w, h };
+}
+
 // The usable width of each line of a block of `lineCount` lines of `lineHeight`,
 // laid out inside the shape and anchored by `valign` ('top' | 'middle' |
 // 'bottom', as everywhere else in the app).

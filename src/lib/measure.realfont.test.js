@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
-import { app, page, loadProjectPages, placeDetectedOnPage, fontCssFor, autoFitBox, boxText } from './store.svelte.js';
-import { boxCandidate, placeBlock, boxInkRect } from './contain.js';
+import { app, page, loadProjectPages, placeDetectedOnPage, fontCssFor, autoFitBox, boxText, fittedRect } from './store.svelte.js';
+import { boxCandidate, placeBlock, boxInkRect, containBox } from './contain.js';
 import {
   canMeasure,
   lineWidth,
@@ -428,6 +428,42 @@ describe('real glyph ink stays inside the box', () => {
     expect(box.w).toBeCloseTo(200, 6);
     expect(box.style.size).toBe(30);
     containedOrFlagged(box, p);
+  });
+
+  // GEO-1: a box placed on an oval is as wide as the inset balloon, so the
+  // balloon's rows - not the box - decide how long each line is. The block keeps
+  // the oval's taper, every line is inside the row it is drawn on, and the box
+  // still holds all of the ink.
+  it.each(['Comic Neue', 'DejaVu Sans'])('%s: an oval block keeps its taper inside the frame', (font) => {
+    const text = 'Nobody told me the lighthouse keeper had a cat, or that the cat had opinions.';
+    const fit = { kind: 'ellipse', cx: 400, cy: 300, rx: 134, ry: 174 };
+    const s = styleFor(font);
+    const g = fittedRect({ w: 800, h: 600 }, fit);
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, ...g, fit, style: s }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    expect(box.w).toBe(g.w);
+    const cand = boxCandidate(box, boxText(box, p));
+    const place = placeBlock(cand);
+    const n = place.lines.length;
+    expect(n).toBeGreaterThan(3);
+    const rows = balloonWidthsFor(box, box.style, SIZE)(n);
+    // Tapered: the outer rows are narrower than the box, which they never were
+    // at the inscribed rectangle.
+    expect(rows[0]).toBeLessThan(contentWidth(box.w, box.style) - 10);
+    place.lines.forEach((ln, i) => expect(lineWidth(ln, box.style, SIZE)).toBeLessThanOrEqual(rows[i] + 1e-6));
+    expect(containBox(cand, place).fits).toBe(true);
+    expect(box.review).toBeUndefined();
+    expect(inkPastBox(box, p).worst).toBeLessThanOrEqual(TOLERANCE);
   });
 });
 

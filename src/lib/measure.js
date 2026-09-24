@@ -758,10 +758,19 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
 // round differently.
 //
 // Returns null - meaning "no per-line widths, use the flat content width" - for
-// a box with no fit, a malformed one, or a box whose style has balloon layout
-// switched off. That null is what makes the promise "a box with no fit produces
-// byte-identical output to today" true by construction rather than by testing:
-// `layoutLines` ignores an absent `widthsFor` entirely.
+// a box with no fit, a malformed one, a box whose style has balloon layout
+// switched off, or text that is not centred. That null is what makes the promise
+// "a box with no fit produces byte-identical output to today" true by
+// construction rather than by testing: `layoutLines` ignores an absent
+// `widthsFor` entirely.
+//
+// Only centred text follows the balloon. A row's room is symmetric about the
+// balloon's centre, and centred lines are too, so a line no wider than its row
+// sits inside the curve at both ends. A left- or right-aligned line starts at
+// the box edge, not at the curve, and a tapered width does not move it off that
+// edge: it would still start outside the curve on the top and bottom rows. Doing
+// that right needs an x per line, from each row's own edge, in the editor, the
+// exporter and the PSD alike; until then flush text sets flat, as it always has.
 //
 // Two adjustments to what `balloon.js` hands back, and both are the caller's own
 // debt rather than something that module could have done:
@@ -772,15 +781,15 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
 //   flat call site takes off through `contentWidth` - so the same inset comes
 //   off each side here.
 //
-//   the box's own content width is a ceiling. The box is placed at the balloon's
-//   INSCRIBED rectangle, which for an ellipse is about 70% of its bounding box,
-//   while the interior width across the middle of that same ellipse is the full
-//   100%. Left uncapped, the middle lines of every fitted box would be laid out
-//   wider than the rectangle the user drags, resizes and aligns - the box would
-//   stop describing its own text, which is the bug `autoFitBox` exists to
-//   prevent on the other axis. Capped, the fit can only ever narrow a line
-//   relative to today, and it narrows exactly the lines that would otherwise run
-//   into the curve: the first and the last.
+//   the box's own content width is a ceiling. No line is laid out wider than the
+//   rectangle the user drags, resizes and aligns - past it the box would stop
+//   describing its own text (the bug `autoFitBox` exists to prevent on the other
+//   axis), and the PSD's paragraph frame, which is the content box, would re-wrap
+//   the line. A box placed on a balloon is as wide as the balloon's inset
+//   interior (`balloonFrame`), so the widest row is exactly the content width and
+//   the ceiling never binds: every row keeps its taper. It binds only on a box
+//   narrower than the balloon - narrowed by hand, or placed before boxes were
+//   sized that way - where it flattens the rows that the box is too narrow for.
 //
 // The widths are read off the shape in PAGE coordinates while the block is
 // positioned inside the shape by the style's own `valign`. A box dragged away
@@ -794,6 +803,7 @@ export function balloonWidthsFor(box, style, sizePx) {
   // existed and the state `layoutLines` treats as "just wrap it".
   if (!typesetEnabled()) return null;
   if (!box || !style || style.balloon === false) return null;
+  if (style.align === 'left' || style.align === 'right') return null;
   const shape = normalizeFit(box.fit);
   if (!shape) return null;
   const inset = textInset(style);

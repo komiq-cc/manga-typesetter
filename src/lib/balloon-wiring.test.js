@@ -5,9 +5,9 @@ import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 // ===========================================================================
 // `balloon.js` and its own test file prove that a shape can be recovered from a
 // page's pixels. Nothing in either of them says the app ever asks. This file is
-// about the wiring: that a click places a box at the balloon's inscribed
-// rectangle, that the shape is kept on the box, that every layout path lays text
-// out inside it, that a save and a PSD round trip carry it, and - the half that
+// about the wiring: that a click places a box on the balloon's frame, that the
+// shape is kept on the box, that every layout path lays text out inside it,
+// that a save and a PSD round trip carry it, and - the half that
 // matters most - that all four of the ways a fit can fail land the user on
 // exactly the behaviour they had before any of this existed.
 //
@@ -59,7 +59,7 @@ const { balloonWidthsFor, textInset, contentWidth, layoutLines, setTypesetEnable
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
 setTypesetEnabled(true);
-const { inscribedRect } = await import('./balloon.js');
+const { inscribedRect, balloonFrame } = await import('./balloon.js');
 const { defaultStyle, normalizeStyle, normalizeFit } = await import('./data.js');
 const { serializePage } = await import('./psd.js');
 const hist = await import('./editor/history.svelte.js');
@@ -168,7 +168,7 @@ describe('placement, when the page can be looked at', () => {
     return img;
   };
 
-  it('sizes and centres the box on the balloon’s inscribed rectangle', () => {
+  it('sizes and centres the box on the balloon’s frame', () => {
     loadProjectPages(withDetect([240, 180, 260, 320], true));
     pixels = ovalPage();
     placeActiveAt(250, 250);
@@ -182,10 +182,15 @@ describe('placement, when the page can be looked at', () => {
     expect(b.fit.cx).toBeCloseTo(250, -1);
     expect(b.fit.cy).toBeCloseTo(250, -1);
 
-    // And the box is that shape's inscribed rectangle - not the detector's rect
-    // inset by 8%, which is what it would have been.
-    const r = inscribedRect(b.fit);
+    // And the box is that shape's frame - not the detector's rect inset by 8%,
+    // which is what it would have been. GEO-1 changed it from the inscribed
+    // rectangle: as wide as the inset balloon, so its rows are not all capped
+    // to one width, and as tall as the inscribed rectangle, as before.
+    const r = balloonFrame(b.fit);
     expect([b.x, b.y, b.w, b.h].map(round2)).toEqual([r.x, r.y, r.w, r.h].map(round2));
+    const ins = inscribedRect(b.fit);
+    expect(round2(b.w)).toBe(round2(ins.w * Math.SQRT2));
+    expect(round2(b.h)).toBe(round2(ins.h));
     // Read in absolute terms so the claim survives a change of helper: the
     // detected block was 20 wide and 140 tall, and the box is the other way up.
     expect(b.w).toBeGreaterThan(150);
@@ -412,15 +417,59 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
     for (const v of w) expect(v).toBeGreaterThan(0);
   });
 
-  // The box is placed at the balloon's INSCRIBED rectangle, so the interior
-  // across the middle of the same ellipse is wider than the box. Uncapped, the
-  // middle lines would be laid out past the rectangle the user drags.
+  // This box is narrower than the balloon - 200 across a 234 interior, as a box
+  // narrowed by hand is, or one placed at the inscribed rectangle before GEO-1 -
+  // so the interior across the middle of the ellipse is wider than the box.
+  // Uncapped, the middle lines would be laid out past the rectangle the user
+  // drags.
   it('never hands back more room than the box itself has', () => {
     const b = boxWith(ell);
     const contentW = contentWidth(b.w, b.style);
     for (const v of balloonWidthsFor(b, b.style, b.style.size)(6)) {
       expect(v).toBeLessThanOrEqual(contentW);
     }
+  });
+
+  // GEO-1, the review's own case: a balloon whose inset interior is 120x160
+  // (134x174 less the 14px cap on `safetyInset`), six lines of 30. At the
+  // inscribed rectangle the box was 169.7 wide and every row was capped to its
+  // 165.7 content width - a rectangle. At the frame the rows keep the balloon's
+  // taper, less the box's inset, and every one of them is inside the box.
+  it('keeps the taper of every row on a box placed at the frame', () => {
+    const fit = { kind: 'ellipse', cx: 400, cy: 400, rx: 134, ry: 174 };
+    const g = fittedRect({ w: 1000, h: 1000 }, fit);
+    expect(round2(g.w)).toBe(240);
+    expect(round2(g.h)).toBe(round2(160 * Math.SQRT2));
+    const b = { ...boxWith(fit, { lineHeight: 1.5, strokes: [] }), ...g };
+    const inset = textInset(b.style);
+    expect(inset).toBe(2);
+    const w = balloonWidthsFor(b, b.style, b.style.size)(6);
+    expect(w.map((v) => Math.round((v + 2 * inset) * 10) / 10)).toEqual([198.4, 222.5, 235.7, 235.7, 222.5, 198.4]);
+    const contentW = contentWidth(b.w, b.style);
+    expect(contentW).toBe(236);
+    for (const v of w) expect(v).toBeLessThanOrEqual(contentW);
+  });
+
+  // Only centred text follows the balloon: a flush line starts at the box's
+  // edge, not at the curve, so a tapered width would not keep it inside.
+  it('answers null for left- and right-aligned text', () => {
+    for (const align of ['left', 'right']) {
+      const b = boxWith(ell, { align });
+      expect(balloonWidthsFor(b, b.style, b.style.size)).toBe(null);
+    }
+    const c = boxWith(ell, { align: 'center' });
+    expect(balloonWidthsFor(c, c.style, c.style.size)).not.toBe(null);
+    // So flush text is placed at the inscribed rectangle, the one box whose
+    // every row is inside the curve, and centred text at the frame.
+    const page = { w: 1000, h: 1000 };
+    for (const align of ['left', 'right']) {
+      const r = inscribedRect(ell);
+      const g = fittedRect(page, ell, align);
+      expect([g.x, g.y, g.w, g.h].map(round2)).toEqual([r.x, r.y, r.w, r.h].map(round2));
+    }
+    const f = balloonFrame(ell);
+    expect(fittedRect(page, ell, 'center').w).toBe(f.w);
+    expect(fittedRect(page, ell).w).toBe(f.w);
   });
 
   it('follows the block up and down with valign', () => {
@@ -780,12 +829,12 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     expect(b.fit.ry).toBeCloseTo(80, -1);
   });
 
-  it('sizes the box to that shape s inscribed rectangle, wider than tall', () => {
+  it('sizes the box to that shape s frame, wider than tall', () => {
     loadProjectPages(noDetect('HELLO THERE'));
     pixels = ovalPage();
     placeActiveAt(250, 250);
     const b = page().boxes[0];
-    const r = inscribedRect(b.fit);
+    const r = balloonFrame(b.fit);
     expect([b.x, b.w].map(round2)).toEqual([r.x, r.w].map(round2));
     expect(b.w).toBeGreaterThan(b.h);
   });
