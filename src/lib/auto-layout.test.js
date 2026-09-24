@@ -134,14 +134,21 @@ describe('the answer holds its constraints', () => {
   });
 
   // Where a fitted box is placed (GEO-1): centred text as wide as the inset
-  // ellipse, so its rows keep the taper; flush text, set flat, in the inscribed
-  // rectangle; a rectangle at its inset.
-  it('places centred text at the balloon frame, flush text at the inscribed rectangle', () => {
+  // ellipse, so its rows keep the taper; a rectangle at its inset. Flush text is
+  // set flat in the inscribed rectangle and then hugged (FIT-3), so its ragged
+  // block is centred in the balloon rather than against the rectangle's side.
+  it('places centred text at the balloon frame, flush text in the box that hugs it', () => {
     expect(solve().w).toBeCloseTo(balloonFrame(OVAL).w, 6);
-    const keys = 'WHERE DID YOU PUT THE KEYS?';
-    expect(solve({ text: keys, style: style({ align: 'left' }) }).w).toBeCloseTo(inscribedRect(OVAL).w, 6);
     const rect = { kind: 'rect', x: 100, y: 100, w: 300, h: 200 };
     expect(solve({ region: rect }).w).toBeCloseTo(inscribedRect(rect).w, 6);
+    const keys = 'WHERE DID YOU PUT THE KEYS?';
+    const s = style({ align: 'left' });
+    const r = solve({ text: keys, style: s });
+    const widest = Math.max(...r.lines.map((l) => lineWidth(l, s, r.size)));
+    expect(r.w).toBe(Math.ceil(widest) + 2 * textInset(s));
+    expect(r.w).toBeLessThan(inscribedRect(OVAL).w);
+    expect(r.x + r.w / 2).toBeCloseTo(OVAL.cx, 6);
+    expect(r.lines).toEqual(rendered(r, s, keys, OVAL));
   });
 
   // GEO-2: the rows hang from where the block is drawn, so the answer has to be
@@ -241,6 +248,27 @@ describe('a location without a balloon (GEO-3)', () => {
     const r = solveLayout({ text: 'A B EXTRAORDINARILY C', style: s, refSize: 26, region: null });
     expect(r.w).toBeGreaterThanOrEqual(lineWidth('EXTRAORDINARILY', s, 26) + 2 * textInset(s));
     expect(r.lines).toEqual(rendered(r, s, 'A B EXTRAORDINARILY C', null));
+  });
+
+  // FIT-3: the widths are the ones the breaker's own lines give. Twelve words at
+  // 26 (14.3 a character): four lines need 229 for SHOULD HAVE LEFT, and the
+  // closed form's guess at a four-line width, with its 6% slack, came to 227 -
+  // six lines of two words, a block as tall as it is wide.
+  it('finds the width a line count first appears at', () => {
+    const s = style();
+    const text = 'I TOLD YOU WE SHOULD HAVE LEFT BEFORE THE RAIN STARTED TODAY';
+    const r = solveLayout({ text, style: s, refSize: 26, region: null });
+    expect(r.lines).toEqual(['I TOLD YOU WE', 'SHOULD HAVE LEFT', 'BEFORE THE RAIN', 'STARTED TODAY']);
+    expect(r.lines).toEqual(rendered(r, s, text, null));
+  });
+
+  it('hugs its text', () => {
+    const s = style();
+    for (const text of [words, 'STAY BEHIND ME!', 'NO.']) {
+      const r = solveLayout({ text, style: s, refSize: 26, region: null, opts: { minW: 40 } });
+      const widest = Math.max(...r.lines.map((l) => lineWidth(l, s, r.size)));
+      expect(r.w).toBe(Math.max(40, Math.ceil(widest) + 2 * textInset(s)));
+    }
   });
 });
 

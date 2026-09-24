@@ -84,6 +84,18 @@ describe('solveLayout with real fonts', () => {
     holds(r, s, text, rect);
   });
 
+  // FIT-3: a box sized from the text alone hugs its lines, and has to hug their
+  // ink. Hugged to the advances, the outline was past the sides at every width,
+  // and the search shrank the font instead: 34 came back 29.
+  it('hugs the ink of a heavy outline without shrinking the text for it', () => {
+    const s = styleFor('Bangers', { strokes: [{ color: '#ffffff', width: 6, opacity: 1 }] });
+    const text = 'STAY BEHIND ME!';
+    const r = solveLayout({ text, style: s, refSize: 34, region: { kind: 'hint', x: 350, y: 540, w: 0, h: 0 } });
+    expect(r.status).toBe('no-region');
+    expect(r.size).toBe(34);
+    holds(r, s, text, null);
+  });
+
   it('sizes a box from a location alone, in an italic whose lean reaches past its advance', () => {
     const s = styleFor('DejaVu Sans', { italic: true });
     const r = solveLayout({ text: TEXT, style: s, refSize: 20, region: { kind: 'hint', x: 300, y: 300, w: 40, h: 120 } });

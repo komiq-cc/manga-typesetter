@@ -43,8 +43,9 @@
 // else chose. This chooses the size, the width and the lines together, for the
 // balloon: the largest size up to the user's reference size at which the text
 // fits the region, at the width a fitted box is placed at when that fits (see
-// `widthsAt`), and with only a location, at the width whose block reads best.
-// Pure - no store, no Svelte state - over its arguments and the metrics
+// `widthsAt`) - hugged to its lines when they are set flush - and with only a
+// location, at the width, of all the ways the breaker sets the text, whose
+// block reads best. Pure - no store, no Svelte state - over its arguments and the metrics
 // measure.js reads, so it can be tested and benchmarked alone.
 //
 // Hard constraints, never traded for score:
@@ -78,9 +79,9 @@
 // (DET-4). The solver cannot tell; the store checks before it asks.
 
 import { placeBlock, placeAtHeight, containBox, inkHeight, fitBox, CONTAIN_TOL, REVIEW_REASONS } from './contain.js';
-import { applyCase, lineWidth, textInset, blockYFor } from './measure.js';
+import { applyCase, lineWidth, textInset, blockYFor, layoutLines } from './measure.js';
 import { interiorLineWidths, inscribedRect, balloonFrame, safetyInset } from './balloon.js';
-import { neededHeight, balancedBlockSize, BALANCED_DEFAULTS } from './typeset.js';
+import { neededHeight, BALANCED_DEFAULTS } from './typeset.js';
 import { normalizeFit } from './data.js';
 
 export const SIZE_STEP = 0.5;
@@ -173,7 +174,13 @@ function rowsFit(ctx, c, place) {
 // whatever the height - the band's top, middle or bottom - so the lines do not
 // depend on the height they then decide; `placeAtHeight` lays them out again in
 // the one case they do (a locked position).
-function trial(ctx, size, w) {
+//
+// A box whose width is the text's own - `own`: with only a location, or hugged
+// in its balloon (`snug`) - is the width of its ink, not of its advances: it is
+// widened, once and about its centre, for ink past its sides (an outline, a
+// lean, a glyph wider than its advance), as any box is grown for ink past its
+// lines. A width the region decided is not; ink past it is a width that fails.
+function trial(ctx, size, w, own = !ctx.R?.shape) {
   const style = size === ctx.style.size ? ctx.style : { ...ctx.style, size };
   const base = { x: 0, y: 0, w, h: 0, style, text: ctx.text, fit: ctx.R?.shape ?? null };
   const place = placeBlock(frame(ctx, base, ctx.minH), NO_CACHE);
@@ -200,75 +207,76 @@ function trial(ctx, size, w) {
     : ctx.R?.shape
       ? place.blockH > ctx.R.height + CONTAIN_TOL
       : false;
+  if (own && !v.fits && !ctx.lk.width) {
+    const side = Math.max(v.overflow.l, v.overflow.r);
+    if (side > CONTAIN_TOL) return trial(ctx, size, w + 2 * Math.ceil(side), false);
+  }
   return { c, place: p, v, ok: v.fits && !tall && rowsFit(ctx, c, p) };
 }
 
-// The widths worth trying at a size.
+// The widths worth trying at a size, in order of preference: the first that
+// fits is the answer.
 //
-// In a balloon, in order of preference, and the first that fits is the answer:
-// the width a fitted box is placed at (`balloonFrame`, GEO-1) first, then
-// WIDTH_STEPS towards the other end of the balloon. Centred text is broken to
-// the ellipse's own rows, capped at the box, so its box is as wide as the inset
-// ellipse - where the cap never binds and the block keeps the balloon's taper -
-// and narrower only when that fails: with balloon layout off, the lines are set
-// flat and have to fit the rows they sit on. Flush text is set flat, so its box
-// starts at the inscribed rectangle, the one box whose rows all sit inside the
-// curve, and widens only for a word that rectangle cannot hold. A rectangle has
-// one width. With nothing but a location, scored (`score`), narrowest first so
-// a tie goes to the box that hugs its text: the widths that break the text into
-// a balanced block - the closed form's line count (`balancedBlockSize`) and two
-// either side of it, each as the width that gives that many lines with the
-// breaker's slack - `balancedBoxSize`'s search, which reads the layout memo and
-// so cannot be called from here - with every width no narrower than the longest
-// word, so a word the breaker cannot split is never the reason a width fails.
+// In a balloon: the width a fitted box is placed at (`balloonFrame`, GEO-1)
+// first, then WIDTH_STEPS towards the other end of the balloon. Centred text is
+// broken to the ellipse's own rows, capped at the box, so its box is as wide as
+// the inset ellipse - where the cap never binds and the block keeps the
+// balloon's taper - and narrower only when that fails: with balloon layout off,
+// the lines are set flat and have to fit the rows they sit on. Flush text is set
+// flat, so its box starts at the inscribed rectangle, the one box whose rows all
+// sit inside the curve, and widens only for a word that rectangle cannot hold
+// (and then hugs its lines - see `snug`). A rectangle has one width. With nothing
+// but a location, the text's own widths (`ownWidths`).
 function widthsAt(ctx, size) {
   const minW = ctx.minW;
   if (ctx.lk.width) return [ctx.box.w];
   const R = ctx.R;
-  if (R?.shape) {
-    const s = ctx.style;
-    const [from, to] = s.align === 'left' || s.align === 'right' ? [R.frameW, R.fullW] : [R.fullW, R.frameW];
-    const out = new Set();
-    for (let i = 0; i < WIDTH_STEPS; i++) out.add(Math.max(minW, from + ((to - from) * i) / (WIDTH_STEPS - 1)));
-    return [...out];
-  }
-  const o = BALANCED_DEFAULTS;
-  const s = { ...ctx.style, size };
-  const lh = size * (s.lineHeight > 0 ? s.lineHeight : 1);
-  const paras = applyCase(ctx.text, s)
-    .split('\n')
-    .filter((t) => /\S/.test(t));
-  let total = 0;
-  let word = 0;
-  for (const para of paras) {
-    total += lineWidth(para, s, size);
-    for (const tok of para.split(/\s+/)) if (tok) word = Math.max(word, lineWidth(tok, s, size));
-  }
-  const seed = balancedBlockSize(total, lh, o);
-  if (!seed) return [Math.max(minW, Math.ceil(word) + 2 * ctx.ti)];
-  const lo = Math.max(1, paras.length, seed.lines - 2);
-  const hi = Math.max(lo, Math.min(Math.round(o.maxLines), seed.lines + 2));
+  if (!R?.shape) return ownWidths(ctx, size);
+  const s = ctx.style;
+  const [from, to] = s.align === 'left' || s.align === 'right' ? [R.frameW, R.fullW] : [R.fullW, R.frameW];
   const out = new Set();
-  for (let n = hi; n >= lo; n--) {
-    const cw = Math.max(o.minWidth, (total / n) * o.slack, word);
-    out.add(Math.max(minW, Math.ceil(cw) + 2 * ctx.ti));
-  }
+  for (let i = 0; i < WIDTH_STEPS; i++) out.add(Math.max(minW, from + ((to - from) * i) / (WIDTH_STEPS - 1)));
   return [...out];
 }
+
+// With only a location, the width comes from the English (FIT-3): every
+// distinct way the breaker sets the text, from one line per paragraph down to a
+// word a line - laid out, then laid out again just narrower than its widest
+// line, until the next would split a word - each as the box that hugs it. Best
+// scored first (`score`), and of two that score alike the narrower. A width the
+// breaker's own lines decide rather than a closed form's guess at it, which a
+// few pixels of slack can put just short of the line count it was aiming for.
+function ownWidths(ctx, size) {
+  const s = { ...ctx.style, size };
+  const text = applyCase(ctx.text, s);
+  const lh = size * (s.lineHeight > 0 ? s.lineHeight : 1);
+  const hug = (w) => Math.max(ctx.minW, Math.ceil(w) + 2 * ctx.ti);
+  const word = widestOf(text.split(/\s+/), s);
+  const out = [];
+  let cw = Math.ceil(widestOf(text.split('\n'), s));
+  while (cw >= Math.ceil(word)) {
+    const lines = layoutLines(text, s, size, cw, null, NO_CACHE);
+    if (out.length && lines.length > BALANCED_DEFAULTS.maxLines) break;
+    const lw = widestOf(lines, s);
+    out.push({ w: hug(lw), score: score(ctx, lines, lw, lines.length * lh) });
+    cw = Math.min(cw - 1, Math.floor(lw) - 1);
+  }
+  if (!out.length) return [hug(word)];
+  return out.sort((a, b) => a.score - b.score || a.w - b.w).map((c) => c.w);
+}
+
+const widestOf = (lines, s) => lines.reduce((m, l) => Math.max(m, lineWidth(l, s, s.size)), 0);
 
 // Lower is better. The block's aspect - its widest line over its height -
 // against the aspect a balloon line is set to (`BALANCED_DEFAULTS`). On the
 // log, so too wide and too tall by the same factor cost the same. Every word
 // the breaker had to hyphenate costs as much as being off that aspect by a
 // factor of e: a width that keeps a long word whole beats a squarer block that
-// splits it. Ties go to the narrower box, which is tried first.
+// splits it.
 const HYPHEN_COST = 1;
-function score(ctx, t) {
-  const s = t.place.s;
-  let blockW = 0;
-  for (const line of t.place.lines) blockW = Math.max(blockW, lineWidth(line, s, s.size));
+function score(ctx, lines, blockW, blockH) {
   const target = BALANCED_DEFAULTS.targetAspect;
-  return Math.abs(Math.log(blockW / t.place.blockH / target)) + HYPHEN_COST * addedHyphens(ctx, t.place.lines);
+  return Math.abs(Math.log(blockW / blockH / target)) + HYPHEN_COST * addedHyphens(ctx, lines);
 }
 
 // Lines the breaker ended inside a word: the last token carries a '-' that no
@@ -284,18 +292,28 @@ function addedHyphens(ctx, lines) {
   return n;
 }
 
-// The best candidate that fits at this size, or null: in a balloon the first
-// that fits, with only a location the best scored.
+// The first candidate that fits at this size, or null.
 function bestAt(ctx, size) {
-  let best = null;
   for (const w of widthsAt(ctx, size)) {
     const t = trial(ctx, size, w);
-    if (!t?.ok) continue;
-    if (ctx.R?.shape) return t;
-    t.score = score(ctx, t);
-    if (!best || t.score < best.score) best = t;
+    if (ctx.curve) return null;
+    if (t.ok) return snug(ctx, size, t);
   }
-  return best;
+  return null;
+}
+
+// Flush text in an ellipse, in the box that hugs its lines (FIT-3): the block,
+// ragged on one side, is centred in the balloon instead of sitting against the
+// side of a rectangle the text does not fill - the inscribed rectangle's edge is
+// nowhere a reader can see. Kept only when it holds the same number of lines.
+// Centred text keeps the frame (GEO-1), and a rectangle's box is its own edge.
+function snug(ctx, size, t) {
+  const s = t.place.s;
+  if (ctx.R?.kind !== 'ellipse' || ctx.lk.width || (s.align !== 'left' && s.align !== 'right')) return t;
+  const w = Math.max(ctx.minW, Math.ceil(widestOf(t.place.lines, s)) + 2 * ctx.ti);
+  if (!(w < t.c.w)) return t;
+  const u = trial(ctx, size, w, true);
+  return u.ok && u.place.lines.length === t.place.lines.length && u.c.w < t.c.w ? u : t;
 }
 
 // A single word wider than the room its row has - what the flag should say
