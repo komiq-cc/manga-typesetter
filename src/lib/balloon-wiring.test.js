@@ -62,6 +62,7 @@ setTypesetEnabled(true);
 const { inscribedRect } = await import('./balloon.js');
 const { defaultStyle, normalizeStyle, normalizeFit } = await import('./data.js');
 const { serializePage } = await import('./psd.js');
+const hist = await import('./editor/history.svelte.js');
 
 // ---------------------------------------------------------------------------
 // The fixtures, lifted from balloon.test.js: an `ImageData`-shaped object built
@@ -696,6 +697,40 @@ describe('re-fitting by hand', () => {
     pixels = ovalPage();
     expect(refitBalloon(b.id)).toBe(true);
     expect(geom(b)).toEqual(want);
+  });
+
+  // UX-2: the button is an edit like any other, and the ladder can move the
+  // rectangle and the size as well as the fit, none of which an undo can
+  // re-derive.
+  it('is one undo step: fit, rectangle and size', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = null;
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    const fallback = geom(b);
+    pixels = ovalPage();
+    const placed = hist.peekStack().undo.length;
+    refitBalloon(b.id);
+    const fitted = geom(b);
+    expect(fitted).not.toEqual(fallback);
+    expect(hist.peekStack().undo.length).toBe(placed + 1);
+    hist.undo();
+    expect(geom(b)).toEqual(fallback);
+    hist.redo();
+    expect(geom(b)).toEqual(fitted);
+  });
+
+  it('records nothing when the press changed nothing', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const placed = hist.peekStack().undo.length;
+    refitBalloon(page().boxes[0].id);
+    expect(hist.peekStack().undo.length).toBe(placed);
   });
 });
 

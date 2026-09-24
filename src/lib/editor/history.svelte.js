@@ -52,12 +52,14 @@ const setActive = (p, n) => {
 
 // Geometry entries carry only the fields that changed. `size` lives on the
 // style rather than the box, and a resize changes it alongside w/h.
-// Inked boxes carry their scaled strokes in ink.
+// Inked boxes carry their scaled strokes in ink. A refit carries the balloon
+// fit, copied out so the box never shares an object with the entry.
 const setFields = (b, from) => {
   for (const k of Object.keys(from)) {
     if (k === 'size') b.style.size = from.size;
     else if (k === 'autoHeight') b.style.autoHeight = from.autoHeight;
     else if (k === 'ink') b.style.ink = structuredClone(from.ink);
+    else if (k === 'fit') b.fit = from.fit ? { ...from.fit } : null;
     else b[k] = from[k];
   }
 };
@@ -239,6 +241,16 @@ const KINDS = {
       // After the style, never before: the fit these two fields describe was
       // taken with that style in place, and a re-derivation triggered in between
       // would be measuring the wrong one.
+      restoreFit(b, e, dir, pageById(e.pageId));
+    },
+  },
+  // The Refit button (`refitBalloon`): the balloon fit, the rectangle and the
+  // size, all inside the two geometry records.
+  refit: {
+    label: 'that refit',
+    apply(e, dir) {
+      const b = boxOf(e);
+      if (!b) throw missing(e);
       restoreFit(b, e, dir, pageById(e.pageId));
     },
   },

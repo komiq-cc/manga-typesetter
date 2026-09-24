@@ -2644,17 +2644,19 @@ export function placeDetectedInChapter() {
 // placement, so the same box on the same balloon gives the same answer however
 // often the button is pressed.
 //
-// Not recorded in the undo history. The fit is derived geometry rather than an
-// edit with a before and an after that the user typed, and every history entry
-// kind carries a fixed set of fields (see history.svelte.js) that this is not
-// one of. What an undo of the surrounding edit does restore is the fit a
-// PLACEMENT wrote, because that rides inside the `place` entry's whole-box
-// snapshot. The remedy for an unwanted re-fit is the button again, or the
-// switch beside it.
+// One press is one undo step (UX-2): the `refit` entry carries the fit, the
+// rectangle and the size on either side, because the ladder can move all of
+// them and none of them can be re-derived on the way back. A press that changed
+// none of them records nothing, so an undo never lands on a step that does
+// nothing.
 export function refitBalloon(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
   if (!b) return false;
+  // A pending Inspector edit on this box would settle AFTER this one and record
+  // on top of it - the same reason `toggleBalloonFit` settles first.
+  settleEdits();
   const before = b.fit;
+  const geomBefore = refitGeom(b);
   const fit = balloonUnder(p, b);
   b.fit = fit;
   if (fit && !before && isAutoBox(boxCandidate(b, boxText(b, p)))) {
@@ -2665,12 +2667,20 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   // of lines than the same box laid out flat, and the rectangle has to describe
   // that. What no longer fits is flagged.
   autoFitBox(b, p);
+  const geomAfter = refitGeom(b);
+  if (JSON.stringify(geomAfter) !== JSON.stringify(geomBefore)) {
+    recordEdit({ t: 'refit', pageId: p.id, boxId: b.id, geomBefore, geomAfter });
+  }
   if (fit) toast(`Fitted to the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box`);
   else if (before) toast('No balloon found under this box - layout is rectangular again');
   else toast('No balloon found under this box');
   markUnsaved();
   return !!fit;
 }
+
+// What a refit can move, as its history entry records it. Plain copies, taken
+// before the fit is replaced, so the two sides never share an object.
+const refitGeom = (b) => ({ ...fitGeom(b), fit: b.fit ? $state.snapshot(b.fit) : null });
 
 // The balloon a box sits in, from the seeds `refitBalloon` describes.
 function balloonUnder(p, b) {
