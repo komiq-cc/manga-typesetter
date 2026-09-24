@@ -1331,6 +1331,20 @@ describe('what a line is drawn with that its advance does not say', () => {
 });
 
 describe('the grow-only paths', () => {
+  // GEO-2: a balloon's rows hang from the block's anchor, so a height change
+  // about the anchor keeps the lines, and one that moves it lays them out again.
+  it('re-places a fitted block only when its anchor moves', () => {
+    const fit = { kind: 'ellipse', cx: 400, cy: 300, rx: 130, ry: 100 };
+    const c = cand({ x: 290, y: 250, w: 220, h: 100, text: 'THE WORLD IS ENDING AND NOBODY CARES AT ALL', fit });
+    const place = placeBlock(c);
+    const grown = { ...c, y: c.y - 20, h: c.h + 40 };
+    expect(contain.placeAtHeight(place, grown).lines).toBe(place.lines);
+    const moved = { ...c, h: c.h + 40 };
+    const again = contain.placeAtHeight(place, moved);
+    expect(again.rowsKey).not.toBe(place.rowsKey);
+    expect(again.lines).toEqual(placeBlock(moved).lines);
+  });
+
   it('never change a width, a position across, or a size on opening', () => {
     const p = load([{ id: 'b1', lineN: null, text: 'AAAAAARRRRRGGGGGHHHH', x: 350, y: 280, w: 100, h: 10, style: style() }]);
     const b = byId('b1');

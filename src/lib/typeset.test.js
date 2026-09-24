@@ -22,7 +22,7 @@ import {
   layoutMemoSize,
   BOX_PAD,
 } from './measure.js';
-import { inscribedRect, safetyInset } from './balloon.js';
+import { inscribedRect, safetyInset, interiorLineWidths } from './balloon.js';
 
 // The measurer is injected precisely so this file can use one: a character is
 // one unit wide, so every expectation below can be read off the strings without
@@ -384,6 +384,46 @@ describe('balanceLines - determinism', () => {
     const before = balanceScored(text, 20, chars, { maxWords: 60, maxLines: 16 });
     expect(before.greedy).toBe(true);
     expect(before.lines.filter(alone)).toEqual(['SO']);
+  });
+});
+
+// ===== paragraphs on the rows they are drawn on (GEO-2) =====
+//
+// A balloon's rows belong to the whole block, so a paragraph is broken against
+// the rows it lands on, not against a block of its own lines. The oval is 26
+// wide and 8 tall, a line is 1 tall, and a line of `chars` is its length.
+describe('balanceLines - paragraphs on the rows of the whole block', () => {
+  const oval = (L) => interiorLineWidths({ kind: 'ellipse', cx: 0, cy: 0, rx: 13, ry: 4 }, 1, L, 'middle', { inset: 0 });
+  const onItsRow = (lines) => {
+    const rows = oval(lines.length);
+    return lines.every((ln, i) => ln.length <= rows[i] + 1e-9);
+  };
+  const text = 'WE HAVE TO GET OUT OF HERE\nBEFORE IT FINDS US AGAIN';
+
+  it('puts every line inside the row it is drawn on', () => {
+    // Alone, the first paragraph is one centred line with the oval's full 25.8
+    // of room, and so is the second - but together they are two rows of 25.2,
+    // and 26 characters do not go in one.
+    const alone = text.split('\n').flatMap((para) => balanceLines(para, oval, chars));
+    expect(alone).toEqual(['WE HAVE TO GET OUT OF HERE', 'BEFORE IT FINDS US AGAIN']);
+    expect(onItsRow(alone)).toBe(false);
+    const lines = balanceLines(text, oval, chars);
+    expect(lines).toEqual(['WE HAVE TO', 'GET OUT OF HERE', 'BEFORE IT FINDS US AGAIN']);
+    expect(onItsRow(lines)).toBe(true);
+  });
+
+  // `layoutLines` drops the blank lines at either end, so the block is drawn
+  // without them and they take no rows. One between two paragraphs is drawn,
+  // and does.
+  it('gives the blank paragraphs at the ends no rows, and one between paragraphs its own', () => {
+    expect(balanceLines(`\n${text}\n`, oval, chars)).toEqual(['', ...balanceLines(text, oval, chars), '']);
+    const gap = balanceLines(text.replace('\n', '\n\n'), oval, chars);
+    expect(gap[gap.indexOf('') - 1]).toBeDefined();
+    expect(onItsRow(gap)).toBe(true);
+  });
+
+  it('breaks a count across paragraphs on the same rows', () => {
+    for (const c of balanceCandidates(text, oval, chars)) expect(onItsRow(c.lines)).toBe(true);
   });
 });
 

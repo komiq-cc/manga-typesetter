@@ -791,11 +791,29 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
 //   narrower than the balloon - narrowed by hand, or placed before boxes were
 //   sized that way - where it flattens the rows that the box is too narrow for.
 //
-// The widths are read off the shape in PAGE coordinates while the block is
-// positioned inside the shape by the style's own `valign`. A box dragged away
-// from the balloon it was fitted to therefore keeps an oval profile that no
-// longer sits on any bubble - which is why the Inspector offers both a re-fit
-// and an off switch, and why neither is optional chrome.
+// The widths are read off the shape in PAGE coordinates, for the rows the block
+// is drawn on (GEO-2): its top is `box.y + blockYFor(...)`, where the editor,
+// the exporter and the PSD put it - less the few pixels a middle block's ink
+// centring moves it, which depends on the very lines being chosen and which the
+// balloon's safety inset absorbs. They used to be read for a block
+// placed inside the shape by `valign` alone, which is the right rows only for a
+// middle-aligned box centred on its balloon: a top-aligned block was measured
+// at the balloon's crown, a first row with almost no room, and broke into more
+// lines than the rows it is actually on need. A block drawn partly past the
+// curve - a box dragged away from its balloon - gets the rows of the nearest
+// place inside it (`interiorLineWidths`), which is why the Inspector offers
+// both a re-fit and an off switch, and why neither is optional chrome.
+//
+// Every line count hangs its block from one point - the top of the content box,
+// its middle or its bottom, by `valign` - and that ANCHOR is what the key
+// carries rather than the box's y and height. The rows move with it, and it is
+// what a height change anchored by `valign` (auto height, the ladder's height
+// step) leaves where it is, so growing a box does not break its lines again. It
+// is rounded to a thousandth of a pixel, in the key and in the arithmetic alike,
+// so the float noise of `y - grow / 2 + (h + grow) / 2` is not a new layout.
+//
+// Built for any rectangle, so a caller weighing a candidate box - the ladder, a
+// solver - asks it of that rectangle and gets the rows the box would draw on.
 export function balloonWidthsFor(box, style, sizePx) {
   // Balloon layout is part of the typesetting beta, so the switch is read here
   // rather than at each of the three call sites: with it off there are no
@@ -810,17 +828,21 @@ export function balloonWidthsFor(box, style, sizePx) {
   const contentW = contentWidth(box.w, style);
   const lineH = sizePx * (style.lineHeight ?? 1);
   const valign = style.valign ?? 'middle';
-  const fn = (lineCount) =>
-    interiorLineWidths(shape, lineH, lineCount, valign).map((w) =>
+  const anchor = Math.round((box.y + blockYFor(style, box.h, 0)) * 1000) / 1000;
+  const fn = (lineCount) => {
+    const blockH = lineCount * lineH;
+    const top = anchor + blockYFor(style, box.h, blockH) - blockYFor(style, box.h, 0);
+    return interiorLineWidths(shape, lineH, lineCount, valign, { top }).map((w) =>
       Math.max(1, Math.min(contentW, w - inset * 2)),
     );
+  };
   // What this closure IS, written down, so `layoutLines` can memoise a result
   // that depends on it. A callback cannot be a cache key - two closures built
   // from the same shape are different objects - and the alternative, hashing
   // the widths it hands back, means calling it, which is a share of the work
   // being avoided. Everything the closure captures is here; a `widthsFor` from
   // anywhere else carries no key and is simply not cached (see `memoKey`).
-  fn.key = JSON.stringify([shape, lineH, valign, contentW, inset]);
+  fn.key = JSON.stringify([shape, lineH, valign, anchor, contentW, inset]);
   return fn;
 }
 

@@ -19,7 +19,7 @@
 //       `opts.cache: false` keeps the layout out of measure.js's memo.
 //   placeAtHeight(place, cand)       -> `place` moved to `cand`'s height, for a
 //       candidate that differs from the one it was made for in `y`/`h` only.
-//       No new layout: line breaking does not read the height.
+//       No new layout unless the balloon's rows moved with the anchor.
 //   boxInkRect(cand, place?)         -> { x, y, w, h } box-local, or null (no ink).
 //       Everything the export paints for the box: glyphs, outline, shadows,
 //       hand-drawn ink, blur, smear, roughening, an include mask's cut and the
@@ -204,7 +204,8 @@ export function placeBlock(cand, opts) {
   // Guarded as `neededHeight` and `baselineInLine` guard it, so a style missing
   // the field is one line height to every reader rather than 0 to one of them.
   const lineH = size * (s.lineHeight > 0 ? s.lineHeight : 1);
-  const lines = layoutLines(text, s, size, contentWidth(cand.w, s), balloonWidthsFor(cand, s, size), opts);
+  const rows = balloonWidthsFor(cand, s, size);
+  const lines = layoutLines(text, s, size, contentWidth(cand.w, s), rows, opts);
   const { inks, shift } = blockInk(lines, s, size);
   const blockH = lines.length * lineH;
   const align = s.align === 'left' || s.align === 'right' ? s.align : 'center';
@@ -221,15 +222,20 @@ export function placeBlock(cand, opts) {
     blockY: blockYFor(s, cand.h, blockH, shift),
     anchorX: align === 'left' ? inset : align === 'right' ? cand.w - inset : cand.w / 2,
     baseY: baselineInLine(s, size),
+    rowsKey: rows?.key ?? null,
   };
 }
 
-// The same placement after a change of height alone. Line breaking does not
-// read the height - the balloon's per-line widths come off the shape, not the
-// box - so only the block's top moves, and the ladder's height steps do not pay
-// for a fresh layout of an unchanged block.
+// The same placement after a change of height alone. Line breaking reads the
+// height only through the balloon's rows, which hang from the point the block is
+// anchored to (`balloonWidthsFor`), and a height change anchored by `valign` -
+// every height step the ladder and auto height take - leaves that point where
+// it is. So only the block's top moves, and the height steps do not pay for a
+// fresh layout of an unchanged block. A step the page or the balloon clamped
+// moves the anchor, and gets one.
 export function placeAtHeight(place, cand) {
   if (place.isCurve) return placeBlock(cand, NO_CACHE);
+  if ((balloonWidthsFor(cand, place.s, place.s.size)?.key ?? null) !== place.rowsKey) return placeBlock(cand, NO_CACHE);
   return { ...place, blockY: blockYFor(place.s, cand.h, place.blockH, place.shift) };
 }
 

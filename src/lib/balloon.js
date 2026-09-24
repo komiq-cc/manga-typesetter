@@ -1216,7 +1216,12 @@ export function balloonFrame(shape, opts = {}) {
 
 // The usable width of each line of a block of `lineCount` lines of `lineHeight`,
 // laid out inside the shape and anchored by `valign` ('top' | 'middle' |
-// 'bottom', as everywhere else in the app).
+// 'bottom', as everywhere else in the app) - or, with `opts.top`, starting at
+// that page y, which is where a box actually draws it (GEO-2; see
+// `balloonWidthsFor` in measure.js). `valign` alone puts a top-aligned block at
+// the balloon's crown, which is not where a box's top-aligned text sits: its
+// first row there has almost no room, and the block was broken into more lines
+// than the rows it is drawn on need.
 //
 // This is the function the line-breaker calls, once per candidate line count,
 // inside its own search - so it is pure, synchronous, allocation-light, O(lines)
@@ -1267,9 +1272,14 @@ export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middl
   if (blockH > 2 * s.ry) return new Array(n).fill(Math.max(o.minLineWidth, 2 * s.rx));
   // Anchored by valign, and inside the shape by construction: a block that fits
   // sits inside whether it hangs from the top, stands on the bottom or is
-  // centred, so there is nothing left to clamp.
+  // centred, so there is nothing left to clamp. A given top is clamped into the
+  // shape: a block drawn partly past the curve - a box dragged off its balloon,
+  // a top-aligned block longer than the room below its first line - gets the
+  // rows of the nearest place it would fit, not rows of nothing, which a breaker
+  // reads as one word a line (see above).
   let top;
-  if (valign === 'top') top = s.cy - s.ry;
+  if (Number.isFinite(o.top)) top = Math.max(s.cy - s.ry, Math.min(s.cy + s.ry - blockH, o.top));
+  else if (valign === 'top') top = s.cy - s.ry;
   else if (valign === 'bottom') top = s.cy + s.ry - blockH;
   else top = s.cy - blockH / 2;
 

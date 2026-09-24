@@ -477,8 +477,10 @@ function widthsResolver(spec) {
 // breaking at each line count it could use (`byCount`, ascending), and the one
 // of those that wins (`best`). Both in the published shape; see `balanceScored`.
 // `every` asks for every count; without it the search stops at the first count
-// that can no longer win, and `byCount` ends there.
-function breakParagraph(para, widthSpec, measureFn, o, every) {
+// that can no longer win, and `byCount` ends there. `only` asks for that one
+// count alone (see `balanceCandidates`); a paragraph that has no breaking at it
+// answers with whatever it falls back to, and the caller checks the count.
+function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   const words = [];
   const re = /\S+/g;
   let m;
@@ -1012,7 +1014,7 @@ function breakParagraph(para, widthSpec, measureFn, o, every) {
   const everyCount = (allowOrphan) => {
     const out = [];
     let cheapest = Infinity;
-    for (let L = 1; L <= maxL; L++) {
+    for (let L = only ?? 1; L <= (only ?? maxL); L++) {
       if (!every && o.lineCost * L >= cheapest) break;
       const cand = bestAt(L, allowOrphan);
       if (!cand) continue;
@@ -1064,6 +1066,85 @@ function paragraphsOf(text) {
   return (text == null ? '' : String(text)).split('\n');
 }
 
+// A text's paragraphs are broken one at a time, but a balloon's rows belong to
+// the whole block: what a `widthsFor` callback hands back for `L` lines is the
+// rows of a block of `L` lines, placed as a block. A paragraph asking for its
+// own count was measured as if it were the whole block, and it is drawn on
+// other rows - the second of two paragraphs in an oval sits on the lower,
+// narrower half, and was broken to the middle's width (GEO-2).
+//
+// So each paragraph is broken against its slice of the whole block's rows: the
+// rows under the paragraphs before it, in a block of every paragraph's lines.
+// That needs every other paragraph's count, which depends on its own rows in
+// turn - so the counts start from each paragraph alone, each paragraph is broken
+// again on its slice, and that repeats until no count moves, the way `greedy`
+// settles its own. Capped, like `greedy`, because an answer that could
+// oscillate is not one; two passes settle every block measured.
+//
+// The blank paragraphs at either end take no rows: `layoutLines` drops the
+// blank lines they become, so the block is drawn without them. A blank
+// paragraph between two others is a blank line in the block, and has its row.
+//
+// `solve(para, widths)` is one paragraph broken against a width spec, in the
+// published shape; the answer is one per paragraph. A constant width is the
+// same on every row, and a lone paragraph's rows are its own, so both are the
+// paragraphs alone, as they always were.
+function onTheirRows(paras, width, o, solve) {
+  const out = paras.map((para) => solve(para, width));
+  const span = spanOf(paras, width);
+  if (!span) return out;
+  const tried = new Map();
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = false;
+    for (let k = span.first; k <= span.last; k++) {
+      const { before, after } = around(out, span, k);
+      const key = `${k} ${before} ${after}`;
+      let got = tried.get(key);
+      if (!got) {
+        got = solve(paras[k], slice(width, before, after, o));
+        tried.set(key, got);
+      }
+      if (got.lines.length !== out[k].lines.length) moved = true;
+      out[k] = got;
+    }
+    if (!moved) break;
+  }
+  return out;
+}
+
+// The paragraphs that take rows, first to last, or null when the rows need no
+// sharing out: a constant width, or a single paragraph with text in it.
+function spanOf(paras, width) {
+  if (typeof width !== 'function') return null;
+  const blank = paras.map((para) => para.trim() === '');
+  const first = blank.indexOf(false);
+  const last = blank.lastIndexOf(false);
+  return first < 0 || first === last ? null : { first, last };
+}
+
+// How many rows the paragraphs before and after paragraph `k` take.
+function around(parts, span, k) {
+  let before = 0;
+  let after = 0;
+  for (let j = span.first; j <= span.last; j++) {
+    if (j < k) before += parts[j].lines.length;
+    if (j > k) after += parts[j].lines.length;
+  }
+  return { before, after };
+}
+
+// A paragraph's rows: lines `before .. before + L` of a block with `after` more
+// lines below them. A block past `maxLines` is one the callback is never asked
+// about (see `balanceScored`), and gets the paragraph's own rows instead.
+function slice(width, before, after, o) {
+  return (L) => {
+    const total = before + L + after;
+    if (total > o.maxLines) return width(L);
+    const rows = width(total);
+    return Array.isArray(rows) ? rows.slice(before, before + L) : rows;
+  };
+}
+
 // A block is its paragraphs one after another: lines concatenated, prices
 // summed, overflowing lines renumbered to where their paragraph starts, and a
 // flag raised when any paragraph raised it.
@@ -1107,7 +1188,8 @@ function joinParagraphs(parts) {
 //                   company, and carries the cheapest orphans instead.
 export function balanceScored(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
-  return joinParagraphs(paragraphsOf(text).map((para) => breakParagraph(para, width, measureFn, o, false).best));
+  const solve = (para, w) => breakParagraph(para, w, measureFn, o, false).best;
+  return joinParagraphs(onTheirRows(paragraphsOf(text), width, o, solve));
 }
 
 // The best breaking at every line count the text can be set in, ascending, each
@@ -1120,10 +1202,18 @@ export function balanceScored(text, width, measureFn, opts = {}) {
 // that count between them, which is a small min-plus product of each
 // paragraph's own table rather than a search over the whole block. A paragraph
 // that fell back to greedy offers its one count only.
+//
+// Against a balloon's rows, each paragraph is then broken at its share of the
+// count again, on the rows it is drawn on (`onTheirRows`), and a count whose
+// split some paragraph has no breaking for on those rows is not on offer -
+// unless no count is, when the paragraphs' own tables are the answer. The split
+// is still chosen on those tables, so for a text of several paragraphs in a
+// balloon the count `balanceScored` chooses may be set differently here.
 export function balanceCandidates(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
+  const paras = paragraphsOf(text);
   let runs = new Map([[0, { cost: 0, parts: [] }]]);
-  for (const para of paragraphsOf(text)) {
+  for (const para of paras) {
     const { byCount } = breakParagraph(para, width, measureFn, o, true);
     const next = new Map();
     for (const [L0, run] of runs) {
@@ -1136,7 +1226,21 @@ export function balanceCandidates(text, width, measureFn, opts = {}) {
     }
     runs = next;
   }
-  return [...runs.keys()].sort((a, b) => a - b).map((L) => joinParagraphs(runs.get(L).parts));
+  const alone = [...runs.keys()].sort((a, b) => a - b).map((L) => runs.get(L).parts);
+  const span = spanOf(paras, width);
+  if (!span) return alone.map(joinParagraphs);
+  const onRows = [];
+  for (const parts of alone) {
+    const got = parts.map((part, k) => {
+      if (k < span.first || k > span.last) return part;
+      const { before, after } = around(parts, span, k);
+      const L = part.lines.length;
+      const best = breakParagraph(paras[k], slice(width, before, after, o), measureFn, o, true, L).best;
+      return best.lines.length === L ? best : null;
+    });
+    if (!got.includes(null)) onRows.push(joinParagraphs(got));
+  }
+  return onRows.length ? onRows : alone.map(joinParagraphs);
 }
 
 // The lines alone, which is all the renderer has ever needed.

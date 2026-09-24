@@ -54,12 +54,14 @@ const {
   setPageDims,
   BULK_PROPS,
 } = await import('./store.svelte.js');
-const { balloonWidthsFor, textInset, contentWidth, layoutLines, setTypesetEnabled } = await import('./measure.js');
+const { balloonWidthsFor, textInset, contentWidth, layoutLines, lineWidth, setTypesetEnabled } = await import(
+  './measure.js'
+);
 // Balloon layout is part of the typesetting beta, which is off until the user
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
 setTypesetEnabled(true);
-const { inscribedRect, balloonFrame } = await import('./balloon.js');
+const { inscribedRect, balloonFrame, interiorLineWidths } = await import('./balloon.js');
 const { defaultStyle, normalizeStyle, normalizeFit } = await import('./data.js');
 const { serializePage } = await import('./psd.js');
 const hist = await import('./editor/history.svelte.js');
@@ -352,12 +354,14 @@ describe('placement, when there is no fit to be had', () => {
 
 // ---------------------------------------------------------------------------
 describe('balloonWidthsFor - the one helper the three layout sites share', () => {
+  // On the balloon `ell` below, centred: the rows are read where the box draws
+  // its block (GEO-2), so a box off the balloon would be measured somewhere else.
   const boxWith = (fit, style = {}) => ({
     id: 'b1',
     lineN: null,
     text: 'X',
-    x: 0,
-    y: 0,
+    x: 150,
+    y: 200,
     w: 200,
     h: 100,
     style: normalizeStyle({ size: 20, lineHeight: 1, valign: 'middle', ...style }),
@@ -477,10 +481,67 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
     const bottom = boxWith(ell, { valign: 'bottom' });
     const t = balloonWidthsFor(top, top.style, top.style.size)(3);
     const bo = balloonWidthsFor(bottom, bottom.style, bottom.style.size)(3);
-    // Top-anchored, the block starts at the crown, so the first line is the
-    // pinched one; bottom-anchored it is the last. Reversing one gives the
-    // other.
+    // Top-anchored, the block hangs from the top of the box, above the
+    // balloon's middle, so the first line is the pinched one; bottom-anchored it
+    // stands on the bottom and it is the last. The box is centred on the
+    // balloon, so reversing one gives the other.
     expect(t.map(round2)).toEqual([...bo].reverse().map(round2));
+  });
+
+  // GEO-2. The rows are the ones the block is drawn on, for the whole block.
+  const tall = { kind: 'ellipse', cx: 250, cy: 250, rx: 134, ry: 174 };
+  const onFrame = (style) => {
+    const s = normalizeStyle({ size: 20, lineHeight: 1.5, strokes: [], ...style });
+    return { ...balloonFrame(tall), style: s, fit: tall };
+  };
+  const linesOf = (text, b) =>
+    layoutLines(text, b.style, b.style.size, contentWidth(b.w, b.style), balloonWidthsFor(b, b.style, b.style.size));
+
+  it('breaks each paragraph to the rows it lands on, not to a block of its own', () => {
+    const b = onFrame();
+    const rowsFor = balloonWidthsFor(b, b.style, b.style.size);
+    const text = 'HEY, WHAT ARE YOU DOING\nOVER THERE, YOU IDIOT';
+    const fitsRows = (lines) => {
+      const rows = rowsFor(lines.length);
+      return lines.every((ln, i) => lineWidth(ln, b.style, b.style.size) <= rows[i] + 1e-6);
+    };
+    // Each paragraph alone is two lines and one, each sure of the room it had:
+    // but its last line is drawn on the third row of three, which is narrower.
+    const alone = text.split('\n').flatMap((para) => linesOf(para, b));
+    expect(alone.length).toBe(3);
+    expect(fitsRows(alone)).toBe(false);
+    const lines = linesOf(text, b);
+    expect(lines.length).toBe(4);
+    expect(fitsRows(lines)).toBe(true);
+  });
+
+  // The block of a box whose height is its block is on the same rows whichever
+  // way it is anchored, so it breaks the same way. It used to be measured at the
+  // balloon's crown when top-aligned, a first row with a fraction of the room.
+  it('breaks a top-aligned block on the rows below the box top, not at the crown', () => {
+    const text = 'THE WORLD IS ENDING AND NOBODY CARES AT ALL';
+    const mid = onFrame({ valign: 'middle' });
+    const n = linesOf(text, mid).length;
+    const lh = mid.style.size * mid.style.lineHeight;
+    const h = n * lh + 2 * textInset(mid.style);
+    const at = (valign) => {
+      const b = onFrame({ valign });
+      return { ...b, y: tall.cy - h / 2, h };
+    };
+    for (const valign of ['top', 'bottom']) {
+      expect(linesOf(text, at(valign))).toEqual(linesOf(text, at('middle')));
+    }
+    // Keyed on the anchor: a drag is a new layout, a height grown about the
+    // anchor is not.
+    const key = (b) => balloonWidthsFor(b, b.style, 20).key;
+    const m = at('middle');
+    expect(key({ ...m, y: m.y + 10 })).not.toBe(key(m));
+    expect(key({ ...m, y: m.y - 7.3, h: m.h + 14.6 })).toBe(key(m));
+    const t = at('top');
+    expect(key({ ...t, h: t.h + 30 })).toBe(key(t));
+    const crown = interiorLineWidths(tall, lh, n, 'top');
+    const rows = balloonWidthsFor(at('top'), at('top').style, 20)(n);
+    expect(crown[0]).toBeLessThan(rows[0] / 2);
   });
 
   // The point of the whole exercise: the widths reach the breaker and change
