@@ -1,5 +1,6 @@
 // ===== Shell-level guards for webview desktop app =====
 // UX-1: Prevents accidental reload and native reload context menu.
+// DET-4: Watches late-loading web fonts and triggers relayout.
 
 // The one selector that decides where the webview's own context menu may still
 // appear: text fields and the in-place editor, where Cut/Copy/Paste/Spelling
@@ -68,4 +69,41 @@ export function isReloadKey(e) {
   // the system still maps the R position to reload.
   const key = typeof e.key === 'string' ? e.key : '';
   return /^[a-z]$/i.test(key) ? key.toLowerCase() === 'r' : e.code === 'KeyR';
+}
+
+/**
+ * Watches a FontFaceSet for late font loads ('loadingdone' events) and calls
+ * onChange debounced by delayMs.
+ *
+ * @param {FontFaceSet|any} fontFaceSet
+ * @param {() => void} onChange
+ * @param {number} [delayMs=150]
+ * @returns {() => void} Disposer
+ */
+export function watchFontLoads(fontFaceSet, onChange, delayMs = 150) {
+  if (!fontFaceSet || typeof fontFaceSet.addEventListener !== 'function') {
+    return () => {};
+  }
+
+  let timer = null;
+
+  const onLoadingDone = () => {
+    if (timer != null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      onChange();
+    }, delayMs);
+  };
+
+  fontFaceSet.addEventListener('loadingdone', onLoadingDone);
+
+  return () => {
+    if (timer != null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (typeof fontFaceSet.removeEventListener === 'function') {
+      fontFaceSet.removeEventListener('loadingdone', onLoadingDone);
+    }
+  };
 }

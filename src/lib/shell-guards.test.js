@@ -1,10 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   isEditableTarget,
   onContextMenu,
   installContextMenuGuard,
   isReloadKey,
+  watchFontLoads,
 } from './shell-guards.js';
+import { app, noteFontsChanged } from './store.svelte.js';
 
 // A tiny stand-in for an Element: just enough `closest` for the one selector
 // shell-guards.js uses (text-like inputs, textarea, and a contenteditable that
@@ -150,5 +152,98 @@ describe('shell-guards: reload keyboard blocking (UX-1)', () => {
     expect(isReloadKey({ key: 'к', code: 'KeyR', metaKey: true })).toBe(true);
     expect(isReloadKey(null)).toBe(false);
     expect(isReloadKey(undefined)).toBe(false);
+  });
+});
+
+describe('shell-guards: font load watching (DET-4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  class FakeFontFaceSet {
+    constructor() {
+      this.handlers = new Set();
+    }
+    addEventListener(type, fn) {
+      if (type === 'loadingdone') this.handlers.add(fn);
+    }
+    removeEventListener(type, fn) {
+      if (type === 'loadingdone') this.handlers.delete(fn);
+    }
+    dispatch(type) {
+      if (type === 'loadingdone') {
+        for (const fn of Array.from(this.handlers)) {
+          fn();
+        }
+      }
+    }
+  }
+
+  it('debounces loadingdone bursts and calls onChange once', () => {
+    const ffs = new FakeFontFaceSet();
+    const onChange = vi.fn();
+    const dispose = watchFontLoads(ffs, onChange, 150);
+
+    // Rapid burst of 4 events
+    ffs.dispatch('loadingdone');
+    vi.advanceTimersByTime(50);
+    ffs.dispatch('loadingdone');
+    vi.advanceTimersByTime(50);
+    ffs.dispatch('loadingdone');
+    vi.advanceTimersByTime(50);
+    ffs.dispatch('loadingdone');
+
+    // Total elapsed: 150ms from start, but only 0ms from last event -> should not fire yet
+    expect(onChange).not.toHaveBeenCalled();
+
+    // 149ms after last event -> still not fired
+    vi.advanceTimersByTime(149);
+    expect(onChange).not.toHaveBeenCalled();
+
+    // 1ms more (150ms after last event) -> fires exactly once
+    vi.advanceTimersByTime(1);
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    dispose();
+  });
+
+  it('disposer removes the listener and cancels pending debounce timers', () => {
+    const ffs = new FakeFontFaceSet();
+    const onChange = vi.fn();
+    const dispose = watchFontLoads(ffs, onChange, 150);
+
+    ffs.dispatch('loadingdone');
+    vi.advanceTimersByTime(100);
+
+    // Disposing before timer fires
+    dispose();
+    vi.advanceTimersByTime(200);
+    expect(onChange).not.toHaveBeenCalled();
+
+    // Subsequent dispatch should do nothing
+    ffs.dispatch('loadingdone');
+    vi.advanceTimersByTime(200);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(ffs.handlers.size).toBe(0);
+  });
+
+  it('gracefully handles missing or invalid fontFaceSet', () => {
+    const dispose1 = watchFontLoads(null, () => {});
+    expect(typeof dispose1).toBe('function');
+    dispose1();
+
+    const dispose2 = watchFontLoads({}, () => {});
+    expect(typeof dispose2).toBe('function');
+    dispose2();
+  });
+
+  it('calling noteFontsChanged bumps app.fontsVersion', () => {
+    const initialVersion = app.fontsVersion;
+    noteFontsChanged();
+    expect(app.fontsVersion).toBe(initialVersion + 1);
   });
 });

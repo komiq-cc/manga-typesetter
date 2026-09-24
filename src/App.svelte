@@ -33,7 +33,7 @@
   import './lib/prefs.svelte.js';
   import { library, initRoot, openChapter, flushBeforeLeaving } from './lib/library.svelte.js';
   import { route, goBack } from './lib/route.svelte.js';
-  import { installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
+  import { watchFontLoads, installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
 
   let fontModalOpen = $state(false);
   let settingsOpen = $state(false);
@@ -47,12 +47,14 @@
   let booted = $state(false);
   // Releases the beforeunload/pagehide fallback - see `armUnloadFlush`.
   let releaseUnloadFlush = null;
+  let releaseFontWatch = null;
   let releaseContextMenu = null;
 
   onMount(async () => {
     initTheme();
     if (typeof document !== 'undefined') {
       releaseContextMenu = installContextMenuGuard(document);
+      releaseFontWatch = watchFontLoads(document.fonts, () => noteFontsChanged(), 150);
     }
     // Register history and page-switch hooks.
     initHistory();
@@ -310,6 +312,8 @@
     releaseShortcuts();
     releaseUnloadFlush?.();
     releaseUnloadFlush = null;
+    releaseFontWatch?.();
+    releaseFontWatch = null;
     releaseContextMenu?.();
     releaseContextMenu = null;
   });
