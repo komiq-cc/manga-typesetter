@@ -1,7 +1,7 @@
 <script>
 
   import { onDestroy } from 'svelte';
-  import { app, saveExportPrefs, toast } from './store.svelte.js';
+  import { app, saveExportPrefs, toast, setChapterTypesetMode } from './store.svelte.js';
   import { checkSidecar, modelsCacheInfo, clearModelsCache } from './sidecar.js';
   import { theme, setTheme } from './theme.svelte.js';
   import { library, setRoot, scanLibrary, withinHome } from './library.svelte.js';
@@ -36,6 +36,10 @@
     { id: 'system', label: 'System', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>' },
   ];
   let tab = $state('general');
+  // The open chapter's line breaker, and the one the box defaults below apply
+  // under: the open chapter's while one is open, else a new chapter's.
+  const smartHere = $derived(app.typesetting.mode === 'smart');
+  const smartUsed = $derived(app.chapterRef ? smartHere : prefs.typeset);
 
   // The registry shortcut groups follow preferences like the brush tool toggle,
   // while each row combo comes from comboFor reading preferences.
@@ -315,8 +319,9 @@
      things - a knob, the preference it writes, and the name a screen reader
      reads - and the row that spells them out by hand is the row that ends up
      writing the wrong key. `disabled` is a look and a refusal, not an attribute:
-     the element is a div, so it also leaves the tab order. -->
-{#snippet toggle(key, label, on, disabled = false)}
+     the element is a div, so it also leaves the tab order. `set` is for the one
+     switch that writes the open chapter rather than a preference. -->
+{#snippet toggle(key, label, on, disabled = false, set = null)}
   <div
     class="switch"
     class:on
@@ -326,11 +331,12 @@
     aria-label={label}
     aria-disabled={disabled}
     tabindex={disabled ? -1 : 0}
-    onclick={() => !disabled && setPref(key, !on)}
+    onclick={() => !disabled && (set ? set(!on) : setPref(key, !on))}
     onkeydown={(e) => {
       if (!disabled && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
-        setPref(key, !on);
+        if (set) set(!on);
+        else setPref(key, !on);
       }
     }}
   ><span class="knob"></span></div>
@@ -459,19 +465,35 @@
       <div class="set-pane" role="tabpanel" id="set-pane-typesetting" aria-labelledby="set-tab-typesetting">
       <!-- The typesetting engine used to hang off every text box as its own
            Inspector sub-menu, which put a half-finished feature in front of
-           everyone editing a line of dialogue. It is one preference, it applies
-           to the whole app, and it lives here now - off, and labelled. -->
+           everyone editing a line of dialogue. It lives here now - off, and
+           labelled. The switch is the open chapter's, saved in its file so it
+           opens the same on every machine (DET-3); the preference is only what
+           a new chapter starts with. -->
       <div class="settings-section ts-section">
         <div class="settings-title">TYPESETTING <span class="beta-badge">Beta · work in progress</span></div>
+        {#if app.chapterRef}
+          <div class="field">
+            <span>Smart line breaking · this chapter</span>
+            {@render toggle(
+              'typeset',
+              'Smart line breaking for this chapter (beta)',
+              smartHere,
+              false,
+              (on) => setChapterTypesetMode(on ? 'smart' : 'plain'),
+            )}
+          </div>
+        {/if}
         <div class="field">
-          <span>Smart line breaking</span>
-          {@render toggle('typeset', 'Smart line breaking (beta)', prefs.typeset)}
+          <span>Smart line breaking · new chapters</span>
+          {@render toggle('typeset', 'Smart line breaking for new chapters (beta)', prefs.typeset)}
         </div>
         <div class="qhint">
           Breaks lines to the shape of the balloon, hyphenates words that fit
           nowhere, and lays text out to a fitted balloon instead of its box.
           Unfinished - with it off, boxes wrap plainly and the extra controls
-          stay out of the Inspector.
+          stay out of the Inspector. Each chapter keeps its own setting, so it
+          opens the same on any machine; chapters made before this setting
+          existed open with it off.
         </div>
 
         <!-- The defaults a new box is born with. Auto height stands outside the
@@ -490,10 +512,10 @@
           alignment. It never shrinks a box you made roomier, and its width is
           never touched.
         </div>
-        <div class="ts-defaults" class:dim={!prefs.typeset}>
+        <div class="ts-defaults" class:dim={!smartUsed}>
           <div class="field">
             <span>Shaped line breaks</span>
-            {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape, !prefs.typeset)}
+            {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape, !smartUsed)}
           </div>
           <!-- The silhouette a shaped block aims for (BRK-3). Auto picks an oval
                in a balloon and a rectangle in a caption. -->
@@ -511,11 +533,11 @@
           </div>
           <div class="field">
             <span>Hyphenate long words</span>
-            {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate, !prefs.typeset)}
+            {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate, !smartUsed)}
           </div>
           <div class="field">
             <span>Fit text to balloon</span>
-            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon, !prefs.typeset)}
+            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon, !smartUsed)}
           </div>
           <div class="field">
             <label for="ts-orphan">Shortest word left alone on a line</label>
@@ -526,7 +548,7 @@
               min="1"
               max="8"
               step="1"
-              disabled={!prefs.typeset}
+              disabled={!smartUsed}
               value={prefs.defaultMinOrphan}
               title="A word shorter than this is never left alone at the end of a line"
               onchange={(e) => { setPref('defaultMinOrphan', e.target.value); e.target.value = prefs.defaultMinOrphan; }}

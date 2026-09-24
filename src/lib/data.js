@@ -90,6 +90,39 @@ export function fontCss(name, userFonts = USER_FONTS) {
   return f ? f.css : "'Comic Neue', cursive";
 }
 
+// ===== the chapter's typesetting =====
+// Which line breaker lays a chapter out is a property of the chapter, stored in
+// its chapter.json as `typesetting: { mode, version }`, not a preference of the
+// machine that opens it (DET-3). Every render, fit and export of the open
+// chapter uses it, so the same file breaks its lines the same way everywhere.
+//
+//   mode      'smart' - the shaped breaker, hyphenation and balloon layout, the
+//             beta in Settings - or 'plain', the wrap every build has.
+//   version   the layout rules the chapter was set under. Nothing reads it yet;
+//             it is stamped now so a later change to the rules can tell the
+//             chapters set under the old ones apart and leave them be.
+//
+// A chapter written before the field existed reads as plain, version 1: that is
+// what it was laid out with on every machine that never turned the beta on, and
+// it means a later change to the NEW-chapter default can never re-break an old
+// chapter. The preference is only that default, mirrored here by
+// prefs.svelte.js the way the box defaults below are.
+export const LAYOUT_VERSION = 1;
+
+export function normalizeTypesetting(raw) {
+  return {
+    mode: raw?.mode === 'smart' ? 'smart' : 'plain',
+    version: Number.isInteger(raw?.version) && raw.version > 0 ? raw.version : LAYOUT_VERSION,
+  };
+}
+
+let smartByDefault = false;
+export function setTypesetDefault(on) {
+  smartByDefault = !!on;
+}
+// What a chapter created now is stamped with.
+export const newTypesetting = () => ({ mode: smartByDefault ? 'smart' : 'plain', version: LAYOUT_VERSION });
+
 // ===== typesetting defaults for a NEW box =====
 // Five of the style properties below are not really styling at all - they are
 // how the layout engine behaves - and they are set once, for the whole app, in

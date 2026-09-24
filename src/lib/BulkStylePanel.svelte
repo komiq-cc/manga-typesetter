@@ -17,7 +17,6 @@ import {
   import { modKey } from './format.js';
   import { fontGroups, isFontOffered } from './font-menu.js';
   import { PATTERN_KINDS, GRADIENT_MAX_STOPS } from './data.js';
-  import { prefs } from './prefs.svelte.js';
 
   // app.bulk.style is the editable template; null when closed.
   const s = $derived(app.bulk.style);
@@ -805,7 +804,7 @@ import {
           </div>
         </div>
 
-        {#if prefs.typeset}
+        {#if app.typesetting.mode === 'smart'}
           <div class="insp-sub" class:closed={!open.typeset}>
             {@render head('typeset', 'Typeset')}
             <div class="insp-sub-body">

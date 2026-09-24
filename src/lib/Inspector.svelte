@@ -40,7 +40,6 @@
   import { LIQUIFY_MODES } from './liquify.js';
   import BrushPanel from './BrushPanel.svelte';
   import { brushArmed } from './brush-tool.svelte.js';
-  import { prefs } from './prefs.svelte.js';
   // Which tab is open is session state shared with the keyboard - see
   // inspector-tabs.svelte.js. The panel is one of two writers, not the owner.
   import {
@@ -1753,7 +1752,7 @@
              balloon layout, the orphan threshold - are defaults now, set once in
              Settings › Typesetting, and overridable per box from the Bulk style
              panel. None of them said anything about the box you had selected. -->
-        {#if prefs.typeset}
+        {#if app.typesetting.mode === 'smart'}
           <div class="insp-rule"></div>
           {@render secHead('Typeset · beta')}
           <div class="grp">

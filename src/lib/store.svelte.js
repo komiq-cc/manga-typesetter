@@ -11,6 +11,7 @@ import {
   normalizeInkStroke,
   normalizeFinish,
   normalizeReview,
+  normalizeTypesetting,
 } from './data.js';
 // The tag module reaches back for nothing - it takes the pages it works on as
 // arguments - so this stays a one-way edge and the two cannot cycle. What comes
@@ -54,7 +55,7 @@ import {
 // metrics. The alternative was a second measurer living in the store, which is
 // exactly how the editor and the exporter would start disagreeing about where a
 // line breaks.
-import { canMeasure, textInset, balancedBoxSize, clearLayoutMemo } from './measure.js';
+import { canMeasure, textInset, balancedBoxSize, clearLayoutMemo, setTypesetEnabled } from './measure.js';
 // Containment - whether a box's text stays inside the box, and the ladder that
 // makes it. Pure, and it joins the lazy store <-> measure cycle above on the
 // same terms: nothing in it runs at evaluation time.
@@ -450,6 +451,11 @@ export const app = $state({
   // preference of the app, so `openChapter` writes it and `closeChapter` puts
   // it back.
   projectLayout: 'pages',
+  // The open chapter's typesetting, mirrored from its chapter.json - see
+  // `normalizeTypesetting` in data.js. Like the mode, it belongs to the chapter:
+  // `useChapterTypesetting` sets it on every open, and plain is what stands while
+  // nothing is open.
+  typesetting: normalizeTypesetting(null),
   // The open project's source language for detection/OCR. This is project
   // state, not a global preference: opening another series must select that
   // series' recognizer and reading direction instead of carrying this one over.
@@ -912,9 +918,9 @@ export function noteFontsChanged() {
   return relayoutAll();
 }
 // The same re-measure, for anything else that changes how every line lays out
-// without touching any box - today, the typesetting beta switch in Settings
-// (prefs.svelte.js). Bumping `fontsVersion` is what wakes the components; the
-// name is historical, it is simply "every measurement is stale".
+// without touching any box - today, the open chapter's typesetting switch in
+// Settings (`setChapterTypesetMode`). Bumping `fontsVersion` is what wakes the
+// components; the name is historical, it is simply "every measurement is stale".
 export function relayoutAll() {
   // FIRST, before anything re-measures. `measure.js` remembers where a block of
   // text broke, keyed on the style's font NAME - and what that name resolves to,
@@ -930,6 +936,27 @@ export function relayoutAll() {
   // be a write nobody asked for.
   if (n) markUnsaved();
   return n;
+}
+
+// ---------- the chapter's typesetting (DET-3) ----------
+// The line breaker is the document's, not the machine's: `typesetEnabled()`
+// in measure.js is the gate every layout reads, and these are the only writers
+// of it in the app. The library calls `useChapterTypesetting` with the record's
+// field before the pages load - their refit already measures under it - and
+// with nothing when the chapter closes.
+export function useChapterTypesetting(raw) {
+  app.typesetting = normalizeTypesetting(raw);
+  setTypesetEnabled(app.typesetting.mode === 'smart');
+}
+
+// Settings' switch for the open chapter. Saved with it, and every box
+// re-measured under the new breaker the way a font arriving re-measures them.
+export function setChapterTypesetMode(mode) {
+  const next = normalizeTypesetting({ ...app.typesetting, mode });
+  if (next.mode === app.typesetting.mode) return;
+  useChapterTypesetting(next);
+  relayoutAll();
+  markUnsaved();
 }
 
 // Deep copy of a style object, normalised up to the current schema (nested

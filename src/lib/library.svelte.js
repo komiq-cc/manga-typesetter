@@ -30,7 +30,9 @@ import {
   normalizeOcrLanguage,
   toast,
   cancelChapterPlace,
+  useChapterTypesetting,
 } from './store.svelte.js';
+import { normalizeTypesetting, newTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
 import { carryTagsForward, bindTags, unbindTags, sanitizeTags, sanitizeTagSizes } from './tags.svelte.js';
 import {
@@ -793,7 +795,10 @@ async function copyInto(dir, name, bytes, used) {
 // `copy(dir, cover)` returns the page list. `cover.offer(bytes)` is how it
 // nominates the project's thumbnail; the first offer wins and a failure to
 // write one is cosmetic.
-async function buildChapter(p, number, title, copy, mode = 'typeset') {
+// `typesetting` is the record's field for a chapter that already had one - an
+// imported package - and undefined for a new chapter, which starts with the
+// preference (`newTypesetting`).
+async function buildChapter(p, number, title, copy, mode = 'typeset', typesetting) {
   // Same hole as createProject, and here it fires on the FAILURE path: the
   // rollback below is a recursive remove, and it must never be pointed at a
   // directory this run did not bring into being.
@@ -828,6 +833,7 @@ async function buildChapter(p, number, title, copy, mode = 'typeset') {
       number,
       title: title ?? '',
       mode: normalizeChapterMode(mode),
+      typesetting: typesetting === undefined ? newTypesetting() : normalizeTypesetting(typesetting),
       createdAt: now(),
       updatedAt: now(),
       pages,
@@ -1013,7 +1019,7 @@ export async function createChapter({
 // lines, boxes, detect }. A page with no raster or missing/invalid file name
 // is not accepted - it would persist with an empty or unresolvable `file`,
 // unrenderable and impossible to remove.
-export async function createChapterFromPages({ projectId, number, title, pages: input, mode = 'typeset' }) {
+export async function createChapterFromPages({ projectId, number, title, pages: input, mode = 'typeset', typesetting }) {
   const p = projectById(projectId);
   if (!p) throw new Error('No such project');
   if (!input?.length) throw new Error('Nothing to import');
@@ -1075,7 +1081,7 @@ export async function createChapterFromPages({ projectId, number, title, pages: 
       if (i === 0) await cover.offer(src.cleanedBytes ?? src.rawBytes);
     }
     return pages;
-  }, mode);
+  }, mode, typesetting);
 }
 
 // ---------- a chapter's sources, after creation ----------
@@ -1896,6 +1902,9 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // The load refits boxes immediately. Its bounds must come from the incoming
   // project's layout, not from whichever project was open before this one.
   app.projectLayout = normalizeLayout(p.layout);
+  // And its line breaker from the chapter's own record, for the same reason:
+  // the load's refit measures under it (DET-3).
+  useChapterTypesetting(record.typesetting);
   const minted = loadProjectPages(pages);
   // After the swap, not before. Pointing the module at the new chapter releases
   // the old one's images, and releasing an image nulls the `raw`/`cleaned` of
@@ -2028,6 +2037,8 @@ async function writeOpenChapter(seq) {
   // made from the project screen reaches a chapter already on screen - so the
   // record follows it here rather than the other way round.
   record.mode = app.chapterMode;
+  // The same for its typesetting (DET-3): Settings writes it while it is open.
+  record.typesetting = { ...app.typesetting };
   // Blob URLs are runtime-only. `file` and `cleanedFile` are the durable
   // references and both are read off the page itself, so a document whose pages
   // were replaced or reordered in the editor can never hand one page's images
@@ -2146,6 +2157,8 @@ export function closeChapter() {
   // closed chapter was in.
   app.projectLayout = 'pages';
   app.projectOcrLanguage = 'ja';
+  // And its typesetting, which was the chapter's.
+  useChapterTypesetting(null);
   // And the tag registry goes with it, so no project's vocabulary is on offer
   // while none is open.
   unbindTags();

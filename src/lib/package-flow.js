@@ -193,6 +193,8 @@ export async function importChapterPackage({ pkg, projectId, number, title }) {
     title: title ?? pkg.record.title ?? '',
     pages: packagePagesForImport(pkg),
     mode: pkg.record.mode === 'translate' ? 'translate' : 'typeset',
+    // The chapter's own, absent reading as plain - never this machine's default.
+    typesetting: pkg.record.typesetting ?? null,
   });
   return { chapter, fontsInstalled, fontsFailed, tagsAdded };
 }

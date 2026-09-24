@@ -1,29 +1,30 @@
 // ===== App preferences =====
 // Preferences that belong to the person, not to a document: they survive a
-// chapter close and are never written into a saved file - the typesetting beta,
-// the defaults a new text box is born with, and the keyboard rebindings. The
+// chapter close and are never written into a saved file - the typesetting a new
+// chapter starts with, the defaults a new text box is born with, and the
+// keyboard rebindings. The
 // shape is one `$state` object, one localStorage key holding all of it, and a
 // single setter, so a preference can never be changed without being persisted
 // and applied in the same breath.
 //
 // The module APPLIES on import, not on some `initPrefs()` call, because what it
-// gates is the layout engine and layout runs the moment a page mounts.
-// App.svelte imports it at boot for exactly that reason: by the time anything
-// measures a line, `setTypesetEnabled` has already been told.
+// feeds is read the moment a box or a chapter is made. App.svelte imports it at
+// boot for exactly that reason.
 //
 // Both consumers are leaves or near-leaves and neither imports this module back,
 // which is what keeps that import-time apply safe: nothing here can run before
 // the module it is writing into has finished evaluating.
-import { setTypesetEnabled } from './measure.js';
-import { setBoxDefaults } from './data.js';
-import { relayoutAll, app, setTool, setBrushToolAllowed, setMinFontSize } from './store.svelte.js';
+import { setBoxDefaults, setTypesetDefault } from './data.js';
+import { app, setTool, setBrushToolAllowed, setMinFontSize } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
 
 const KEY = 'mt.prefs';
 
 export const prefs = $state({
-  // The shaped line breaking / hyphenation / balloon fitting engine. Beta, and
-  // off until the user says otherwise - see the TYPESETTING section in Settings.
+  // The shaped line breaking / hyphenation / balloon fitting engine, for NEW
+  // chapters. Beta, and off until the user says otherwise - see the TYPESETTING
+  // section in Settings. A chapter carries its own answer once it exists
+  // (`typesetting` in chapter.json, see data.js), so this never re-breaks one.
   typeset: false,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
@@ -91,10 +92,10 @@ const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'] };
 
 // Push the box defaults to where a box is actually born. The store seeds a new
 // box's style through `applyBoxDefaults` in data.js, and data.js is a leaf - it
-// imports nothing - so it cannot read `prefs` itself. This is the same shape as
-// `setTypesetEnabled` right below: the preference is stored here and MIRRORED
-// into the module that consumes it, by the one function that is allowed to write
-// a preference, so the copy can never be a version behind.
+// imports nothing - so it cannot read `prefs` itself. The new-chapter
+// typesetting goes the same way (`setTypesetDefault`): the preference is stored
+// here and MIRRORED into the module that consumes it, by the one function that
+// is allowed to write a preference, so the copy can never be a version behind.
 function applyBoxDefaults() {
   setBoxDefaults({
     autoHeight: prefs.defaultAutoHeight,
@@ -159,13 +160,9 @@ export function setPref(key, value) {
   prefs[key] = value;
   // Applying is part of setting. Nothing else in the app watches `prefs`, so a
   // caller that only wrote the field would leave the engine on the old answer.
-  if (key === 'typeset') {
-    setTypesetEnabled(!!value);
-    // The flag is read inside measure.js, which nothing reactive watches, so
-    // every box on screen would keep its old line breaks until something else
-    // nudged it. Re-measure the document the way a font arriving does.
-    relayoutAll();
-  }
+  // No relayout: it is what the NEXT chapter is created with. The open one has
+  // its own switch (`setChapterTypesetMode` in the store).
+  if (key === 'typeset') setTypesetDefault(!!value);
   // Turning the brush tool off falls back to pan so brush mode disarms cleanly.
   if (key === 'brushTool') {
     setBrushToolAllowed(!!value);
@@ -231,7 +228,7 @@ function load() {
     if (names) prefs[k] = names;
   }
   prefs.ocrModels = normalizeOcrModels(saved?.ocrModels);
-  setTypesetEnabled(prefs.typeset);
+  setTypesetDefault(prefs.typeset);
   applyBoxDefaults();
   setMinFontSize(prefs.minFontSize);
   setBrushToolAllowed(prefs.brushTool);

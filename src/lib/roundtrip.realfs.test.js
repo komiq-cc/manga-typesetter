@@ -17,12 +17,22 @@ import {
   beforeAll,
   afterAll,
   beforeEach,
+  afterEach,
   vi,
 } from "vitest";
 import { deflateSync } from "node:zlib";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Metrics, for the one describe that lays text out (DET-3). Off everywhere
+// else, which is what this environment answers without the mock: no canvas, so
+// nothing measures and no box moves on its own.
+const metrics = vi.hoisted(() => ({ on: false }));
+vi.mock("./measure.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  canMeasure: () => metrics.on,
+}));
 
 vi.mock("./fsx.js", async () => {
   const fs = await import("node:fs/promises");
@@ -107,7 +117,10 @@ const {
 const { undo, history, initHistory } =
   await import("./editor/history.svelte.js");
 const { switchHistoryPage } = await import("./editor/history-file.svelte.js");
-const { setPageSwitchHook } = await import("./store.svelte.js");
+const { setPageSwitchHook, boxText, setChapterTypesetMode } = await import("./store.svelte.js");
+const { prefs, setPref } = await import("./prefs.svelte.js");
+const { typesetEnabled, setTypesetEnabled } = await import("./measure.js");
+const { boxCandidate, placeBlock } = await import("./contain.js");
 
 // ---------- fixtures ----------
 const crcTable = [...Array(256)].map((_, n) => {
@@ -569,5 +582,78 @@ describe("a style survives the trip to disk and back", () => {
     expect(app.pages[0].boxes[0].style.strokes).toEqual([]);
     expect(app.pages[0].boxes[0].style.shadows).toEqual([]);
     closeChapter();
+  });
+});
+
+// DET-3. The line breaker is the chapter's, saved in its chapter.json, so the
+// same file lays out the same way on a machine whose preference says otherwise.
+describe("the chapter's typesetting survives the trip to disk and back", () => {
+  const LONG =
+    "We have to get out of here before the whole building comes down on top of every one of us";
+  const breaks = (pg) =>
+    pg.boxes.map((b) => placeBlock(boxCandidate(b, boxText(b, pg))).lines.map((l) => l.text ?? l));
+  const heights = (pg) => pg.boxes.map((b) => ({ y: b.y, h: b.h }));
+
+  beforeEach(() => {
+    metrics.on = true;
+  });
+  afterEach(() => {
+    metrics.on = false;
+    setPref("typeset", false);
+    setTypesetEnabled(false);
+  });
+
+  it("breaks the lines and sizes the boxes the same when reopened with the preference off", async () => {
+    setPref("typeset", true);
+    const { p, c } = await chapter();
+    expect((await record(c)).typesetting).toEqual({ mode: "smart", version: 1 });
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("smart");
+    const id = addEmptyBox(200, 300);
+    endEdit(LONG);
+    settleEdits();
+    const pg = app.pages[0];
+    const smart = breaks(pg);
+    const geometry = heights(pg);
+    // The test means something only if the two breakers disagree here.
+    setTypesetEnabled(false);
+    expect(breaks(pg)).not.toEqual(smart);
+    setTypesetEnabled(true);
+
+    expect(await flushBeforeLeaving("editor")).toBe(true);
+    closeChapter();
+    setPref("typeset", false);
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("smart");
+    expect(typesetEnabled()).toBe(true);
+    expect(breaks(app.pages[0])).toEqual(smart);
+    expect(heights(app.pages[0])).toEqual(geometry);
+    expect(byId(id)).toBeTruthy();
+    closeChapter();
+  });
+
+  it("reads a chapter written before the field existed as plain, whatever the preference", async () => {
+    const { p, c } = await chapter();
+    const rec = await record(c);
+    delete rec.typesetting;
+    await writeFile(join(c.dir, "chapter.json"), JSON.stringify(rec));
+    setPref("typeset", true);
+    await openChapter(p.id, c.id);
+    expect(app.typesetting).toEqual({ mode: "plain", version: 1 });
+    expect(typesetEnabled()).toBe(false);
+    closeChapter();
+  });
+
+  it("saves the switch made in Settings with the chapter", async () => {
+    const { p, c } = await chapter();
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("plain");
+    setChapterTypesetMode("smart");
+    expect(typesetEnabled()).toBe(true);
+    // A preference is not the chapter's switch.
+    expect(prefs.typeset).toBe(false);
+    expect(await flushBeforeLeaving("editor")).toBe(true);
+    closeChapter();
+    expect((await record(c)).typesetting).toEqual({ mode: "smart", version: 1 });
   });
 });
