@@ -526,7 +526,7 @@
               {#each [['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rectangle']] as [v, label]}
                 <button
                   class:on={prefs.defaultBlockShape === v}
-                  disabled={!prefs.typeset || !prefs.defaultShape}
+                  disabled={!smartUsed || !prefs.defaultShape}
                   onclick={() => setPref('defaultBlockShape', v)}
                 >{label}</button>
               {/each}
