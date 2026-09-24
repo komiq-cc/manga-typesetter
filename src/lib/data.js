@@ -102,11 +102,19 @@ export function fontCss(name, userFonts = USER_FONTS) {
 //             it is stamped now so a later change to the rules can tell the
 //             chapters set under the old ones apart and leave them be.
 //
-// A chapter written before the field existed reads as plain, version 1: that is
-// what it was laid out with on every machine that never turned the beta on, and
-// it means a later change to the NEW-chapter default can never re-break an old
-// chapter. The preference is only that default, mirrored here by
-// prefs.svelte.js the way the box defaults below are.
+// The preference is only the NEW-chapter default, mirrored here by
+// prefs.svelte.js the way the box defaults below are, so a later change to it
+// (BRK-1) can never re-break a chapter that already exists.
+//
+// A chapter written before the field existed was laid out with whatever this
+// machine's beta switch said then, and `legacyTypesetting()` is that answer:
+// 'smart' only if the switch was saved on when this build first ran, frozen
+// there by prefs.svelte.js so turning it on or off afterwards - or a new build
+// changing its default - cannot re-break the chapters made before. The library
+// hands it to the open path for a record with no field; the first save stamps
+// the field and it is never consulted for that chapter again.
+// `normalizeTypesetting` itself stays a pure reading of what it is given:
+// anything that is not an explicit 'smart' is plain.
 export const LAYOUT_VERSION = 1;
 
 export function normalizeTypesetting(raw) {
@@ -122,6 +130,13 @@ export function setTypesetDefault(on) {
 }
 // What a chapter created now is stamped with.
 export const newTypesetting = () => ({ mode: smartByDefault ? 'smart' : 'plain', version: LAYOUT_VERSION });
+
+let legacyMode = 'plain';
+export function setLegacyTypeset(mode) {
+  legacyMode = mode === 'smart' ? 'smart' : 'plain';
+}
+// What a chapter with no `typesetting` field was laid out with on this machine.
+export const legacyTypesetting = () => ({ mode: legacyMode, version: LAYOUT_VERSION });
 
 // ===== typesetting defaults for a NEW box =====
 // Five of the style properties below are not really styling at all - they are

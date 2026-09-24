@@ -121,6 +121,7 @@ const { setPageSwitchHook, boxText, setChapterTypesetMode } = await import("./st
 const { prefs, setPref } = await import("./prefs.svelte.js");
 const { typesetEnabled, setTypesetEnabled } = await import("./measure.js");
 const { boxCandidate, placeBlock } = await import("./contain.js");
+const { setLegacyTypeset } = await import("./data.js");
 
 // ---------- fixtures ----------
 const crcTable = [...Array(256)].map((_, n) => {
@@ -601,7 +602,16 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
     metrics.on = false;
     setPref("typeset", false);
     setTypesetEnabled(false);
+    setLegacyTypeset("plain");
   });
+  // A chapter.json as a build before the field wrote it, or with the field it
+  // is given.
+  const withField = async (c, typesetting) => {
+    const rec = await record(c);
+    if (typesetting === undefined) delete rec.typesetting;
+    else rec.typesetting = typesetting;
+    await writeFile(join(c.dir, "chapter.json"), JSON.stringify(rec));
+  };
 
   it("breaks the lines and sizes the boxes the same when reopened with the preference off", async () => {
     setPref("typeset", true);
@@ -632,15 +642,53 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
     closeChapter();
   });
 
-  it("reads a chapter written before the field existed as plain, whatever the preference", async () => {
+  // A chapter from before the field was laid out with this machine's switch as
+  // it stood then - `legacyTypesetting()`, which prefs.svelte.js freezes from
+  // the stored blob (back-compat.test.js pins that reading). The open path is
+  // what is tested here.
+  it("opens a chapter from before the field smart where the beta was saved on, and stamps it", async () => {
     const { p, c } = await chapter();
-    const rec = await record(c);
-    delete rec.typesetting;
-    await writeFile(join(c.dir, "chapter.json"), JSON.stringify(rec));
+    await withField(c, undefined);
+    setLegacyTypeset("smart");
+    await openChapter(p.id, c.id);
+    expect(app.typesetting).toEqual({ mode: "smart", version: 1 });
+    expect(typesetEnabled()).toBe(true);
+    // The first save writes the field, and from then on the file answers.
+    addEmptyBox(200, 300);
+    endEdit("stamp");
+    settleEdits();
+    expect(await flushBeforeLeaving("editor")).toBe(true);
+    closeChapter();
+    expect((await record(c)).typesetting).toEqual({ mode: "smart", version: 1 });
+    setLegacyTypeset("plain");
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("smart");
+    closeChapter();
+  });
+
+  it("opens a chapter from before the field plain where the beta was never saved on, whatever the default", async () => {
+    const { p, c } = await chapter();
+    await withField(c, undefined);
+    setLegacyTypeset("plain");
     setPref("typeset", true);
     await openChapter(p.id, c.id);
     expect(app.typesetting).toEqual({ mode: "plain", version: 1 });
     expect(typesetEnabled()).toBe(false);
+    closeChapter();
+  });
+
+  it("lets the field win over this machine's answer whenever it is there", async () => {
+    const { p, c } = await chapter();
+    setLegacyTypeset("smart");
+    await withField(c, { mode: "plain", version: 1 });
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("plain");
+    closeChapter();
+    setLegacyTypeset("plain");
+    setPref("typeset", false);
+    await withField(c, { mode: "smart", version: 1 });
+    await openChapter(p.id, c.id);
+    expect(app.typesetting.mode).toBe("smart");
     closeChapter();
   });
 

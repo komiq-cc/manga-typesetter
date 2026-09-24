@@ -492,8 +492,9 @@
           nowhere, and lays text out to a fitted balloon instead of its box.
           Unfinished - with it off, boxes wrap plainly and the extra controls
           stay out of the Inspector. Each chapter keeps its own setting, so it
-          opens the same on any machine; chapters made before this setting
-          existed open with it off.
+          opens the same on any machine. A chapter made before this setting
+          existed opens the way this computer had it then, and keeps that once
+          saved.
         </div>
 
         <!-- The defaults a new box is born with. Auto height stands outside the

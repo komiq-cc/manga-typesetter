@@ -14,11 +14,20 @@
 // Both consumers are leaves or near-leaves and neither imports this module back,
 // which is what keeps that import-time apply safe: nothing here can run before
 // the module it is writing into has finished evaluating.
-import { setBoxDefaults, setTypesetDefault } from './data.js';
+import { setBoxDefaults, setTypesetDefault, setLegacyTypeset } from './data.js';
 import { app, setTool, setBrushToolAllowed, setMinFontSize } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
 
 const KEY = 'mt.prefs';
+
+// Not a preference: what this machine laid chapters out with before a chapter
+// carried its own line breaker (DET-3), for the chapters that still do not.
+// 'smart' only when the stored blob said `typeset: true` - the user turned the
+// beta on - the first time a build with the field ran; a default never counts,
+// because the default is what BRK-1 will change. Frozen from then on and saved
+// in the same blob, so switching the new-chapter preference afterwards cannot
+// re-break an old chapter that has not been opened (and stamped) since.
+let legacyTypeset = 'plain';
 
 export const prefs = $state({
   // The shaped line breaking / hyphenation / balloon fitting engine, for NEW
@@ -126,6 +135,7 @@ function persist() {
         hiddenBuiltinFonts: $state.snapshot(prefs.hiddenBuiltinFonts),
         shownSystemFonts: $state.snapshot(prefs.shownSystemFonts),
         ocrModels: $state.snapshot(prefs.ocrModels),
+        legacyTypeset,
       }),
     );
   } catch {
@@ -228,6 +238,16 @@ function load() {
     if (names) prefs[k] = names;
   }
   prefs.ocrModels = normalizeOcrModels(saved?.ocrModels);
+  // Read before anything this session can persist, so the blob it reads is the
+  // one the last build left. Until the first write stamps it, every launch
+  // derives the same answer from the same unchanged blob.
+  legacyTypeset =
+    saved?.legacyTypeset === 'smart' || saved?.legacyTypeset === 'plain'
+      ? saved.legacyTypeset
+      : saved?.typeset === true
+        ? 'smart'
+        : 'plain';
+  setLegacyTypeset(legacyTypeset);
   setTypesetDefault(prefs.typeset);
   applyBoxDefaults();
   setMinFontSize(prefs.minFontSize);

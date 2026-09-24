@@ -759,6 +759,73 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
   });
 });
 
+// DET-3. A chapter.json from before the `typesetting` field was laid out with
+// this machine's beta switch as it stood when the field arrived. That answer is
+// read from the stored blob - never from a default, which BRK-1 will change -
+// and frozen, so a later flip of the new-chapter preference cannot re-break
+// those chapters. roundtrip.realfs.test.js pins the open path that uses it.
+describe('a prefs blob from before chapters carried their typesetting', () => {
+  const withStorage = async (raw, { broken = false } = {}) => {
+    const map = new Map(raw == null ? [] : [['mt.prefs', raw]]);
+    globalThis.localStorage = broken
+      ? {
+          getItem: () => {
+            throw new Error('denied');
+          },
+          setItem: () => {
+            throw new Error('denied');
+          },
+        }
+      : {
+          getItem: (k) => (map.has(k) ? map.get(k) : null),
+          setItem: (k, v) => void map.set(k, String(v)),
+          removeItem: (k) => void map.delete(k),
+        };
+    vi.resetModules();
+    const mod = await import('./prefs.svelte.js');
+    const data = await import('./data.js');
+    return { ...mod, ...data, map };
+  };
+  const realStorage = globalThis.localStorage;
+  afterEach(() => {
+    if (realStorage) globalThis.localStorage = realStorage;
+    else delete globalThis.localStorage;
+  });
+
+  it('reads such a chapter as smart where the beta was saved on', async () => {
+    const { legacyTypesetting } = await withStorage('{"typeset":true}');
+    expect(legacyTypesetting()).toEqual({ mode: 'smart', version: 1 });
+  });
+
+  it('reads it as plain where nothing says the beta was on, even with the default on', async () => {
+    for (const raw of [null, '{}', '{"typeset":false}', '{"typeset":"yes"}', '{ not json']) {
+      const { legacyTypesetting, setTypesetDefault, newTypesetting } = await withStorage(raw);
+      // The in-memory default is not what the old chapters were set with.
+      setTypesetDefault(true);
+      expect(newTypesetting().mode).toBe('smart');
+      expect(legacyTypesetting().mode).toBe('plain');
+    }
+    expect((await withStorage(null, { broken: true })).legacyTypesetting().mode).toBe('plain');
+  });
+
+  it('keeps its first answer when the preference changes afterwards', async () => {
+    // Beta never on: turning it on for new chapters leaves the old ones plain,
+    // this launch and every launch after.
+    const a = await withStorage('{"typeset":false}');
+    a.setPref('typeset', true);
+    expect(a.legacyTypesetting().mode).toBe('plain');
+    const a2 = await withStorage(a.map.get('mt.prefs'));
+    expect(a2.prefs.typeset).toBe(true);
+    expect(a2.legacyTypesetting().mode).toBe('plain');
+    // Beta on: turning it off leaves the old ones smart.
+    const b = await withStorage('{"typeset":true}');
+    b.setPref('typeset', false);
+    const b2 = await withStorage(b.map.get('mt.prefs'));
+    expect(b2.prefs.typeset).toBe(false);
+    expect(b2.legacyTypesetting().mode).toBe('smart');
+  });
+});
+
 describe('a tags blob from the last release', () => {
   // Tags still persist an outline as one colour and one width - that half of the
   // format has not moved, and this is the fixture that says so.

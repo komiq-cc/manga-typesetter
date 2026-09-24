@@ -32,7 +32,7 @@ import {
   cancelChapterPlace,
   useChapterTypesetting,
 } from './store.svelte.js';
-import { normalizeTypesetting, newTypesetting } from './data.js';
+import { normalizeTypesetting, newTypesetting, legacyTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
 import { carryTagsForward, bindTags, unbindTags, sanitizeTags, sanitizeTagSizes } from './tags.svelte.js';
 import {
@@ -1903,8 +1903,9 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // project's layout, not from whichever project was open before this one.
   app.projectLayout = normalizeLayout(p.layout);
   // And its line breaker from the chapter's own record, for the same reason:
-  // the load's refit measures under it (DET-3).
-  useChapterTypesetting(record.typesetting);
+  // the load's refit measures under it (DET-3). A record from before the field
+  // opens with what this machine laid it out with; the first save stamps it.
+  useChapterTypesetting(record.typesetting ?? legacyTypesetting());
   const minted = loadProjectPages(pages);
   // After the swap, not before. Pointing the module at the new chapter releases
   // the old one's images, and releasing an image nulls the `raw`/`cleaned` of
