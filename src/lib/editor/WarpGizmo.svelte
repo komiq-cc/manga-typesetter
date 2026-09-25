@@ -38,10 +38,12 @@
     warpDragGesture,
     resetWarp,
   } from '../warp-gizmo.js';
+  import { flipDelta, mirrorCss } from '../box-frame.js';
 
   // `toLocal` turns a pointer event into box-local page px - the box's own
-  // frame, rotation undone. The box owns that conversion (its mask tool needs
-  // the identical one), so it is passed in rather than worked out twice.
+  // frame, rotation undone and the flip mirrored out, which is the frame the
+  // mesh is stored in. The box owns that conversion (its mask tool needs the
+  // identical one), so it is passed in rather than worked out twice.
   let { box, pageId, z, toLocal, painter = null } = $props();
 
   const s = $derived(box.style);
@@ -51,6 +53,10 @@
   const pts = $derived(showHandles ? handlePoints(s.warp, box.w, box.h) : []);
   const lines = $derived(meshLines(s.warp, box.w, box.h));
   const ghost = $derived(ghostOutline(box.w, box.h));
+  // The mesh is stored unflipped and the export flips the warped picture last,
+  // so the overlay is drawn through the same flip: a handle sits on the part of
+  // the flipped picture it moves (see box-frame.js).
+  const mirror = $derived(mirrorCss(s, box.w * z, box.h * z));
   // Nothing to reset until something has been dragged. The empty array is the
   // stored form of "never touched" (see data.js), so this is exactly that test.
   const dirty = $derived(Array.isArray(s.warp.pts) && s.warp.pts.length > 0);
@@ -211,7 +217,9 @@
       });
       painter?.begin();
     }
-    session.gesture.by(d[0], d[1]);
+    // An arrow is a direction on screen; the mesh is stored unflipped.
+    const [dx, dy] = flipDelta(d, s);
+    session.gesture.by(dx, dy);
     painter?.frame();
     clearTimeout(session.timer);
     session.timer = setTimeout(() => endSession(false), NUDGE_SETTLE_MS);
@@ -225,6 +233,7 @@
   class="warp-gizmo"
   width={box.w * z}
   height={box.h * z}
+  style={mirror}
   aria-hidden="true"
   data-warp-gizmo={box.id}
 >

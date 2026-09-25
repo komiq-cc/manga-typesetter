@@ -67,6 +67,7 @@
   import { liquifyMeshGesture, frameScaleFor } from './liquify-mesh.js';
   import { reviewReach, reviewTitle } from './review-label.js';
   import { inkOverhang } from './paint-reach.js';
+  import { screenPoint, flipPoint, flipDelta, mirrorTransform, mirrorCss } from './box-frame.js';
   import { editLines, drawEditLines, rawOffset, domPoint, stepChar } from './edit-lines.js';
 
   // pg defaults to current page; longstrip passes explicit page.
@@ -826,9 +827,11 @@
   const review = $derived(reviewOf(box, pg));
 
   // Mirror flip transform for text.
-  const mirror = $derived(
-    s.flipH || s.flipV ? `scale(${s.flipH ? -1 : 1}, ${s.flipV ? -1 : 1})` : '',
-  );
+  const mirror = $derived(mirrorTransform(s));
+  // The same flip on an overlay of stored points - the path and mask gizmos -
+  // about the box's centre, so a handle sits on the part of the flipped
+  // picture it moves (see box-frame.js).
+  const overlayMirror = $derived(mirrorCss(s, box.w * z, box.h * z));
   // The flip, as the export makes it: of the box's FINISHED picture - type,
   // ink, and the mask already cut out of them - about the box's centre
   // (`paintBoxOnPage` mirrors the bitmap `renderBox` composited, the mask
@@ -1032,6 +1035,7 @@
   // smooth through the anchor in a single drag.
   // The pointer delta is inverse-rotated into box space like a resize is, and
   // the gesture records one style edit at the end like the rotation handle.
+  // Deltas rather than `maskLocal` points, so the drag needs no page frame.
   function startPathDrag(e, i, which) {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -1055,8 +1059,10 @@
       if (ev.pointerId !== pid) return;
       const sdx = (ev.clientX - sx) / zz,
         sdy = (ev.clientY - sy) / zz;
-      const dx = sdx * cos - sdy * sin,
-        dy = sdx * sin + sdy * cos;
+      // And mirrored into the path's own frame, which is the unflipped one: the
+      // curve is drawn flipped (`overlayMirror`), so a step right on screen is
+      // a step left in the path on a box flipped left-right.
+      const [dx, dy] = flipDelta([sdx * cos - sdy * sin, sdx * sin + sdy * cos], s);
       if (which === 'a') {
         pt.x = o.x + dx;
         pt.y = o.y + dy;
@@ -1109,27 +1115,19 @@
   const maskDraft = $state({ shape: null, poly: null });
 
   // A pointer event in box-local page px: page coords from the page frame,
-  // then inverse-rotated around the box centre. What the mesh tools work in;
-  // the mask tool takes one step more (`maskLocal`).
+  // then inverse-rotated around the box centre - the SCREEN frame, where the
+  // liquify ring is drawn. Every gizmo that stores points takes one step more
+  // (`maskLocal`).
   function maskPoint(ev) {
-    const r = pageFrameEl.getBoundingClientRect();
-    const px = (ev.clientX - r.left) / app.zoom - box.x;
-    const py = (ev.clientY - r.top) / app.zoom - box.y;
-    const rad = (-(s.rotation || 0) * Math.PI) / 180;
-    if (!rad) return [px, py];
-    const cx = box.w / 2;
-    const cy = box.h / 2;
-    const dx = px - cx;
-    const dy = py - cy;
-    return [cx + dx * Math.cos(rad) - dy * Math.sin(rad), cy + dx * Math.sin(rad) + dy * Math.cos(rad)];
+    return screenPoint(ev.clientX, ev.clientY, pageFrameEl.getBoundingClientRect(), app.zoom, box);
   }
 
-  // The same point in the frame mask shapes are stored in: unflipped, because
-  // the mask is cut before the flip (`wrapMirror`), so a shape lands - once
-  // mirrored with the box - under the pointer that drew it.
+  // The same point in the frame the mask shapes, the warp mesh and the path
+  // are stored in: unflipped, because all three are applied before the flip
+  // (`wrapMirror`), so what they move lands - once mirrored with the box -
+  // under the pointer that moved it.
   function maskLocal(ev) {
-    const [x, y] = maskPoint(ev);
-    return [s.flipH ? box.w - x : x, s.flipV ? box.h - y : y];
+    return flipPoint(maskPoint(ev), box);
   }
 
   // A shape changes the verdict as well as the picture: an include mask cuts
@@ -1233,9 +1231,13 @@
     // same trade the transform gizmo makes, for the same reason.
     warpPainter.begin();
     const ac = new AbortController();
-    let [lx, ly] = maskPoint(e);
+    // The ring is drawn where the pointer is, in the screen frame; the mesh is
+    // pushed in its own, unflipped one (`maskLocal`), so on a flipped box the
+    // push is mirrored into the mesh and lands, flipped back, under the ring
+    // and the way the pointer went.
+    liquifyAt = maskPoint(e);
+    let [lx, ly] = flipPoint(liquifyAt, box);
     let lastT = e.timeStamp;
-    liquifyAt = [lx, ly];
     liquifyEnd = (commit) => {
       liquifyEnd = null;
       live.delete(ac);
@@ -1246,10 +1248,10 @@
     };
     const move = (ev) => {
       if (ev.pointerId !== pid) return;
-      const [x, y] = maskPoint(ev);
+      liquifyAt = maskPoint(ev);
+      const [x, y] = flipPoint(liquifyAt, box);
       const scale = frameScaleFor(ev.timeStamp - lastT);
       lastT = ev.timeStamp;
-      liquifyAt = [x, y];
       if (g.step({ cx: x, cy: y, dx: x - lx, dy: y - ly, scale })) warpPainter.frame();
       lx = x;
       ly = y;
@@ -1694,8 +1696,9 @@
   {#if gizmoLine}
     <!-- The path gizmo: the baked curve, an anchor dot per point and its two
          handle dots, all draggable. Outside the clip wrapper on purpose - the
-         curve must stay visible where the clip has cropped the letters. -->
-    <svg class="path-gizmo" width={box.w * z} height={box.h * z} aria-hidden="true">
+         curve must stay visible where the clip has cropped the letters - and
+         so it carries the box's flip itself, as the curve the letters follow does. -->
+    <svg class="path-gizmo" width={box.w * z} height={box.h * z} style={overlayMirror} aria-hidden="true">
       <polyline points={gizmoLine} />
       {#each s.path.pts as p, i (i)}
         <line x1={p.x * z} y1={p.y * z} x2={(p.x + p.ix) * z} y2={(p.y + p.iy) * z} />
@@ -1719,7 +1722,7 @@
       class:excl={s.clip.mode === 'exclude'}
       width={box.w * z}
       height={box.h * z}
-      style={mirror ? `transform:${mirror};transform-origin:${(box.w * z) / 2}px ${(box.h * z) / 2}px;` : ''}
+      style={overlayMirror}
       aria-hidden="true"
     >
       {#if maskArmed}
@@ -1783,10 +1786,11 @@
   {/if}
 
   {#if warpGizmoOn}
-    <!-- The mesh's handles. `maskPoint` is the box's own client -> box-local
-         conversion, rotation undone, and the gizmo takes it rather than working
-         the same thing out a second time. -->
-    <WarpGizmo {box} pageId={pg.id} {z} toLocal={maskPoint} painter={warpPainter} />
+    <!-- The mesh's handles. `maskLocal` is the box's own client -> box-local
+         conversion, rotation undone and the flip mirrored out - the frame the
+         mesh is stored in - and the gizmo takes it rather than working the same
+         thing out a second time. -->
+    <WarpGizmo {box} pageId={pg.id} {z} toLocal={maskLocal} painter={warpPainter} />
   {/if}
 
   <!-- The box's own resize and rotate handles stand down while the gizmo is up.
