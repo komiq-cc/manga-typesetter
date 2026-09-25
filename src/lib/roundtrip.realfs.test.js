@@ -600,7 +600,7 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
   });
   afterEach(() => {
     metrics.on = false;
-    setPref("typeset", false);
+    setPref("typeset", true);
     setTypesetEnabled(false);
     setLegacyTypeset("plain");
   });
@@ -695,13 +695,13 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
   it("saves the switch made in Settings with the chapter", async () => {
     const { p, c } = await chapter();
     await openChapter(p.id, c.id);
-    expect(app.typesetting.mode).toBe("plain");
-    setChapterTypesetMode("smart");
-    expect(typesetEnabled()).toBe(true);
+    expect(app.typesetting.mode).toBe("smart");
+    setChapterTypesetMode("plain");
+    expect(typesetEnabled()).toBe(false);
     // A preference is not the chapter's switch.
-    expect(prefs.typeset).toBe(false);
+    expect(prefs.typeset).toBe(true);
     expect(await flushBeforeLeaving("editor")).toBe(true);
     closeChapter();
-    expect((await record(c)).typesetting).toEqual({ mode: "smart", version: 1 });
+    expect((await record(c)).typesetting).toEqual({ mode: "plain", version: 1 });
   });
 });

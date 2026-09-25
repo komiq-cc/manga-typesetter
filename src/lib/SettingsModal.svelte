@@ -485,16 +485,15 @@
         {/if}
         <div class="field">
           <span>Smart line breaking · new chapters</span>
-          {@render toggle('typeset', 'Smart line breaking for new chapters (beta)', prefs.typeset)}
+          {@render toggle('typeset', 'Smart line breaking for new chapters', prefs.typeset)}
         </div>
         <div class="qhint">
           Breaks lines to the shape of the balloon, hyphenates words that fit
           nowhere, and lays text out to a fitted balloon instead of its box.
-          Unfinished - with it off, boxes wrap plainly and the extra controls
-          stay out of the Inspector. Each chapter keeps its own setting, so it
-          opens the same on any machine. A chapter made before this setting
-          existed opens the way this computer had it then, and keeps that once
-          saved.
+          On by default for new chapters. With it off, boxes wrap plainly.
+          Each chapter keeps its own setting, so it opens the same on any
+          machine. A chapter made before this setting existed opens the way
+          this computer had it then, and keeps that once saved.
         </div>
 
         <!-- The defaults a new box is born with. Auto height stands outside the

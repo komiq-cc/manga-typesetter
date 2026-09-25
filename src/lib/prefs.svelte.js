@@ -31,10 +31,10 @@ let legacyTypeset = 'plain';
 
 export const prefs = $state({
   // The shaped line breaking / hyphenation / balloon fitting engine, for NEW
-  // chapters. Beta, and off until the user says otherwise - see the TYPESETTING
-  // section in Settings. A chapter carries its own answer once it exists
-  // (`typesetting` in chapter.json, see data.js), so this never re-breaks one.
-  typeset: false,
+  // chapters. On by default - see the TYPESETTING section in Settings. A chapter
+  // carries its own answer once it exists (`typesetting` in chapter.json, see
+  // data.js), so this never re-breaks one.
+  typeset: true,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
   // ---- typesetting defaults for NEW text boxes ----

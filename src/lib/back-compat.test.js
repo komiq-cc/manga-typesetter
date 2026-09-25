@@ -713,13 +713,13 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
 
   it('reads a blob with no keys at all', async () => {
     const { prefs } = await withStorage('{}');
-    expect(prefs.typeset).toBe(false);
+    expect(prefs.typeset).toBe(true);
     expect(prefs.shortcuts).toEqual({});
   });
 
   it('leaves the defaults standing for a corrupt or absent blob', async () => {
     expect((await withStorage('{ not json')).prefs.shortcuts).toEqual({});
-    expect((await withStorage(null)).prefs.typeset).toBe(false);
+    expect((await withStorage(null)).prefs.typeset).toBe(true);
   });
 
   it('refuses a `shortcuts` of the wrong shape rather than handing it to the matcher', async () => {
@@ -823,6 +823,23 @@ describe('a prefs blob from before chapters carried their typesetting', () => {
     const b2 = await withStorage(b.map.get('mt.prefs'));
     expect(b2.prefs.typeset).toBe(false);
     expect(b2.legacyTypesetting().mode).toBe('smart');
+  });
+
+  // BRK-1: smart line breaking is on by default for new chapters.
+  it('fresh prefs (no saved blob) defaults prefs.typeset to true and newTypesetting to smart', async () => {
+    const { prefs, newTypesetting } = await withStorage(null);
+    expect(prefs.typeset).toBe(true);
+    expect(newTypesetting().mode).toBe('smart');
+  });
+
+  it('an old chapter with no typesetting field and no saved pref still opens plain', async () => {
+    const { legacyTypesetting } = await withStorage(null);
+    expect(legacyTypesetting().mode).toBe('plain');
+  });
+
+  it('saved blob with typeset:false and no legacyTypeset derives legacy plain', async () => {
+    const { legacyTypesetting } = await withStorage('{"typeset":false}');
+    expect(legacyTypesetting().mode).toBe('plain');
   });
 });
 
