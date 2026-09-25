@@ -15,7 +15,7 @@
     rememberStyle,
     settleEdits,
     setBoxText,
-    autoFitBox,
+    refitBox,
     autoFitBoxTo,
     focusPage,
     resizeBox,
@@ -808,8 +808,11 @@
   // only when it actually changes.
   //
   // `shaped` is null only for a curved box (glyphs along an arc, never
-  // wrapped), drawn or being typed into. It falls back to `autoFitBox`, which
-  // refuses it outright, exactly as it always has.
+  // wrapped), drawn or being typed into. It falls back to `refitBox`, the same
+  // grow-only net, which for a curve is the verdict alone. Never the solver or
+  // the ladder: sizing a box is the store's, on the edits that call for it
+  // (ARC-1), and a component that re-sized boxes as it rendered them would
+  // resize every box it drew.
   $effect(() => {
     text;
     box.w;
@@ -833,7 +836,7 @@
     box.fit;
     app.fontsVersion;
     const lines = shaped;
-    untrack(() => (lines ? autoFitBoxTo(box, lines.length, pg) : autoFitBox(box, pg)));
+    untrack(() => (lines ? autoFitBoxTo(box, lines.length, pg) : refitBox(box, pg)));
   });
 
   // The "needs review" flag as every reader sees it: the containment check's,

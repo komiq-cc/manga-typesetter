@@ -56,6 +56,8 @@ const {
   selectBox,
   autoFitBox,
   autoFitBoxTo,
+  setLineText,
+  settleEdits,
   flaggedBoxes,
   reviewBox,
   setBoxText,
@@ -1716,6 +1718,29 @@ describe('placement chooses the size (FIT-1)', () => {
       } finally {
         app.projectLayout = 'pages';
       }
+    });
+
+    // What the queue's translation field does (Queue.svelte): every keystroke
+    // through `setLineText`, one `line` entry for the burst.
+    it('a queue line edit is one undo step that puts back the text and the box', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = placeAt(32);
+      const placed = [...geomOf(b), { ...b.auto }];
+      const ln = page().lines[0];
+      const n = hist.peekStack().undo.length;
+      for (const v of ['N', 'NO', 'NO.']) setLineText(page(), ln.n, v);
+      const edited = [...geomOf(b), { ...b.auto }];
+      expect(b.style.size).toBe(32);
+      expect(edited).not.toEqual(placed);
+      settleEdits();
+      expect(hist.peekStack().undo.length).toBe(n + 1);
+      hist.undo();
+      expect(ln.en).toBe(TEXT);
+      expect([...geomOf(b), { ...b.auto }]).toEqual(placed);
+      hist.redo();
+      expect(ln.en).toBe('NO.');
+      expect([...geomOf(b), { ...b.auto }]).toEqual(edited);
     });
 
     // With no balloon, a width set by hand is the box's, and a wider box gives

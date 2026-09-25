@@ -5,24 +5,20 @@
     placedLineNs,
     activateLine,
     lineText,
-    markUnsaved,
     toggleTagOnLine,
     toast,
     isFreeLine,
     addTextBoxInView,
-    autoFitBox,
+    setLineText,
     isTranslateMode,
     addQueueLine,
-    pageById,
-    setEditSettleHook,
     placeableDetectedLines,
     placeDetectedOnPage,
     placeDetectedInChapter,
     cancelChapterPlace,
   } from './store.svelte.js';
-  import { record } from './editor/history.svelte.js';
   import { fontGroups, isFontOffered } from './font-menu.js';
-  import { onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import {
     knownTags,
     lineTags,
@@ -69,52 +65,13 @@
     resyncField(fieldUndo, v);
   });
 
-  // ---- history recording for the translation textarea ----
-  // The field's own Cmd+Z stack covers keystrokes while the caret is in it;
-  // this is the other half, one `line` entry per typing burst, so the toolbar
-  // undo can rewind a queue edit like any other edit. Same settle pattern as
-  // the Inspector: the pending entry opens on the first input for a line,
-  // and closes 400ms after the last one - or when another line is touched,
-  // when the panel unmounts, or when anything asks the app to settle (a page
-  // turn, an undo press).
-  const LINE_SETTLE_MS = 400;
-  let linePending = null; // { pageId, lineN, before }
-  let lineSettleT;
-
-  function settleLine() {
-    clearTimeout(lineSettleT);
-    const pend = linePending;
-    linePending = null;
-    if (!pend) return;
-    const pg = pageById(pend.pageId);
-    const ln = pg?.lines.find((l) => l.n === pend.lineN);
-    if (!ln) return;
-    const after = ln.en ?? '';
-    if (after === pend.before) return;
-    record({ t: 'line', pageId: pend.pageId, lineN: pend.lineN, before: pend.before, after });
-  }
-
-  function touchLine(line) {
-    if (linePending && (linePending.lineN !== line.n || linePending.pageId !== p.id)) settleLine();
-    if (!linePending) linePending = { pageId: p.id, lineN: line.n, before: line.en ?? '' };
-    clearTimeout(lineSettleT);
-    lineSettleT = setTimeout(settleLine, LINE_SETTLE_MS);
-  }
-
-  const releaseLineSettle = setEditSettleHook(settleLine);
-  onDestroy(() => {
-    settleLine();
-    releaseLineSettle();
-    clearTimeout(lineSettleT);
-  });
-
+  // The translation textarea writes through the store (`setLineText`), which
+  // fits the line's boxes and records one `line` entry per typing burst for the
+  // toolbar undo; the field's own Cmd+Z stack covers the keystrokes.
   function onTextareaInput(e, line) {
     const v = e.currentTarget.value;
-    touchLine(line);
-    line.en = v;
+    setLineText(p, line.n, v);
     recordFieldEdit(fieldUndo, v, { atomic: isAtomicInput(e.inputType) });
-    fitLineBoxes(line.n);
-    markUnsaved();
   }
 
   function onTextareaKey(e, line) {
@@ -126,20 +83,12 @@
     const caret = caretAfter(el.value, next);
     el.value = next;
     el.setSelectionRange(caret, caret);
-    touchLine(line);
-    line.en = next;
-    fitLineBoxes(line.n);
-    markUnsaved();
+    setLineText(p, line.n, next);
   }
 
   // Translate mode disables canvas box placement and status indicators.
   const translate = $derived(isTranslateMode());
 
-
-  // Refit boxes when translation text changes.
-  function fitLineBoxes(n) {
-    for (const b of p.boxes) if (b.lineN === n) autoFitBox(b, p);
-  }
 
   const known = $derived(knownTags(app.pages));
   const recent = $derived(known.slice(0, 4));

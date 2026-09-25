@@ -4,9 +4,7 @@
     byId,
     boxText,
     deleteBox,
-    markUnsaved,
     beginEdit,
-    rememberStyle,
     cloneStyle,
     fontCssFor,
     page,
@@ -15,7 +13,7 @@
     boxOwnText,
     setBoxText,
     isFreeBox,
-    autoFitBox,
+    boxEdited,
     refitBalloon,
     toast,
     resizeBox,
@@ -188,9 +186,7 @@
       };
     }
     if (pending && opts?.geom) pending.geom = true;
-    if (box) autoFitBox(box);
-    markUnsaved();
-    rememberStyle(box);
+    boxEdited(box);
     clearTimeout(settleT);
     settleT = setTimeout(settle, SETTLE_MS);
   }

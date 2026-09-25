@@ -577,6 +577,66 @@ function clamp(v, a, b) {
   return Math.max(a, Math.min(b, v));
 }
 
+// ---------- an edit the Inspector has written onto a box ----------
+// The panel writes the style, text or geometry field itself, then says so here:
+// the store sizes the box for it (`autoFitBox` - the solver, the ladder or the
+// verdict), marks the document, and carries the style to the next box placed.
+// The panel records the history; it sizes nothing (ARC-1).
+export function boxEdited(b, p = page()) {
+  if (b) autoFitBox(b, p);
+  markUnsaved();
+  rememberStyle(b);
+}
+
+// ---------- a queue line's translation, typed into the queue ----------
+// The queue's own field writes the line, and every box reading that line is
+// fitted to it, as `setBoxText` fits the one box it writes. Here rather than in
+// the panel, so the queue sizes nothing itself (ARC-1).
+//
+// One `line` entry per typing burst, so the toolbar undo can rewind a queue
+// edit like any other edit - the field's own Cmd+Z covers the keystrokes. The
+// burst opens on the first write to a line and closes LINE_SETTLE_MS after the
+// last, or when another line is written, or when anything asks the app to
+// settle (a page turn, an undo press - `settleEdits`). The boxes reading the
+// line re-size as it is typed, so the entry carries their geometry on both
+// sides as well (`boxes: [{ boxId, geomBefore, geomAfter }]`), which the
+// history's `line` kind puts back: one undo restores the text and the boxes.
+const LINE_SETTLE_MS = 400;
+let linePending = null; // { pageId, lineN, before, geoms }
+let lineT = null;
+export function setLineText(p, n, v) {
+  const ln = p ? lineByN(p, n) : null;
+  if (!ln) return;
+  if (linePending && (linePending.lineN !== n || linePending.pageId !== p.id)) settleLine();
+  linePending ??= { pageId: p.id, lineN: n, before: ln.en ?? '', geoms: lineBoxGeoms(p, n) };
+  ln.en = v;
+  fitLineBoxes(p, n);
+  markUnsaved();
+  clearTimeout(lineT);
+  lineT = setTimeout(settleLine, LINE_SETTLE_MS);
+}
+function settleLine() {
+  clearTimeout(lineT);
+  const pend = linePending;
+  linePending = null;
+  if (!pend) return;
+  const pg = pageById(pend.pageId);
+  const ln = pg ? lineByN(pg, pend.lineN) : null;
+  if (!ln) return;
+  const after = ln.en ?? '';
+  if (after === pend.before) return;
+  const now = new Map(lineBoxGeoms(pg, pend.lineN).map((g) => [g.boxId, g.geom]));
+  const boxes = pend.geoms
+    .filter((g) => now.has(g.boxId))
+    .map((g) => ({ boxId: g.boxId, geomBefore: g.geom, geomAfter: now.get(g.boxId) }));
+  recordEdit({ t: 'line', pageId: pend.pageId, lineN: pend.lineN, before: pend.before, after, boxes });
+}
+function fitLineBoxes(p, n) {
+  for (const b of p?.boxes ?? []) if (b.lineN === n) autoFitBox(b, p);
+}
+const lineBoxGeoms = (p, n) =>
+  (p?.boxes ?? []).filter((b) => b.lineN === n).map((b) => ({ boxId: b.id, geom: fitGeom(b) }));
+
 // ---------- auto-height, and containment ----------
 // The box's rectangle has to describe its text. It did not: the editor renders
 // with `overflow:visible` and the exporter grows a footprint of its own
@@ -620,12 +680,15 @@ function clamp(v, a, b) {
 //                  refitted.
 //
 // Every path that can change what the box has to fit calls one of them - inline
-// typing, the Inspector's text field and style controls, the queue's own
-// translation field, a bulk apply, a tag apply, a width drag, a placement, a
-// chapter load, and a font arriving after all of those (`noteFontsChanged`) -
-// because a `$effect` in the component would only ever cover the boxes rendered
-// on the page currently on screen. An undo or redo restores the recorded
-// geometry directly rather than re-deriving it, and then re-checks.
+// typing and its end (`setBoxText`, `endEdit`), the Inspector's text field and
+// style controls, a preset, a style paste, the queue's own translation field
+// (`fitLineBoxes`), a bulk apply, a tag apply, the balloon switch, the Refit
+// button, a width drag, a placement, a chapter load, and a font arriving after
+// all of those (`noteFontsChanged`) - because a `$effect` in the component would
+// only ever cover the boxes rendered on the page currently on screen. The one
+// effect that does size a box, TextBox's, is the grow-only net and nothing more
+// (ARC-1). An undo or redo restores the recorded geometry directly rather than
+// re-deriving it, and then re-checks.
 //
 // Records nothing of its own. The fit is not an edit - it is a consequence of an
 // edit the user has already made, and giving it its own history entry would
@@ -1532,6 +1595,9 @@ export function settleEdits() {
   // inline edit' in store.test.js, which is the whole of the claim: flip these
   // two lines and it fails.
   editSettleHooks.notify();
+  // The queue's line burst is a panel's pending entry too, kept here since the
+  // store writes it (`setLineText`).
+  settleLine();
   // The inline box edit is settled here rather than by each caller because this
   // is already what every path that would strand an unrecorded edit calls - the
   // page turn, the undo, the start of a drag, the way out of the chapter - and
@@ -1588,6 +1654,9 @@ export const clearPending = () => {
   // put away is the one that page belonged to.
   nudgePending = null;
   clearTimeout(nudgeT);
+  // And the queue's line burst, for the same reason.
+  linePending = null;
+  clearTimeout(lineT);
 };
 // Every path that ends an edit calls this - not just `endEdit`. `deselect` and
 // `selectBox` null `editingId` on pointerdown, before the browser fires blur on
