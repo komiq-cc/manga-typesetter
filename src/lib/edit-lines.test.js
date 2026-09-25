@@ -206,6 +206,23 @@ describe('the Returns the result trims take no room while typing (UX-4)', () => 
     expect(edge(node, 'end').textContent).toBe('\n');
   });
 
+  // A flush block in a balloon sets each line in from its aligned edge
+  // (`lineIndents`); the editable pads its lines the same, so the text does not
+  // move when the edit starts or ends. A line not set in gets no padding.
+  it('pads each line on its aligned side by its indent', () => {
+    const text = '\nhello big\nworld';
+    const node = fakeDoc().createElement('div');
+    drawEditLines(node, text, map(text, ['hello big', 'world']), () => 0, { side: 'right', px: [12.5, 0] });
+    const [a, b] = rows(node);
+    expect(a.style).toEqual({ paddingRight: '12.5px' });
+    expect(b.style).toEqual({});
+    const left = fakeDoc().createElement('div');
+    drawEditLines(left, text, map(text, ['hello big', 'world']), () => 0, { side: 'left', px: [3, 4] });
+    expect(rows(left).map((r) => r.style.paddingLeft)).toEqual(['3px', '4px']);
+    // The Return trimmed at the start hangs above, unpadded.
+    expect(edge(left, 'start').style).toEqual({});
+  });
+
   it('gives a single trailing Return a caret row below the block, and nothing in it', () => {
     const node = draw('hello\n', ['hello']);
     expect(rows(node).map((r) => r.textContent)).toEqual(['hello\n']);

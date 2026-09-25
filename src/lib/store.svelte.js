@@ -2389,10 +2389,11 @@ const MIN_FIT_CONFIDENCE = 0.5;
 // wide and a fitted box laid its text out as a rectangle (GEO-1). At the full
 // width the balloon's rows decide every line and the box still holds them all.
 //
-// Flush text still gets the inscribed rectangle. Only centred text follows the
-// balloon's rows (`balloonWidthsFor`); a left- or right-aligned block sets flat
-// from the box's edge, and the one rectangle whose every row is inside the curve
-// is the inscribed one.
+// Flush text still gets the inscribed rectangle, where its block reads centred
+// in the balloon rather than hugging one side of it. Its lines follow the
+// balloon's rows too (`balloonWidthsFor`), each set in to its row's edge
+// (`lineIndents`) - which inside that rectangle is the box's own edge, and past
+// it, once auto height has grown the box, the curve.
 //
 // Pure and exported for the same reason `placementRect` is - "what size is a box
 // on this bubble" is arithmetic worth pinning down without a canvas anywhere

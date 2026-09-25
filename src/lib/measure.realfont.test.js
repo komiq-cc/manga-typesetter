@@ -10,6 +10,7 @@ import {
   layoutLines,
   applyCase,
   balloonWidthsFor,
+  lineIndents,
   setTypesetEnabled,
   clearLayoutMemo,
   BOX_PAD,
@@ -637,6 +638,68 @@ describe('boxInkRect is the ink the exporter paints', () => {
       expect(missed, msg).toBeLessThanOrEqual(SLACK);
       expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT);
     }
+  });
+
+  // GEO-1: a flush block in an oval, on the balloon's frame. Each line is set in
+  // from its aligned edge to its row's (`lineIndents`) - the same number in the
+  // editor, which pads each line by what it asks with the editor's own
+  // arguments, and in the exporter, which draws each line at `placeBlock`'s
+  // `lineX`. The check measures the painted ink, and every painted pixel is
+  // inside the balloon: set flat from the box edge, the top and bottom lines
+  // started or ended outside the curve.
+  it.each([
+    ['Comic Neue', 'left'],
+    ['DejaVu Sans', 'right'],
+  ])('%s, %s-aligned in an oval: the lines follow its edge', (font, align) => {
+    const text = 'Nobody told me the lighthouse keeper had a cat, or that the cat had opinions.';
+    const fit = { kind: 'ellipse', cx: 400, cy: 300, rx: 134, ry: 174 };
+    const g = fittedRect({ w: 800, h: 600 }, fit, 'center');
+    loadProjectPages([
+      {
+        id: 1,
+        w: 800,
+        h: 600,
+        lines: [{ n: 1, jp: 'あ', en: text, type: 'dialogue' }],
+        boxes: [{ id: 'b1', lineN: 1, text: null, ...g, fit, style: styleFor(font, { align }) }],
+        detect: null,
+      },
+    ]);
+    const p = page();
+    const box = p.boxes[0];
+    const s = box.style;
+    const cand = boxCandidate(box, boxText(box, p));
+    const place = placeBlock(cand);
+    const cw = contentWidth(box.w, s);
+    const editor = layoutLines(applyCase(text, s), s, s.size, cw, balloonWidthsFor(box, s, s.size));
+    expect(place.lines).toEqual(editor);
+    expect(place.indents).toEqual(lineIndents(editor, s, s.size, cw, balloonWidthsFor(box, s, s.size)));
+    expect(place.indents[0]).toBeGreaterThan(10);
+    expect(containBox(cand, place).fits).toBe(true);
+
+    const geo = boxInkRect(cand);
+    const got = rasterInk(box, p);
+    const want = { x0: geo.x, y0: geo.y, x1: geo.x + geo.w, y1: geo.y + geo.h };
+    for (const k of ['x0', 'y0', 'x1', 'y1']) {
+      const missed = k.endsWith('0') ? want[k] - got[k] : got[k] - want[k];
+      const msg = `${k}: raster ${got[k]} vs check ${want[k]}`;
+      expect(missed, msg).toBeLessThanOrEqual(SLACK);
+      expect(-missed, msg).toBeLessThanOrEqual(SLACK + ROUNDED_OUT);
+    }
+
+    const inside = (x, y) => ((x - fit.cx) / fit.rx) ** 2 + ((y - fit.cy) / fit.ry) ** 2 <= 1;
+    const { canvas, ox, oy, ss } = renderBoxTexture(box, p);
+    const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    let ink = 0;
+    let outside = 0;
+    for (let py = 0; py < canvas.height; py++) {
+      for (let px = 0; px < canvas.width; px++) {
+        if (d[(py * canvas.width + px) * 4 + 3] === 0) continue;
+        ink++;
+        if (!inside(box.x - ox + (px + 0.5) / ss, box.y - oy + (py + 0.5) / ss)) outside++;
+      }
+    }
+    expect(ink).toBeGreaterThan(500);
+    expect(outside).toBe(0);
   });
 
   // OVF-10: a tab is painted as the space it was laid out as. One line, with

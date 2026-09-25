@@ -1,6 +1,6 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { familyFor, fontShorthand, maxLineWidth, textInset, contentWidth } from './measure.js';
+import { familyFor, fontShorthand, lineWidth, textInset, contentWidth } from './measure.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import {
   strokeBands,
@@ -212,7 +212,7 @@ function layoutBox(box, p) {
 
   let lines = null;
   let layout = null;
-  let anchorX = 0;
+  let lineX = null;
   let leftExtra = 0,
     rightExtra = 0,
     topExtra = 0,
@@ -248,9 +248,8 @@ function layoutBox(box, p) {
     // breaks where the canvas breaks" is a construction rather than a
     // coincidence. Shaping off, that function is still `wrapLinesDOM`.
     lines = place.lines;
-    anchorX = place.anchorX;
+    lineX = place.lineX;
     const blockH = place.blockH;
-    const blockW = maxLineWidth(lines, s, s.size);
 
     // Where the block sits inside the box, as an offset from the box's top-left,
     // and the one statement of it: `paintBox` draws from these and the overflow
@@ -271,18 +270,24 @@ function layoutBox(box, p) {
     // line boxes - see `inkShiftY`. The editor applies the same shift to the
     // same lines, so a centred block exports where the canvas shows it.
     blockY = place.blockY;
-    const inset = textInset(s);
-    blockX =
-      s.align === 'center'
-        ? (box.w - blockW) / 2
-        : s.align === 'right'
-          ? box.w - inset - blockW
-          : inset;
+    // Across, the block is its lines' own spans, each at the x `placeBlock`
+    // draws it at: a flush line in a balloon is set in from the edge to its
+    // row's (`lineIndents`), so the widest line is not always the one that
+    // reaches furthest.
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    lines.forEach((ln, i) => {
+      const w = lineWidth(ln, s, s.size);
+      const x = s.align === 'center' ? lineX[i] - w / 2 : s.align === 'right' ? lineX[i] - w : lineX[i];
+      x0 = Math.min(x0, x);
+      x1 = Math.max(x1, x + w);
+    });
+    blockX = x0;
 
     topExtra = Math.max(0, -blockY);
     bottomExtra = Math.max(0, blockY + blockH - box.h);
-    leftExtra = Math.max(0, -blockX);
-    rightExtra = Math.max(0, blockX + blockW - box.w);
+    leftExtra = Math.max(0, -x0);
+    rightExtra = Math.max(0, x1 - box.w);
   }
 
   // Hand-drawn ink past the box's far edges (OVF-7). The pad above holds the
@@ -314,7 +319,7 @@ function layoutBox(box, p) {
   // Where each line's baseline sits inside its line box - the browser's own
   // placement, so the raster draws the glyphs where the editor does.
   const baseY = isCurve ? 0 : place.baseY;
-  return { s, lineH, baseY, pad, isCurve, lines, layout, leftExtra, topExtra, ox, oy, blockX, blockY, anchorX, cw, ch };
+  return { s, lineH, baseY, pad, isCurve, lines, layout, leftExtra, topExtra, ox, oy, blockX, blockY, lineX, cw, ch };
 }
 
 // The rectangle a gradient or a pattern is measured against, in the same
@@ -481,16 +486,16 @@ function paintBox(ctx, box, L) {
   } else {
     if ('letterSpacing' in ctx) ctx.letterSpacing = `${s.letterSpacing}px`;
     // Both from `layoutBox`, which is where the padding is applied and the only
-    // place it should be. `textAlign` decides which edge of the line `anchorX`
+    // place it should be. `textAlign` decides which edge of the line its x
     // names, so the padded content box's own edge is the anchor - its left for
     // left-aligned text, its right for right-aligned, and the box's centre for
-    // centred text, which the symmetric padding leaves where it was. The anchor
-    // is `placeBlock`'s, the one the containment check measured the ink from.
+    // centred text, which the symmetric padding leaves where it was - moved in,
+    // for a flush line in a balloon, to its row's edge. The x is `placeBlock`'s
+    // `lineX`, the one the containment check measured the ink from.
     const startY = L.oy + L.blockY;
     ctx.textAlign = s.align;
-    const anchorX = L.ox + L.anchorX;
     const drawAll = (fn) => {
-      L.lines.forEach((ln, i) => fn(ln, anchorX, startY + i * L.lineH + L.baseY));
+      L.lines.forEach((ln, i) => fn(ln, L.ox + L.lineX[i], startY + i * L.lineH + L.baseY));
     };
     // Gradient scope 'line' restarts the gradient on every wrapped line, so the
     // fill style is chosen per line rather than once for the block.
@@ -501,7 +506,7 @@ function paintBox(ctx, box, L) {
         if (!L.silhouette && !perLine) setFill(ctx, s, fillRect(box, L));
         L.lines.forEach((ln, i) => {
           if (perLine) setFill(ctx, s, fillRect(box, L, i));
-          ctx.fillText(ln, anchorX, startY + i * L.lineH + L.baseY);
+          ctx.fillText(ln, L.ox + L.lineX[i], startY + i * L.lineH + L.baseY);
         });
       },
     });

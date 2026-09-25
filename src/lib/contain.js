@@ -14,7 +14,7 @@
 //
 //   placeBlock(cand, opts?)          -> where the block sits, box-local, unzoomed:
 //       straight { s, text, isCurve: false, lines, inks, shift, lineH, blockH,
-//                  blockY, anchorX, baseY }
+//                  blockY, anchorX, indents, lineX, baseY }
 //       curved   { s, text, isCurve: true, layout }
 //       `opts.cache: false` keeps the layout out of measure.js's memo.
 //   placeAtHeight(place, cand)       -> `place` moved to `cand`'s height, for a
@@ -76,6 +76,7 @@ import {
   layoutLines,
   lineWidth,
   balloonWidthsFor,
+  lineIndents,
   blockYFor,
   baselineInLine,
   blockInk,
@@ -179,10 +180,13 @@ export function manualReason(cand) {
 //   inks     each line's ink off `lineInk`, measured once (`blockInk`)
 //   shift    the ink-centring shift for a middle-aligned block
 //   blockY   the block's top inside the box (`blockYFor`)
-//   anchorX  the x the canvas draws each line at, with `textAlign` set to the
+//   anchorX  the x the canvas draws a line at, with `textAlign` set to the
 //            style's alignment: the content box's left edge, right edge or the
 //            box's centre - `textInset` in from the box's edge, the padding the
 //            editor's `.tbox` lays out inside (measure.js)
+//   indents  how far each flush line is set in from that edge to its balloon
+//            row's own (`lineIndents`), or null when none is
+//   lineX    the x each line is drawn at: `anchorX`, moved in by its indent
 //   baseY    each baseline's offset inside its line box
 //
 // For curves, the glyph layout, positions relative to the box centre.
@@ -210,6 +214,8 @@ export function placeBlock(cand, opts) {
   const blockH = lines.length * lineH;
   const align = s.align === 'left' || s.align === 'right' ? s.align : 'center';
   const inset = textInset(s);
+  const anchorX = align === 'left' ? inset : align === 'right' ? cand.w - inset : cand.w / 2;
+  const indents = lineIndents(lines, s, size, contentWidth(cand.w, s), rows);
   return {
     s,
     text,
@@ -220,7 +226,9 @@ export function placeBlock(cand, opts) {
     lineH,
     blockH,
     blockY: blockYFor(s, cand.h, blockH, shift),
-    anchorX: align === 'left' ? inset : align === 'right' ? cand.w - inset : cand.w / 2,
+    anchorX,
+    indents,
+    lineX: lines.map((_, i) => anchorX + (indents ? (align === 'left' ? indents[i] : -indents[i]) : 0)),
     baseY: baselineInLine(s, size),
     rowsKey: rows?.key ?? null,
   };
@@ -313,7 +321,7 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
       const k = place.inks[i];
       if (!k) continue;
       const base = place.blockY + i * place.lineH + place.baseY;
-      r = unite(r, place.anchorX + k.left, base - k.ascent, place.anchorX + k.right, base + k.descent);
+      r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
     }
   }
   const ink = inkActive(s.ink) ? inkBounds(s.ink) : null;

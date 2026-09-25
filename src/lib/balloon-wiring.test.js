@@ -66,10 +66,9 @@ const {
   noteFontsChanged,
 } = await import('./store.svelte.js');
 const { tags } = await import('./tags.svelte.js');
-const { containBox, boxCandidate, REVIEW_REASONS } = await import('./contain.js');
-const { balloonWidthsFor, textInset, contentWidth, layoutLines, lineWidth, setTypesetEnabled } = await import(
-  './measure.js'
-);
+const { containBox, boxCandidate, placeBlock, REVIEW_REASONS } = await import('./contain.js');
+const { balloonWidthsFor, lineIndents, textInset, contentWidth, layoutLines, lineWidth, setTypesetEnabled } =
+  await import('./measure.js');
 // Balloon layout is part of the typesetting beta, which is off until the user
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
@@ -506,17 +505,17 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
     for (const v of w) expect(v).toBeLessThanOrEqual(contentW);
   });
 
-  // Only centred text follows the balloon: a flush line starts at the box's
-  // edge, not at the curve, so a tapered width would not keep it inside.
-  it('answers null for left- and right-aligned text', () => {
+  // Every alignment follows the balloon: a flush line is set in to its row's
+  // edge (`lineIndents`), so it is broken to the same rows a centred one is.
+  it('hands left- and right-aligned text the rows centred text gets', () => {
+    const c = boxWith(ell, { align: 'center' });
+    const want = balloonWidthsFor(c, c.style, c.style.size)(5);
     for (const align of ['left', 'right']) {
       const b = boxWith(ell, { align });
-      expect(balloonWidthsFor(b, b.style, b.style.size)).toBe(null);
+      expect(balloonWidthsFor(b, b.style, b.style.size)(5)).toEqual(want);
     }
-    const c = boxWith(ell, { align: 'center' });
-    expect(balloonWidthsFor(c, c.style, c.style.size)).not.toBe(null);
-    // So flush text is placed at the inscribed rectangle, the one box whose
-    // every row is inside the curve, and centred text at the frame.
+    // Flush text is still placed at the inscribed rectangle, where its block
+    // reads centred in the balloon, and centred text at the frame.
     const page = { w: 1000, h: 1000 };
     for (const align of ['left', 'right']) {
       const r = inscribedRect(ell);
@@ -615,6 +614,112 @@ describe('balloonWidthsFor - the one helper the three layout sites share', () =>
 });
 
 // ---------------------------------------------------------------------------
+describe('lineIndents - where a flush line starts inside a balloon', () => {
+  // The box `boxWith` places above is 200 wide over a 234 interior, so the
+  // middle rows are capped at its content width and the outer ones are not.
+  const boxWith = (fit, style = {}) => ({
+    x: 150,
+    y: 200,
+    w: 200,
+    h: 100,
+    style: normalizeStyle({ size: 20, lineHeight: 1, valign: 'middle', ...style }),
+    fit,
+  });
+  const ell = { kind: 'ellipse', cx: 250, cy: 250, rx: 130, ry: 80 };
+  const SHORT = ['A', 'A', 'A', 'A', 'A'];
+  const indentsOf = (b, lines = SHORT) =>
+    lineIndents(lines, b.style, b.style.size, contentWidth(b.w, b.style), balloonWidthsFor(b, b.style, b.style.size));
+
+  it('sets a left-aligned line in by half the room its row lacks', () => {
+    const b = boxWith(ell, { align: 'left' });
+    const cw = contentWidth(b.w, b.style);
+    const rows = balloonWidthsFor(b, b.style, 20)(5);
+    const got = indentsOf(b);
+    expect(got).toEqual(rows.map((r) => (cw - r) / 2));
+    // In at the top and the bottom, where the curve is inside the box; flush
+    // across the middle, where the box is inside the curve.
+    expect(got[0]).toBeGreaterThan(5);
+    expect(got[4]).toBeCloseTo(got[0], 6);
+    expect(got[2]).toBe(0);
+  });
+
+  it('sets a right-aligned line in by the same amount, from the right', () => {
+    const l = boxWith(ell, { align: 'left' });
+    const r = boxWith(ell, { align: 'right' });
+    expect(indentsOf(r)).toEqual(indentsOf(l));
+  });
+
+  it('answers null for centred text, which its row already holds', () => {
+    expect(indentsOf(boxWith(ell, { align: 'center' }))).toBe(null);
+  });
+
+  it('answers null with no balloon, or a balloon whose rows all clear the box', () => {
+    expect(indentsOf(boxWith(null, { align: 'left' }))).toBe(null);
+    expect(indentsOf(boxWith({ kind: 'rect', x: 0, y: 0, w: 1000, h: 1000 }, { align: 'left' }))).toBe(null);
+    expect(indentsOf(boxWith(ell, { align: 'left', balloon: false }))).toBe(null);
+  });
+
+  // Plain wrapping ignores the rows (`layoutLines`), so it must not be set in
+  // to them either: plain mode draws as it always did.
+  it('answers null in plain mode', () => {
+    const b = boxWith(ell, { align: 'left', shape: 'off' });
+    const rows = balloonWidthsFor(b, b.style, 20);
+    expect(rows).not.toBe(null);
+    expect(lineIndents(SHORT, b.style, 20, contentWidth(b.w, b.style), rows)).toBe(null);
+    setTypesetEnabled(false);
+    try {
+      const f = boxWith(ell, { align: 'left' });
+      expect(lineIndents(SHORT, f.style, 20, contentWidth(f.w, f.style), () => [1, 1, 1, 1, 1])).toBe(null);
+    } finally {
+      setTypesetEnabled(true);
+    }
+  });
+
+  // A word wider than its row is kept whole by the breaker. Set in all the way,
+  // it would run past the box; it goes in only as far as the box has room.
+  it('never sets a line in past the room the box has beside it', () => {
+    const b = boxWith(ell, { align: 'left' });
+    const cw = contentWidth(b.w, b.style);
+    const rows = balloonWidthsFor(b, b.style, 20)(5);
+    // Wider than its row by more than the indent the row would give it.
+    let wide = 'W';
+    while (lineWidth(wide, b.style, 20) <= (cw + rows[0]) / 2) wide += 'W';
+    const w = lineWidth(wide, b.style, 20);
+    expect(w).toBeLessThan(cw);
+    const got = indentsOf(b, [wide, 'A', 'A', 'A', 'A']);
+    expect(got[0]).toBeCloseTo(cw - w, 6);
+    expect(got[0] + w).toBeLessThanOrEqual(cw + 1e-9);
+  });
+
+  // `placeBlock` is what the exporter draws from and the containment check
+  // measures, and the editor asks `lineIndents` with the same arguments: the
+  // x each line is drawn at is the aligned edge, moved in by its indent.
+  it('is the x placeBlock draws each line at, and the editor pads it by', () => {
+    const text = 'THE WORLD IS ENDING AND NOBODY CARES AT ALL ABOUT IT OR ABOUT ANY OF US';
+    for (const align of ['left', 'right']) {
+      const b = { ...boxWith(ell, { align }), ...balloonFrame(ell), text };
+      const place = placeBlock(boxCandidate(b, text));
+      const editor = layoutLines(text, b.style, 20, contentWidth(b.w, b.style), balloonWidthsFor(b, b.style, 20));
+      expect(place.lines).toEqual(editor);
+      expect(place.indents).toEqual(indentsOf(b, editor));
+      expect(place.indents.some((v) => v > 0)).toBe(true);
+      const inset = textInset(b.style);
+      place.lineX.forEach((x, i) =>
+        expect(x).toBeCloseTo(align === 'left' ? inset + place.indents[i] : b.w - inset - place.indents[i], 9),
+      );
+      // Across, the ink is inside the box (the frame's height is the auto
+      // height's to grow, which is not this test's business).
+      const { overflow } = containBox(boxCandidate(b, text), place);
+      expect(Math.max(overflow.l, overflow.r)).toBeLessThanOrEqual(0.5);
+    }
+    const c = { ...boxWith(ell), ...balloonFrame(ell), text };
+    const mid = placeBlock(boxCandidate(c, text));
+    expect(mid.indents).toBe(null);
+    for (const x of mid.lineX) expect(x).toBe(c.w / 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('the PSD’s type layer breaks where the canvas does', () => {
   // `textLayerFor` writes the app's own line breaks into the type layer as hard
   // returns, so that a re-render in Photoshop cannot re-wrap the block greedily
@@ -644,6 +749,38 @@ describe('the PSD’s type layer breaks where the canvas does', () => {
     const flat = layoutLines(box.text, box.style, box.style.size, contentWidth(box.w, box.style));
     expect(layer.text.text).toBe(want.join('\n'));
     expect(layer.text.text).not.toBe(flat.join('\n'));
+    // Centred: no line is set in, so no paragraph carries an indent.
+    expect(layer.text.paragraphStyleRuns).toBeUndefined();
+  });
+
+  // A flush line starts at its row's edge. Each line is a paragraph of its own
+  // in the layer, so each carries its indent from the edge it is aligned to,
+  // and a re-render in Photoshop sets it where the pixels beneath show it.
+  it('indents each flush paragraph as the canvas sets its line in', async () => {
+    const { textLayerFor } = await import('./psd.js');
+    const fit = { kind: 'ellipse', cx: 250, cy: 250, rx: 130, ry: 80 };
+    for (const [align, key, other] of [
+      ['left', 'startIndent', 'endIndent'],
+      ['right', 'endIndent', 'startIndent'],
+    ]) {
+      const box = {
+        lineN: null,
+        text: 'THE WORLD IS ENDING AND NOBODY CARES AT ALL ABOUT IT OR ABOUT ANY OF US',
+        ...balloonFrame(fit),
+        style: normalizeStyle({ size: 20, lineHeight: 1, valign: 'middle', align }),
+        fit,
+      };
+      const p = { id: 1, w: 500, h: 500, lines: [], boxes: [box] };
+      const layer = textLayerFor(p, box, null);
+      const place = placeBlock(boxCandidate(box, box.text));
+      expect(place.indents.some((v) => v > 0)).toBe(true);
+      const runs = layer.text.paragraphStyleRuns;
+      expect(runs.map((r) => r.style[key])).toEqual(place.indents);
+      expect(runs.every((r) => !(other in r.style))).toBe(true);
+      // One run a line, each the line and the return that ends it.
+      expect(runs.map((r) => r.length)).toEqual(place.lines.map((ln) => ln.length + 1));
+      expect(runs.reduce((a, r) => a + r.length, 0)).toBe(layer.text.text.length + 1);
+    }
   });
 });
 

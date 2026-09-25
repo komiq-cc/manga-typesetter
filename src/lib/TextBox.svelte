@@ -38,7 +38,7 @@
     caretAfter,
     isAtomicInput,
   } from './editor/field-undo.svelte.js';
-  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, textInset, contentWidth, balloonWidthsFor, inkShiftY, charWidths } from './measure.js';
+  import { arcLayout, circleLayout, pathLayout, pathPolyline, removePathAnchor, applyCase, layoutLines, lineIndents, textInset, contentWidth, balloonWidthsFor, inkShiftY, charWidths } from './measure.js';
   import {
     strokeBands,
     rgba,
@@ -759,6 +759,20 @@
     );
   });
 
+  // How far each flush line is set in from the edge it is aligned to, to its
+  // balloon row's own edge (`lineIndents`): the number the exporter draws each
+  // line's x from and the PSD indents each paragraph by. Unzoomed, and null for
+  // every box that sets none in - centred text, no balloon, plain wrapping -
+  // which then draws exactly as it always did. A line's padding on its aligned
+  // side, so its row is still the content box and a line-scoped gradient spans
+  // what the exporter's does.
+  const indents = $derived.by(() => {
+    if (!shaped) return null;
+    app.fontsVersion;
+    return lineIndents(shaped, s, s.size, contentWidth(box.w, s), balloonWidthsFor(box, s, s.size));
+  });
+  const indentCss = (i) => (indents ? `padding-${s.align}:${indents[i] * z}px;` : '');
+
   // How far the centred block moves so its INK, not its line boxes, is centred
   // in the box - the exporter's `inkShiftY`, in zoomed px because it is applied
   // to the zoomed text. Zero for any other `valign` and for curved text, which
@@ -1377,6 +1391,7 @@
     let first = true;
     $effect(() => {
       editSegs;
+      indents;
       text;
       effSize;
       effLs;
@@ -1395,7 +1410,7 @@
 
   // Draws the lines and puts the caret at raw offset `caret`, or selects all.
   function drawEdit(node, caret) {
-    drawEditLines(node, text, editSegs, hangWidth);
+    drawEditLines(node, text, editSegs, hangWidth, indents && { side: s.align, px: indents.map((v) => v * z) });
     const r = document.createRange();
     if (caret == null) r.selectNodeContents(node);
     else {
@@ -1675,7 +1690,7 @@
     <div class="txt shaped stack" style="{textStyle}{stackTransform}{filterCss}">
       {#each layers as ly, li (li)}
         <div class="tlayer" class:base={li === 0} style={ly.css}>
-          {#each shaped as ln, i (i)}<div class="tline" style={ly.line}>{ln === '' ? '\u200b' : ln}</div>{/each}
+          {#each shaped as ln, i (i)}<div class="tline" style="{ly.line}{indentCss(i)}">{ln === '' ? '\u200b' : ln}</div>{/each}
         </div>
       {/each}
     </div>

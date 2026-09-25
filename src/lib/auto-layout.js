@@ -55,9 +55,11 @@
 //   band the box draws that line on (`interiorLineWidths`, hung where
 //   `balloonWidthsFor` hangs the rows the layout itself is broken to), less the
 //   box's text inset on each side; a centred line is centred on the balloon,
-//   and a left- or right-aligned one starts at the box's edge, so for those the
-//   box itself has to be inside the balloon on every row. A single word wider
-//   than its row fails here - the breaker keeps it whole and lets it overhang.
+//   and a left- or right-aligned one starts - or ends - where it is drawn:
+//   at its row's edge when it is set in to it (`lineIndents`), at the box's
+//   edge when it is not (balloon layout off), where the box itself has to be
+//   inside the balloon on that row. A single word wider than its row fails
+//   here - the breaker keeps it whole and lets it overhang.
 //   the block fits the balloon's height, anchored by `valign` exactly as the
 //   row widths assume it is.
 //   the ink fits the box: `containBox`, the one check every renderer answers
@@ -149,9 +151,13 @@ function frame(ctx, base, h) {
   return { ...base, x: R.cx - w / 2, y, h };
 }
 
-// How wide the room at each row has to be for the line on it. The rows are the
-// balloon's at the band each line is drawn on - hung from where the box draws
-// the block, as `balloonWidthsFor` hangs the rows the breaker is handed (GEO-2).
+// Whether each line, and its inset either side, is inside the room its row has.
+// The rows are the balloon's at the band each line is drawn on - hung from where
+// the box draws the block, as `balloonWidthsFor` hangs the rows the breaker is
+// handed (GEO-2) - and centred on the box, which is centred on the balloon. The
+// line is where `placeBlock` draws it (`lineX`), so a flush line set in to its
+// row's edge is held to the same room a centred one is, and one drawn from the
+// box's edge to the box being inside the balloon on its row.
 function rowsFit(ctx, c, place) {
   const { R, ti } = ctx;
   const s = place.s;
@@ -159,11 +165,13 @@ function rowsFit(ctx, c, place) {
   const rows = R?.shape
     ? interiorLineWidths(R.shape, place.lineH, n, valignOf(s), { top: c.y + blockYFor(s, c.h, place.blockH) })
     : null;
-  const centred = s.align !== 'left' && s.align !== 'right';
   return place.lines.every((line, i) => {
-    const need = lineWidth(line, s, s.size) + 2 * ti;
+    const w = lineWidth(line, s, s.size);
+    const x = place.lineX[i];
+    const left = s.align === 'left' ? x : s.align === 'right' ? x - w : x - w / 2;
     const room = rows ? rows[i] : c.w;
-    return (centred ? need : Math.max(c.w, need)) <= room + CONTAIN_TOL;
+    // Half the tolerance a side, so a centred line gets what it always had.
+    return left - ti >= (c.w - room - CONTAIN_TOL) / 2 && left + w + ti <= (c.w + room + CONTAIN_TOL) / 2;
   });
 }
 
@@ -223,10 +231,11 @@ function trial(ctx, size, w, own = !ctx.R?.shape) {
 // broken to the ellipse's own rows, capped at the box, so its box is as wide as
 // the inset ellipse - where the cap never binds and the block keeps the
 // balloon's taper - and narrower only when that fails: with balloon layout off,
-// the lines are set flat and have to fit the rows they sit on. Flush text is set
-// flat, so its box starts at the inscribed rectangle, the one box whose rows all
-// sit inside the curve, and widens only for a word that rectangle cannot hold
-// (and then hugs its lines - see `snug`). A rectangle has one width. With nothing
+// the lines are set flat and have to fit the rows they sit on. Flush text starts
+// at the inscribed rectangle, where its block reads centred in the balloon and
+// its lines are set in to the curve only on rows past the rectangle
+// (`lineIndents`), and widens only for a word that rectangle cannot hold (and
+// then hugs its lines - see `snug`). A rectangle has one width. With nothing
 // but a location, the text's own widths (`ownWidths`).
 function widthsAt(ctx, size) {
   const minW = ctx.minW;

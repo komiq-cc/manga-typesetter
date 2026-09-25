@@ -117,11 +117,27 @@ describe('the answer holds its constraints', () => {
     expect(r.lines.length * lineH).toBeLessThanOrEqual(2 * (OVAL.ry - safetyInset(OVAL)) + 0.5);
   });
 
-  it('holds a left-aligned block to the rows where the whole box is inside the balloon', () => {
-    const s = style({ align: 'left' });
+  // A flush line starts - or ends - at its row's edge where the row is narrower
+  // than the box (`lineIndents`), so each line, where it is drawn, is inside
+  // the room its own row has.
+  it.each(['left', 'right'])('holds each line of a %s-aligned block inside its own row', (align) => {
+    const s = style({ align });
     const r = solveLayout({ text: LONG, style: s, refSize: 40, region: OVAL, opts: { minSize: 12 } });
+    const b = boxOf(r, s, OVAL);
+    const place = placeBlock(boxCandidate(b, LONG));
+    expect(place.lines).toEqual(r.lines);
     const rows = interiorLineWidths(OVAL, r.size * s.lineHeight, r.lines.length, 'middle');
-    for (const room of rows) expect(r.w).toBeLessThanOrEqual(room + 0.5);
+    const ti = textInset(s);
+    // The block is taller than the rectangle whose rows all clear the box, so
+    // at least one line is set in.
+    expect(rows.some((room) => room < r.w)).toBe(true);
+    expect(place.indents.some((v) => v > 0)).toBe(true);
+    r.lines.forEach((line, i) => {
+      const w = lineWidth(line, b.style, r.size);
+      const left = r.x + (align === 'left' ? place.lineX[i] : place.lineX[i] - w);
+      expect(left - ti).toBeGreaterThanOrEqual(OVAL.cx - rows[i] / 2 - 0.5);
+      expect(left + w + ti).toBeLessThanOrEqual(OVAL.cx + rows[i] / 2 + 0.5);
+    });
   });
 
   it('is centred on the balloon, the block where the row widths assume it', () => {

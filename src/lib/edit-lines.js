@@ -128,7 +128,12 @@ function findLine(t, c, line) {
 // the block the result lays out. The in-flow elements are then the result's
 // lines exactly, and what is typed after the Return is a line of the block as
 // soon as there is something on it.
-export function drawEditLines(node, text, segs, width) {
+//
+// `indent`, when given, is `{ side, px }`: a flush block's lines set in from
+// the edge they are aligned to (`lineIndents`), zoomed, one per seg - padded on
+// that side, as the drawn `.tline`s are, so the text does not move when the
+// edit starts or ends.
+export function drawEditLines(node, text, segs, width, indent = null) {
   const doc = node.ownerDocument;
   const put = (el, str) => str && el.append(str);
   const hang = (el, str, side) => {
@@ -148,6 +153,7 @@ export function drawEditLines(node, text, segs, width) {
       put(el, text);
       return el;
     }
+    if (indent?.px[i] > 0) el.style[indent.side === 'right' ? 'paddingRight' : 'paddingLeft'] = `${indent.px[i]}px`;
     const h = g.head.lastIndexOf('\n') + 1;
     if (i === 0 && h) put((before = div('el edge start')), g.head.slice(0, h));
     else put(el, g.head.slice(0, h));

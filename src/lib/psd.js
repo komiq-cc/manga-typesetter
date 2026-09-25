@@ -688,6 +688,22 @@ export function textLayerFor(p, box, rendered) {
         strokeColor: hexToRgb(s.strokes?.[0]?.color ?? s.color),
       },
       paragraphStyle: { justification: JUSTIFY[s.align] || 'center' },
+      // A flush line in a balloon starts at its row's edge, not the frame's
+      // (`lineIndents`). Every line is its own paragraph here - the breaks go in
+      // as hard returns - so each one carries its indent from the edge it is
+      // aligned to, and Photoshop sets it where the cached pixels show it. The
+      // frame is the content box rounded up on the side the text is not aligned
+      // to, so the aligned edge the indent is measured from is the canvas's.
+      // Omitted when no line is set in, which is every box that is not flush
+      // text in a balloon.
+      ...(place?.indents
+        ? {
+            paragraphStyleRuns: place.lines.map((ln, i) => ({
+              length: ln.length + 1,
+              style: { [s.align === 'right' ? 'endIndent' : 'startIndent']: place.indents[i] },
+            })),
+          }
+        : null),
     },
   };
 }

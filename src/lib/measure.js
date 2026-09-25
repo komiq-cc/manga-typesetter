@@ -762,19 +762,17 @@ export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
 // round differently.
 //
 // Returns null - meaning "no per-line widths, use the flat content width" - for
-// a box with no fit, a malformed one, a box whose style has balloon layout
-// switched off, or text that is not centred. That null is what makes the promise
-// "a box with no fit produces byte-identical output to today" true by
-// construction rather than by testing: `layoutLines` ignores an absent
-// `widthsFor` entirely.
+// a box with no fit, a malformed one, or a box whose style has balloon layout
+// switched off. That null is what makes the promise "a box with no fit produces
+// byte-identical output to today" true by construction rather than by testing:
+// `layoutLines` ignores an absent `widthsFor` entirely.
 //
-// Only centred text follows the balloon. A row's room is symmetric about the
+// Every alignment follows the balloon. A row's room is symmetric about the
 // balloon's centre, and centred lines are too, so a line no wider than its row
-// sits inside the curve at both ends. A left- or right-aligned line starts at
-// the box edge, not at the curve, and a tapered width does not move it off that
-// edge: it would still start outside the curve on the top and bottom rows. Doing
-// that right needs an x per line, from each row's own edge, in the editor, the
-// exporter and the PSD alike; until then flush text sets flat, as it always has.
+// sits inside the curve at both ends. A left- or right-aligned line is set in
+// from the box's edge to its row's own edge (`lineIndents`, below), so it starts
+// - or ends - at the curve rather than at the box, which on the top and bottom
+// rows is outside it.
 //
 // Two adjustments to what `balloon.js` hands back, and both are the caller's own
 // debt rather than something that module could have done:
@@ -825,7 +823,6 @@ export function balloonWidthsFor(box, style, sizePx) {
   // existed and the state `layoutLines` treats as "just wrap it".
   if (!typesetEnabled()) return null;
   if (!box || !style || style.balloon === false) return null;
-  if (style.align === 'left' || style.align === 'right') return null;
   const shape = normalizeFit(box.fit);
   if (!shape) return null;
   const inset = textInset(style);
@@ -848,6 +845,48 @@ export function balloonWidthsFor(box, style, sizePx) {
   // anywhere else carries no key and is simply not cached (see `memoKey`).
   fn.key = JSON.stringify([shape, lineH, valign, anchor, contentW, inset]);
   return fn;
+}
+
+// ===== where a flush line starts, inside a balloon =====
+//
+// How far each line of a left- or right-aligned block is set in from the edge
+// it is aligned to, in unzoomed px: THE one statement of it, which the editor's
+// `.tline` padding, the raster exporter's x per line (through `placeBlock`'s
+// `lineX`), the containment check and the PSD's paragraph indents all read.
+//
+// A row's room (`balloonWidthsFor`) is centred on the box, as a centred line is,
+// so a flush line's row starts half the room the row lacks in from the content
+// box's edge: `(contentW - row) / 2`. That is the row's interior edge less the
+// box's inset, the same inset the breaker took off the row. A box centred on its
+// balloon - every box `fittedRect` places - puts that edge on the curve; a box
+// dragged sideways off it moves its rows with it, as it moves a centred block.
+//
+// Never so far in that the line would cross the content box's other edge. A
+// line wider than its row - a word the breaker had to keep whole - is set in by
+// what the box has left beside it, so it may reach past the curve but never
+// past the box, which is the rule every renderer is held to. It also keeps the
+// editor honest: a CSS line wider than the room its padding leaves overflows at
+// its end whatever its alignment, and a right-aligned one would then draw from
+// the other edge to the export.
+//
+// Null - no indent anywhere - for centred text, a box with no rows, plain
+// wrapping (which ignores the rows: `layoutLines`), or a block whose every row
+// is as wide as the box. So a box with no balloon, or one whose block sits
+// inside the rectangle its rows all clear, draws exactly as it always did.
+export function lineIndents(lines, style, sizePx, contentWidthPx, widthsFor) {
+  if (!widthsFor || !Array.isArray(lines) || lines.length === 0) return null;
+  if (style?.align !== 'left' && style?.align !== 'right') return null;
+  if (!typesetEnabled() || (style.shape ?? 'auto') === 'off') return null;
+  const w = contentWidthPx > 1 ? contentWidthPx : 1;
+  const rows = widthsFor(lines.length);
+  let any = false;
+  const out = lines.map((line, i) => {
+    const row = rows[i] ?? w;
+    const v = Math.max(0, Math.min((w - row) / 2, w - lineWidth(line, style, sizePx)));
+    if (v > 0) any = true;
+    return v;
+  });
+  return any ? out : null;
 }
 
 // ===== the same block, broken twice =====
@@ -1071,12 +1110,4 @@ export function balancedBoxSize(text, style, opts = {}) {
     h: neededHeight(best.count, style, textInset(style)),
     lines: best.count,
   };
-}
-
-// Widest wrapped line width (used by export to size the offscreen canvas so
-// horizontally-overflowing lines aren't clipped).
-export function maxLineWidth(lines, style, sizePx) {
-  let m = 0;
-  for (const ln of lines) m = Math.max(m, lineWidth(ln, style, sizePx));
-  return m;
 }
