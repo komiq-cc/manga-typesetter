@@ -704,4 +704,21 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
     closeChapter();
     expect((await record(c)).typesetting).toEqual({ mode: "plain", version: 1 });
   });
+
+  it("leaves the store untouched when called with no chapter open", () => {
+    closeChapter();
+    expect(app.chapterRef).toBe(null);
+    const beforeTypesetting = { ...app.typesetting };
+    const beforeFonts = app.fontsVersion;
+    app.saved = true;
+    const beforeEnabled = typesetEnabled();
+
+    setChapterTypesetMode(beforeTypesetting.mode === "smart" ? "plain" : "smart");
+
+    expect(app.chapterRef).toBe(null);
+    expect(app.typesetting).toEqual(beforeTypesetting);
+    expect(app.fontsVersion).toBe(beforeFonts);
+    expect(app.saved).toBe(true);
+    expect(typesetEnabled()).toBe(beforeEnabled);
+  });
 });

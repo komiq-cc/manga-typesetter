@@ -975,6 +975,7 @@ export function useChapterTypesetting(raw) {
 // Settings' switch for the open chapter. Saved with it, and every box
 // re-measured under the new breaker the way a font arriving re-measures them.
 export function setChapterTypesetMode(mode) {
+  if (!app.chapterRef) return;
   const next = normalizeTypesetting({ ...app.typesetting, mode });
   if (next.mode === app.typesetting.mode) return;
   useChapterTypesetting(next);

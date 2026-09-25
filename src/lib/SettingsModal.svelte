@@ -36,10 +36,12 @@
     { id: 'system', label: 'System', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>' },
   ];
   let tab = $state('general');
-  // The open chapter's line breaker, and the one the box defaults below apply
-  // under: the open chapter's while one is open, else a new chapter's.
+  // The open chapter's line breaker.
   const smartHere = $derived(app.typesetting.mode === 'smart');
-  const smartUsed = $derived(app.chapterRef ? smartHere : prefs.typeset);
+  // Whether the box defaults below reach any box: they are born into every
+  // chapter, so they stay editable, and are only dimmed when neither the open
+  // chapter nor a new one would lay them out with the smart breaker.
+  const defaultsUsed = $derived(prefs.typeset || (!!app.chapterRef && smartHere));
 
   // The registry shortcut groups follow preferences like the brush tool toggle,
   // while each row combo comes from comboFor reading preferences.
@@ -512,10 +514,10 @@
           alignment. It never shrinks a box you made roomier, and its width is
           never touched.
         </div>
-        <div class="ts-defaults" class:dim={!smartUsed}>
+        <div class="ts-defaults" class:dim={!defaultsUsed}>
           <div class="field">
             <span>Shaped line breaks</span>
-            {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape, !smartUsed)}
+            {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape)}
           </div>
           <!-- The silhouette a shaped block aims for (BRK-3). Auto picks an oval
                in a balloon and a rectangle in a caption. -->
@@ -525,7 +527,7 @@
               {#each [['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rectangle']] as [v, label]}
                 <button
                   class:on={prefs.defaultBlockShape === v}
-                  disabled={!smartUsed || !prefs.defaultShape}
+                  disabled={!prefs.defaultShape}
                   onclick={() => setPref('defaultBlockShape', v)}
                 >{label}</button>
               {/each}
@@ -533,11 +535,11 @@
           </div>
           <div class="field">
             <span>Hyphenate long words</span>
-            {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate, !smartUsed)}
+            {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate)}
           </div>
           <div class="field">
             <span>Fit text to balloon</span>
-            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon, !smartUsed)}
+            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon)}
           </div>
           <div class="field">
             <label for="ts-orphan">Shortest word left alone on a line</label>
@@ -548,7 +550,6 @@
               min="1"
               max="8"
               step="1"
-              disabled={!smartUsed}
               value={prefs.defaultMinOrphan}
               title="A word shorter than this is never left alone at the end of a line"
               onchange={(e) => { setPref('defaultMinOrphan', e.target.value); e.target.value = prefs.defaultMinOrphan; }}
