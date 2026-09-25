@@ -22,6 +22,7 @@ import {
   packageFileName,
   PACKAGE_EXT,
 } from './package.js';
+import { legacyTypesetting } from './data.js';
 
 async function appVersion() {
   if (!isTauri()) return '';
@@ -44,6 +45,15 @@ function downloadBytes(bytes, name) {
 
 // ---------- export ----------
 
+// A record from before the typesetting field existed opens with whatever
+// this machine's legacy answer was (legacyTypesetting()). Stamp it on export
+// so the other machine opens it the same way instead of falling back to
+// plain. A copy: the record read from disk is left as it was.
+export function recordForExport(record) {
+  if (!record || record.typesetting != null) return record;
+  return { ...record, typesetting: legacyTypesetting() };
+}
+
 // Build the package for a closed chapter and save it through the OS dialog.
 // Resolves to the path written, or null when the user cancelled. Throws when
 // the chapter cannot be read or the write fails.
@@ -51,7 +61,8 @@ export async function exportChapterPackage(projectId, chapterId) {
   const p = projectById(projectId);
   if (!p) throw new Error('No such project');
   const src = await readChapterPackageSources(projectId, chapterId);
-  const pages = src.record.pages ?? [];
+  const record = recordForExport(src.record);
+  const pages = record.pages ?? [];
 
   // The tag vocabulary this chapter uses, as its PROJECT knows it - the registry
   // is the project's, not the machine's. Entries the project has never
@@ -75,7 +86,7 @@ export async function exportChapterPackage(projectId, chapterId) {
   );
 
   const bytes = buildChapterPackage({
-    record: src.record,
+    record,
     translations: src.translations,
     project: src.project,
     raws: src.raws,
@@ -84,7 +95,7 @@ export async function exportChapterPackage(projectId, chapterId) {
     tags: tagEntries,
     app: await appVersion(),
   });
-  const name = packageFileName(p.name, src.record.number);
+  const name = packageFileName(p.name, record.number);
 
   if (!isTauri()) {
     downloadBytes(bytes, name);
