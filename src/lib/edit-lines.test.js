@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { editLines, stepChar } from './edit-lines.js';
+import { editLines, drawEditLines, domPoint, stepChar } from './edit-lines.js';
 import { layoutLines, applyCase, contentWidth, setTypesetEnabled, clearLayoutMemo } from './measure.js';
 import { defaultStyle, normalizeStyle } from './data.js';
 
@@ -130,4 +130,112 @@ describe('while editing, the lines are layoutLines (UX-4)', () => {
       });
     }
   }
+});
+
+// Just enough of a DOM to draw the editable into: elements, text nodes, and a
+// text walker, which is all `drawEditLines` and `domPoint` touch.
+function fakeDoc() {
+  const link = (parent, kids) => {
+    kids.forEach((k, i) => {
+      k.parentNode = parent;
+      k.nextSibling = kids[i + 1] ?? null;
+    });
+  };
+  const text = (data) => ({ nodeType: 3, nodeName: '#text', data, parentNode: null, nextSibling: null });
+  const doc = {
+    createElement(tag) {
+      const el = {
+        nodeType: 1,
+        nodeName: tag.toUpperCase(),
+        className: '',
+        style: {},
+        childNodes: [],
+        ownerDocument: doc,
+        get firstChild() {
+          return this.childNodes[0] ?? null;
+        },
+        append(...xs) {
+          this.childNodes.push(...xs.map((x) => (typeof x === 'string' ? text(x) : x)));
+          link(this, this.childNodes);
+        },
+        replaceChildren(...xs) {
+          this.childNodes = [];
+          this.append(...xs);
+        },
+        get textContent() {
+          return this.childNodes.map((c) => (c.nodeType === 3 ? c.data : c.textContent)).join('');
+        },
+        set textContent(v) {
+          this.replaceChildren(v);
+        },
+      };
+      return el;
+    },
+    createTreeWalker(root) {
+      const out = [];
+      const visit = (n) => n.childNodes.forEach((c) => (c.nodeType === 3 ? out.push(c) : visit(c)));
+      visit(root);
+      let i = -1;
+      return { nextNode: () => out[++i] ?? null };
+    },
+  };
+  return doc;
+}
+
+// A Return typed at the very start or end of the block is one the result trims
+// (`layoutLines` drops blank lines at either end). While it is being typed it
+// must not take room either, or the block moves and jumps back when the edit
+// ends: the rows the block lays out are the result's lines, and the trimmed
+// Returns hang in `.edge` rows outside it, where the caret can still stand.
+describe('the Returns the result trims take no room while typing (UX-4)', () => {
+  const draw = (text, lines) => {
+    const node = fakeDoc().createElement('div');
+    drawEditLines(node, text, map(text, lines), () => 0);
+    return node;
+  };
+  const rows = (node) => node.childNodes.filter((c) => !c.className.includes('edge'));
+  const edge = (node, side) => node.childNodes.find((c) => c.className === `el edge ${side}`);
+
+  it('lays out only the result\'s lines, and keeps every character of the text', () => {
+    const text = '\n\nhello\nworld\n\n';
+    const node = draw(text, ['hello', 'world']);
+    expect(node.textContent).toBe(text);
+    expect(rows(node).map((r) => r.textContent.replace(/\n/g, ''))).toEqual(['hello', 'world']);
+    expect(edge(node, 'start').textContent).toBe('\n\n');
+    // The last line keeps the newline that ends it; the rest hangs below.
+    expect(edge(node, 'end').textContent).toBe('\n');
+  });
+
+  it('gives a single trailing Return a caret row below the block, and nothing in it', () => {
+    const node = draw('hello\n', ['hello']);
+    expect(rows(node).map((r) => r.textContent)).toEqual(['hello\n']);
+    const end = edge(node, 'end');
+    expect(end.childNodes.map((c) => c.nodeName)).toEqual(['BR']);
+    // The caret after the Return stands on that row, in front of its <br>.
+    expect(domPoint(node, 6)).toEqual([end, 0]);
+  });
+
+  it('puts the caret after two trailing Returns on the second row below', () => {
+    const node = draw('hello\n\n', ['hello']);
+    const end = edge(node, 'end');
+    expect(domPoint(node, 7)).toEqual([end, 1]);
+    // Between them, at the start of the first row below.
+    expect(domPoint(node, 6)).toEqual([end.childNodes[0], 0]);
+  });
+
+  it('puts the caret after a leading Return in front of the first line', () => {
+    const node = draw('\nhello', ['hello']);
+    expect(edge(node, 'start').textContent).toBe('\n');
+    const [c, i] = domPoint(node, 1);
+    expect([c.data, i]).toEqual(['hello', 0]);
+  });
+
+  it('draws no edge when nothing is trimmed, or when the text is all blank', () => {
+    expect(draw('one\n\ntwo', ['one', '', 'two']).childNodes).toHaveLength(3);
+    // A blank box is one empty line in the result; the Returns in it hang below.
+    const node = draw('\n\n', ['']);
+    expect(rows(node)).toHaveLength(1);
+    expect(edge(node, 'end').textContent).toBe('\n');
+    expect(edge(node, 'start')).toBeUndefined();
+  });
 });

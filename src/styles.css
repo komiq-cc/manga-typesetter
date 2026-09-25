@@ -765,6 +765,11 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
    or text the lines cannot be laid over, is one element the browser wraps. */
 .txt.editable .el.wrap{ white-space:pre-wrap; word-break:break-word; }
 .txt.editable .ehy::after{ content:'-'; }
+/* The Returns at either end of the block, which the result trims: rows the
+   caret can stand on that take no room, hanging above the first line or below
+   the last (edit-lines.js). */
+.txt.editable .el.edge{ height:0; display:flex; flex-direction:column; }
+.txt.editable .el.edge.start{ justify-content:flex-end; }
 
 /* curved (arc) text */
 .tbox .arc{ position:absolute; inset:0; }

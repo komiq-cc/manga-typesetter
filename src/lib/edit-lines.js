@@ -115,10 +115,19 @@ function findLine(t, c, line) {
 // take room on the line, or a centred line would sit half a space away from
 // where the result puts it: each is a span pulled back by its own width
 // (`width(str)`, in the px the editable is drawn in). Only the part on the
-// line's own row: the Returns in them stay text, so a Return typed at the very
-// start or end of the block makes its line while it is being typed, as it does
-// in any text field, even though the result trims it. With no `segs` it is the
-// raw text in one element the browser wraps, which is what the editable was.
+// line's own row: the Returns in them stay text. With no `segs` it is the raw
+// text in one element the browser wraps, which is what the editable was.
+//
+// The Returns at the very start and end of the block are the ones the result
+// trims, so they must not take room either: drawn as rows in the flow, they
+// pushed the block down or up (and a centred block off its centre) until the
+// edit ended and it jumped back. They still need rows - a caret after a Return
+// has to stand on the line it opened, or the next letter typed would look as
+// if it went on the line before - so they are drawn in an `.edge` element of
+// no height, whose rows hang above the first line or below the last, outside
+// the block the result lays out. The in-flow elements are then the result's
+// lines exactly, and what is typed after the Return is a line of the block as
+// soon as there is something on it.
 export function drawEditLines(node, text, segs, width) {
   const doc = node.ownerDocument;
   const put = (el, str) => str && el.append(str);
@@ -129,28 +138,39 @@ export function drawEditLines(node, text, segs, width) {
     sp.style[side] = `${-width(str)}px`;
     el.append(sp);
   };
-  const out = (segs ?? [null]).map((g) => {
-    const el = doc.createElement('div');
-    el.className = g ? 'el' : 'el wrap';
+  const div = (cls) => Object.assign(doc.createElement('div'), { className: cls });
+  let before = null;
+  let after = null;
+  const n = segs?.length ?? 1;
+  const out = (segs ?? [null]).map((g, i) => {
+    const el = div(g ? 'el' : 'el wrap');
     if (!g) {
       put(el, text);
       return el;
     }
     const h = g.head.lastIndexOf('\n') + 1;
-    put(el, g.head.slice(0, h));
+    if (i === 0 && h) put((before = div('el edge start')), g.head.slice(0, h));
+    else put(el, g.head.slice(0, h));
     hang(el, g.head.slice(h), 'marginLeft');
     put(el, g.body);
     if (g.hyphen) el.append(Object.assign(doc.createElement('span'), { className: 'ehy' }));
     const t = g.tail.indexOf('\n');
     hang(el, t < 0 ? g.tail : g.tail.slice(0, t), 'marginRight');
-    put(el, t < 0 ? '' : g.tail.slice(t));
+    if (t < 0) return el;
+    // The newline that ends the line is the line's; on the last line, what
+    // comes after it is the trimmed end of the block.
+    if (i + 1 < n) put(el, g.tail.slice(t));
+    else {
+      put(el, '\n');
+      put((after = div('el edge end')), g.tail.slice(t + 1));
+    }
     return el;
   });
   // A Return at the very end of the text opens a line nothing is on yet, and
   // an empty box has no line at all: the `<br>` is the line the caret stands on.
-  const last = out[out.length - 1];
+  const last = after ?? out[out.length - 1];
   if (!last.textContent || last.textContent.endsWith('\n')) last.append(doc.createElement('br'));
-  node.replaceChildren(...out);
+  node.replaceChildren(...(before ? [before] : []), ...out, ...(after ? [after] : []));
 }
 
 // The raw offset of a DOM position in the editable, or null when it is not in
@@ -166,7 +186,9 @@ export function rawOffset(node, container, offset) {
 // The DOM position of a raw offset, as [container, offset]: in the text node
 // that holds it, the later one where two meet - so a caret at a line break
 // stands at the start of the next line - and in front of the `<br>` when it is
-// right after the Return that opened that `<br>`'s line.
+// right after the Return that opened that `<br>`'s line. That `<br>` is the
+// next node after the Return, in its own line or, past the last line, in the
+// `.edge` below it.
 export function domPoint(node, o) {
   const walk = node.ownerDocument.createTreeWalker(node, 4 /* NodeFilter.SHOW_TEXT */);
   let at = 0;
@@ -178,7 +200,7 @@ export function domPoint(node, o) {
   }
   if (!hit) return [node.firstChild ?? node, 0];
   const [t, i] = hit;
-  const br = t.nextSibling;
+  const br = t.nextSibling ?? (t.parentNode !== node ? t.parentNode.nextSibling?.firstChild : null);
   if (i === t.data.length && t.data.endsWith('\n') && br?.nodeName === 'BR')
     return [br.parentNode, Array.prototype.indexOf.call(br.parentNode.childNodes, br)];
   return hit;
