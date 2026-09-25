@@ -16,6 +16,7 @@ import {
   refitBox,
   reviewBox,
   solvePending,
+  markSelectedSize,
 } from '../store.svelte.js';
 
 export const MAX_STEPS = 5;
@@ -457,6 +458,10 @@ function step(from, to, dir) {
         }
       }
     }
+    // A size the step put back is nobody's edit: without this, the next fit of
+    // the selected box would take it for one the user just typed and make it
+    // the box's reference, locked (see `noteSizeEdit`).
+    markSelectedSize();
     markUnsaved();
     sync();
     return true;

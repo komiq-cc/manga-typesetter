@@ -11,7 +11,7 @@
 // nothing on the document's own save path ever waits on this one.
 import { fsx } from '../fsx.js';
 import { normalizeStyle } from '../data.js';
-import { toast, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, lengthScale } from '../store.svelte.js';
+import { toast, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, rescaleAuto, scaleFit, lengthScale } from '../store.svelte.js';
 import { scaleStroke } from '../brush.js';
 import {
   takeStack,
@@ -206,9 +206,20 @@ export function migrateDoc(doc) {
 //   place / delete   `box` - a whole box, rectangle, fit and style.
 //   move / resize    `before` / `after` - a subset of x/y/w/h plus `size`, which
 //                    lives on the style and is carried flat here (`setFields`).
+//   placeMany        `items[].box` - whole boxes, as `place`.
 //   style / bulk     `before` / `after` are STYLES, and `geomBefore`/`geomAfter`
-//                    are the { y, h } the auto-fit left the box at.
+//                    are the geometry the fit left the box at (`fitGeom`: the
+//                    rectangle, the size and the solver record - { y, h } in
+//                    entries written before that).
 //   text             `before` / `after` are strings; only the geometry pair moves.
+//   line             the geometry pair of every box the edit re-sized, in `boxes`.
+//   refit            the geometry pair, with the balloon fit in each.
+//
+// A geometry pair's solver record keeps its stamp as recorded: the stamp is a
+// fingerprint of the whole box, which an entry does not hold, so a status it
+// describes stops counting once the rescaled box is put back - the flag it
+// raised goes quiet, and the next edit's solve raises it again if it still
+// applies.
 //
 // A field that is not there is not invented: entries outlive the build that
 // wrote them, and half of these are optional by design.
@@ -224,6 +235,8 @@ const scaleGeom = (g, sx, sy) => {
   // type size along with the rectangle. A length, so it takes the same factor
   // `rescaleStyle` gives every other length.
   if (Number.isFinite(out.size)) out.size *= s;
+  if (out.auto) out.auto = rescaleAuto(out.auto, sx, sy);
+  if (out.fit) out.fit = scaleFit(out.fit, sx, sy);
   if (out.ink && typeof out.ink === 'object' && Array.isArray(out.ink.strokes)) {
     out.ink = {
       ...out.ink,
@@ -258,15 +271,32 @@ export function rescaleEntry(entry, sx, sy) {
   }
   if (e.geomBefore) e.geomBefore = scaleGeom(e.geomBefore, sx, sy);
   if (e.geomAfter) e.geomAfter = scaleGeom(e.geomAfter, sx, sy);
-  if (Array.isArray(e.items)) {
-    e.items = e.items.map((it) => ({
-      ...it,
-      before: rescaleStyle(it.before, sx, sy),
-      after: rescaleStyle(it.after, sx, sy),
-      geomBefore: scaleGeom(it.geomBefore, sx, sy),
-      geomAfter: scaleGeom(it.geomAfter, sx, sy),
+  if (Array.isArray(e.boxes)) {
+    e.boxes = e.boxes.map((g) => ({
+      ...g,
+      geomBefore: scaleGeom(g.geomBefore, sx, sy),
+      geomAfter: scaleGeom(g.geomAfter, sx, sy),
     }));
   }
+  // Two shapes of item: a bulk's (styles and geometry pairs) and a batch
+  // placement's (a whole box). Only the fields an item has are scaled, so
+  // neither grows the other's keys.
+  if (Array.isArray(e.items)) {
+    e.items = e.items.map((it) => {
+      const out = { ...it };
+      if (it.box) out.box = scaleRecordedBox(it.box, sx, sy);
+      if (it.before) out.before = rescaleStyle(it.before, sx, sy);
+      if (it.after) out.after = rescaleStyle(it.after, sx, sy);
+      if (it.geomBefore) out.geomBefore = scaleGeom(it.geomBefore, sx, sy);
+      if (it.geomAfter) out.geomAfter = scaleGeom(it.geomAfter, sx, sy);
+      return out;
+    });
+  }
+  // The style every later box is born with, which a bulk entry walks back and
+  // forth with its boxes: in the new space too, or an undo after the rescale
+  // would hand every new box the old space's sizes.
+  if (e.lastStyleBefore) e.lastStyleBefore = rescaleStyle(e.lastStyleBefore, sx, sy);
+  if (e.lastStyleAfter) e.lastStyleAfter = rescaleStyle(e.lastStyleAfter, sx, sy);
   return e;
 }
 

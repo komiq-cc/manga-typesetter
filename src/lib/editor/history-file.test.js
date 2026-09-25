@@ -581,3 +581,35 @@ describe('the file on disk', () => {
     expect(undoCount(files, PATH, '1')).toBe(1);
   });
 });
+
+// A page rescaled under its history: every geometry pair moves into the new
+// space, the solver's reference size with it (it is a size like the style's),
+// and so do the balloon a refit recorded and the boxes a queue line edit did.
+describe('rescaling a recorded entry', () => {
+  it('scales the solver record, a refit fit and a line edit’s boxes', async () => {
+    const { rescaleEntry } = await import('./history-file.svelte.js');
+    const geom = (k) => ({ x: 10 * k, y: 20 * k, w: 100 * k, h: 40 * k, size: 20 * k, auto: { on: true, refSize: 26 * k, locks: {}, status: 'ok', stamp: 's' } });
+    const refit = rescaleEntry({ t: 'refit', geomBefore: { ...geom(1), fit: { kind: 'ellipse', cx: 50, cy: 50, rx: 30, ry: 20 } }, geomAfter: geom(1) }, 2, 2);
+    expect(refit.geomBefore.auto.refSize).toBe(52);
+    expect(refit.geomBefore.fit).toEqual({ kind: 'ellipse', cx: 100, cy: 100, rx: 60, ry: 40 });
+    expect(refit.geomAfter).toEqual(geom(2));
+    const line = rescaleEntry({ t: 'line', lineN: 1, before: 'a', after: 'b', boxes: [{ boxId: 'b1', geomBefore: geom(1), geomAfter: geom(1) }] }, 2, 2);
+    expect(line.boxes[0].geomBefore).toEqual(geom(2));
+    expect(line.boxes[0].geomAfter).toEqual(geom(2));
+  });
+
+  it('scales a batch placement’s boxes, and adds no bulk keys to them', async () => {
+    const { rescaleEntry } = await import('./history-file.svelte.js');
+    const box = { id: 'b1', lineN: 1, text: null, x: 10, y: 20, w: 100, h: 40, style: { size: 20 }, fit: null, auto: { on: true, refSize: 26, locks: {}, status: 'ok', stamp: 's' } };
+    const e = rescaleEntry({ t: 'placeMany', pageId: 1, items: [{ index: 0, box }] }, 2, 2);
+    expect(Object.keys(e.items[0]).sort()).toEqual(['box', 'index']);
+    expect([e.items[0].box.x, e.items[0].box.w, e.items[0].box.style.size, e.items[0].box.auto.refSize]).toEqual([20, 200, 40, 52]);
+    expect(e.items[0].box.auto.stamp).toBe('s');
+  });
+
+  it('scales the style a bulk entry walks back for new boxes', async () => {
+    const { rescaleEntry } = await import('./history-file.svelte.js');
+    const e = rescaleEntry({ t: 'bulk', pageId: 1, items: [], lastStyleBefore: { size: 20 }, lastStyleAfter: { size: 30 } }, 2, 2);
+    expect([e.lastStyleBefore.size, e.lastStyleAfter.size]).toEqual([40, 60]);
+  });
+});

@@ -1894,6 +1894,50 @@ describe('placement chooses the size (FIT-1)', () => {
     expect(b.style.size).toBe(32);
   });
 
+  // A size an undo puts back on the selected box is nobody's edit. A bulk
+  // entry selects nothing, so without the history re-marking the selection the
+  // next fit took the restored size for one the user had typed, and locked it.
+  it('never takes a size an undo put back for the user’s size edit', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const b = placeAt(26);
+    const style26 = normalizeStyle({ ...b.style });
+    const geom26 = fitGeom(b);
+    b.style.size = 20;
+    b.auto.refSize = 20;
+    selectBox(b.id);
+    hist.record({
+      t: 'bulk',
+      pageId: page().id,
+      items: [{ pageId: page().id, boxId: b.id, before: style26, after: normalizeStyle({ ...b.style }), geomBefore: geom26, geomAfter: fitGeom(b) }],
+    });
+    hist.undo();
+    expect(b.style.size).toBe(26);
+    // What the Inspector does for any edit of the box - a colour, say.
+    autoFitBox(b, page());
+    expect(b.auto.locks.size).toBe(false);
+    expect(tags.sizes['']).toBeUndefined();
+  });
+
+  // The reference size is a size like the style's: a page whose raster comes
+  // back at twice the resolution doubles it, and a solve that stood still
+  // stands - its flag with it.
+  it('rescales the reference size with the page, and keeps a standing solve', () => {
+    loadProjectPages(noDetect('I TOLD YOU WE SHOULD HAVE LEFT BEFORE THE RAIN'));
+    app.lastStyle = { ...defaultStyle(), size: 40 };
+    const img = pageImage(500, 500);
+    drawEllipse(img, 250, 250, 120, 90);
+    pixels = img;
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    expect(b.auto.status).toBe('overflow');
+    const flag = reviewOf(b, page());
+    expect(flag).not.toBeNull();
+    setPageDims(page(), 1000, 1000);
+    expect(b.auto.refSize).toBe(80);
+    expect(reviewOf(b, page())).toEqual(flag);
+  });
+
   // TextBox's edge drag: the record carries the solver's record (`fitGeom`), so
   // the width lock the drag set goes with the undo.
   it('an undone width drag takes its width lock back', () => {

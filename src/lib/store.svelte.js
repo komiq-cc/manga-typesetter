@@ -1322,12 +1322,23 @@ export function rememberSizeFor(p, box) {
 // user's. One mark, not one per box: a size is only ever edited on the box in
 // front of the user, and the bulk editor, which edits many, says so itself
 // (`rememberSizeFor`).
+//
+// Anything else that writes a size has to move the mark with it, or the next
+// edit of the box reads the write as the user's: a solve (`solveBox`), a
+// rescale, and an undo or redo, which puts back a size that was the user's or
+// the program's once and is neither now - so the history re-marks the selected
+// box after every step (`markSelectedSize`), including the steps that do not
+// select anything, like a bulk apply's.
 let sizeMark = { id: null, size: null };
 function markSize(b) {
   sizeMark = { id: b.id, size: b.style?.size };
 }
 function seeSize(b) {
   if (sizeMark.id === b.id) sizeMark.size = b.style.size;
+}
+export function markSelectedSize() {
+  const b = app.selectedId ? byId(app.selectedId) : null;
+  if (b?.style) markSize(b);
 }
 function noteSizeEdit(b, p) {
   if (sizeMark.id !== b.id || b.style.size === sizeMark.size) return;
@@ -2140,7 +2151,7 @@ export function rescaleStyle(st, sx, sy) {
 // and their line breaks would not. An axis-aligned ellipse scaled per axis is
 // still an axis-aligned ellipse, and bands of rows are still bands of rows, so
 // this is exact for every kind.
-const scaleFit = (f, sx, sy) => {
+export const scaleFit = (f, sx, sy) => {
   if (!f) return f;
   if (f.kind === 'ellipse') {
     return { kind: 'ellipse', cx: f.cx * sx, cy: f.cy * sy, rx: f.rx * sx, ry: f.ry * sy };
@@ -2155,6 +2166,19 @@ const scaleFit = (f, sx, sy) => {
   return null;
 };
 
+// The solver's record in the new space: its sizes are lengths, like the
+// style's own. The stamp is the caller's to renew - it is a fingerprint of the
+// whole box.
+export function rescaleAuto(a, sx, sy) {
+  if (!a || typeof a !== 'object') return a;
+  const s = lengthScale(sx, sy);
+  if (!Number.isFinite(s) || s <= 0 || s === 1) return a;
+  const out = { ...a };
+  if (Number.isFinite(a.refSize)) out.refSize = a.refSize * s;
+  if (Number.isFinite(a.minSize)) out.minSize = a.minSize * s;
+  return out;
+}
+
 export function rescalePageGeometry(p, sx, sy) {
   for (const b of p.boxes ?? []) {
     // The rectangle. A rotated box is stored as an axis-aligned x/y/w/h plus
@@ -2165,6 +2189,13 @@ export function rescalePageGeometry(p, sx, sy) {
     // change) and for any box at rotation 0, which between them is everything
     // but a redelivery at a different aspect ratio - where the art itself has
     // been reshaped and no placement survives faithfully anyway.
+    // Whether the last solve still describes the box, asked before anything
+    // moves: afterwards it is the same solve in the new space. Never asked of a
+    // recorded box on a stand-in page with no lines (history-file.svelte.js),
+    // whose text may live on a line it does not have: its stamp stays as
+    // recorded, like every other recorded stamp.
+    const text = b.auto?.stamp && Array.isArray(p.lines) ? boxText(b, p) : null;
+    const stood = text != null && solveStands(b, text);
     b.x *= sx;
     b.y *= sy;
     b.w *= sx;
@@ -2176,6 +2207,14 @@ export function rescalePageGeometry(p, sx, sy) {
     // that had come loose from the glyphs - all of it invisible until the
     // export, because the record looked perfectly consistent.
     b.style = rescaleStyle(b.style, sx, sy);
+    // And the size the user chose, which is a size like the style's: left
+    // behind, the next solve at 2x would shrink every box to the old reference.
+    // A new object, for the reason `rescaleStyle` returns one.
+    if (b.auto) {
+      b.auto = rescaleAuto(b.auto, sx, sy);
+      if (stood) b.auto.stamp = solveStamp(b, text);
+    }
+    seeSize(b);
   }
   const d = p.detect;
   if (!d) return;
