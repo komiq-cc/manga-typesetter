@@ -589,7 +589,7 @@ export function boxEdited(b, p = page()) {
 }
 
 // The box as the Inspector's history sees it: the style, the text, the
-// rectangle, and the solver's record, which an edit there can change (a typed
+// rectangle, the balloon fit a typed X or Y moves, and the solver's record, which an edit there can change (a typed
 // size becomes the reference and is locked, a width is locked) and which the
 // solve it runs rewrites.
 export const boxSnap = (b) => ({
@@ -599,6 +599,7 @@ export const boxSnap = (b) => ({
   y: b.y,
   w: b.w,
   h: b.h,
+  fit: b.fit ? $state.snapshot(b.fit) : null,
   auto: b.auto ? $state.snapshot(b.auto) : null,
 });
 
@@ -613,10 +614,12 @@ export const boxSnap = (b) => ({
 // and for a move the ink carried with the rectangle - is no entry of its own:
 // the `resize` or `text` entry puts it back with the rectangle, and one edit is
 // one undo. A burst that also changed the look records that as its own `style`
-// entry, as two edits.
+// entry, as two edits. The balloon fit rides along, since a typed X or Y moves
+// it with the box (`moveBoxTo`).
 export function boxEditRecords(key, before, after, geom) {
   const out = [];
-  const withAuto = (g, snap) => (snap.auto ? { ...g, auto: snap.auto } : g);
+  const withFit = (g, snap) => ('fit' in snap ? { ...g, fit: snap.fit } : g);
+  const withAuto = (g, snap) => withFit(snap.auto ? { ...g, auto: snap.auto } : g, snap);
   const fitOf = (snap) => withAuto({ x: snap.x, y: snap.y, w: snap.w, h: snap.h, size: snap.style.size }, snap);
   const geomOf = (snap) => {
     const g = fitOf(snap);
@@ -887,12 +890,14 @@ function solverReview(b, p) {
 // What a solve was solved FOR, as a short fingerprint kept on the record
 // (`auto.stamp`): the text, the rectangle, the balloon and every style field the
 // lines are laid out from. The status is the solve's answer only while the box
-// still matches it. Most edits - typing, a size or font change, a move, a
-// resize, a rotation, a refit to another balloon - run the ladder or nothing,
-// not the solver, and it is not theirs to keep a solver's record up to date;
-// they change the box, and the stamp stops matching. An undo that puts the box
-// back as it was solved makes it match again. One comparison wherever the
-// status is read, instead of a guard in every path that can edit a box.
+// still matches it. Most edits - typing, a size or font change, a resize, a
+// rotation, a refit to another balloon - run the ladder or nothing, not the
+// solver, and it is not theirs to keep a solver's record up to date; they
+// change the box, and the stamp stops matching. A move and a rescale are the
+// exceptions: they carry the fit with the box, so the solve is the same one
+// somewhere else, and they renew the stamp (`moveBoxTo`). An undo that puts
+// the box back as it was solved makes it match again. One comparison wherever
+// the status is read, instead of a guard in every path that can edit a box.
 //
 // Hashed, because the text can be long and the stamp rides every save. FNV-1a,
 // 32 bits: a collision would take an edit that lands on the same hash, about one
@@ -2162,6 +2167,20 @@ export const scaleFit = (f, sx, sy) => {
   if (f.kind === 'rows') {
     const spans = f.spans.map((sp) => sp && [sp[0] * sx, sp[1] * sx]);
     return { kind: 'rows', y0: f.y0 * sy, step: f.step * sy, spans };
+  }
+  return null;
+};
+
+// The same fit carried by (dx, dy), for a box the user moves (`moveBoxTo`).
+// A new object every time, so a fit shared with the gesture's starting copy -
+// or with anything else - is never moved under it.
+export const translateFit = (f, dx, dy) => {
+  if (!f) return f;
+  if (f.kind === 'ellipse') return { kind: 'ellipse', cx: f.cx + dx, cy: f.cy + dy, rx: f.rx, ry: f.ry };
+  if (f.kind === 'rect') return { kind: 'rect', x: f.x + dx, y: f.y + dy, w: f.w, h: f.h };
+  if (f.kind === 'rows') {
+    const spans = f.spans.map((sp) => sp && [sp[0] + dx, sp[1] + dx]);
+    return { kind: 'rows', y0: f.y0 + dy, step: f.step, spans };
   }
   return null;
 };
@@ -3622,11 +3641,14 @@ export function duplicateBox(id = app.selectedId) {
     w: src.w,
     h: src.h,
     style: cloneStyle(src.style),
-    // The fit is used as a width profile rather than as a position on the page
-    // (see `balloonWidthsFor`), so the copy breaks its lines exactly where the
-    // original does even though it sits at the offset.
-    fit: normalizeFit($state.snapshot(src.fit)),
+    fit: null,
   };
+  // The fit is the box's width profile, carried to the offset the copy sits
+  // at as a move carries it (`moveBoxTo`): its rows hang from where the box
+  // draws its block (`balloonWidthsFor`), so a fit left where the original's
+  // balloon is would break the copy's lines on other rows. With it carried,
+  // the copy breaks exactly where the original does.
+  b.fit = translateFit(normalizeFit($state.snapshot(src.fit)), b.x - src.x, b.y - src.y);
   // The copy's own verdict, before the record takes its snapshot. Not the
   // source's flag copied across: the copy sits somewhere else and reads its
   // text off a line of its own.
@@ -3798,10 +3820,16 @@ export function resizeBox(pageId, boxId, geom, base = null) {
   // every step of an edge drag re-sets the text, not only the steps that moved
   // the pointer sideways: each one writes the height back from the start.
   const widened = nw !== ow;
+  // A new place and nothing else - the Inspector's X or Y - is a move, and
+  // carries the balloon fit and a standing solve with the box as a drag does.
+  const moveOnly = nw === b.w && nh === b.h && !Number.isFinite(geom.size) && (nx !== b.x || ny !== b.y);
   b.w = nw;
   b.h = nh;
-  b.x = nx;
-  b.y = ny;
+  if (moveOnly) moveBoxTo(b, nx, ny, p);
+  else {
+    b.x = nx;
+    b.y = ny;
+  }
   if (Number.isFinite(geom.size)) {
     b.style.size = geom.size;
   }
@@ -3824,6 +3852,50 @@ export function resizeBox(pageId, boxId, geom, base = null) {
 }
 
 
+// ---------- moving a box ----------
+// A box the user moves - a drag or the arrow keys - takes its balloon fit with
+// it, so its lines stay the lines it had (GEO-2). The rows a fitted block is
+// broken to hang from where the box draws it (`balloonWidthsFor`), and that is
+// right for everything that places a box: the solver, a refit, a resize, auto
+// height. A move is not one of those. Measured against the balloon where it
+// stands, a box dragged a few pixels up drew every line on another row, and its
+// breaks changed under the pointer - and then again at the next keystroke,
+// when the solver held it where it now stood and checked each line against the
+// balloon's rows there (`rowsFit`), shrinking the text or flagging it for a
+// balloon it had only been nudged within.
+//
+// So the fit is the box's width profile, as `duplicateBox` has always treated
+// it, and it rides with the box: the lines, their indents, the solver's verdict
+// and the export are all the same as before the move, only somewhere else. What
+// the user has put where the balloon is narrower is theirs, as it is sideways,
+// where the rows were already centred on the box; Refit is the command that
+// sets the text again in the balloon under the box (`refitBalloon`, which
+// measures it afresh there).
+//
+// A solve that described the box before the move describes it after, as after a
+// rescale: its stamp moves with it, so an overflow the solver flagged stays
+// flagged (`solverReview`). Not a box still waiting for its face: its stamp
+// says it is as it was placed, and a move is the user's (`solvePending`).
+//
+// `from` is where the gesture started - `moveGeom` taken then - so a drag moves
+// the fit from one place by the whole distance rather than by every pointer
+// step in turn.
+export const moveGeom = (b) => ({
+  x: b.x,
+  y: b.y,
+  ...(b.fit ? { fit: $state.snapshot(b.fit) } : null),
+  ...(b.auto ? { auto: $state.snapshot(b.auto) } : null),
+});
+
+export function moveBoxTo(b, x, y, p = page(), from = moveGeom(b)) {
+  const text = b.auto?.stamp && b.auto.status !== 'pending' ? boxText(b, p) : null;
+  const stood = text != null && solveStands(b, text);
+  b.x = x;
+  b.y = y;
+  if (from.fit) b.fit = translateFit(from.fit, x - from.x, y - from.y);
+  if (stood) b.auto.stamp = solveStamp(b, text);
+}
+
 // ---------- keyboard nudge ----------
 // The arrow keys, moving the selected box a pixel at a time. Bounds are the
 // drag's, not the page's: a box the user deliberately hung off the edge must not
@@ -3844,7 +3916,7 @@ function settleNudge() {
   const b = p?.boxes.find((x) => x.id === pend.boxId);
   if (!b) return; // the box went while the window was open - nothing to record against
   if (b.x === pend.before.x && b.y === pend.before.y) return;
-  recordEdit({ t: 'move', pageId: pend.pageId, boxId: pend.boxId, before: pend.before, after: { x: b.x, y: b.y } });
+  recordEdit({ t: 'move', pageId: pend.pageId, boxId: pend.boxId, before: pend.before, after: moveGeom(b) });
 }
 
 export function nudgeBox(id, dx, dy) {
@@ -3861,9 +3933,8 @@ export function nudgeBox(id, dx, dy) {
     ? clamp(b.y + dy, stripBounds.min, stripBounds.max)
     : clamp(b.y + dy, -b.h + 20, p.h - 20);
   if (x === b.x && y === b.y) return false;
-  nudgePending ??= { boxId: id, pageId: p.id, before: { x: b.x, y: b.y } };
-  b.x = x;
-  b.y = y;
+  nudgePending ??= { boxId: id, pageId: p.id, before: moveGeom(b) };
+  moveBoxTo(b, x, y, p);
   clearTimeout(nudgeT);
   nudgeT = setTimeout(settleNudge, NUDGE_SETTLE_MS);
   markUnsaved();

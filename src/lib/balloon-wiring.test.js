@@ -72,6 +72,9 @@ const {
   boxSnap,
   boxEditRecords,
   boxText,
+  moveGeom,
+  moveBoxTo,
+  duplicateBox,
 } = await import('./store.svelte.js');
 const { copyStyle, pasteStyle } = await import('./presets.svelte.js');
 const { tags } = await import('./tags.svelte.js');
@@ -1589,17 +1592,18 @@ describe('placement chooses the size (FIT-1)', () => {
     });
 
     // A width drag re-solves the box in its new width (FIT-2), and the text
-    // still does not fit its balloon; a move leaves the box the solve was about.
-    it('is re-solved by a width drag, and clears on a move', () => {
+    // still does not fit its balloon; a move carries the balloon with the box,
+    // so the solve and its flag go with it.
+    it('is re-solved by a width drag, and kept through a move', () => {
       const a = overflowed();
       resizeBox(page().id, a.id, { w: a.w - 10 });
       expect(a.auto.locks.width).toBe(true);
       expect(flag(a)?.reason).toBe(REVIEW_REASONS.minSize);
       const b = overflowed();
       selectBox(b.id);
-      nudgeBox(b.id, 5, 0);
-      expect(flag(b)).toBeNull();
-      nudgeBox(b.id, -5, 0);
+      nudgeBox(b.id, 5, 12);
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
+      nudgeBox(b.id, -5, -12);
       expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
     });
 
@@ -1766,6 +1770,115 @@ describe('placement chooses the size (FIT-1)', () => {
       expect(b.h).toBe(h0);
       setBoxText(b, `${TEXT} ${TEXT} AGAIN`, page());
       expect(b.w).toBe(narrow.w + 80);
+    });
+  });
+
+  // GEO-2: the rows a fitted block is broken to hang from where the box draws
+  // it, so a move measured against the balloon where it stands put every line on
+  // another row - 4px up or down re-broke this text. A user's move carries the
+  // fit with the box instead (`moveBoxTo`): the same lines, the same solve,
+  // somewhere else.
+  describe('a move carries the balloon with the box', () => {
+    const editorLines = (b) =>
+      layoutLines(boxText(b, page()), b.style, b.style.size, contentWidth(b.w, b.style), balloonWidthsFor(b, b.style, b.style.size));
+    const exportLines = (b) => placeBlock(boxCandidate(b, boxText(b, page()))).lines;
+
+    it('keeps its lines when nudged up or down inside its balloon, in the editor, the export and the PSD', async () => {
+      const { textLayerFor } = await import('./psd.js');
+      const b = placeAt(26);
+      const lines = editorLines(b);
+      const fit = { ...b.fit };
+      // Measured against the balloon where it stands, the moved box would break
+      // elsewhere: this is the case the move has to hold.
+      expect(editorLines({ ...b, y: b.y + 8 })).not.toEqual(lines);
+      selectBox(b.id);
+      for (const [dy, total] of [[8, 8], [-20, -12]]) {
+        nudgeBox(b.id, 0, dy);
+        expect(b.fit).toEqual({ ...fit, cy: fit.cy + total });
+        expect(editorLines(b)).toEqual(lines);
+        expect(exportLines(b)).toEqual(lines);
+        expect(textLayerFor(page(), b, null).text.text).toBe(lines.join('\n'));
+      }
+      settleEdits();
+    });
+
+    it('moves the fit from where a drag started, by the whole distance', () => {
+      const b = placeAt(26);
+      const lines = editorLines(b);
+      const from = moveGeom(b);
+      for (const dy of [3.25, 17.5, 40]) moveBoxTo(b, from.x + 5, from.y + dy, page(), from);
+      expect(b.fit).toEqual({ ...from.fit, cx: from.fit.cx + 5, cy: from.fit.cy + 40 });
+      expect(editorLines(b)).toEqual(lines);
+    });
+
+    // The next edit re-solves the box where it stands (FIT-2), against the
+    // balloon it carried: nothing is shrunk for rows it was only moved across.
+    it('is re-solved by the next edit to what it was, where it now stands', () => {
+      const b = placeAt(26);
+      const lines = editorLines(b);
+      const g = [b.w, b.h, b.style.size];
+      selectBox(b.id);
+      nudgeBox(b.id, 0, -12);
+      settleEdits();
+      const at = [b.x, b.y];
+      autoFitBox(b, page());
+      expect([b.w, b.h, b.style.size]).toEqual(g);
+      expect([b.x, b.y]).toEqual(at);
+      expect(editorLines(b)).toEqual(lines);
+      expect(b.auto.status).toBe('ok');
+    });
+
+    it('is one undo step that puts back the box and its fit', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = placeAt(26);
+      const before = { x: b.x, y: b.y, fit: { ...b.fit } };
+      const n = hist.peekStack().undo.length;
+      selectBox(b.id);
+      nudgeBox(b.id, 0, 10);
+      nudgeBox(b.id, 3, 0);
+      settleEdits();
+      const after = { x: b.x, y: b.y, fit: { ...b.fit } };
+      expect(hist.peekStack().undo.length).toBe(n + 1);
+      hist.undo();
+      expect({ x: b.x, y: b.y, fit: { ...b.fit } }).toEqual(before);
+      hist.redo();
+      expect({ x: b.x, y: b.y, fit: { ...b.fit } }).toEqual(after);
+    });
+
+    // The Inspector's X and Y fields (`commitGeom`): a resize to a new place and
+    // nothing else is a move, recorded with the fit and the record both ways.
+    it('keeps its lines and its solve when a new X or Y is typed, and one undo puts both back', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = placeAt(26);
+      const lines = editorLines(b);
+      selectBox(b.id);
+      const before = boxSnap(b);
+      resizeBox(page().id, b.id, { y: b.y - 10 });
+      resizeBox(page().id, b.id, { x: b.x + 7 });
+      boxEdited(b, page());
+      expect(b.fit).toEqual({ ...before.fit, cx: before.fit.cx + 7, cy: before.fit.cy - 10 });
+      expect(editorLines(b)).toEqual(lines);
+      expect(exportLines(b)).toEqual(lines);
+      expect([b.w, b.h, b.style.size]).toEqual([before.w, before.h, before.style.size]);
+      expect(b.auto.stamp).not.toBe(before.auto.stamp);
+      const recs = boxEditRecords({ pageId: page().id, boxId: b.id }, before, boxSnap(b), true);
+      expect(recs.map((e) => e.t)).toEqual(['resize']);
+      for (const e of recs) hist.record(e);
+      hist.undo();
+      expect({ x: b.x, y: b.y, fit: { ...b.fit } }).toEqual({ x: before.x, y: before.y, fit: before.fit });
+      expect(b.auto).toEqual(before.auto);
+    });
+
+    // A copy sits at an offset, and breaks where the original does.
+    it('gives a duplicate the original’s lines at its offset', () => {
+      const b = placeAt(26);
+      const id = duplicateBox(b.id);
+      const copy = page().boxes.find((x) => x.id === id);
+      expect(copy.y).not.toBe(b.y);
+      expect(copy.fit.cy - b.fit.cy).toBe(copy.y - b.y);
+      expect(editorLines(copy)).toEqual(editorLines(b));
     });
   });
 

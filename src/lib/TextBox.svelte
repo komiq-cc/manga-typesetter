@@ -18,6 +18,8 @@
     refitBox,
     autoFitBoxTo,
     fitGeom,
+    moveGeom,
+    moveBoxTo,
     focusPage,
     resizeBox,
     isLongstrip,
@@ -912,13 +914,16 @@
     const sx = e.clientX, sy = e.clientY, ox = box.x, oy = box.y;
 
     const pageId = dims.id;
-    const before = { x: ox, y: oy };
+    // The box's balloon fit moves with it, from where it started, so its lines
+    // stay the lines it had (`moveBoxTo`); the entry carries the fit both ways.
+    const before = moveGeom(box);
     const move = (ev) => {
       if (ev.pointerId !== pid) return;
-      box.x = clamp(ox + (ev.clientX - sx) / zz, -box.w + 20, dims.w - 20);
-      box.y = stripBounds
+      const x = clamp(ox + (ev.clientX - sx) / zz, -box.w + 20, dims.w - 20);
+      const y = stripBounds
         ? clamp(oy + (ev.clientY - sy) / zz, stripBounds.min, stripBounds.max)
         : clamp(oy + (ev.clientY - sy) / zz, -box.h + 20, dims.h - 20);
+      moveBoxTo(box, x, y, pg, before);
       markUnsaved();
     };
 
@@ -929,7 +934,7 @@
       ac.abort();
 
       if (box.x !== before.x || box.y !== before.y) {
-        record({ t: 'move', pageId, boxId: box.id, before, after: { x: box.x, y: box.y } });
+        record({ t: 'move', pageId, boxId: box.id, before, after: moveGeom(box) });
       }
     };
     live.add(ac);
