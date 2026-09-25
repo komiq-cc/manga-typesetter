@@ -17,6 +17,7 @@
     setBoxText,
     refitBox,
     autoFitBoxTo,
+    fitGeom,
     focusPage,
     resizeBox,
     isLongstrip,
@@ -949,7 +950,9 @@
     const pid = e.pointerId;
     const sx = e.clientX, sy = e.clientY;
 
-    const o = { x: box.x, y: box.y, w: box.w, h: box.h, size: s.size };
+    // The rectangle and the size, and the solver's record: a width drag locks the
+    // width and re-sets the text in it, and the undo has to take both back.
+    const o = fitGeom(box);
     const isRot = dir === 'rot';
     const hasInk = !!(box.style?.ink?.on && box.style?.ink?.strokes?.length);
     const inkBefore = hasInk ? cloneStyle(box.style).ink : null;
@@ -996,7 +999,7 @@
           pageId,
           box.id,
           geom,
-          inkBefore ? { w: o.w, h: o.h, ink: inkBefore } : null
+          inkBefore ? { w: o.w, h: o.h, ink: inkBefore } : { w: o.w, h: o.h }
         );
       }
     };
@@ -1032,7 +1035,7 @@
       }
       const before = { ...o };
       if (inkBefore) before.ink = inkBefore;
-      const after = { x: box.x, y: box.y, w: box.w, h: box.h, size: box.style.size };
+      const after = fitGeom(box);
       if (box.style?.ink?.on) after.ink = cloneStyle(box.style).ink;
       const geomKeys = ['x', 'y', 'w', 'h', 'size'];
       if (geomKeys.some((k) => after[k] !== before[k])) {

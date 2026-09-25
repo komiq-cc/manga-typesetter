@@ -67,7 +67,13 @@ const {
   toggleBalloonFit,
   reviewOf,
   noteFontsChanged,
+  fitGeom,
+  boxEdited,
+  boxSnap,
+  boxEditRecords,
+  boxText,
 } = await import('./store.svelte.js');
+const { copyStyle, pasteStyle } = await import('./presets.svelte.js');
 const { tags } = await import('./tags.svelte.js');
 const { containBox, boxCandidate, placeBlock, REVIEW_REASONS } = await import('./contain.js');
 const { balloonWidthsFor, lineIndents, textInset, contentWidth, layoutLines, lineWidth, setTypesetEnabled } =
@@ -1782,6 +1788,125 @@ describe('placement chooses the size (FIT-1)', () => {
     expect(b.auto.refSize).toBe(38);
     expect(tags.sizes['']).toBe(38);
     expect(b.style.size).toBeLessThanOrEqual(38);
+  });
+
+  // ARC-1: an explicit size edit is the box's reference AND is locked, so the
+  // solver never shrinks it out from under the edit; what does not fit at that
+  // size is flagged. The Inspector records its edit with the whole geometry and
+  // the solver record (its `fitOf`), so one undo gives the box its freedom back.
+  it('keeps a size typed on the box, flags what it cannot hold, and the undo unlocks it', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const b = placeAt(26);
+    selectBox(b.id);
+    const before = boxSnap(b);
+    // The Inspector's size field: write the size, then tell the store.
+    b.style.size = 44;
+    boxEdited(b, page());
+    expect(b.style.size).toBe(44);
+    expect(b.auto).toMatchObject({ refSize: 44, status: 'overflow', locks: { size: true } });
+    expect(reviewOf(b, page())).not.toBeNull();
+    // Later edits keep it too.
+    setBoxText(b, `${TEXT} NOW`, page());
+    expect(b.style.size).toBe(44);
+    // One burst, one entry: the text entry carries the size and the record.
+    const recs = boxEditRecords({ pageId: page().id, boxId: b.id }, before, boxSnap(b), false);
+    expect(recs.map((e) => e.t)).toEqual(['text']);
+    for (const e of recs) hist.record(e);
+    hist.undo();
+    expect(b.style.size).toBe(26);
+    expect(b.auto).toMatchObject({ refSize: 26, status: 'ok', locks: { size: false } });
+  });
+
+  // The Inspector's width field (`commitGeom`): resize, then the fit. The
+  // re-solve changes the size as well as the rectangle, and the burst is one
+  // entry that puts both back.
+  it('records an Inspector width edit that re-sized the text as one undo step', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const b = placeAt(32);
+    selectBox(b.id);
+    const before = boxSnap(b);
+    resizeBox(page().id, b.id, { w: b.w - 80 });
+    boxEdited(b, page());
+    expect(b.style.size).not.toBe(before.style.size);
+    const recs = boxEditRecords({ pageId: page().id, boxId: b.id }, before, boxSnap(b), true);
+    expect(recs.map((e) => e.t)).toEqual(['resize']);
+    for (const e of recs) hist.record(e);
+    hist.undo();
+    expect([b.x, b.y, b.w, b.h, b.style.size]).toEqual([before.x, before.y, before.w, before.h, before.style.size]);
+    expect(b.auto).toEqual(before.auto);
+  });
+
+  // The Inspector's text field (`setText`): the re-solve changes the size, and
+  // the edit is still one entry.
+  it('records an Inspector text edit that re-sized the text as one undo step', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const b = placeAt(32);
+    selectBox(b.id);
+    const before = boxSnap(b);
+    setBoxText(b, 'NO.', page());
+    boxEdited(b, page());
+    expect(b.style.size).not.toBe(before.style.size);
+    const recs = boxEditRecords({ pageId: page().id, boxId: b.id }, before, boxSnap(b), false);
+    expect(recs.map((e) => e.t)).toEqual(['text']);
+    for (const e of recs) hist.record(e);
+    hist.undo();
+    expect([b.x, b.y, b.w, b.h, b.style.size]).toEqual([before.x, before.y, before.w, before.h, before.style.size]);
+    expect(b.auto).toEqual(before.auto);
+    expect(boxText(b, page())).toBe(TEXT);
+  });
+
+  // A paste is a look. It never carries one box's hand-drawn geometry onto
+  // another, never turns a manual box auto, and never sizes a manual box.
+  it('pastes no strokes, masks or manual switches onto a manual box, and leaves it where it is', () => {
+    const a = placeAt(26);
+    copyStyle(a);
+    const strokes = [{ pts: [[10, 10, 1], [50, 10, 1]], size: 6, color: '#000000' }];
+    for (const over of [{ ink: { on: true, strokes } }, { autoHeight: false }]) {
+      const b = placeAt(26);
+      Object.assign(b.style, normalizeStyle({ ...b.style, ...over, font: 'Bangers' }));
+      b.h -= 30;
+      const g = [b.x, b.y, b.w, b.h, b.style.size];
+      pasteStyle(b);
+      expect(b.style.font).toBe(a.style.font);
+      if (over.ink) expect(b.style.ink).toMatchObject({ on: true, strokes });
+      else expect(b.style.autoHeight).toBe(false);
+      expect([b.x, b.y, b.w, b.h, b.style.size]).toEqual(g);
+    }
+  });
+
+  it('pastes the size the copied box was chosen at, not the size its balloon allowed', () => {
+    const a = placeAt(32);
+    expect(a.style.size).toBeLessThan(32);
+    copyStyle(a);
+    page().lines.push({ n: 2, type: 'dialogue', jp: 'い', en: 'NO.' });
+    page().activeLineN = 2;
+    placeActiveAt(250, 250);
+    const b = page().boxes[1];
+    b.style.size = 20;
+    // Not selected: the paste says it is a size edit itself.
+    selectBox(null);
+    pasteStyle(b);
+    expect(b.auto.refSize).toBe(32);
+    expect(b.auto.locks.size).toBe(true);
+    expect(b.style.size).toBe(32);
+  });
+
+  // TextBox's edge drag: the record carries the solver's record (`fitGeom`), so
+  // the width lock the drag set goes with the undo.
+  it('an undone width drag takes its width lock back', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const b = placeAt(26);
+    const before = fitGeom(b);
+    resizeBox(page().id, b.id, { x: b.x + 10, w: b.w - 20 }, { w: b.w, h: b.h });
+    expect(b.auto.locks.width).toBe(true);
+    hist.record({ t: 'resize', pageId: page().id, boxId: b.id, before, after: fitGeom(b) });
+    hist.undo();
+    expect(b.auto.locks.width).toBe(false);
+    expect([b.x, b.w]).toEqual([before.x, before.w]);
   });
 
   // DET-4: a face the page has asked for and not got measures as the fallback.

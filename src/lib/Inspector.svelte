@@ -10,10 +10,11 @@
     page,
     pageById,
     setEditSettleHook,
-    boxOwnText,
     setBoxText,
     isFreeBox,
     boxEdited,
+    boxSnap,
+    boxEditRecords,
     refitBalloon,
     toast,
     resizeBox,
@@ -139,23 +140,6 @@
   let pending = null;
   let settleT;
 
-  // Capture style, transform geometry, and text for undo history.
-  const snapOf = (b) => ({
-    style: cloneStyle(b.style),
-    text: boxOwnText(b),
-    x: b.x,
-    y: b.y,
-    w: b.w,
-    h: b.h,
-  });
-  const geomOf = (snap) => {
-    const g = { x: snap.x, y: snap.y, w: snap.w, h: snap.h };
-    if (snap.style?.ink?.on) g.ink = structuredClone(snap.style.ink);
-    return g;
-  };
-
-  const fitOf = (snap) => ({ y: snap.y, h: snap.h });
-
   // The box as it stood BEFORE the change `touch` is being told about. Every
   // handler in this panel mutates first and calls `touch` after, so a snapshot
   // taken inside `touch` is already the after - and a one-click edit (a
@@ -170,7 +154,7 @@
   function armSnap() {
     if (!box) return;
     if (pending && pending.boxId === box.id) return;
-    preSnap = { boxId: box.id, snap: snapOf(box) };
+    preSnap = { boxId: box.id, snap: boxSnap(box) };
   }
 
   // Explicit geometry edits record resize history.
@@ -182,7 +166,7 @@
       pending = {
         pageId: page().id,
         boxId: box.id,
-        before: preSnap?.boxId === box.id ? preSnap.snap : snapOf(box),
+        before: preSnap?.boxId === box.id ? preSnap.snap : boxSnap(box),
       };
     }
     if (pending && opts?.geom) pending.geom = true;
@@ -222,30 +206,10 @@
 
     const b = pageById(pend.pageId)?.boxes.find((x) => x.id === pend.boxId);
     if (!b) return;
-    const before = pend.before;
-    const after = snapOf(b);
+    // The box as the history sees it, and the entries the burst makes, are the
+    // store's: one per kind of edit, each with everything its fit moved.
     const key = { pageId: pend.pageId, boxId: b.id };
-    // Record style edit with before/after geometry.
-    const fit = { geomBefore: fitOf(before), geomAfter: fitOf(after) };
-    const geomChanged = pend.geom && ['x', 'y', 'w', 'h'].some((k) => before[k] !== after[k]);
-    const styleOnlyInk = () => {
-      const s1 = { ...before.style, ink: null };
-      const s2 = { ...after.style, ink: null };
-      return JSON.stringify(s1) === JSON.stringify(s2);
-    };
-    if (JSON.stringify(before.style) !== JSON.stringify(after.style)) {
-      if (!geomChanged || !styleOnlyInk()) {
-        record({ t: 'style', ...key, before: before.style, after: after.style, ...fit });
-      }
-    }
-
-    if (geomChanged) {
-      record({ t: 'resize', ...key, before: geomOf(before), after: geomOf(after) });
-    }
-
-    if (before.text !== after.text) {
-      record({ t: 'text', ...key, before: before.text ?? null, after: after.text, ...fit });
-    }
+    for (const e of boxEditRecords(key, pend.before, boxSnap(b), pend.geom)) record(e);
   }
 
   // One setter for every plain numeric field: clamp, write, touch. Saves the

@@ -6,11 +6,14 @@ import {
   app,
   cloneStyle,
   fitGeom,
+  refSizeOf,
+  rememberSizeFor,
   autoFitBox,
   markUnsaved,
   page,
 } from './store.svelte.js';
 import { record } from './editor/history.svelte.js';
+import { isAutoBox, boxCandidate } from './contain.js';
 
 const KEY = 'mt.presets';
 
@@ -105,9 +108,13 @@ export function removePreset(id) {
 // Module-level clipboard for style copy/paste.
 let clipboardStyle = null;
 
+// The size copied is the box's reference size (`refSizeOf`) - the size the user
+// chose for it - not the size its balloon made the solver shrink it to, which
+// pasted onto a roomier balloon would be a smaller voice for no reason.
 export function copyStyle(box) {
   if (!box?.style) return null;
   clipboardStyle = cloneStyle(box.style);
+  clipboardStyle.size = refSizeOf(box);
   try {
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(JSON.stringify(clipboardStyle));
@@ -120,8 +127,17 @@ export function copyStyle(box) {
 
 // What a style PASTE declines to move: a box's transform belongs to where it
 // sits on the page, not to how its text looks, and pasting a look should not
-// tilt or mirror the target.
-const EXCLUDED_KEYS = ['rotation', 'flipH', 'flipV'];
+// tilt or mirror the target. Nor the box's own hand-placed geometry - its
+// brush strokes, mask shapes, bezier path and warp mesh, all in px from its own
+// corner, which on another box would be someone else's lettering drawn over it
+// and the target's own work thrown away (see `applyBoxDefaults`, which keeps a
+// new box from inheriting them for the same reason).
+const EXCLUDED_KEYS = ['rotation', 'flipH', 'flipV', 'ink', 'clip', 'path', 'warp'];
+// And what a paste leaves alone on a MANUAL box (`isAutoBox`): the switches that
+// made it manual. Pasted over, a box the user sized by hand or bent onto an arc
+// would turn auto and be re-sized by the paste's own fit. Onto an auto box they
+// paste like the rest of the look, and at worst make it manual.
+const MANUAL_KEYS = ['autoHeight', 'curve', 'circle'];
 
 // What remembering the paste declines to carry into `lastStyle`, which is a
 // SHORTER list than the one above - see `pasteStyle`.
@@ -132,14 +148,19 @@ export function pasteStyle(box) {
 
   const before = cloneStyle(box.style);
   const geomBefore = fitGeom(box);
+  const keep = isAutoBox(boxCandidate(box, null)) ? EXCLUDED_KEYS : [...EXCLUDED_KEYS, ...MANUAL_KEYS];
 
-  // Assign every key of the clipboard style except rotation/flipH/flipV.
   for (const [k, v] of Object.entries(clipboardStyle)) {
-    if (!EXCLUDED_KEYS.includes(k)) {
+    if (!keep.includes(k)) {
       box.style[k] = v && typeof v === 'object' ? structuredClone($state.snapshot(v)) : v;
     }
   }
 
+  // The pasted size is a size the user chose for this box, whichever box is
+  // selected: its reference size, locked, as any explicit size edit is. Even
+  // when it equals the size the box shows: that may be a size the solver shrank
+  // the box to from another reference, and the paste says this one.
+  rememberSizeFor(page(), box);
   autoFitBox(box);
   markUnsaved();
   // Remember the pasted style so the next placed box carries the look, minus

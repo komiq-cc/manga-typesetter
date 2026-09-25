@@ -588,6 +588,55 @@ export function boxEdited(b, p = page()) {
   rememberStyle(b);
 }
 
+// The box as the Inspector's history sees it: the style, the text, the
+// rectangle, and the solver's record, which an edit there can change (a typed
+// size becomes the reference and is locked, a width is locked) and which the
+// solve it runs rewrites.
+export const boxSnap = (b) => ({
+  style: cloneStyle(b.style),
+  text: boxOwnText(b),
+  x: b.x,
+  y: b.y,
+  w: b.w,
+  h: b.h,
+  auto: b.auto ? $state.snapshot(b.auto) : null,
+});
+
+// The history entries one settled burst of Inspector edits makes, from the box
+// before it (`boxSnap`) and after. `geom` says the burst typed into a placement
+// field.
+//
+// Each entry carries everything the fit that burst ran can move - the rectangle,
+// the size and the solver's record - since the solver re-sets the size and the
+// height, and on a first solve the width and the place. So a style change that
+// is only what a move or a text edit caused - the size a re-solve settled on,
+// and for a move the ink carried with the rectangle - is no entry of its own:
+// the `resize` or `text` entry puts it back with the rectangle, and one edit is
+// one undo. A burst that also changed the look records that as its own `style`
+// entry, as two edits.
+export function boxEditRecords(key, before, after, geom) {
+  const out = [];
+  const withAuto = (g, snap) => (snap.auto ? { ...g, auto: snap.auto } : g);
+  const fitOf = (snap) => withAuto({ x: snap.x, y: snap.y, w: snap.w, h: snap.h, size: snap.style.size }, snap);
+  const geomOf = (snap) => {
+    const g = fitOf(snap);
+    if (snap.style?.ink?.on) g.ink = structuredClone(snap.style.ink);
+    return g;
+  };
+  const fit = { geomBefore: fitOf(before), geomAfter: fitOf(after) };
+  const moved = geom && ['x', 'y', 'w', 'h'].some((k) => before[k] !== after[k]);
+  const typed = before.text !== after.text;
+  const look = (st, ink) => JSON.stringify({ ...st, size: null, ...(ink ? { ink: null } : null) });
+  const same = (ink) => look(before.style, ink) === look(after.style, ink);
+  const carried = (moved && same(true)) || (typed && same(false));
+  if (JSON.stringify(before.style) !== JSON.stringify(after.style) && !carried) {
+    out.push({ t: 'style', ...key, before: before.style, after: after.style, ...fit });
+  }
+  if (moved) out.push({ t: 'resize', ...key, before: geomOf(before), after: geomOf(after) });
+  if (typed) out.push({ t: 'text', ...key, before: before.text ?? null, after: after.text, ...fit });
+  return out;
+}
+
 // ---------- a queue line's translation, typed into the queue ----------
 // The queue's own field writes the line, and every box reading that line is
 // fitted to it, as `setBoxText` fits the one box it writes. Here rather than in
@@ -1247,9 +1296,18 @@ export const refSizeOf = (b) => (b?.auto?.on && b.auto.refSize > 0 ? b.auto.refS
 
 // A deliberate size change: the box's reference size, and its group's memory.
 // A legacy free box (`lineN == null`) has no line and lands in the untagged group.
+//
+// And the size is LOCKED on a box the solver manages: a size the user set is
+// not one the solver may take back. Text it cannot hold at that size is flagged
+// rather than shrunk out from under the edit - quietly shrinking a size the user
+// has just typed would be the fit arguing with them. The Refit button respects
+// the lock too; only an undo of the edit gives the box its freedom back.
 export function rememberSizeFor(p, box) {
   if (!box?.style || typeof box.style.size !== 'number' || !Number.isFinite(box.style.size)) return;
-  if (box.auto) box.auto.refSize = box.style.size;
+  if (box.auto) {
+    box.auto.refSize = box.style.size;
+    box.auto.locks.size = true;
+  }
   seeSize(box);
   const line = box.lineN != null && p ? lineByN(p, box.lineN) : null;
   rememberTagSize(sizeKeyFor(line), box.style.size);
@@ -3668,7 +3726,8 @@ export function setBoxInk(pageId, boxId, strokes) {
 }
 
 // Resize or move a box, scaling hand-drawn ink strokes when present.
-// Updates the box geometry and scales stroke points and sizes.
+// Updates the box geometry and scales stroke points and sizes. `base` is the
+// box as the gesture found it - its w/h, and its strokes when it is inked.
 export function resizeBox(pageId, boxId, geom, base = null) {
   const p = pageById(pageId) ?? page();
   const b = p?.boxes.find((x) => x.id === boxId);
@@ -3696,7 +3755,10 @@ export function resizeBox(pageId, boxId, geom, base = null) {
       };
     }
   }
-  const widened = nw !== b.w;
+  // Against the width the gesture started from when the caller says (`base`), so
+  // every step of an edge drag re-sets the text, not only the steps that moved
+  // the pointer sideways: each one writes the height back from the start.
+  const widened = nw !== ow;
   b.w = nw;
   b.h = nh;
   b.x = nx;
