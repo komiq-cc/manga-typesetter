@@ -296,7 +296,12 @@ export function loadProjectPages(rawPages) {
   // chapter opens. Grow-only, so a box that is roomier than its text is left
   // exactly as the user left it, and a no-op in an environment with no text
   // metrics, so a test run never rewrites geometry from a stand-in number.
-  for (const p of app.pages) refitPage(p);
+  // Before it, the one box a load lays out: one placed while its face was
+  // loading and never solved, whose face is in by now (`solvePending`).
+  for (const p of app.pages) {
+    solvePending(p);
+    refitPage(p);
+  }
   // A different document is now open, and page ids are per-document counters
   // that collide freely across chapters - so anything the cache still holds is
   // at best dead weight and at worst another chapter's page 3. The src check
@@ -1010,7 +1015,9 @@ export function refitPage(p) {
 //                screen, which have no component to re-run anything.
 //
 // Idempotent and grow-only like every other fit, so calling it more often than
-// strictly necessary costs a measurement pass and changes nothing else.
+// strictly necessary costs a measurement pass and changes nothing else. The one
+// thing it lays out afresh is a box that was never laid out: placed while its
+// face was loading, and solved once that face is in (`solvePending`).
 //
 // `fonts.js` calls this after it registers a face, and `App.svelte` calls it
 // once `document.fonts.ready` resolves at boot, which covers the built-in faces
@@ -1031,11 +1038,51 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  for (const p of app.pages) n += refitPage(p);
+  for (const p of app.pages) n += solvePending(p) + refitPage(p);
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
   if (n) markUnsaved();
+  return n;
+}
+
+// Every box on a page placed while its face was loading, solved now that the
+// face is in (DET-4). Placement will not solve against the fallback family -
+// a size solved for a font nobody sees - so such a box is placed by the old
+// rules and marked 'pending' (`bornBox`). Left to the grow-only refit above, its
+// height then followed the real face's lines with nothing to hold it to its
+// balloon: 323 px tall in a balloon of 180.
+//
+// Only 'pending' boxes, never one with a solve behind it: a font arriving must
+// not change the size, width or position of anything already laid out, and a
+// box with no status was placed without text and belongs to the ladder. And
+// only a pending box still as it was placed (its stamp, `solveStamp`): one the
+// user has since typed into, moved, resized, rotated or restyled - by any path -
+// is theirs, and a solve would throw that away; one they have drawn ink on,
+// masked, curved or sized by hand is manual. Either is settled to no status, for
+// the ladder, and so is one the solver has nothing to lay out. A face still
+// loading leaves its boxes pending for the next arrival.
+//
+// Run wherever pending boxes can meet a loaded face: a font arriving
+// (`relayoutAll`), a chapter opening whose faces are already in
+// (`loadProjectPages`), and an undo or redo putting a box back
+// (history.svelte.js). Synchronous, so no chapter can open between the check
+// and the write. `boxes` narrows it to the boxes a caller has just put back.
+export function solvePending(p, boxes = p?.boxes) {
+  if (!p || !canMeasure()) return 0;
+  let n = 0;
+  for (const b of boxes ?? []) {
+    const a = b.auto;
+    if (a?.status !== 'pending') continue;
+    const text = boxText(b, p);
+    if (!a.on || !isAutoBox(b) || !/\S/.test(text) || !solveStands(b, text)) {
+      a.status = null;
+      continue;
+    }
+    if (!faceReady(b.style)) continue;
+    if (solveBox(b, p, text, { x: b.x + b.w / 2, y: b.y + b.h / 2 })) n++;
+    else a.status = null;
+  }
   return n;
 }
 
@@ -2540,7 +2587,9 @@ const ontoPage = (p, r) => {
 // (`box.auto`), so the size the user chose outlives the size the balloon
 // allowed. Without text, metrics or the face the text is set in, the box is
 // placed by the list above and the ladder fits it; its record carries the
-// reference size and no status, since nothing was solved.
+// reference size and no status, since nothing was solved - except that a box
+// with text that only lacked its face is 'pending', and is solved when the face
+// arrives (`solvePending`).
 //
 // Per-tag font size (untagged is its own group), everything else still
 // inherits `lastStyle` - the font, colour and strokes chosen by hand on the
@@ -2553,7 +2602,8 @@ const ontoPage = (p, r) => {
 function bornBox(p, ln, imgX, imgY, measured) {
   const style = inheritedStyleFor(ln);
   const text = lineText(ln);
-  const solvable = /\S/.test(text) && canMeasure() && faceReady(style);
+  const measurable = /\S/.test(text) && canMeasure();
+  const solvable = measurable && faceReady(style);
   const det = detectedEntryFor(p, ln.n, imgX, imgY);
   // The block first: a detected rectangle is a measurement of where the Japanese
   // in THIS line sat, so it seeds the fill closer to the right balloon than a
@@ -2619,15 +2669,24 @@ function bornBox(p, ln, imgX, imgY, measured) {
   // already has its translation typed in the queue is placed at the size that
   // text needs; an empty one is placed at the bubble's size and grows as it is
   // filled in, through `setBoxText`.
-  if (!(solvable && solveBorn(b, p, text, at))) autoFitBox(b, p);
+  if (!(solvable && solveBox(b, p, text, at))) {
+    autoFitBox(b, p);
+    // Stamped as it now stands, so any edit before the face arrives - by
+    // whatever path - hands it to the ladder instead (`solvePending`).
+    if (measurable && !solvable) {
+      b.auto.status = 'pending';
+      b.auto.stamp = solveStamp(b, text);
+    }
+  }
   return b;
 }
 
-// The solver's answer, written onto a box being born: in its balloon, or with
-// none, centred on `at` - the detected block's centre, or the click. Answers
-// false when there was nothing the solver would lay out (text on a curve), so
-// the caller places the box as before.
-function solveBorn(b, p, text, at) {
+// The solver's answer, written onto a box: in its balloon, or with none,
+// centred on `at` - for a box being born the detected block's centre or the
+// click, for a pending one its own centre, which is where it was placed.
+// Answers false when there was nothing the solver would lay out (text on a
+// curve), so the caller places the box as before.
+function solveBox(b, p, text, at) {
   const refSize = b.auto.refSize;
   const region = b.fit ?? { kind: 'hint', x: at.x, y: at.y, w: 0, h: 0 };
   const r = solveLayout({

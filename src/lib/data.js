@@ -885,12 +885,16 @@ export function normalizeReview(r) {
 // last solve's answer (`solveLayout`'s), or null for a box not solved yet, and
 // `reason` the REVIEW_REASONS string it gave for an overflow. `stamp` is a
 // fingerprint of the box that solve laid out (`solveStamp` in the store): the
-// status is the box's own only while the box still matches it.
+// status is the box's own only while the box still matches it. One status is
+// not an answer: 'pending' is a box placed with text while the face it is set
+// in was still loading, so nothing could be solved yet - its stamp is the box
+// as placed, and the store solves it when the face arrives, unless an edit has
+// made it the user's first (DET-4).
 //
 // A box without the field is a box the solver has never touched - every box
 // saved before it existed - and stays manual: nothing solves it on load.
 // Anything unreadable degrades to that same state rather than to a guess.
-export const AUTO_STATUSES = Object.freeze(['ok', 'shrunk', 'overflow', 'no-region']);
+export const AUTO_STATUSES = Object.freeze(['ok', 'shrunk', 'overflow', 'no-region', 'pending']);
 const AUTO_LOCKS = ['size', 'width', 'height', 'pos', 'breaks'];
 
 export function normalizeAuto(a) {

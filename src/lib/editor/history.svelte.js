@@ -15,6 +15,7 @@ import {
   setBoxText,
   refitBox,
   reviewBox,
+  solvePending,
 } from '../store.svelte.js';
 
 export const MAX_STEPS = 5;
@@ -97,12 +98,13 @@ const restoreFit = (b, e, dir, p) => {
 
 // The flag of every box a step put back into the document. A box comes back
 // from its snapshot with the flag it had then; the page around it - its line's
-// text, a font - may have moved on since.
+// text, a font - may have moved on since. A box that comes back still waiting
+// for its face may find the face arrived while it was gone, with no font event
+// left to solve it, so it is solved here (`solvePending`).
 const recheck = (p, boxes) => {
-  for (const snap of boxes) {
-    const b = p.boxes.find((x) => x.id === snap.id);
-    if (b) reviewBox(b, p);
-  }
+  const back = boxes.map((snap) => p.boxes.find((x) => x.id === snap.id)).filter(Boolean);
+  solvePending(p, back);
+  for (const b of back) reviewBox(b, p);
 };
 
 // Every command type, and how to walk it in each direction. `apply` throws a

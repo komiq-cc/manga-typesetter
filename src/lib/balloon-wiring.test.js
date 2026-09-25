@@ -63,6 +63,7 @@ const {
   fitBoxNow,
   toggleBalloonFit,
   reviewOf,
+  noteFontsChanged,
 } = await import('./store.svelte.js');
 const { tags } = await import('./tags.svelte.js');
 const { containBox, boxCandidate, REVIEW_REASONS } = await import('./contain.js');
@@ -1461,10 +1462,129 @@ describe('placement chooses the size (FIT-1)', () => {
     vi.stubGlobal('document', { fonts: { check: () => false, load } });
     try {
       const b = placeAt(32);
-      expect(b.auto).toMatchObject({ refSize: 32, status: null });
+      expect(b.auto).toMatchObject({ refSize: 32, status: 'pending' });
       expect(load).toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // DET-4, the other half: the face arrives, and the box placed without it is
+  // solved - the box a placement with the face in hand would have made. Left to
+  // the grow-only refit, its height followed the real face's lines out of its
+  // balloon.
+  describe('a box placed before its face loaded', () => {
+    let ready = false;
+    beforeEach(() => {
+      ready = false;
+      vi.stubGlobal('document', { fonts: { check: () => ready, load: () => Promise.resolve([]) } });
+    });
+    afterEach(() => vi.unstubAllGlobals());
+    const geomOf = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size });
+    // What a font arriving may not touch on a box it does not solve: the grow-only
+    // refit may still make it taller, about its anchor.
+    const kept = (b, before) => {
+      expect([b.x, b.w, b.style.size]).toEqual([before.x, before.w, before.size]);
+      expect(b.h).toBeGreaterThanOrEqual(before.h);
+    };
+
+    it('is solved when the face arrives, as if it had been there all along', () => {
+      ready = true;
+      const want = placeAt(32);
+      const solved = { ...geomOf(want), auto: { ...want.auto } };
+      ready = false;
+      const b = placeAt(32);
+      expect(b.auto.status).toBe('pending');
+      ready = true;
+      expect(noteFontsChanged()).toBeGreaterThan(0);
+      expect(b.auto).toEqual(solved.auto);
+      expect(geomOf(b)).toEqual({ x: solved.x, y: solved.y, w: solved.w, h: solved.h, size: solved.size });
+    });
+
+    it('stays pending while its face is still loading', () => {
+      const b = placeAt(32);
+      const before = geomOf(b);
+      noteFontsChanged();
+      expect(b.auto.status).toBe('pending');
+      expect(geomOf(b)).toEqual(before);
+    });
+
+    it('never re-solves a box that has a status', () => {
+      ready = true;
+      const b = placeAt(32);
+      expect(b.auto.status).toBe('shrunk');
+      // Laid out by hand since, or by an older engine: a font arriving leaves it.
+      b.x -= 20;
+      b.w += 30;
+      b.style.size = 31;
+      const before = geomOf(b);
+      noteFontsChanged();
+      expect(b.auto.status).toBe('shrunk');
+      kept(b, before);
+    });
+
+    // Any edit, by whichever path, makes the box the user's: the face arriving
+    // later settles it for the ladder instead of snapping it back.
+    it('is the user’s once it is edited, and is not solved later', () => {
+      const edits = [
+        (b) => setBoxText(b, 'WE CAN STILL CATCH IT.', page()),
+        (b) => resizeBox(page().id, b.id, { w: b.w - 12 }),
+        (b) => {
+          selectBox(b.id);
+          nudgeBox(b.id, 0, 6);
+        },
+      ];
+      for (const edit of edits) {
+        ready = false;
+        const b = placeAt(32);
+        edit(b);
+        const before = geomOf(b);
+        ready = true;
+        noteFontsChanged();
+        expect(b.auto.status).toBe(null);
+        kept(b, before);
+      }
+    });
+
+    it('is never solved once it carries hand-drawn ink or a mask', () => {
+      for (const over of [
+        { ink: { on: true, strokes: [{ pts: [[10, 10, 1], [50, 10, 1]], size: 6, color: '#000000' }] } },
+        { clip: { on: true, mode: 'exclude', shapes: [{ kind: 'ellipse', cx: 20, cy: 20, rx: 5, ry: 5 }] } },
+      ]) {
+        ready = false;
+        const b = placeAt(32);
+        Object.assign(b.style, normalizeStyle({ ...b.style, ...over }));
+        const before = geomOf(b);
+        ready = true;
+        noteFontsChanged();
+        expect(b.auto.status).toBe(null);
+        kept(b, before);
+      }
+    });
+
+    it('is solved when its chapter opens with the face already in', () => {
+      ready = true;
+      const want = geomOf(placeAt(32));
+      ready = false;
+      placeAt(32);
+      const saved = JSON.parse(JSON.stringify(app.pages));
+      ready = true;
+      loadProjectPages(saved);
+      const b = page().boxes[0];
+      expect(b.auto.status).toBe('shrunk');
+      expect(geomOf(b)).toEqual(want);
+    });
+
+    it('is solved when a redo brings it back after its face arrived', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      ready = false;
+      placeAt(32);
+      hist.undo();
+      ready = true;
+      noteFontsChanged();
+      hist.redo();
+      expect(page().boxes[0].auto.status).toBe('shrunk');
+    });
   });
 });

@@ -313,7 +313,7 @@ describe('placement fits the box it just created', () => {
       vi.stubGlobal('document', { fonts: { check: () => false, load: () => Promise.resolve([]) } });
       try {
         const b = placed();
-        expect(b.auto.status).toBe(null);
+        expect(b.auto.status).toBe('pending');
         expect(b.w).toBe(balancedBoxSize(TEXT, b.style).w);
         expect(b.x + b.w / 2).toBeCloseTo(320, 6);
       } finally {
