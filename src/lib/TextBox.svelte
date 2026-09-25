@@ -51,11 +51,13 @@
     inkActive,
     drawInk,
     ensureNoisePhase,
+    applyTextFilters,
+    textFiltersActive,
     OCTAVES,
     TILE_SS,
   } from './text-paint.js';
   import { warpActive } from './warp.js';
-  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture } from './exporter.js';
+  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
   import { maskTool } from './mask-tool.svelte.js';
   import { inspectorTab, effectsSubTab } from './inspector-tabs.svelte.js';
   import WarpGizmo from './editor/WarpGizmo.svelte';
@@ -231,14 +233,25 @@
   // any more than it is on export.
   let inkEl = $state(null);
   // Padded on each side by however far the ink reaches past that edge, with its
-  // finish (`inkOverhang`): a stroke carried past the right or the bottom edge
-  // is drawn whole, as the export draws it.
+  // finish and the filters (`inkOverhang`): a stroke carried past the right or
+  // the bottom edge is drawn whole, as the export draws it.
   const inkPad = $derived(inkOverhang(s, box.w, box.h));
+  // Where the roughening's grain starts, in box-local page px - the exporter's
+  // own answer, so the ink crumples in the field the text does. Only for a box
+  // that is both inked and roughened, because it costs a layout.
+  const inkNoise = $derived.by(() => {
+    if (!inkActive(s.ink) || !s.roughen.on) return null;
+    // A font that loads late moves the block, and the grain with it.
+    app.fontsVersion;
+    return boxNoiseOrigin(box, pg);
+  });
   // The strokes and shadows are in the key because they are in the picture:
-  // they wrap the ink (see `drawInk`), so a change to either repaints it.
+  // they wrap the ink (see `drawInk`), so a change to either repaints it. The
+  // blur, the smear and the roughening are run over it (see `paintInk`).
   const inkKey = $derived(
     inkActive(s.ink)
-      ? JSON.stringify([s.ink, s.strokes, s.shadows]) + `|${box.w}|${box.h}|${z}`
+      ? JSON.stringify([s.ink, s.strokes, s.shadows, s.blur, s.motionBlur, s.roughen, inkNoise]) +
+          `|${box.w}|${box.h}|${z}`
       : '',
   );
   let inkDrawn = '';
@@ -249,6 +262,11 @@
   // turn "the tips arrived" into a dependency of the effect that asked for them.
   let inkTips = null;
   let inkTipSeq = 0;
+  // The roughening filter's phase is measured against the running browser once
+  // per session (see text-paint.js), and the measurement is a rasterisation. The
+  // first paint of a roughened ink layer or warped box happens before it lands;
+  // this is what says the second one is worth its cost and the third is not.
+  let noiseSettled = false;
 
   // Whether two settles answered with the same tips. A repaint is only worth
   // its cost when they did not - the usual case on a live stroke is that the
@@ -276,6 +294,21 @@
     ctx.scale(z, z);
     ctx.translate(inkPad.l, inkPad.t);
     drawInk(ctx, s.ink, undefined, tips, s);
+    // The whole-text filters, over the ink as the exporter runs them over its
+    // composite - the same chain, at the zoom instead of the supersample. The
+    // text beside it gets the same three from its CSS filter list; the ink is a
+    // canvas and cannot hang that list, so it is filtered in its pixels here.
+    // The chain's result is copied back and let go at once: a second
+    // zoom-sized canvas per box is not something to keep between paints.
+    if (!textFiltersActive(s)) return;
+    const o = inkNoise ?? { x: 0, y: 0 };
+    const out = applyTextFilters(el, s, z, { x: o.x + inkPad.l, y: o.y + inkPad.t });
+    if (out === el) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(out, 0, 0);
+    out.width = 0;
+    out.height = 0;
   }
 
   $effect(() => {
@@ -317,21 +350,25 @@
     // on a live stroke is the first frame after the brush is picked and no
     // frame after that.
     paintInk(el, inkTips);
+    // The roughening's phase lands once per session (see `noiseSettled`); a
+    // roughened ink painted before it is repainted once it has.
     const ids = inkTipIds(s.ink);
-    if (!ids.size) {
+    const wantNoise = s.roughen.on && !noiseSettled;
+    if (!ids.size && !wantNoise) {
       inkTips = null;
       inkTipSeq++;
       return;
     }
     const seq = ++inkTipSeq;
-    settleTips(ids).then(
-      (map) => {
+    Promise.all([ids.size ? settleTips(ids) : null, wantNoise ? ensureNoisePhase() : null]).then(
+      ([map]) => {
         // A newer paint, a torn-down canvas, or a canvas the effect has since
         // handed its pixels back: in all three this paint is stale.
         if (seq !== inkTipSeq || inkLive !== el || !el.width) return;
+        if (wantNoise) noiseSettled = true;
         const before = inkTips;
-        inkTips = map;
-        if (!sameTips(before, map)) paintInk(el, map);
+        inkTips = map ?? null;
+        if (wantNoise || !sameTips(before, inkTips)) paintInk(el, inkTips);
       },
       () => {},
     );
@@ -387,11 +424,6 @@
   let warpLive = null; // non-reactive twin of warpEl: what the pixel release acts on
   let warpTips = null;
   let warpSeq = 0;
-  // The roughening filter's phase is measured against the running browser once
-  // per session (see text-paint.js), and the measurement is a rasterisation. The
-  // first paint of a roughened warped box happens before it lands; this is what
-  // says the second one is worth its cost and the third is not.
-  let noiseSettled = false;
 
   function paintWarp(el, tips) {
     warpGeom = paintWarpedBox(el, box, pg, z, tips);

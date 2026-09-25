@@ -44,6 +44,24 @@ describe("the editor's ink canvas (OVF-7 follow-up)", () => {
     expect(pad.b).toBeGreaterThan(45);
   });
 
+  it('is grown by the blur, the smear and the crumple run over it', () => {
+    // The editor runs the whole-text filters over its ink canvas
+    // (`applyTextFilters`), so they have to fit on it - on every side, not just
+    // the ones the stroke overhangs.
+    const ink = inkOf(inkLine([[150, 60], [245, 125]]));
+    for (const extra of [
+      { blur: 4 },
+      { motionBlur: { on: true, x: -5, y: 2, amount: 6 } },
+      { roughen: { on: true, amount: 12, detail: 0.05, seed: 1 } },
+      { blur: 2, motionBlur: { on: true, x: 0, y: 4, amount: 3 }, roughen: { on: true, amount: 6, detail: 0.05, seed: 1 } },
+    ]) {
+      const s = style({ ink, ...extra });
+      const pad = inkOverhang(s, W, H);
+      expect(holds(pad, boxInkRect(inkOnly(s)))).toBe(true);
+      expect(Math.min(pad.l, pad.t)).toBeGreaterThan(0);
+    }
+  });
+
   it('pads nothing for a box with no ink', () => {
     expect(inkOverhang(style(), W, H)).toEqual({ l: 0, t: 0, r: 0, b: 0 });
     expect(inkOverhang(style({ ink: { on: false, strokes: [inkLine([[0, 0], [300, 0]])] } }), W, H)).toEqual({

@@ -16,13 +16,34 @@ const NONE = Object.freeze({ l: 0, t: 0, r: 0, b: 0 });
 // box only - it cannot see the box's size - so a stroke carried past the right
 // or the bottom edge was cut off at the canvas edge, while the export, which
 // grows its footprint by the far-side overhang too (`layoutBox`), drew it whole.
+// The whole-text filters are run over that canvas too (`applyTextFilters`), so
+// it is grown by how far they carry the ink as well, or a blur or a smear would
+// be cut off square at its edge.
 export function inkOverhang(style, w, h) {
   if (!inkActive(style?.ink)) return NONE;
   const k = inkBounds(style.ink);
   if (!k) return NONE;
-  const finish = Math.ceil(strokeExtent(style.strokes) + shadowExtent(style.shadows));
-  const side = (v) => Math.ceil(Math.max(0, v)) + finish;
-  return { l: side(-k.minX), t: side(-k.minY), r: side(k.maxX - w), b: side(k.maxY - h) };
+  const finish = strokeExtent(style.strokes) + shadowExtent(style.shadows);
+  const g = filterReach(style);
+  const side = (v, grow) => Math.ceil(Math.max(0, v) + finish + grow);
+  return { l: side(-k.minX, g.x), t: side(-k.minY, g.y), r: side(k.maxX - w, g.x), b: side(k.maxY - h, g.y) };
+}
+
+// How far the whole-text filters carry a picture past its own edge, per axis,
+// in page px: the blur at three sigma, the smear to its furthest tap along each
+// axis, and the crumple by half its span - one after another, as they are run.
+function filterReach(style) {
+  const blur = 3 * Math.max(0, Number(style.blur) || 0);
+  let mx = 0;
+  let my = 0;
+  if (style.motionBlur?.on) {
+    for (const t of motionBlurTaps(style.motionBlur.x, style.motionBlur.y, style.motionBlur.amount)) {
+      mx = Math.max(mx, Math.abs(t.dx));
+      my = Math.max(my, Math.abs(t.dy));
+    }
+  }
+  const rough = style.roughen?.on ? Math.abs(Number(style.roughen.amount) || 0) / 2 : 0;
+  return { x: blur + mx + rough, y: blur + my + rough };
 }
 
 // Everything the box's style can paint past each edge, on the assumption that
@@ -67,18 +88,7 @@ export function styleReach(style, w, h) {
     u.y1 = Math.max(u.y1, sil.y1 + dy + spread);
   }
   // The filters grow the whole of that, one after another, as they do there.
-  const blur = 3 * Math.max(0, Number(style.blur) || 0);
-  let mx = 0;
-  let my = 0;
-  if (style.motionBlur?.on) {
-    for (const t of motionBlurTaps(style.motionBlur.x, style.motionBlur.y, style.motionBlur.amount)) {
-      mx = Math.max(mx, Math.abs(t.dx));
-      my = Math.max(my, Math.abs(t.dy));
-    }
-  }
-  const rough = style.roughen?.on ? Math.abs(Number(style.roughen.amount) || 0) / 2 : 0;
-  const gx = blur + mx + rough;
-  const gy = blur + my + rough;
+  const { x: gx, y: gy } = filterReach(style);
   const out = {
     l: Math.max(0, gx - u.x0),
     t: Math.max(0, gy - u.y0),

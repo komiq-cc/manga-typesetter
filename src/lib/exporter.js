@@ -10,11 +10,10 @@ import {
   patternTilePx,
   patternTileCanvas,
   fillKind,
-  roughenPixels,
   stopColor,
   ensureNoisePhase,
-  motionBlurTaps,
   motionBlurExtent,
+  applyTextFilters,
   drawClipShapes,
   clipActive,
   inkActive,
@@ -131,14 +130,22 @@ function noiseOrigin(L) {
   return { x: L.ox + textInset(L.s), y: L.oy + L.blockY };
 }
 
-// The roughening, over the finished raster: exactly the filter the editor hangs
-// on the same text (feTurbulence -> feDisplacementMap), evaluated here instead
-// of by the browser. The noise itself lives in text-paint.js, next to every
+// The same origin in the box's own page px, for the editor's ink canvas: the
+// ink is roughened on its own canvas there (see `applyTextFilters`), and it has
+// to take its grain from the field the text's does or the two crumple apart.
+// It costs a layout, so the editor only asks for a roughened, inked box.
+export function boxNoiseOrigin(box, p) {
+  const L = layoutBox(box, p);
+  const o = noiseOrigin(L);
+  return { x: o.x - L.ox, y: o.y - L.oy };
+}
+
+// The roughening, over the finished raster, is exactly the filter the editor
+// hangs on the same text (feTurbulence -> feDisplacementMap), evaluated here
+// instead of by the browser - `applyTextFilters` in text-paint.js, next to every
 // other number the two renderers have to agree on; see the long note there for
 // what this used to be and why the export came out shredded.
 //
-// `SS` is the raster's supersampling, so the displacement is stated in page px
-// and applied in device px, and the pattern does not change with it.
 // The phase between the browser's turbulence and our port of it is measured
 // against the browser actually running rather than assumed (see text-paint.js),
 // and the measurement is a rasterisation, so it is async. Every entry point that
@@ -147,16 +154,6 @@ function noiseOrigin(L) {
 // never rasterises the probe at all.
 export async function settleNoise(boxes) {
   if ((boxes ?? []).some((b) => b?.style?.roughen?.on)) await ensureNoisePhase();
-}
-
-function roughen(ctx, L, SS) {
-  const w = Math.round(L.cw * SS);
-  const h = Math.round(L.ch * SS);
-  const src = ctx.getImageData(0, 0, w, h);
-  const dst = ctx.createImageData(w, h);
-  const o = noiseOrigin(L);
-  roughenPixels(src, dst, L.s.roughen, { ss: SS, originX: o.x, originY: o.y });
-  ctx.putImageData(dst, 0, 0);
 }
 
 // Lay out a box's text and compute its canvas geometry WITHOUT drawing. The
@@ -603,50 +600,16 @@ export function renderBoxTexture(box, p, tips) {
     drawInk(ctx, s.ink, undefined, tips, s);
     ctx.restore();
   }
-  // Blur first, then roughen - the order the editor's filter list states, and a
-  // CSS filter list is applied left to right: `filter: blur() url(#rough)` blurs
-  // the clean picture and then crumples the blurred one. Doing it the other way
-  // round (which is what happened here) softens the crumple away instead of
-  // crumpling a soft edge, and the two are visibly different pictures wherever
-  // both effects are on at once.
-  //
-  // The blur is of the finished picture - shadows, strokes and fill together -
-  // so it happens here, on the composite, rather than per drawing call. Canvas
-  // filters are stated in device pixels, hence the SS.
-  let out = cnv;
-  if (s.blur > 0) {
-    out = document.createElement('canvas');
-    out.width = cnv.width;
-    out.height = cnv.height;
-    const octx = out.getContext('2d');
-    octx.filter = `blur(${s.blur * SS}px)`;
-    octx.drawImage(cnv, 0, 0);
-    octx.filter = 'none';
+  // The blur, the smear and the roughening, in that order, over the finished
+  // picture - shadows, strokes, fill and ink together - so they happen here, on
+  // the composite, rather than per drawing call. The chain is text-paint.js's,
+  // the one the editor's ink canvas runs too, and the order is the editor's
+  // CSS filter list (see `applyTextFilters`).
+  const out = applyTextFilters(cnv, s, SS, noiseOrigin(L));
+  if (out !== cnv) {
+    cnv.width = 0;
+    cnv.height = 0;
   }
-  // The directional smear, after the gaussian and before the roughening - the
-  // order the editor's filter list states. The tap list is the shader's whole
-  // sum flattened (see motionBlurTaps); an empty transparent canvas plus
-  // 'lighter' draws is an exact weighted sum, where source-over would
-  // composite instead of adding. Offsets are page px, applied in device px,
-  // same as every other filter here.
-  {
-    const taps = s.motionBlur?.on
-      ? motionBlurTaps(s.motionBlur.x, s.motionBlur.y, s.motionBlur.amount)
-      : [];
-    if (taps.length) {
-      const acc = document.createElement('canvas');
-      acc.width = cnv.width;
-      acc.height = cnv.height;
-      const actx = acc.getContext('2d');
-      actx.globalCompositeOperation = 'lighter';
-      for (const t of taps) {
-        actx.globalAlpha = t.w;
-        actx.drawImage(out, t.dx * SS, t.dy * SS);
-      }
-      out = acc;
-    }
-  }
-  if (s.roughen.on) roughen(out.getContext('2d'), L, SS);
   // The visibility mask, last of all: it decides what of the finished picture
   // - blur, smear and crumple included - is shown at all, exactly as the
   // editor's CSS mask sits outside its filter list. Shapes are box-local page

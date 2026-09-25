@@ -829,6 +829,80 @@ export function motionBlurExtent(mb) {
 }
 
 // ---------------------------------------------------------------------------
+// The whole-text filters, over a finished raster: the gaussian blur, then the
+// directional smear, then the roughening - the order the editor's CSS filter
+// list states, and a filter list is applied left to right, so a crumpled edge
+// is crumpled after it was softened rather than softened away.
+//
+// One statement for both renderers. The exporter runs it over a box's whole
+// composite; the editor's ink canvas runs it over the ink, because the ink is
+// a canvas and cannot hang the text stack's CSS filter - and until it did, the
+// editor showed crisp ink on a blurred, smeared or crumpled box that the file
+// then blurred, smeared and crumpled.
+//
+// `ss` is the raster's device px per page px, so every number here is stated
+// in page px and applied in device px, and `origin` is where the roughening's
+// noise field starts in the raster, in page px (see `roughenPixels`). Returns
+// the finished canvas: `cnv` itself where only the roughening ran (it works in
+// place), otherwise a new one. Every intermediate this makes and supersedes has
+// its pixels handed back here, so the caller only ever owns `cnv` and the one
+// canvas returned.
+export function applyTextFilters(cnv, s, ss, origin = { x: 0, y: 0 }) {
+  let out = cnv;
+  const make = () => {
+    const c = document.createElement('canvas');
+    c.width = cnv.width;
+    c.height = cnv.height;
+    return c;
+  };
+  const drop = (c) => {
+    if (c === cnv) return;
+    c.width = 0;
+    c.height = 0;
+  };
+  // Canvas filters are stated in device pixels, hence the ss.
+  if (s.blur > 0) {
+    out = make();
+    const octx = out.getContext('2d');
+    octx.filter = `blur(${s.blur * ss}px)`;
+    octx.drawImage(cnv, 0, 0);
+    octx.filter = 'none';
+  }
+  // The tap list is the shader's whole sum flattened (see motionBlurTaps); an
+  // empty transparent canvas plus 'lighter' draws is an exact weighted sum,
+  // where source-over would composite instead of adding.
+  const taps = s.motionBlur?.on ? motionBlurTaps(s.motionBlur.x, s.motionBlur.y, s.motionBlur.amount) : [];
+  if (taps.length) {
+    const acc = make();
+    const actx = acc.getContext('2d');
+    actx.globalCompositeOperation = 'lighter';
+    for (const t of taps) {
+      actx.globalAlpha = t.w;
+      actx.drawImage(out, t.dx * ss, t.dy * ss);
+    }
+    drop(out);
+    out = acc;
+  }
+  if (s.roughen?.on) {
+    const ctx = out.getContext('2d');
+    const src = ctx.getImageData(0, 0, out.width, out.height);
+    const dst = ctx.createImageData(out.width, out.height);
+    roughenPixels(src, dst, s.roughen, { ss, originX: origin.x, originY: origin.y });
+    ctx.putImageData(dst, 0, 0);
+  }
+  return out;
+}
+
+// Whether `applyTextFilters` has anything to do for this style.
+export function textFiltersActive(s) {
+  return (
+    (Number(s?.blur) || 0) > 0 ||
+    motionBlurExtent(s?.motionBlur) > 0 ||
+    s?.roughen?.on === true
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The visibility mask.
 //
 // Paints the style's mask shapes as opaque ink into `ctx`, in the same
