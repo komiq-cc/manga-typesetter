@@ -34,8 +34,9 @@
     stripResidentWindow,
     isBoxInStripWindow,
     stripFrameCoords,
+    stripScrollTopForBox,
   } from './strip.js';
-  import { publishStripScroll } from './strip-sync.svelte.js';
+  import { publishStripScroll, stripReveal } from './strip-sync.svelte.js';
 
   // Handle for dock Fit button.
   let { onReady } = $props();
@@ -728,16 +729,7 @@
     // `stripFrameMetrics`. The one thing that cannot be derived is where the
     // column itself starts: the stage pads it, centres it and the pan is
     // translated onto it, so that is measured, once.
-    const sr = scrollEl.getBoundingClientRect();
-    const st = scrollEl.scrollTop;
-    const firstTop = stripEl.getBoundingClientRect().top - sr.top + st;
-    // Read rather than mirrored, for the same reason the fit reads the stage's
-    // padding off the element: the stylesheet owns this number (`.strip` is
-    // `gap:0` today, because a webtoon's slices are cuts through one continuous
-    // drawing) and a second copy of it here could only drift.
-    const gap = parseFloat(getComputedStyle(stripEl).rowGap) || 0;
-    const { tops, heights } = stripFrameMetrics(app.pages, app.zoom, firstTop, gap);
-    const vh = scrollEl.clientHeight;
+    const { st, vh, tops, heights } = stripMetrics();
     const i = pageIndexAtCenter(tops, st, vh, heights);
     // The index follows the scroll, EXCEPT while the reader is working on a box:
     // `gotoPage` clears the selection and closes the caret, so a click on a box
@@ -756,6 +748,39 @@
     // The reference strip follows this one - see strip-sync.svelte.js.
     publishStripScroll(scrollFraction(scrollEl));
   }
+
+  // Where every frame of the column sits in the scroll container's content, in
+  // zoomed pixels, and the viewport it is seen through.
+  function stripMetrics() {
+    const sr = scrollEl.getBoundingClientRect();
+    const st = scrollEl.scrollTop;
+    const firstTop = stripEl.getBoundingClientRect().top - sr.top + st;
+    // Read rather than mirrored, for the same reason the fit reads the stage's
+    // padding off the element: the stylesheet owns this number (`.strip` is
+    // `gap:0` today, because a webtoon's slices are cuts through one continuous
+    // drawing) and a second copy of it here could only drift.
+    const gap = parseFloat(getComputedStyle(stripEl).rowGap) || 0;
+    const { tops, heights } = stripFrameMetrics(app.pages, app.zoom, firstTop, gap);
+    return { st, vh: scrollEl.clientHeight, tops, heights };
+  }
+
+  // A jump to a box from outside the canvas (see `revealInStrip`). By the time
+  // this runs the caller has turned to the box's page and selected it, which
+  // also mounts it whatever the resident window says. Instant, not smooth: a
+  // smooth scroll from far up the chapter passes the reader's centre through
+  // every page in between, and `syncStrip` would turn to each of them - and
+  // drop the selection on the first.
+  $effect(() => {
+    if (!stripReveal.seq) return;
+    untrack(() => {
+      if (!strip || !scrollEl || !stripEl) return;
+      const box = page()?.boxes.find((b) => b.id === stripReveal.boxId);
+      if (!box) return;
+      const { st, vh, tops } = stripMetrics();
+      const top = stripScrollTopForBox(box, tops[app.pageIndex] ?? 0, app.zoom, st, vh);
+      if (top != null) scrollEl.scrollTop = top;
+    });
+  });
 
   // Zooming does not cancel a pan - a user who has pushed the page aside to see
   // a corner expects to be able to zoom into it - but it does change what

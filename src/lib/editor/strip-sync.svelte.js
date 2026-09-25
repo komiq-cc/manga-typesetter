@@ -34,3 +34,23 @@ export function publishStripScroll(fraction) {
   stripScroll.fraction = fraction;
   stripScroll.seq++;
 }
+
+// ===== A jump to a box, for the canvas strip to scroll to =====
+//
+// The other direction: something outside the canvas - the queue's "needs
+// review" list - wants a box brought into view. In a paged chapter turning to
+// its page is the whole of that; in a strip the page is already on screen
+// somewhere in the column and only a scroll reaches the box, and the scroll
+// container is the canvas's own. Same shape as above for the same reason: the
+// list and the canvas are strangers, and this keeps the canvas's element in the
+// canvas's file.
+//
+// The box is looked up on the current page when the canvas answers, so the
+// caller turns to its page and selects it first - as it does in a paged
+// chapter - and asks for the scroll last.
+export const stripReveal = $state({ boxId: null, seq: 0 });
+
+export function revealInStrip(boxId) {
+  stripReveal.boxId = boxId;
+  stripReveal.seq++;
+}

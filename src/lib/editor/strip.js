@@ -219,6 +219,22 @@ export function focusedBoxHoldsIndex(box, ownerTop, zoom, scrollTop, viewportH, 
   return height > 0 && visibleHeightOf(top, height, scrollTop, viewportH) >= Math.min(minPx, height);
 }
 
+// Where to scroll the column so a box is in view, for a jump to it from
+// outside the canvas (the queue's "needs review" list). `null` when all it
+// paints is on screen already: a box the reader can see is not moved under
+// them. Otherwise the box is centred - which also puts the viewport's centre on
+// the box's own page, so the scroll that follows does not turn the index away
+// from it - or, taller than the viewport, brought in top first.
+export function stripScrollTopForBox(box, ownerTop, zoom, scrollTop, viewportH) {
+  if (!box || !(zoom > 0)) return null;
+  const span = boxPaintedStripSpan(box);
+  const top = ownerTop + span.top * zoom;
+  const height = Math.max(0, (span.bottom - span.top) * zoom);
+  if (top >= scrollTop && top + height <= scrollTop + viewportH) return null;
+  const want = height >= viewportH ? top : top + height / 2 - viewportH / 2;
+  return Math.max(0, want);
+}
+
 // Find maximum page width across chapter.
 export function maxPageWidth(pages) {
   let max = 0;

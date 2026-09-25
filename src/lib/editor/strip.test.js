@@ -18,6 +18,7 @@ import {
   visibleHeightOf,
   focusHoldsIndex,
   focusedBoxHoldsIndex,
+  stripScrollTopForBox,
   RESIDENT_MIN,
   RESIDENT_MAX,
 } from './strip.js';
@@ -420,6 +421,51 @@ describe('the focused page holds the index while the reader is working', () => {
     expect(focusHoldsIndex([0, 1000], [1000, 1000], 0, 1050, 100)).toBe(false);
     expect(focusedBoxHoldsIndex(box, 0, 1, 1050, 100)).toBe(true);
     expect(focusedBoxHoldsIndex(box, 0, 1, 1250, 100)).toBe(false);
+  });
+});
+
+describe('a jump to a box scrolls the strip to it', () => {
+  // A box on the third page of a 1000px-tall-slice column, 600px down it.
+  const box = { y: 600, w: 200, h: 100 };
+
+  it('centres a box that is off screen on the box, in zoomed pixels', () => {
+    // The box's top is at 2000 + 600 = 2600, its centre at 2650.
+    expect(stripScrollTopForBox(box, 2000, 1, 0, 800)).toBe(2650 - 400);
+    // At 50% the owner top is already zoomed (it is a frame metric); the box
+    // is not, so its 600 is 300 and its 100 is 50.
+    expect(stripScrollTopForBox(box, 1000, 0.5, 0, 800)).toBe(1000 + 325 - 400);
+  });
+
+  it('moves nothing when the whole box is already on screen', () => {
+    expect(stripScrollTopForBox(box, 2000, 1, 2200, 800)).toBeNull();
+  });
+
+  it('scrolls a box that is only partly on screen', () => {
+    // Its bottom 50px hang below a viewport that ends at 2650.
+    expect(stripScrollTopForBox(box, 2000, 1, 1850, 800)).toBe(2250);
+  });
+
+  it('brings a box taller than the viewport in top first', () => {
+    expect(stripScrollTopForBox({ y: 100, w: 200, h: 1200 }, 1000, 1, 0, 800)).toBe(1100);
+  });
+
+  it('never asks for a scroll above the top of the column', () => {
+    expect(stripScrollTopForBox({ y: 0, w: 200, h: 100 }, 0, 1, 900, 800)).toBe(0);
+  });
+
+  it('counts what the box paints past its own edges', () => {
+    // Text that overflows the box by 60px below: that is what the list is
+    // flagging, so the scroll has to show it, not only the frame.
+    // The viewport ends at 2720, 20px under the box's frame.
+    const styled = { ...box, style: { rotation: 0 } };
+    const over = { ...styled, review: { overflow: { b: 60 } } };
+    expect(stripScrollTopForBox(styled, 2000, 1, 1920, 800)).toBeNull();
+    expect(stripScrollTopForBox(over, 2000, 1, 1920, 800)).not.toBeNull();
+  });
+
+  it('answers nothing without a box or a zoom', () => {
+    expect(stripScrollTopForBox(null, 0, 1, 0, 800)).toBeNull();
+    expect(stripScrollTopForBox(box, 0, 0, 0, 800)).toBeNull();
   });
 });
 

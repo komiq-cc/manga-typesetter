@@ -3,7 +3,8 @@
   // does not fit it, counted, and one click from each to the box. A bad fit was
   // only ever found by looking at every page; the flag is written by the
   // containment check (contain.js) and this only reads it.
-  import { app, flaggedBoxes, gotoPage, selectBox, boxText } from './store.svelte.js';
+  import { app, flaggedBoxes, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
+  import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { reviewReason, reviewWhere, reviewTitle } from './review-label.js';
   import { plural } from './format.js';
 
@@ -36,9 +37,12 @@
   });
 
   // To the box's page, then the box itself - selected, so the Inspector is on it.
+  // In a strip the page is somewhere in the column rather than turned to, so the
+  // canvas is asked to scroll the box into view as well.
   function jump(r) {
     if (r.pageIndex !== app.pageIndex) gotoPage(r.pageIndex);
     selectBox(r.boxId);
+    if (isLongstrip()) revealInStrip(r.boxId);
   }
 </script>
 
