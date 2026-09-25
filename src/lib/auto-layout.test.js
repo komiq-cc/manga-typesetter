@@ -304,6 +304,50 @@ describe('locks', () => {
     expect(r.y + r.h / 2).toBe(170);
   });
 
+  // A locked position is not placed by the region, so the solver has to keep it
+  // in the region and on the page itself: shrink the text, or flag it.
+  it('a locked position never grows a box off the page unflagged', () => {
+    const s = style({ valign: 'bottom' });
+    const at = { x: 150, y: 10, w: 200, h: 40 };
+    const r = solveLayout({
+      text: LONG,
+      style: s,
+      refSize: 40,
+      region: { kind: 'hint', x: 250, y: 30, w: 0, h: 0 },
+      locks: { width: true, pos: true },
+      opts: { box: at, page: { w: 500, h: 500 }, minSize: 12 },
+    });
+    expect(r.y + r.h).toBe(at.y + at.h);
+    if (r.status !== 'overflow') expect(r.y).toBeGreaterThanOrEqual(0);
+    expect(r.size).toBeLessThan(40);
+  });
+
+  // `interiorLineWidths` clamps a block's top into the shape, and a rect's rows
+  // are one width wherever they are asked for: neither can tell a block a
+  // locked position has put past the region.
+  it('a locked position never puts a block out of its region unflagged', () => {
+    const PANEL = { kind: 'rect', x: 300, y: 200, w: 200, h: 120 };
+    const up = solveLayout({
+      text: 'WE CAN STILL CATCH THE LAST TRAIN',
+      style: style({ valign: 'bottom' }),
+      refSize: 26,
+      region: PANEL,
+      locks: { pos: true },
+      opts: { box: { x: 300, y: 190, w: 200, h: 40 }, minSize: 12 },
+    });
+    expect(up.status).toBe('overflow');
+    // Dragged sideways off its oval: the rows are the oval's, the lines are not.
+    const aside = solveLayout({
+      text: 'WE CAN GO',
+      style: style(),
+      refSize: 26,
+      region: OVAL,
+      locks: { pos: true },
+      opts: { box: { x: 440, y: 280, w: 200, h: 40 }, minSize: 12 },
+    });
+    expect(aside.status).toBe('overflow');
+  });
+
   it('locked breaks lock the size and the width', () => {
     const r = solve({ refSize: 40, locks: { breaks: true }, opts: { box, minSize: 12 } });
     expect(r.size).toBe(40);

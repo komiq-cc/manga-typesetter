@@ -134,11 +134,17 @@ function locksOf(locks, box) {
 // The box of height `h` for a block laid out at width `base.w`: on the balloon,
 // with the block where the row widths assumed it (anchored by `valign` in the
 // band, the box `textInset` around it - see `blockYFor`); centred on a hint;
-// or on the locked centre.
+// or where the box stands, when its position is locked - centred across it, and
+// anchored by `valign` down it as auto height grows a box, so a box the solver
+// placed and is asked again about lands where it was.
 function frame(ctx, base, h) {
   const { R, lk, box } = ctx;
   const w = base.w;
-  if (lk.pos) return { ...base, x: box.x + box.w / 2 - w / 2, y: box.y + box.h / 2 - h / 2, h };
+  if (lk.pos) {
+    const va = valignOf(base.style);
+    const y = va === 'top' ? box.y : va === 'bottom' ? box.y + box.h - h : box.y + box.h / 2 - h / 2;
+    return { ...base, x: box.x + box.w / 2 - w / 2, y, h };
+  }
   if (!R) return { ...base, h };
   if (R.kind === 'hint') return { ...base, x: R.cx - w / 2, y: R.cy - h / 2, h };
   const va = valignOf(base.style);
@@ -154,25 +160,52 @@ function frame(ctx, base, h) {
 // Whether each line, and its inset either side, is inside the room its row has.
 // The rows are the balloon's at the band each line is drawn on - hung from where
 // the box draws the block, as `balloonWidthsFor` hangs the rows the breaker is
-// handed (GEO-2) - and centred on the box, which is centred on the balloon. The
-// line is where `placeBlock` draws it (`lineX`), so a flush line set in to its
-// row's edge is held to the same room a centred one is, and one drawn from the
-// box's edge to the box being inside the balloon on its row.
+// handed (GEO-2) - and centred on the balloon, where the box is centred unless
+// its position is locked. The line is where `placeBlock` draws it (`lineX`), so
+// a flush line set in to its row's edge is held to the same room a centred one
+// is, and one drawn from the box's edge to the box being inside the balloon on
+// its row.
+//
+// The block itself has to be inside the balloon's band, too. `interiorLineWidths`
+// clamps a top it is given into the shape, which is right for breaking - rows of
+// the nearest place the block would fit, not rows of nothing - and would pass a
+// block a locked position has put partly past the curve.
 function rowsFit(ctx, c, place) {
   const { R, ti } = ctx;
   const s = place.s;
   const n = place.lines.length;
-  const rows = R?.shape
-    ? interiorLineWidths(R.shape, place.lineH, n, valignOf(s), { top: c.y + blockYFor(s, c.h, place.blockH) })
-    : null;
+  const top = c.y + blockYFor(s, c.h, place.blockH);
+  if (R?.shape && (top < R.top - CONTAIN_TOL || top + place.blockH > R.top + R.height + CONTAIN_TOL)) return false;
+  const rows = R?.shape ? interiorLineWidths(R.shape, place.lineH, n, valignOf(s), { top }) : null;
+  const mid = R?.shape ? R.cx : c.x + c.w / 2;
   return place.lines.every((line, i) => {
     const w = lineWidth(line, s, s.size);
-    const x = place.lineX[i];
+    const x = c.x + place.lineX[i];
     const left = s.align === 'left' ? x : s.align === 'right' ? x - w : x - w / 2;
     const room = rows ? rows[i] : c.w;
     // Half the tolerance a side, so a centred line gets what it always had.
-    return left - ti >= (c.w - room - CONTAIN_TOL) / 2 && left + w + ti <= (c.w + room + CONTAIN_TOL) / 2;
+    return left - ti >= mid - (room + CONTAIN_TOL) / 2 && left + w + ti <= mid + (room + CONTAIN_TOL) / 2;
   });
+}
+
+// A box held where it stands (`lk.pos`) is not put anywhere by the region, so
+// nothing else keeps it on the page: grown about its anchor, a bottom-aligned
+// box near the top of the page rises off it. It may stay as far off the page as
+// it already was - a box hung over the edge by hand is the user's - and go no
+// further. Fails a candidate rather than moving it, so the search shrinks the
+// text or, failing that, flags it.
+function onPage(ctx, c) {
+  const pw = Number(ctx.opts.page?.w) || 0;
+  const ph = Number(ctx.opts.page?.h) || 0;
+  if (!ctx.lk.pos || !(pw > 0 && ph > 0)) return true;
+  const b = ctx.box;
+  const t = CONTAIN_TOL;
+  return (
+    c.x >= Math.min(0, b.x) - t &&
+    c.y >= Math.min(0, b.y) - t &&
+    c.x + c.w <= Math.max(pw, b.x + b.w) + t &&
+    c.y + c.h <= Math.max(ph, b.y + b.h) + t
+  );
 }
 
 // One candidate: the text at `size` in a box `w` wide, placed, checked.
@@ -220,7 +253,7 @@ function trial(ctx, size, w, own = !ctx.R?.shape) {
     const side = Math.max(v.overflow.l, v.overflow.r);
     if (side > CONTAIN_TOL) return trial(ctx, size, w + 2 * Math.ceil(side), false);
   }
-  return { c, place: p, v, ok: v.fits && !tall && rowsFit(ctx, c, p) };
+  return { c, place: p, v, ok: v.fits && !tall && onPage(ctx, c) && rowsFit(ctx, c, p) };
 }
 
 // The widths worth trying at a size, in order of preference: the first that
@@ -340,7 +373,9 @@ function wideWord(ctx, t) {
 // taller than the balloon's band, handed to the placement ladder - which grows
 // it within the balloon's bounds and the page (`fitLimit`) and flags whatever
 // ink is still outside, as it does for any box an edit overfills. Never below
-// `minSize`, never a column.
+// `minSize`, never a column. A locked position still lets it grow: the ladder
+// grows a box about the same anchor `frame` holds it by. A locked width or
+// height does not.
 function bestEffort(ctx, size) {
   const widths = widthsAt(ctx, size);
   const t = trial(ctx, size, Math.max(...widths));
@@ -350,7 +385,7 @@ function bestEffort(ctx, size) {
     page: ctx.opts.page,
     strip: ctx.opts.strip,
     minSize: size,
-    geometry: !(lk.width || lk.height || lk.pos),
+    geometry: !(lk.width || lk.height),
   });
   const c = { ...c0, x: r.x, y: r.y, w: r.w, h: r.h };
   const place = placeBlock(c, NO_CACHE);

@@ -77,6 +77,7 @@ import {
   inkHeight,
   growAround,
   fitBox,
+  fitLimit,
   reviewFor,
   isAutoBox,
   manualReason,
@@ -591,15 +592,24 @@ function clamp(v, a, b) {
 // accents, strokes, shadows, and every effect laid on them (OVF-7) - and it is
 // never clipped to get there. A box either fits or carries `box.review` saying
 // it does not (see contain.js, which decides both, and data.js for the flag's
-// shape). Two ways that gets enforced:
+// shape). Three ways that gets enforced:
 //
-//   the ladder     `autoFitBox`. After an edit or a placement, an AUTO box (auto
-//                  sizing on, straight text, and no mesh, ink or mask pinned to
-//                  it - see `isAutoBox` in contain.js) that does not fit is
-//                  grown - height, then width, within its balloon and the page -
-//                  and then its font is shrunk, no lower than `minSizeFor`; only
-//                  if that fails is it flagged. A MANUAL box is never moved,
-//                  resized or shrunk here: it gets the verdict and nothing else.
+//   the solver     `autoFitBox`, for a box the auto-layout solver manages: an
+//                  AUTO box (auto sizing on, straight text, and no mesh, ink or
+//                  mask pinned to it - see `isAutoBox` in contain.js) with a
+//                  solver record (`box.auto`), text to set and its face loaded.
+//                  After an edit its size, height and lines are solved again
+//                  inside its balloon (`resolveBox`), so the height shrinks back
+//                  when the text gets shorter or the box wider, and the size
+//                  goes back up towards the reference size (FIT-2). What the
+//                  solver cannot fit is flagged.
+//   the ladder     `autoFitBox`, for every other auto box - one saved before the
+//                  solver existed, one typed onto the page: after an edit or a
+//                  placement, one that does not fit is grown - height, then
+//                  width, within its balloon and the page - and then its font is
+//                  shrunk, no lower than `minSizeFor`; only if that fails is it
+//                  flagged. A MANUAL box is never moved, resized or shrunk here:
+//                  it gets the verdict and nothing else.
 //   grow-only      `refitBox` and `autoFitBoxTo`. A chapter opening, a font
 //                  arriving, the component's own safety net: the height grows
 //                  to hold the lines and their ink (`growHeightTo`), and the
@@ -635,10 +645,15 @@ export function autoFitBox(b, p = page()) {
   // Before the ladder can shrink it: a size the user has just typed or dragged
   // is their reference size, and the answer below is only what fits.
   noteSizeEdit(b, p);
-  const cand = boxCandidate(b, boxText(b, p));
+  const text = boxText(b, p);
+  const cand = boxCandidate(b, text);
   if (!isAutoBox(cand)) {
     reviewBox(b, p);
     return false;
+  }
+  if (b.auto?.on) {
+    const solved = resolveBox(b, p, text);
+    if (solved != null) return solved;
   }
   const r = fitBox(cand, { page: p, strip: stripOf(p), minSize: minSizeFor(b, p) });
   const changed = writeFit(b, r);
@@ -658,15 +673,24 @@ export function autoFitBox(b, p = page()) {
 //   quarter smaller is about as far as a letterer shrinks one balloon before it
 //   reads as a different voice from the balloons around it; past that, the text
 //   needs a decision - a bigger balloon, fewer words - and the flag asks for it.
+//
+// The solver stops at the same floor (`solveFloor`, off the box's own reference
+// size), and text it cannot fit there is flagged rather than shrunk on towards
+// the preference. That is a choice, and the rule it answers to - text never
+// leaves its box unflagged, and is never clipped - holds either way: the
+// preference is the one floor nothing ever goes below, "Fit now" included, and
+// the three quarters is how far the app goes without asking. Shrinking a
+// balloon's text to half the size of its neighbours to avoid a flag would trade
+// a visible, fixable problem for a quiet one nobody is told about.
 let minFontSize = 12;
 export function setMinFontSize(v) {
   const n = Number(v);
   if (n > 0) minFontSize = n;
 }
+const solveFloor = (ref) => Math.max(minFontSize, 0.75 * ref);
 function minSizeFor(b, p) {
   const line = b.lineN != null && p ? lineByN(p, b.lineN) : null;
-  const ref = tagSize(sizeKeyFor(line)) ?? refSizeOf(b);
-  return Math.max(minFontSize, 0.75 * ref);
+  return solveFloor(tagSize(sizeKeyFor(line)) ?? refSizeOf(b));
 }
 
 const stripOf = (p) => (isLongstrip() ? stripPageExtent(app.pages, p?.id) : null);
@@ -865,6 +889,12 @@ function growAndReview(b, p, cand, place, lineCount) {
 // the ink needs, anchored by `valign`, capped by the page - or by the whole
 // strip in a longstrip document, where a box may hang over a seam.
 //
+// A box the solver manages is capped by its balloon instead, within its page
+// (`fitLimit`, never smaller than the box as it stands), and never by the whole
+// strip (FIT-2): the page cap is how an oversized font once became a box 708 px
+// tall that had left its bubble, and in a longstrip the whole chapter was the
+// cap. What its balloon cannot hold is flagged, like any overflow.
+//
 // The lines: their line boxes inside the content box (the box less
 // `textInset` - its padding and its outline's reach - above and below).
 //
@@ -880,7 +910,8 @@ function growAndReview(b, p, cand, place, lineCount) {
 function growHeightTo(b, lineCount, p, cand, place) {
   const s = b.style;
   const need = Math.max(neededHeight(lineCount, s, textInset(s)), inkHeight(cand, place));
-  const extent = stripOf(p);
+  const lim = b.auto?.on ? fitLimit(cand, p, null) : null;
+  const extent = lim ? { top: -lim.y0, total: lim.y1 - lim.y0 } : stripOf(p);
   const next = extent && extent.total > 0
     ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)
     : growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
@@ -895,7 +926,18 @@ function growHeightTo(b, lineCount, p, cand, place) {
 // either side of an edit that can fit a box, so an undo restores what the user
 // was looking at rather than what a re-derivation would produce now. The size is
 // the style's, and `setFields` in history.svelte.js knows to put it back there.
-export const fitGeom = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size });
+// A box the solver manages carries its record too - the reference size, the
+// locks and the status of the solve that laid it out - since an edit re-solves
+// it, and an undo that put the rectangle back without the record would leave a
+// status about a box that is no longer there.
+export const fitGeom = (b) => ({
+  x: b.x,
+  y: b.y,
+  w: b.w,
+  h: b.h,
+  size: b.style.size,
+  ...(b.auto ? { auto: $state.snapshot(b.auto) } : null),
+});
 
 // ===== the flag's own commands =====
 //
@@ -2687,25 +2729,36 @@ function bornBox(p, ln, imgX, imgY, measured) {
 // click, for a pending one its own centre, which is where it was placed.
 // Answers false when there was nothing the solver would lay out (text on a
 // curve), so the caller places the box as before.
-function solveBox(b, p, text, at) {
-  const refSize = b.auto.refSize;
+//
+// `stay` keeps the box where it stands: its position is locked for this solve,
+// whatever its record says, and it is not pulled back onto its page - see
+// `resolveBox`. The solver holds such a box to its balloon and its page itself
+// (`rowsFit`, `onPage` in auto-layout.js): an answer that would leave either is
+// no answer, so the text shrinks or the box is flagged. The best effort's growth is bounded by the balloon and the
+// page, never by a whole longstrip (FIT-2).
+function solveBox(b, p, text, at, stay = false) {
+  const a = b.auto;
   const region = b.fit ?? { kind: 'hint', x: at.x, y: at.y, w: 0, h: 0 };
   const r = solveLayout({
     text,
     style: b.style,
-    refSize,
+    refSize: a.refSize,
     region,
+    locks: stay ? { ...a.locks, pos: true } : a.locks,
     opts: {
-      minSize: Math.max(minFontSize, 0.75 * refSize),
+      minSize: solveFloor(a.refSize),
       minW: MIN_BOX_W,
       minH: MIN_BOX_H,
+      box: { x: b.x, y: b.y, w: b.w, h: b.h },
       page: p,
-      strip: stripOf(p),
     },
   });
   if (!r) return false;
-  Object.assign(b, ontoPage(p, r));
-  b.style.size = r.size;
+  const g = stay ? { x: r.x, y: r.y, w: r.w, h: r.h } : ontoPage(p, r);
+  for (const k of ['x', 'y', 'w', 'h']) if (b[k] !== g[k]) b[k] = g[k];
+  if (b.style.size !== r.size) b.style.size = r.size;
+  // Not the user's size, so the mark follows it (`noteSizeEdit`).
+  seeSize(b);
   // An overflow whose ink is still inside the box is flagged from the record
   // (`solverReview`), for as long as the box is the one solved here.
   b.auto.status = r.status;
@@ -2713,6 +2766,25 @@ function solveBox(b, p, text, at) {
   b.auto.stamp = solveStamp(b, text);
   writeReview(b, r.review);
   return true;
+}
+
+// An edit's solve (FIT-2), for `autoFitBox`: the size, the height and the lines
+// again, inside the box's balloon - from the reference size, so text that got
+// shorter gets its size back, and to the height it now needs, so a box whose
+// text got shorter or that was made wider gives the height back. A box keeps its
+// place on the page: an edit re-sets the text where the box stands, and only
+// the Refit button re-places it in its balloon (`refitBalloon`). A box never
+// solved - placed with no text to set - is laid out whole the first time its
+// text arrives, as placement would have laid it out.
+//
+// Null when the solver has nothing to say - blank text, or a face still loading,
+// which it must not be measured against (DET-4) - so the caller fits the box by
+// the older rules; otherwise whether the box's rectangle or size moved.
+function resolveBox(b, p, text, stay = !!b.auto.stamp) {
+  if (!/\S/.test(text) || !faceReady(b.style)) return null;
+  const before = fitGeom(b);
+  if (!solveBox(b, p, text, { x: b.x + b.w / 2, y: b.y + b.h / 2 }, stay)) return null;
+  return ['x', 'y', 'w', 'h', 'size'].some((k) => before[k] !== (k === 'size' ? b.style.size : b[k]));
 }
 
 // Whether the face a style names is loaded, so a measurement of it is a
@@ -3530,6 +3602,7 @@ export function resizeBox(pageId, boxId, geom, base = null) {
       };
     }
   }
+  const widened = nw !== b.w;
   b.w = nw;
   b.h = nh;
   b.x = nx;
@@ -3537,10 +3610,20 @@ export function resizeBox(pageId, boxId, geom, base = null) {
   if (Number.isFinite(geom.size)) {
     b.style.size = geom.size;
   }
-  // A drag is the user choosing the box, so it never runs the ladder - but the
-  // flag has to describe the box they chose. A height-only drag changes nothing
-  // the component's own fit effect watches, so this is the only place that
-  // would notice the text no longer fits.
+  // A width set by hand is the box's from here on: the solver keeps it through
+  // every later edit and Refit (`auto.locks.width`), and an edge drag re-sets the
+  // text in it as it goes - the size back towards the reference and the height
+  // to what the lines now need, so a box made wider gives its height back
+  // (FIT-2). Not a corner drag, which sets the size too and is the user's size
+  // edit (`noteSizeEdit`).
+  if (widened && b.auto?.on) b.auto.locks.width = true;
+  if (widened && !Number.isFinite(geom.size) && b.auto?.on && isAutoBox(b) && canMeasure()) {
+    if (resolveBox(b, p, boxText(b, p), true) != null) return b;
+  }
+  // Any other drag is the user choosing the box, so it never runs the ladder -
+  // but the flag has to describe the box they chose. A height-only drag changes
+  // nothing the component's own fit effect watches, so this is the only place
+  // that would notice the text no longer fits.
   reviewBox(b, p);
   return b;
 }

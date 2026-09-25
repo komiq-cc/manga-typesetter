@@ -54,14 +54,15 @@ const setActive = (p, n) => {
 // Geometry entries carry only the fields that changed. `size` lives on the
 // style rather than the box, and a resize changes it alongside w/h.
 // Inked boxes carry their scaled strokes in ink. A refit carries the balloon
-// fit, copied out whole (a rows fit has nested spans) so the box never shares
-// an object with the entry.
+// fit, and a box the solver manages its record (`auto`), both copied out whole
+// so the box never shares an object with the entry.
 const setFields = (b, from) => {
   for (const k of Object.keys(from)) {
     if (k === 'size') b.style.size = from.size;
     else if (k === 'autoHeight') b.style.autoHeight = from.autoHeight;
     else if (k === 'ink') b.style.ink = structuredClone(from.ink);
     else if (k === 'fit') b.fit = from.fit ? structuredClone(from.fit) : null;
+    else if (k === 'auto') b.auto = structuredClone(from.auto);
     else b[k] = from[k];
   }
 };

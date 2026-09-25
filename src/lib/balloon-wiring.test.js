@@ -55,6 +55,7 @@ const {
   BULK_PROPS,
   selectBox,
   autoFitBox,
+  autoFitBoxTo,
   flaggedBoxes,
   reviewBox,
   setBoxText,
@@ -1510,10 +1511,13 @@ describe('placement chooses the size (FIT-1)', () => {
       expect(flaggedBoxes()).toEqual([]);
     });
 
-    it('clears on a resize and on a move', () => {
+    // A width drag re-solves the box in its new width (FIT-2), and the text
+    // still does not fit its balloon; a move leaves the box the solve was about.
+    it('is re-solved by a width drag, and clears on a move', () => {
       const a = overflowed();
       resizeBox(page().id, a.id, { w: a.w - 10 });
-      expect(flag(a)).toBeNull();
+      expect(a.auto.locks.width).toBe(true);
+      expect(flag(a)?.reason).toBe(REVIEW_REASONS.minSize);
       const b = overflowed();
       selectBox(b.id);
       nudgeBox(b.id, 5, 0);
@@ -1555,13 +1559,21 @@ describe('placement chooses the size (FIT-1)', () => {
       expect(flag(b)).toEqual(shrunk);
     });
 
-    it('clears when balloon layout is turned off, and comes back with the undo', () => {
+    // The switch re-solves the box (ARC-1): its lines are set flat, and still
+    // have to fit the rows of the balloon they sit in, which they do not. So the
+    // flag stands, from the new solve, and the undo puts the old one back.
+    it('stays when balloon layout is turned off, and the undo puts back the solve it came from', () => {
       hist.initHistory();
       hist.resetHistory();
       const b = overflowed();
+      const solved = { auto: { ...b.auto }, g: [b.x, b.y, b.w, b.h, b.style.size] };
       toggleBalloonFit(b.id, page());
-      expect(flag(b)).toBeNull();
+      expect(b.style.balloon).toBe(false);
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
       hist.undo();
+      expect(b.style.balloon).toBe(true);
+      expect([b.x, b.y, b.w, b.h, b.style.size]).toEqual(solved.g);
+      expect(b.auto).toEqual(solved.auto);
       expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
     });
 
@@ -1569,6 +1581,91 @@ describe('placement chooses the size (FIT-1)', () => {
       const b = overflowed();
       b.style.autoHeight = false;
       expect(flag(b)).toBeNull();
+    });
+  });
+
+  // FIT-2: after placement an auto box is re-solved by every edit, inside its
+  // balloon. It used to be grown and never given anything back, capped only by
+  // the page - or by the whole strip in a longstrip chapter.
+  describe('an edit re-solves the box', () => {
+    const geomOf = (b) => [b.x, b.y, b.w, b.h, b.style.size];
+
+    it('gives the size and the height back when the text gets shorter, and lands where placement did', () => {
+      const b = placeAt(32);
+      const placed = geomOf(b);
+      expect(b.auto.status).toBe('shrunk');
+      setBoxText(b, 'NO.', page());
+      expect(b.style.size).toBe(32);
+      expect(b.h).toBeLessThan(placed[3]);
+      expect(b.auto.status).toBe('ok');
+      setBoxText(b, TEXT, page());
+      expect(geomOf(b)).toEqual(placed);
+      expect(b.auto.status).toBe('shrunk');
+    });
+
+    it('is idempotent: a second fit of the same box changes nothing', () => {
+      const b = placeAt(32);
+      setBoxText(b, TEXT + ' TONIGHT', page());
+      const once = geomOf(b);
+      expect(autoFitBox(b, page())).toBe(false);
+      expect(geomOf(b)).toEqual(once);
+    });
+
+    it('stays inside its balloon when the text outgrows it, and is flagged', () => {
+      const b = placeAt(26);
+      setBoxText(b, `${TEXT} ${TEXT} ${TEXT} ${TEXT}`, page());
+      expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
+      expect(b.y + b.h).toBeLessThanOrEqual(b.fit.cy + b.fit.ry);
+      expect(b.auto.status).toBe('overflow');
+      expect(reviewOf(b, page())).not.toBeNull();
+    });
+
+    it('keeps its place on the page: an edit re-sets the text where the box was moved to', () => {
+      const b = placeAt(26);
+      selectBox(b.id);
+      nudgeBox(b.id, 30, 12);
+      const cx = b.x + b.w / 2;
+      const cy = b.y + b.h / 2;
+      setBoxText(b, 'WE CAN STILL CATCH IT.', page());
+      expect(b.x + b.w / 2).toBeCloseTo(cx, 6);
+      expect(b.y + b.h / 2).toBeCloseTo(cy, 6);
+    });
+
+    it('is never grown past its balloon by the grow-only net, even in a longstrip', () => {
+      app.projectLayout = 'longstrip';
+      try {
+        const b = placeAt(26);
+        const bottom = b.fit.cy + b.fit.ry;
+        autoFitBoxTo(b, 20, page());
+        expect(b.y + b.h).toBeLessThanOrEqual(bottom);
+        // The same box saved before the solver existed is grown as it always
+        // was, past the balloon and bounded by the page.
+        const legacy = placeAt(26);
+        delete legacy.auto;
+        autoFitBoxTo(legacy, 20, page());
+        expect(legacy.y + legacy.h).toBeGreaterThan(bottom);
+      } finally {
+        app.projectLayout = 'pages';
+      }
+    });
+
+    // With no balloon, a width set by hand is the box's, and a wider box gives
+    // its height back.
+    it('gives the height back when an edge drag makes the box wider, and keeps the width through later edits', () => {
+      loadProjectPages(noDetect(`${TEXT} ${TEXT}`));
+      app.lastStyle = { ...defaultStyle(), size: 26 };
+      placeActiveAt(250, 250);
+      const b = page().boxes[0];
+      expect(b.fit).toBe(null);
+      const h0 = b.h;
+      resizeBox(page().id, b.id, { x: b.x + 40, w: b.w - 80 });
+      expect(b.auto.locks.width).toBe(true);
+      const narrow = { w: b.w, h: b.h };
+      expect(narrow.h).toBeGreaterThan(h0);
+      resizeBox(page().id, b.id, { x: b.x - 40, w: b.w + 80 });
+      expect(b.h).toBe(h0);
+      setBoxText(b, `${TEXT} ${TEXT} AGAIN`, page());
+      expect(b.w).toBe(narrow.w + 80);
     });
   });
 

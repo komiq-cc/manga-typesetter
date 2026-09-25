@@ -510,9 +510,10 @@
           {@render toggle('defaultAutoHeight', 'Auto height', prefs.defaultAutoHeight)}
         </div>
         <div class="qhint">
-          The box grows taller so its text fits, anchored by its vertical
-          alignment. It never shrinks a box you made roomier, and its width is
-          never touched.
+          A placed box's height follows its text inside its balloon: it grows
+          and shrinks as the text changes, and text the balloon cannot hold is
+          flagged. A box you drew yourself only grows, and never shrinks a box
+          you made roomier.
         </div>
         <div class="ts-defaults" class:dim={!defaultsUsed}>
           <div class="field">
