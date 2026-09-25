@@ -1070,6 +1070,75 @@ describe('re-fitting by hand', () => {
     expect(b.style.size).toBe(fitted.size);
   });
 
+  // FIT-4: a re-typeset, not a height fit. Whatever edits left the box at, the
+  // press lays it out as placement would in the balloon it finds - and a second
+  // press finds the same balloon and changes nothing (DET-2).
+  it('typesets the box again: size, width and place in the balloon, as placement would, once', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    const pages = withDetect([240, 180, 260, 320], true);
+    pages[0].lines[0].en = LONG;
+    loadProjectPages(pages);
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    const placed = { ...geom(b), auto: { ...b.auto } };
+    b.x += 25;
+    b.w -= 30;
+    b.style.size = 14;
+    const n = hist.peekStack().undo.length;
+    expect(refitBalloon(b.id)).toBe(true);
+    expect({ ...geom(b), auto: { ...b.auto } }).toEqual(placed);
+    expect(hist.peekStack().undo.length).toBe(n + 1);
+    expect(refitBalloon(b.id)).toBe(true);
+    expect({ ...geom(b), auto: { ...b.auto } }).toEqual(placed);
+    expect(hist.peekStack().undo.length).toBe(n + 1);
+    hist.undo();
+    expect([b.x, b.w, b.style.size]).toEqual([placed.x + 25, placed.w - 30, 14]);
+  });
+
+  it('keeps what the box has locked', () => {
+    const pages = withDetect([240, 180, 260, 320], true);
+    pages[0].lines[0].en = LONG;
+    loadProjectPages(pages);
+    pixels = ovalPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    resizeBox(page().id, b.id, { x: b.x + 20, w: b.w - 40 });
+    const w = b.w;
+    refitBalloon(b.id);
+    expect(b.w).toBe(w);
+    expect(b.auto.locks.width).toBe(true);
+  });
+
+  // A box typed onto the page, or saved before the solver, has no record. The
+  // press is the user asking for the solver, so it gets one - and the undo
+  // takes it away with the rest.
+  it('gives an auto box with no solver record one, and the undo takes it back', () => {
+    hist.initHistory();
+    hist.resetHistory();
+    loadProjectPages([
+      {
+        id: 1,
+        w: 500,
+        h: 500,
+        lines: [],
+        boxes: [{ id: 'b1', lineN: null, text: LONG, x: 130, y: 220, w: 100, h: 60, style: { size: 30 }, fit: null }],
+      },
+    ]);
+    pixels = ovalPage();
+    const b = page().boxes[0];
+    const before = geom(b);
+    expect(b.auto).toBeUndefined();
+    refitBalloon('b1');
+    expect(b.auto).toMatchObject({ on: true, refSize: 30 });
+    expect(['ok', 'shrunk', 'overflow']).toContain(b.auto.status);
+    expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
+    hist.undo();
+    expect(b.auto).toBeUndefined();
+    expect(geom(b)).toEqual(before);
+  });
+
   it('records nothing when the press changed nothing', () => {
     hist.initHistory();
     hist.resetHistory();

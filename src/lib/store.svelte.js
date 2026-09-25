@@ -2777,11 +2777,12 @@ function solveBox(b, p, text, at, stay = false) {
 // solved - placed with no text to set - is laid out whole the first time its
 // text arrives, as placement would have laid it out.
 //
-// Null when the solver has nothing to say - blank text, or a face still loading,
-// which it must not be measured against (DET-4) - so the caller fits the box by
-// the older rules; otherwise whether the box's rectangle or size moved.
+// Null when the solver has nothing to say - no metrics, blank text, or a face
+// still loading, which it must not be measured against (DET-4) - so the caller
+// fits the box by the older rules; otherwise whether the box's rectangle or
+// size moved.
 function resolveBox(b, p, text, stay = !!b.auto.stamp) {
-  if (!/\S/.test(text) || !faceReady(b.style)) return null;
+  if (!canMeasure() || !/\S/.test(text) || !faceReady(b.style)) return null;
   const before = fitGeom(b);
   if (!solveBox(b, p, text, { x: b.x + b.w / 2, y: b.y + b.h / 2 }, stay)) return null;
   return ['x', 'y', 'w', 'h', 'size'].some((k) => before[k] !== (k === 'size' ? b.style.size : b[k]));
@@ -3127,19 +3128,30 @@ function measureBlock(p, det, pixels) {
 // dragged away from - a stale fit is worse than none, because the text is laid
 // out to a curve that is no longer under it.
 //
-// A fit that appears where there was none resizes an auto box to the balloon, the
-// way placement sizes it (`fittedRect`), so a box placed with the rectangle
-// fallback and refitted once its page is decoded ends up where a fitted
-// placement would have put it. A box that already had a fit keeps its rectangle:
-// the user may have sized it. Either way the ladder runs, as it does at
-// placement, so the same box on the same balloon gives the same answer however
-// often the button is pressed.
+// Then the text is typeset again in what it found (FIT-4): the solver, as at
+// placement, from the box's reference size - the size, the width, the height,
+// the lines and the box's place in the balloon, all of them, except what the
+// box has locked (`auto.locks`: a width set by hand, a size typed in). With no
+// balloon, around the box's own centre. An edit only re-sets the text where the
+// box stands (`resolveBox`); this is the one command that re-places it. An auto
+// box with no solver record - one typed onto the page, or saved before the
+// solver existed - is given one here, at the size it is set at: pressing the
+// button is asking for exactly this.
+//
+// When the solver has nothing to say - blank text, a face still loading - the
+// box is fitted as before: a fit that appears where there was none resizes it
+// to the balloon, the way placement sizes it (`fittedRect`), and the ladder
+// runs. A manual box gets its new fit and the verdict, nothing else.
+//
+// Idempotent (DET-2): the same box on the same balloon is solved to the same
+// answer, so a second press finds the balloon the first one laid the box out in
+// and changes nothing.
 //
 // One press is one undo step (UX-2): the `refit` entry carries the fit, the
-// rectangle and the size on either side, because the ladder can move all of
-// them and none of them can be re-derived on the way back. A press that changed
-// none of them records nothing, so an undo never lands on a step that does
-// nothing.
+// rectangle, the size and the solver record on either side, because the solve
+// can move all of them and none of them can be re-derived on the way back. A
+// press that changed none of them records nothing, so an undo never lands on a
+// step that does nothing.
 export function refitBalloon(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
   if (!b) return false;
@@ -3150,19 +3162,26 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   const geomBefore = refitGeom(b);
   const fit = balloonUnder(p, b);
   b.fit = fit;
-  if (fit && !before && isAutoBox(boxCandidate(b, boxText(b, p)))) {
-    const g = fittedRect(p, fit, b.style.align);
-    if (g) Object.assign(b, g);
+  const text = boxText(b, p);
+  const auto = isAutoBox(boxCandidate(b, text));
+  if (auto && !b.auto && b.style.size > 0) b.auto = normalizeAuto({ refSize: b.style.size });
+  const solved = auto && b.auto?.on ? resolveBox(b, p, text, false) : null;
+  if (solved == null) {
+    if (fit && !before && auto) {
+      const g = fittedRect(p, fit, b.style.align);
+      if (g) Object.assign(b, g);
+    }
+    // The height follows: a box laid out to a curve breaks into a different
+    // number of lines than the same box laid out flat, and the rectangle has to
+    // describe that. What no longer fits is flagged.
+    autoFitBox(b, p);
   }
-  // The height follows: a box laid out to a curve breaks into a different number
-  // of lines than the same box laid out flat, and the rectangle has to describe
-  // that. What no longer fits is flagged.
-  autoFitBox(b, p);
   const geomAfter = refitGeom(b);
   if (JSON.stringify(geomAfter) !== JSON.stringify(geomBefore)) {
     recordEdit({ t: 'refit', pageId: p.id, boxId: b.id, geomBefore, geomAfter });
   }
-  if (fit) toast(`Fitted to the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box`);
+  const where = fit ? `the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box` : null;
+  if (fit) toast(solved != null ? `Typeset again in ${where}` : `Fitted to ${where}`);
   else if (before) toast('No balloon found under this box - layout is rectangular again');
   else toast('No balloon found under this box');
   markUnsaved();
@@ -3170,8 +3189,14 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
 }
 
 // What a refit can move, as its history entry records it. Plain copies, taken
-// before the fit is replaced, so the two sides never share an object.
-const refitGeom = (b) => ({ ...fitGeom(b), fit: b.fit ? $state.snapshot(b.fit) : null });
+// before the fit is replaced, so the two sides never share an object. The
+// solver record is written on both sides, as null where there is none, so an
+// undo of the press that gave a box its record takes the record away again.
+const refitGeom = (b) => ({
+  ...fitGeom(b),
+  fit: b.fit ? $state.snapshot(b.fit) : null,
+  auto: b.auto ? $state.snapshot(b.auto) : null,
+});
 
 // The balloon a box sits in, from the seeds `refitBalloon` describes.
 function balloonUnder(p, b) {
@@ -3617,7 +3642,7 @@ export function resizeBox(pageId, boxId, geom, base = null) {
   // (FIT-2). Not a corner drag, which sets the size too and is the user's size
   // edit (`noteSizeEdit`).
   if (widened && b.auto?.on) b.auto.locks.width = true;
-  if (widened && !Number.isFinite(geom.size) && b.auto?.on && isAutoBox(b) && canMeasure()) {
+  if (widened && !Number.isFinite(geom.size) && b.auto?.on && isAutoBox(b)) {
     if (resolveBox(b, p, boxText(b, p), true) != null) return b;
   }
   // Any other drag is the user choosing the box, so it never runs the ladder -

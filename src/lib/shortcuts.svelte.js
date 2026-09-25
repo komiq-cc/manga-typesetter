@@ -275,6 +275,11 @@ const DEFS = [
   { id: 'box.deleteAlt', label: 'Delete box (alternate)', group: 'Text box', combo: 'Backspace' },
   { id: 'box.resetRotation', label: 'Reset rotation to 0°', group: 'Text box', combo: 'Mod+0', whenTyping: true },
   { id: 'box.fitBalloon', label: 'Fit to balloon (on/off)', group: 'Text box', combo: 'Mod+Shift+f', whenTyping: true },
+  // The Refit button's own key (UX-3): measure the balloon again and typeset
+  // the box in it. Beside the switch above rather than on it - one turns balloon
+  // layout on and off, this re-lays the box out - and Alt rather than Shift+R,
+  // which a hand used to a browser presses to reload.
+  { id: 'box.retypeset', label: 'Re-fit to balloon (typeset again)', group: 'Text box', combo: 'Mod+Alt+f', whenTyping: true },
   { id: 'style.copy', label: 'Copy style', group: 'Text box', combo: 'Mod+Shift+c', whenTyping: true },
   { id: 'style.paste', label: 'Paste style', group: 'Text box', combo: 'Mod+Shift+v', whenTyping: true },
 

@@ -62,7 +62,10 @@ const setFields = (b, from) => {
     else if (k === 'autoHeight') b.style.autoHeight = from.autoHeight;
     else if (k === 'ink') b.style.ink = structuredClone(from.ink);
     else if (k === 'fit') b.fit = from.fit ? structuredClone(from.fit) : null;
-    else if (k === 'auto') b.auto = structuredClone(from.auto);
+    else if (k === 'auto') {
+      if (from.auto) b.auto = structuredClone(from.auto);
+      else delete b.auto;
+    }
     else b[k] = from[k];
   }
 };
@@ -248,8 +251,8 @@ const KINDS = {
       restoreFit(b, e, dir, pageById(e.pageId));
     },
   },
-  // The Refit button (`refitBalloon`): the balloon fit, the rectangle and the
-  // size, all inside the two geometry records.
+  // The Refit button (`refitBalloon`): the balloon fit, the rectangle, the size
+  // and the solver record, all inside the two geometry records.
   refit: {
     label: 'that refit',
     apply(e, dir) {

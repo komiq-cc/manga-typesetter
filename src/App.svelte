@@ -16,7 +16,7 @@
   import NewChapterDialog from './lib/home/NewChapterDialog.svelte';
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -262,11 +262,17 @@
       if (!isTranslateMode()) duplicateBox();
     },
     // A switch, not a one-shot: pressing it again on the same box turns balloon
-    // fit back off. The Inspector's button is still the RE-measure - see
-    // `toggleBalloonFit` for why the two are different actions.
+    // fit back off. The re-measure is `box.retypeset` below, the Inspector's
+    // button - see `toggleBalloonFit` for why the two are different actions.
     'box.fitBalloon': () => {
       if (isTranslateMode() || !app.selectedId) return false;
       toggleBalloonFit(app.selectedId);
+    },
+    // The Inspector's Refit button, from the keyboard: one undo step, and a
+    // second press changes nothing.
+    'box.retypeset': () => {
+      if (isTranslateMode() || !app.selectedId) return false;
+      refitBalloon(app.selectedId);
     },
     'box.delete': deleteSelected,
     'box.deleteAlt': deleteSelected,

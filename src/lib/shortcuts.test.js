@@ -466,11 +466,15 @@ describe('dispatch', () => {
     const copy = vi.fn();
     const paste = vi.fn();
     const fit = vi.fn();
-    registerShortcutHandlers({ 'box.duplicate': dup, 'style.copy': copy, 'style.paste': paste, 'box.fitBalloon': fit });
+    const retype = vi.fn();
+    registerShortcutHandlers({ 'box.duplicate': dup, 'style.copy': copy, 'style.paste': paste, 'box.fitBalloon': fit, 'box.retypeset': retype });
     expect(dispatchShortcut(press('KeyD', { mod: true }), { typing: true })).toBe('box.duplicate');
     expect(dispatchShortcut(press('KeyC', { mod: true, shift: true }), { typing: true })).toBe('style.copy');
     expect(dispatchShortcut(press('KeyV', { mod: true, shift: true }), { typing: true })).toBe('style.paste');
     expect(dispatchShortcut(press('KeyF', { mod: true, shift: true }), { typing: true })).toBe('box.fitBalloon');
+    expect(dispatchShortcut(press('KeyF', { mod: true, alt: true }), { typing: true })).toBe('box.retypeset');
+    expect(retype).toHaveBeenCalledTimes(1);
+    expect(fit).toHaveBeenCalledTimes(1);
   });
 
   it('warns instead of silently overwriting a registered handler', () => {
