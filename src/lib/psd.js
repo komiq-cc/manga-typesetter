@@ -13,7 +13,7 @@ import { app, PAGE_W, PAGE_H } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import { renderBoxLayer, pageSpace, settleNoise } from './exporter.js';
 import { settleBoxTips } from './brush-tips.js';
-import { fontCssFor, fontNameFor } from './store.svelte.js';
+import { fontCssFor, fontNameFor, reviewOf } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
 import { applyCase, canMeasure, textInset, contentWidth, blockYFor } from './measure.js';
 import { boxCandidate, placeBlock } from './contain.js';
@@ -406,7 +406,7 @@ export function isRasterOnly(style) {
 export const RASTER_MARK = ' [raster, not editable in Photoshop]';
 
 // Written onto the layer name of a box whose text the app could not fit inside
-// it (`box.review`, see contain.js), so the person opening the PSD sees which
+// it (`reviewOf` in the store: `box.review`, see contain.js, or the solver's), so the person opening the PSD sees which
 // boxes were left for them to decide about - the same flag the editor shows,
 // carried to the one place a Photoshop user looks. On a raster layer it goes
 // BEFORE the raster marker, which has to stay last for the importer to find it,
@@ -432,7 +432,7 @@ export const REVIEW_MARK = ' [needs review]';
 export function textLayerFor(p, box, rendered) {
   const s = box.style;
   const raw = boxTextFor(p, box);
-  const flag = box.review ? REVIEW_MARK : '';
+  const flag = reviewOf(box, p) ? REVIEW_MARK : '';
 
   if (isRasterOnly(s)) {
     // If the box paints no pixels (e.g. empty or whitespace-only text),

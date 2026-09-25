@@ -877,13 +877,15 @@ export function normalizeReview(r) {
 // `box.auto` marks a box the auto-layout solver (auto-layout.js) manages, and
 // holds what it needs to solve it again:
 //
-//   { on, refSize, minSize?, locks: { size, width, height, pos, breaks }, status, reason }
+//   { on, refSize, minSize?, locks: { size, width, height, pos, breaks }, status, reason, stamp }
 //
 // `refSize` is the size the user chose - the solver never goes above it, and
 // shrinks from it only as far as the balloon needs, so it is kept apart from
 // `style.size`, which is the size the solver last settled on. `status` is the
 // last solve's answer (`solveLayout`'s), or null for a box not solved yet, and
-// `reason` the REVIEW_REASONS string it gave for an overflow.
+// `reason` the REVIEW_REASONS string it gave for an overflow. `stamp` is a
+// fingerprint of the box that solve laid out (`solveStamp` in the store): the
+// status is the box's own only while the box still matches it.
 //
 // A box without the field is a box the solver has never touched - every box
 // saved before it existed - and stays manual: nothing solves it on load.
@@ -905,5 +907,6 @@ export function normalizeAuto(a) {
     locks,
     status: AUTO_STATUSES.includes(a.status) ? a.status : null,
     reason: typeof a.reason === 'string' && a.reason.trim() ? a.reason : null,
+    stamp: typeof a.stamp === 'string' && a.stamp ? a.stamp : null,
   };
 }

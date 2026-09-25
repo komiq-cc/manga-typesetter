@@ -21,6 +21,7 @@
     resizeBox,
     isLongstrip,
     reviewBox,
+    reviewOf,
   } from './store.svelte.js';
   import { stripDragYBounds } from './editor/strip.js';
 
@@ -788,6 +789,10 @@
     untrack(() => (lines ? autoFitBoxTo(box, lines.length, pg) : autoFitBox(box, pg)));
   });
 
+  // The "needs review" flag as every reader sees it: the containment check's,
+  // or the solver's while the solve it came from still stands (`reviewOf`).
+  const review = $derived(reviewOf(box, pg));
+
   // Mirror flip transform for text.
   const mirror = $derived(
     s.flipH || s.flipV ? `scale(${s.flipH ? -1 : 1}, ${s.flipV ? -1 : 1})` : '',
@@ -1499,7 +1504,7 @@
   class:editing
   class:bulk-on={bulkOn}
   class:bulk-target={bulkTarget}
-  class:flagged={!!box.review}
+  class:flagged={!!review}
   data-id={box.id}
   style={boxStyle}
   onpointerdown={onBoxPointerDown}
@@ -1554,13 +1559,16 @@
     <div class="jp-pill" class:sfx={isSfx} contenteditable="false">{jp}</div>
   {/if}
 
-  {#if box.review}
+  {#if review}
     <!-- The "needs review" flag (UX-6): the text does not fit this box, and by
          how far - the containment check's verdict, never a clip. Outside the
          clip wrapper so a mask cannot hide it; it turns with the box, as the
-         handles do. The reason is in the tooltip and in the queue's list. -->
-    <div class="review-badge" contenteditable="false" role="img" title={reviewTitle(box.review)} aria-label={reviewTitle(box.review)}>
-      !<span>{reviewReach(box.review)}px</span>
+         handles do. The reason is in the tooltip and in the queue's list.
+         A solver overflow crosses no edge of the box - it is the balloon the
+         text leaves - so it has no distance to show, only the mark. -->
+    {@const reach = reviewReach(review)}
+    <div class="review-badge" contenteditable="false" role="img" title={reviewTitle(review)} aria-label={reviewTitle(review)}>
+      !{#if reach}<span>{reach}px</span>{/if}
     </div>
   {/if}
 

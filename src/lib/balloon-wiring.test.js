@@ -55,6 +55,14 @@ const {
   BULK_PROPS,
   selectBox,
   autoFitBox,
+  flaggedBoxes,
+  reviewBox,
+  setBoxText,
+  resizeBox,
+  nudgeBox,
+  fitBoxNow,
+  toggleBalloonFit,
+  reviewOf,
 } = await import('./store.svelte.js');
 const { tags } = await import('./tags.svelte.js');
 const { containBox, boxCandidate, REVIEW_REASONS } = await import('./contain.js');
@@ -1306,6 +1314,124 @@ describe('placement chooses the size (FIT-1)', () => {
     const b = placeAt(40);
     expect(b.style.size).toBe(30);
     expect(b.auto).toMatchObject({ refSize: 40, status: 'overflow', reason: REVIEW_REASONS.minSize });
+  });
+
+  // The solver's overflow with every glyph inside the box: the lines run past
+  // the balloon's curve, which the containment check - measured against the box -
+  // cannot see. It used to be recorded in `box.auto` and nowhere the user looks.
+  describe('a solver overflow inside its own box', () => {
+    const LONGER = 'I TOLD YOU WE SHOULD HAVE LEFT BEFORE THE RAIN';
+    // The repro: 240 by 180, and a reference size of 40 the text cannot keep.
+    const overflowed = () => {
+      loadProjectPages(noDetect(LONGER));
+      app.lastStyle = { ...defaultStyle(), size: 40 };
+      const img = pageImage(500, 500);
+      drawEllipse(img, 250, 250, 120, 90);
+      pixels = img;
+      placeActiveAt(250, 250);
+      const b = page().boxes[0];
+      expect(b.style.size).toBe(30);
+      expect(b.auto).toMatchObject({ status: 'overflow', reason: REVIEW_REASONS.minSize });
+      expect(containBox(boxCandidate(b, LONGER)).fits).toBe(true);
+      return b;
+    };
+
+    const flag = (b) => reviewOf(b, page());
+
+    it('is flagged with the solver’s reason, and listed', () => {
+      const b = overflowed();
+      expect(flag(b)).toEqual({ kind: 'overflow', overflow: { l: 0, t: 0, r: 0, b: 0 }, reason: REVIEW_REASONS.minSize });
+      expect(flaggedBoxes()).toEqual([{ pageId: page().id, boxId: b.id, review: flag(b) }]);
+      // Worked out from the solver's record, not written: nothing a check does
+      // to `box.review` can drop it.
+      expect(b.review).toBeUndefined();
+    });
+
+    it('keeps the flag through a re-check, an undo and redo, and a save and load', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = overflowed();
+      reviewBox(b, page());
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
+      hist.undo();
+      expect(page().boxes).toHaveLength(0);
+      hist.redo();
+      expect(flag(page().boxes[0])?.reason).toBe(REVIEW_REASONS.minSize);
+      loadProjectPages(JSON.parse(JSON.stringify(app.pages)));
+      expect(flag(page().boxes[0])?.reason).toBe(REVIEW_REASONS.minSize);
+      expect(flaggedBoxes()).toHaveLength(1);
+    });
+
+    // The status is only ever written by a solve; every other edit changes the
+    // box it was solved for, and the flag goes with it.
+    it('clears when the text is shortened', () => {
+      const b = overflowed();
+      setBoxText(b, 'NO.', page());
+      expect(flag(b)).toBeNull();
+      loadProjectPages(JSON.parse(JSON.stringify(app.pages)));
+      expect(flaggedBoxes()).toEqual([]);
+    });
+
+    it('clears on a resize and on a move', () => {
+      const a = overflowed();
+      resizeBox(page().id, a.id, { w: a.w - 10 });
+      expect(flag(a)).toBeNull();
+      const b = overflowed();
+      selectBox(b.id);
+      nudgeBox(b.id, 5, 0);
+      expect(flag(b)).toBeNull();
+      nudgeBox(b.id, -5, 0);
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
+    });
+
+    // A standing solver flag means the ink is inside the box, which leaves the
+    // ladder nothing to do: Fit now cannot help, and the overflow is still true.
+    it('stays through a Fit now that cannot help', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = overflowed();
+      expect(fitBoxNow(b.id, page())).toBe(false);
+      expect(hist.peekStack().undo).toHaveLength(1);
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
+    });
+
+    // A Fit now that does refit: the ladder grows the box back to the lines it
+    // holds, which is the rectangle the solve laid out - so the ink flag goes and
+    // the solver's, true again, is what is left. One undo puts back the box and
+    // its flag as they were.
+    it('refits a box dragged shorter, back to the solve and its flag, in one undo step', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = overflowed();
+      const solved = { flag: flag(b), g: [b.x, b.y, b.w, b.h, b.style.size] };
+      resizeBox(page().id, b.id, { y: b.y + 20, h: b.h - 40 });
+      const shrunk = flag(b);
+      expect(shrunk.overflow.t + shrunk.overflow.b).toBeGreaterThan(0);
+      const entries = hist.peekStack().undo.length;
+      expect(fitBoxNow(b.id, page())).toBe(true);
+      expect(hist.peekStack().undo).toHaveLength(entries + 1);
+      expect(b.review).toBeUndefined();
+      expect([b.x, b.y, b.w, b.h, b.style.size]).toEqual(solved.g);
+      expect(flag(b)).toEqual(solved.flag);
+      hist.undo();
+      expect(flag(b)).toEqual(shrunk);
+    });
+
+    it('clears when balloon layout is turned off, and comes back with the undo', () => {
+      hist.initHistory();
+      hist.resetHistory();
+      const b = overflowed();
+      toggleBalloonFit(b.id, page());
+      expect(flag(b)).toBeNull();
+      hist.undo();
+      expect(flag(b)?.reason).toBe(REVIEW_REASONS.minSize);
+    });
+
+    it('clears when the box turns manual', () => {
+      const b = overflowed();
+      b.style.autoHeight = false;
+      expect(flag(b)).toBeNull();
+    });
   });
 
   it('remembers the size the user chose, not the size the balloon allowed', () => {

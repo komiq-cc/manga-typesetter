@@ -709,6 +709,75 @@ function writeReview(b, review) {
   b.review = review;
 }
 
+// Whether a box needs review, and why: what every reader of the flag asks - the
+// editor's badge, the queue's list, the export's pre-flight, the PSD's layer
+// name. The containment check's flag (`box.review`), or else the solver's
+// (below), which is not written anywhere: it is worked out from the solver's
+// record each time it is read, so it can never outlive the box it was about.
+// `p` is the box's page, for its text.
+export const reviewOf = (b, p) => b?.review ?? solverReview(b, p);
+
+// The solver's own "does not fit" (FIT-5), for a box the containment check has
+// nothing against. The solver asks more of a box than that its ink stays inside
+// it: every line has to fit its own row of the balloon. Its best effort when
+// nothing does - `status: 'overflow'` - can hold every glyph inside a box that
+// itself runs past the balloon's curve, and the check, which measures against
+// the box, then passes a box whose text the user can see leaving its bubble.
+//
+// So the last solve's answer is part of the verdict, for as long as it is the
+// answer that stands: an auto box (auto sizing on and nothing hand-placed in it
+// - see `isAutoBox`) whose solver record is on, whose last solve overflowed, and
+// which is still the box that solve laid out (`solveStands`). Read off
+// `box.auto` rather than kept in `box.review`, because the record is what is
+// saved with the box and snapshotted with it by the history - so a chapter
+// opening (measured or not), an undo and a redo all come to the same flag, and
+// no check has to run for it to appear or to go. It goes when a later solve
+// succeeds, when the box turns manual, and when anything the solve was solved
+// for changes - by whichever path changes it.
+//
+// No edge of the box is crossed, so every side reads 0 - it is the balloon the
+// text leaves, and the reason names what the solver ran out of.
+function solverReview(b, p) {
+  const a = b?.auto;
+  if (!a?.on || a.status !== 'overflow' || !isAutoBox(b) || !solveStands(b, boxText(b, p))) return null;
+  return { kind: 'overflow', overflow: { l: 0, t: 0, r: 0, b: 0 }, reason: a.reason ?? REVIEW_REASONS.minSize };
+}
+
+// What a solve was solved FOR, as a short fingerprint kept on the record
+// (`auto.stamp`): the text, the rectangle, the balloon and every style field the
+// lines are laid out from. The status is the solve's answer only while the box
+// still matches it. Most edits - typing, a size or font change, a move, a
+// resize, a rotation, a refit to another balloon - run the ladder or nothing,
+// not the solver, and it is not theirs to keep a solver's record up to date;
+// they change the box, and the stamp stops matching. An undo that puts the box
+// back as it was solved makes it match again. One comparison wherever the
+// status is read, instead of a guard in every path that can edit a box.
+//
+// Hashed, because the text can be long and the stamp rides every save. FNV-1a,
+// 32 bits: a collision would take an edit that lands on the same hash, about one
+// in four billion.
+// The flips count because they mirror the finished block inside the box, and
+// a block anchored to one edge lands at the other - away from the rows the
+// balloon gave it.
+const STAMP_STYLE = ['font', 'size', 'bold', 'italic', 'align', 'valign', 'lineHeight', 'letterSpacing', 'uppercase', 'shape', 'balloon', 'hyphenate', 'minOrphan', 'rotation', 'flipH', 'flipV'];
+function solveStamp(b, text) {
+  const s = b.style;
+  const key = JSON.stringify([
+    String(text ?? ''),
+    b.x,
+    b.y,
+    b.w,
+    b.h,
+    textInset(s),
+    b.fit ?? null,
+    ...STAMP_STYLE.map((k) => s[k] ?? null),
+  ]);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
+const solveStands = (b, text) => !!b.auto?.stamp && b.auto.stamp === solveStamp(b, text);
+
 // The verdict alone: check the box as it stands and bring its flag up to date.
 // Moves nothing. The reason a flag already carries is kept - it was written by
 // whatever last tried to fit the box, and that is still the explanation - and a
@@ -776,8 +845,13 @@ export function autoFitBoxTo(b, lineCount, p = page()) {
 // the verdict. The growth moves `y` and `h` and nothing else, which the lines
 // do not read, so the block placed for the box as it stood is re-placed at the
 // new height rather than laid out again.
+//
+// Not an edit, so a box that was the solve's answer before it grew is still
+// that answer after: its stamp moves with it (`solveStamp`).
 function growAndReview(b, p, cand, place, lineCount) {
+  const held = solveStands(b, cand.text);
   const changed = isAutoBox(cand) ? growHeightTo(b, lineCount, p, cand, place) : false;
+  if (changed && held) b.auto.stamp = solveStamp(b, cand.text);
   reviewBox(b, p, changed ? placeAtHeight(place, boxCandidate(b, cand.text)) : place);
   return changed;
 }
@@ -882,11 +956,15 @@ export function makeBoxAuto(boxId = app.selectedId, p = page()) {
 
 // Every flagged box, in page order: what the queue's list and the export's
 // pre-flight read. Reactive when read inside a `$derived` - it reads each box's
-// `review`, and `writeReview` only writes when a flag actually changes.
+// `review`, and `writeReview` only writes when a flag actually changes, and
+// each box's solver status, past which it reads only for a box that overflowed.
 export function flaggedBoxes(pages = app.pages) {
   const out = [];
   for (const pg of pages ?? []) {
-    for (const b of pg?.boxes ?? []) if (b.review) out.push({ pageId: pg.id, boxId: b.id, review: b.review });
+    for (const b of pg?.boxes ?? []) {
+      const review = reviewOf(b, pg);
+      if (review) out.push({ pageId: pg.id, boxId: b.id, review });
+    }
   }
   return out;
 }
@@ -2568,9 +2646,12 @@ function solveBorn(b, p, text, at) {
   if (!r) return false;
   Object.assign(b, ontoPage(p, r));
   b.style.size = r.size;
-  writeReview(b, r.review);
+  // An overflow whose ink is still inside the box is flagged from the record
+  // (`solverReview`), for as long as the box is the one solved here.
   b.auto.status = r.status;
   b.auto.reason = r.reasons[0] ?? null;
+  b.auto.stamp = solveStamp(b, text);
+  writeReview(b, r.review);
   return true;
 }
 

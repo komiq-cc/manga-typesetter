@@ -32,7 +32,8 @@
 //            'overflow'  nothing fits: the best effort, never below `minSize`,
 //                        with `reasons` saying why (REVIEW_REASONS values)
 //   review   the `box.review` to write: null unless the best effort's ink is
-//            still past the box.
+//            still past the box. An overflow with its ink inside the box is
+//            flagged by the store from `status` (`solverReview`).
 //
 // Null when there is nothing to lay out: no style, no size, blank text, or
 // text on a curve (which is manual and never solved).

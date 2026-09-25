@@ -307,8 +307,8 @@ describe('placeBlock agrees', () => {
 // `box.auto` on disk
 // ===========================================================================
 describe('box.auto', () => {
-  const auto = { on: true, refSize: 26, locks: { size: true }, status: 'shrunk', reason: null };
-  const whole = { on: true, refSize: 26, locks: { size: true, width: false, height: false, pos: false, breaks: false }, status: 'shrunk', reason: null };
+  const auto = { on: true, refSize: 26, locks: { size: true }, status: 'shrunk', reason: null, stamp: '1x2y3z' };
+  const whole = { on: true, refSize: 26, locks: { size: true, width: false, height: false, pos: false, breaks: false }, status: 'shrunk', reason: null, stamp: '1x2y3z' };
 
   it('normalises to the whole record, and to nothing when it is unreadable', () => {
     expect(normalizeAuto(auto)).toEqual(whole);
@@ -319,7 +319,9 @@ describe('box.auto', () => {
       locks: { size: false, width: false, height: false, pos: false, breaks: false },
       status: null,
       reason: 'x',
+      stamp: null,
     });
+    expect(normalizeAuto({ ...auto, stamp: 42 }).stamp).toBeNull();
     expect(normalizeAuto({ on: false, refSize: 20 }).on).toBe(false);
     expect(normalizeAuto({ refSize: 0 })).toBeNull();
     expect(normalizeAuto({ refSize: 'big' })).toBeNull();
