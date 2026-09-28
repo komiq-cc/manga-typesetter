@@ -280,6 +280,12 @@ const DEFS = [
   // layout on and off, this re-lays the box out - and Alt rather than Shift+R,
   // which a hand used to a browser presses to reload.
   { id: 'box.retypeset', label: 'Re-fit to balloon (typeset again)', group: 'Text box', combo: 'Mod+Alt+f', whenTyping: true },
+  // Lock layout (FIT-5): hold the box's size, width, place and line breaks as
+  // they stand, so edits and Refit keep them - and again to let every lock go.
+  // A key because a box with no lock yet shows no lock chip to click. L for
+  // lock, with Alt beside Refit's Mod+Alt+F; Mod+L alone is the address bar to
+  // a hand used to a browser.
+  { id: 'box.layoutLock', label: 'Lock layout (on/off)', group: 'Text box', combo: 'Mod+Alt+l', whenTyping: true },
   { id: 'style.copy', label: 'Copy style', group: 'Text box', combo: 'Mod+Shift+c', whenTyping: true },
   { id: 'style.paste', label: 'Paste style', group: 'Text box', combo: 'Mod+Shift+v', whenTyping: true },
 

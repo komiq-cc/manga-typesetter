@@ -3383,6 +3383,126 @@ const refitGeom = (b) => ({
   auto: b.auto ? $state.snapshot(b.auto) : null,
 });
 
+// ===== locks (FIT-5) =====
+//
+// What the solver may not change on a box (`auto.locks`, read by `locksOf` in
+// auto-layout.js) used to be set only as a side effect - a size typed in, a
+// width dragged wider - and the only way to let one go was an undo, which also
+// took back the edit that set it. These are the commands that set and clear
+// them on purpose: the lock chip on the page and the Bulk panel call them, and
+// nothing else decides what a lock means.
+//
+// Only a box the solver manages has locks worth showing or changing. A manual
+// box - sizing off, text on a curve, a mesh warp, ink or a mask - is never laid
+// out by the solver, so a lock on it would do nothing and a chip would promise
+// something it cannot deliver.
+const LOCK_KEYS = ['size', 'width', 'height', 'pos', 'breaks'];
+
+export const lockableBox = (b) => !!(b?.auto?.on && b.style && isAutoBox(boxCandidate(b, null)));
+
+// The locks a box has on, as a plain object, or null when it has none (or none
+// that mean anything - see `lockableBox`). What the chip reads to decide
+// whether to show at all and which entries its menu offers.
+export function boxLocks(b) {
+  if (!lockableBox(b)) return null;
+  const l = b.auto.locks ?? {};
+  const on = {};
+  for (const k of LOCK_KEYS) if (l[k] === true) on[k] = true;
+  return Object.keys(on).length ? on : null;
+}
+
+// Whether the whole layout is held, as "Lock layout" holds it. The line breaks
+// are the one lock nothing else sets, so they are what marks it.
+export const layoutLocked = (b) => !!boxLocks(b)?.breaks;
+
+// What a lock change can move, as the `locks` history entry records it: the
+// locks, and the reference size, which "Lock layout" rewrites (below). Plain
+// copies, never the live proxy.
+const lockRecord = (b) => ({ locks: { ...$state.snapshot(b.auto.locks) }, refSize: b.auto.refSize });
+
+// Sets or clears locks on one box or several, anywhere in the chapter: `patch`
+// names the locks to change, `{ size: false }` or `{ width: true }`, and leaves
+// the rest as they are.
+//
+// Releasing the size or the width lets the line breaks go too. The breaks hold
+// both (`locksOf`), so "Unlock size" on a box whose breaks are held would
+// otherwise change nothing at all.
+//
+// `hold` is "Lock layout": the size, the width, the place and the breaks, held
+// as they stand. The solver's size lock holds the REFERENCE size, not the one
+// on the box, so a box the solver had shrunk to 18 from 24 would jump back up
+// to 24 at its next edit - the opposite of holding it. So the size it stands at
+// becomes its reference, as a size typed on the box does (`rememberSizeFor`).
+// Only this box's: the tag's remembered size is left alone, because locking a
+// box is not saying anything about every other box of its kind.
+//
+// Nothing is typeset again. A lock or an unlock is a statement about the next
+// solve, and a box that jumped the moment its lock was clicked away would be
+// the fit arguing with the user; Refit (`refitBalloon`, Mod+Alt+F by default) is
+// how they ask for the box to be laid out again without it.
+//
+// One undo step per page the boxes are on (the same rule as `recordBulkByPage`:
+// an entry is only ever on one page's stack), and none when nothing changed.
+// Answers how many boxes changed.
+export function setBoxLocks(ids, patch = {}, { hold = false } = {}) {
+  const want = new Set(Array.isArray(ids) ? ids : [ids]);
+  if (!want.size) return 0;
+  // An Inspector edit still settling would record after this and on top of it.
+  settleEdits();
+  const byPage = new Map();
+  let changed = 0;
+  for (const pg of app.pages) {
+    for (const b of pg.boxes ?? []) {
+      if (!want.has(b.id) || !lockableBox(b)) continue;
+      const before = lockRecord(b);
+      const next = { ...before.locks, ...patch };
+      if (patch.size === false || patch.width === false) next.breaks = false;
+      for (const k of LOCK_KEYS) {
+        const v = next[k] === true;
+        if (b.auto.locks[k] !== v) b.auto.locks[k] = v;
+      }
+      if (hold && b.style.size > 0 && b.auto.refSize !== b.style.size) b.auto.refSize = b.style.size;
+      const after = lockRecord(b);
+      if (JSON.stringify(after) === JSON.stringify(before)) continue;
+      const items = byPage.get(pg.id) ?? [];
+      items.push({ boxId: b.id, before, after });
+      byPage.set(pg.id, items);
+      changed++;
+    }
+  }
+  for (const [pageId, items] of byPage) {
+    // A one-box entry names its box, so the undo selects it (`step`).
+    recordEdit({ t: 'locks', pageId, ...(items.length === 1 ? { boxId: items[0].boxId } : null), items });
+  }
+  if (changed) markUnsaved();
+  return changed;
+}
+
+// The chip's and the Bulk panel's commands, in words. `which` is 'size',
+// 'width' or 'all'.
+export function unlockBoxes(ids, which = 'all') {
+  const patch = which === 'all' ? Object.fromEntries(LOCK_KEYS.map((k) => [k, false])) : { [which]: false };
+  return setBoxLocks(ids, patch);
+}
+
+export const lockBoxLayout = (ids) => setBoxLocks(ids, { size: true, width: true, pos: true, breaks: true }, { hold: true });
+
+// The keyboard's Lock layout (`box.layoutLock`): a switch on the selected box,
+// like the balloon fit's. Held already, it lets every lock go. Told in a toast
+// either way, since nothing on the page moves to show it happened.
+export function toggleLayoutLock(boxId = app.selectedId) {
+  const b = byId(boxId);
+  if (!b) return false;
+  if (!lockableBox(b)) {
+    toast('This box is laid out by hand - it has no layout to lock');
+    return false;
+  }
+  if (layoutLocked(b)) {
+    if (unlockBoxes(boxId, 'all')) toast('Layout unlocked - Refit will lay this box out again');
+  } else if (lockBoxLayout(boxId)) toast('Layout locked - edits and Refit keep this box as it is');
+  return true;
+}
+
 // The balloon a box sits in, from the seeds `refitBalloon` describes.
 function balloonUnder(p, b) {
   const covers = (x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
@@ -4369,6 +4489,28 @@ function recordBulkByPage(items, lastStyleBefore = null, lastStyleAfter = null) 
   for (const [pageId, its] of byPage)
     recordEdit({ t: 'bulk', pageId, items: its, lastStyleBefore, lastStyleAfter });
   return byPage.size;
+}
+
+// The Bulk panel's two lock buttons (FIT-5): "Unlock selected" lets every lock
+// go on the boxes it has picked, "Lock layout of selected" holds each one's
+// layout as it stands. They act at once, like the page's lock chip, rather than
+// waiting for Apply: a lock is not a style, and the mask and the template have
+// nothing to say about it. A tag selection is resolved again first, for the
+// reason `applyBulk` gives. Manual boxes among the picks are passed over
+// (`lockableBox`); the toast counts what changed, one undo step per page.
+export function lockBulkTargets(lock) {
+  if (!app.bulk.active) return 0;
+  if (app.bulk.tag) syncBulkTagTargets();
+  const ids = app.bulk.targets;
+  if (!ids.length) {
+    toast('No boxes selected');
+    return 0;
+  }
+  const n = lock ? lockBoxLayout(ids) : unlockBoxes(ids, 'all');
+  const boxes = `${n} box${n === 1 ? '' : 'es'}`;
+  if (lock) toast(n ? `Layout locked on ${boxes}` : 'Nothing to lock - those boxes are held already, or laid out by hand');
+  else toast(n ? `Unlocked ${boxes} - Refit lays each one out again` : 'None of those boxes has a lock');
+  return n;
 }
 
 export function applyBulk() {

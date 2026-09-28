@@ -12,6 +12,7 @@ import {
   syncBulkTagTargets,
   tickBulkProp,
   bulkTicked,
+  lockBulkTargets,
 } from './store.svelte.js';
   import { tagsInUse, boxesWithTag } from './tags.svelte.js';
   import { modKey } from './format.js';
@@ -875,6 +876,13 @@ import {
       </div>
     </div>
 
+    <!-- Locks act on the picked boxes at once, not through Apply: a lock is not
+         a style, so the ticks have nothing to say about it (`lockBulkTargets`). -->
+    <div class="bulk-locks">
+      <span class="lbl">Locks</span>
+      <button class="btn btn-sm" disabled={count === 0} title="Let every lock go on the selected boxes. Nothing moves until Refit lays them out again." onclick={() => lockBulkTargets(false)}>Unlock selected</button>
+      <button class="btn btn-sm" disabled={count === 0} title="Hold each selected box's size, width, place and line breaks as they stand, through edits and Refit" onclick={() => lockBulkTargets(true)}>Lock layout of selected</button>
+    </div>
     <div class="bulk-foot">
       <span class="cnt">{ticked} ticked · {count} selected{tag ? ` · “${tag}”` : ''}</span>
       <button class="btn" onclick={closeBulk}>Cancel</button>
@@ -890,6 +898,8 @@ import {
   .sub-list-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
   .sub-count { font-size: 11.5px; color: var(--t2); }
   .btn-sm { height: 24px; padding: 0 8px; font-size: 11px; }
+  .bulk-locks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto; padding: 8px 12px; border-top: 1px solid var(--line); }
+  .bulk-locks .lbl { font-size: 11px; color: var(--t2); text-transform: uppercase; letter-spacing: 0.4px; margin-right: auto; }
   .sub-list { display: flex; flex-direction: column; gap: 6px; }
   .sub-card { display: flex; flex-direction: column; gap: 6px; padding: 6px; background: var(--panel2); border-radius: 6px; border: 1px solid var(--line); }
   .sub-row { display: flex; align-items: center; gap: 6px; }

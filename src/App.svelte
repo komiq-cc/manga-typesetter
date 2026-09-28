@@ -16,7 +16,7 @@
   import NewChapterDialog from './lib/home/NewChapterDialog.svelte';
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -273,6 +273,12 @@
     'box.retypeset': () => {
       if (isTranslateMode() || !app.selectedId) return false;
       refitBalloon(app.selectedId);
+    },
+    // Lock layout, as a switch on the selected box: the way to lock a box that
+    // has no lock chip yet, since the chip only shows once a box has a lock.
+    'box.layoutLock': () => {
+      if (isTranslateMode() || !app.selectedId) return false;
+      toggleLayoutLock(app.selectedId);
     },
     'box.delete': deleteSelected,
     'box.deleteAlt': deleteSelected,

@@ -262,6 +262,27 @@ const KINDS = {
       restoreFit(b, e, dir, pageById(e.pageId));
     },
   },
+  // A lock set or let go (`setBoxLocks`): the locks and the reference size of
+  // each box, exactly as they were on either side. Nothing is laid out again,
+  // because the command itself lays nothing out - putting back the locks is
+  // the whole of the edit.
+  locks: {
+    label: 'that lock change',
+    apply(e, dir) {
+      const p = pageById(e.pageId);
+      if (!p) throw new Error('the page is gone');
+      let hit = 0;
+      for (const item of e.items ?? []) {
+        const b = p.boxes.find((x) => x.id === item.boxId);
+        if (!b?.auto) continue;
+        const g = dir === 'undo' ? item.before : item.after;
+        b.auto.locks = { ...g.locks };
+        if (g.refSize > 0) b.auto.refSize = g.refSize;
+        hit++;
+      }
+      if (!hit) throw new Error(e.items?.length > 1 ? 'those text boxes are gone' : 'the text box is gone');
+    },
+  },
   text: {
     label: 'that text edit',
     apply(e, dir) {

@@ -64,6 +64,7 @@
   import { maskTool } from './mask-tool.svelte.js';
   import { inspectorTab, effectsSubTab } from './inspector-tabs.svelte.js';
   import WarpGizmo from './editor/WarpGizmo.svelte';
+  import LockChip from './LockChip.svelte';
   import { brushArmed } from './brush-tool.svelte.js';
   import { inkTipIds, settleTips } from './brush-tips.js';
   import { liquifySettings } from './liquify-tool.svelte.js';
@@ -1631,6 +1632,9 @@
       !{#if reach}<span>{reach}px</span>{/if}
     </div>
   {/if}
+
+  <!-- What the solver may not change on this box, and the way to let it go (FIT-5). -->
+  <LockChip {box} />
 
   <!-- The wrapper exists for the mask: `mask-image` needs an element whose
        (0,0) is the box's own top-left, and the text stack is a centred flex
