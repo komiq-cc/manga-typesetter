@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { editLines, drawEditLines, domPoint, stepChar } from './edit-lines.js';
+import { editLines, drawEditLines, domPoint, stepChar, rawEdit } from './edit-lines.js';
+import { arcLayout } from './measure.js';
+import { glyphIndex, caretAt, caretNearest } from './curve-caret.js';
 import { layoutLines, applyCase, contentWidth, setTypesetEnabled, clearLayoutMemo } from './measure.js';
 import { defaultStyle, normalizeStyle } from './data.js';
 
@@ -254,5 +256,72 @@ describe('the Returns the result trims take no room while typing (UX-4)', () => 
     expect(rows(node)).toHaveLength(1);
     expect(edge(node, 'end').textContent).toBe('\n');
     expect(edge(node, 'start')).toBeUndefined();
+  });
+});
+
+// Every edit is made to the raw text (`rawEdit`), from where `beforeinput` says
+// it goes - flat text, and curved text, whose editable nobody sees: it is the
+// raw text in one element (`drawEditLines` with no lines), so a DOM position in
+// it is a raw offset, and the caret drawn on the curve is that offset's glyph.
+describe('typing into curved text: the raw text is what changes (UX-4)', () => {
+  const s = normalizeStyle({ ...defaultStyle(), size: 20, curve: 60 });
+  // What the box draws after the edit, and where the caret is drawn on it.
+  const after = (v, span, t, data) => {
+    const r = rawEdit(v, span, t, data);
+    const glyphs = arcLayout(applyCase(r.v, s), s, 20);
+    return { ...r, glyphs, at: caretAt(glyphs, glyphIndex(r.v, r.caret)) };
+  };
+
+  it('inserts a letter at the caret, and the caret stands after it on the curve', () => {
+    const r = after('helo', [3, 3], 'insertText', 'l');
+    expect(r).toMatchObject({ v: 'hello', caret: 4 });
+    expect(r.glyphs.map((g) => g.ch).join('')).toBe('hello');
+    // The caret stands between the second l and the o, where a click there lands.
+    expect(caretNearest(r.glyphs, r.at.x, r.at.y)).toBe(4);
+  });
+
+  it('replaces a selection', () => {
+    expect(rawEdit('hello world', [6, 11], 'insertText', 'there')).toEqual({ v: 'hello there', caret: 11 });
+    expect(rawEdit('ab', [0, 2], 'insertReplacementText', 'cd')).toEqual({ v: 'cd', caret: 2 });
+  });
+
+  it('deletes the character before or after a caret, and a selection whole', () => {
+    expect(rawEdit('hello', [3, 3], 'deleteContentBackward')).toEqual({ v: 'helo', caret: 2 });
+    expect(rawEdit('hello', [3, 3], 'deleteContentForward')).toEqual({ v: 'helo', caret: 3 });
+    expect(rawEdit('hello', [1, 4], 'deleteContentBackward')).toEqual({ v: 'ho', caret: 1 });
+    expect(rawEdit('hello', [0, 5], 'deleteByCut')).toEqual({ v: '', caret: 0 });
+    // An emoji goes whole.
+    expect(rawEdit('a\u{1F44D}', [3, 3], 'deleteContentBackward')).toEqual({ v: 'a', caret: 1 });
+  });
+
+  it('changes nothing for a Backspace at the start or a Delete at the end', () => {
+    expect(rawEdit('hello', [0, 0], 'deleteContentBackward')).toEqual({ v: 'hello', caret: 0 });
+    expect(rawEdit('hello', [5, 5], 'deleteContentForward')).toEqual({ v: 'hello', caret: 5 });
+  });
+
+  it('pastes raw text, its Returns made plain newlines', () => {
+    expect(rawEdit('ab', [1, 1], 'insertFromPaste', 'x\r\ny\rz')).toEqual({ v: 'ax\ny\nzb', caret: 6 });
+    const r = after('on the', [6, 6], 'insertFromPaste', ' curve');
+    expect(r.v).toBe('on the curve');
+    expect(r.glyphs).toHaveLength(12);
+  });
+
+  it('types a Return as a newline, and leaves inputs it does not know alone', () => {
+    expect(rawEdit('ab', [1, 1], 'insertParagraph')).toEqual({ v: 'a\nb', caret: 2 });
+    expect(rawEdit('ab', [1, 1], 'insertText', null)).toBeNull();
+    expect(rawEdit('ab', [0, 2], 'formatBold')).toBeNull();
+  });
+
+  it('holds the raw text in the editable nobody sees, one offset per position', () => {
+    const text = 'Round\nand \u{1F44D} round';
+    const node = fakeDoc().createElement('div');
+    drawEditLines(node, text, null, () => 0);
+    expect(node.textContent).toBe(text);
+    expect(node.childNodes.map((c) => c.className)).toEqual(['el wrap']);
+    for (let o = 0; o <= text.length; o++) {
+      if (o === 11) continue; // inside the emoji's pair
+      const [c, i] = domPoint(node, o);
+      expect(c.data.slice(0, i), `offset ${o}`).toBe(text.slice(0, o));
+    }
   });
 });

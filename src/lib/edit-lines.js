@@ -226,3 +226,25 @@ export function stepChar(v, o, dir) {
   }
   return dir > 0 ? v.length : prev;
 }
+
+// One edit to the raw text, as `beforeinput` asks for it: `inputType` `t`, the
+// raw span [a, b] it replaces, and the text it puts there (`data`, for the
+// inserts). Returns the new text and the raw offset the caret goes to, or null
+// for an input this does not make. A delete over nothing - a Backspace at a
+// line start, which the browser gives as the join of two line elements, or any
+// Backspace or Delete on text nobody sees (curved text) - takes the one
+// character before or after: the space the line wrapped at, the Return.
+export function rawEdit(v, [a, b], t, data) {
+  let ins = '';
+  if (t === 'insertParagraph' || t === 'insertLineBreak') ins = '\n';
+  else if (t.startsWith('insert')) {
+    if (data == null) return null;
+    ins = String(data).replace(/\r\n?/g, '\n');
+  } else if (t.startsWith('delete')) {
+    if (a === b) {
+      if (t.includes('Backward')) a = stepChar(v, a, -1);
+      else b = stepChar(v, a, 1);
+    }
+  } else return null;
+  return { v: v.slice(0, a) + ins + v.slice(b), caret: a + ins.length };
+}

@@ -72,7 +72,8 @@
   import { reviewReach, reviewTitle } from './review-label.js';
   import { inkOverhang } from './paint-reach.js';
   import { screenPoint, flipPoint, flipDelta, mirrorTransform, mirrorCss } from './box-frame.js';
-  import { editLines, drawEditLines, rawOffset, domPoint, stepChar } from './edit-lines.js';
+  import { editLines, drawEditLines, rawOffset, domPoint, rawEdit } from './edit-lines.js';
+  import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   let { box, pageFrameEl, pg = page() } = $props();
@@ -733,13 +734,24 @@
   // has a curve to follow, else the closed circle, else the arc. All three
   // return the same shape, so the markup below draws any of them without
   // knowing which.
+  //
+  // While it is typed into too (`curveEdit`), from the text being typed: the
+  // box draws the glyphs the result draws, with the caret and the selection
+  // drawn on them, and the text itself in an editable nobody sees. Not when
+  // uppercasing changes the number of characters, so that a glyph is no longer
+  // a character of the text: that box is typed into flat, as it always was.
   const curved = $derived(!!((s.path?.on && (s.path.pts?.length ?? 0) >= 2) || s.circle?.on || s.curve));
+  const curveEdit = $derived(editing && curved && glyphsMatch(text, applyCase(text, s)));
+  // An IME's text is not the box's until the composition ends, but it is on
+  // the curve while it is being composed: the editable holds it by then.
+  let composeText = $state(null);
   const layout = $derived.by(() => {
-    if (editing || text === '' || !curved) return null;
-    if (s.path?.on && (s.path.pts?.length ?? 0) >= 2)
-      return pathLayout(applyCase(text, s), s, effSize, box.w, box.h);
-    if (s.circle?.on) return circleLayout(applyCase(text, s), s, effSize);
-    return arcLayout(applyCase(text, s), s, effSize);
+    if ((editing && !curveEdit) || !curved) return null;
+    const t = applyCase(editing ? (composeText ?? text) : text, s);
+    if (t === '') return null;
+    if (s.path?.on && (s.path.pts?.length ?? 0) >= 2) return pathLayout(t, s, effSize, box.w, box.h);
+    if (s.circle?.on) return circleLayout(t, s, effSize);
+    return arcLayout(t, s, effSize);
   });
 
   // The lines this box draws, and the ONLY thing that draws them: the editor
@@ -748,7 +760,7 @@
   // including the leading and trailing blank lines that function drops. While
   // it is being typed into too (`editSegs`), so the text does not jump when
   // the edit ends - except curved text, which is not broken into lines at all
-  // and is typed into flat.
+  // and is typed on its curve (or flat).
   const shaped = $derived.by(() => {
     if (layout || (editing && curved)) return null;
     // Invalidate breaks when fonts load.
@@ -780,12 +792,13 @@
   // How far the centred block moves so its INK, not its line boxes, is centred
   // in the box - the exporter's `inkShiftY`, in zoomed px because it is applied
   // to the zoomed text. Zero for any other `valign` and for curved text, which
-  // is placed glyph by glyph from the box centre. While curved text is being
-  // typed into there are no shaped lines, so the typed paragraphs stand in:
-  // their first ascender and last descender are the ones that decide the shift,
-  // and measuring them keeps the text from jumping when the edit starts and ends.
+  // is placed glyph by glyph from the box centre, typed into or not. While
+  // curved text is typed into flat there are no shaped lines, so the typed
+  // paragraphs stand in: their first ascender and last descender are the ones
+  // that decide the shift, and measuring them keeps the text from jumping when
+  // the edit starts and ends.
   const inkShift = $derived.by(() => {
-    if (s.valign !== 'middle' || layout) return 0;
+    if (s.valign !== 'middle' || layout || curveEdit) return 0;
     const lines = shaped ?? (editing ? applyCase(text, s).split('\n') : null);
     return lines ? inkShiftY(lines, s, effSize) : 0;
   });
@@ -1391,16 +1404,37 @@
   // raw text here, from where the browser says it goes, and the lines are drawn
   // again from the result. Composition (an IME) is the one exception, because
   // its text is not final until it ends; it is left to the browser and read
-  // back then.
+  // back then. Curved text is edited the same way, in an editable nobody sees
+  // (see "typing on the curve" below).
   const editSegs = $derived(editing && shaped ? editLines(text, applyCase(text, s), shaped) : null);
   // What a line's hidden head or tail would take up on it, in zoomed px.
   const hangWidth = (str) => charWidths(str, s, effSize).reduce((a, w) => a + w + effLs, 0);
   // Where the caret goes when the lines are next drawn, as a raw offset.
   let caretNext = null;
   let composing = false;
+  // The editable, for the curve's pointer handlers, and its selection as raw
+  // offsets (anchor, focus), which is what the caret on the curve is drawn from.
+  let editEl = null;
+  let edSel = $state(null);
 
   function editField(node) {
     let first = true;
+    editEl = node;
+    const onSel = () => {
+      const sel = window.getSelection();
+      if (!sel.rangeCount || !node.contains(sel.focusNode)) return;
+      const a = rawOffset(node, sel.anchorNode, sel.anchorOffset);
+      const f = rawOffset(node, sel.focusNode, sel.focusOffset);
+      if (a != null && f != null) edSel = { a, f };
+    };
+    $effect(() => {
+      document.addEventListener('selectionchange', onSel);
+      return () => {
+        document.removeEventListener('selectionchange', onSel);
+        if (editEl === node) editEl = null;
+        edSel = null;
+      };
+    });
     $effect(() => {
       editSegs;
       indents;
@@ -1433,6 +1467,10 @@
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(r);
+    // Now, not at the selectionchange that follows, so the caret on the curve
+    // is never drawn for one frame at the old offset on the new glyphs.
+    const o = caret == null ? null : Math.min(caret, text.length);
+    edSel = o == null ? { a: 0, f: text.length } : { a: o, f: o };
   }
 
   function caretNow(node) {
@@ -1460,9 +1498,9 @@
     markUnsaved();
   }
 
-  function replaceSpan(node, [a, b], ins, inputType) {
-    const v = node.textContent;
-    commitEdit(v.slice(0, a) + ins + v.slice(b), a + ins.length, inputType);
+  function applyEdit(node, span, inputType, data) {
+    const r = rawEdit(node.textContent, span, inputType, data);
+    if (r) commitEdit(r.v, r.caret, inputType);
   }
 
   function onEditBeforeInput(e) {
@@ -1472,29 +1510,14 @@
     const node = e.currentTarget;
     if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
     const span = editSpan(node, e);
-    if (!span) return;
-    if (t === 'insertParagraph' || t === 'insertLineBreak') return replaceSpan(node, span, '\n', t);
-    if (t.startsWith('insert')) {
-      const ins = e.data ?? e.dataTransfer?.getData('text/plain');
-      if (ins != null) replaceSpan(node, span, ins.replace(/\r\n?/g, '\n'), t);
-      return;
-    }
-    if (!t.startsWith('delete')) return;
-    // A Backspace at the start of a line is given as the join of two line
-    // elements, which is no text at all; in the raw text it is the character
-    // before (the space the line wrapped at, the Return).
-    const [a, b] = span;
-    const v = node.textContent;
-    const back = t.includes('Backward');
-    replaceSpan(node, a < b ? span : back ? [stepChar(v, a, -1), a] : [a, stepChar(v, a, 1)], '', t);
+    if (span) applyEdit(node, span, t, e.data ?? e.dataTransfer?.getData('text/plain'));
   }
 
   function onEditPaste(e) {
     e.preventDefault();
     const node = e.currentTarget;
     const span = editSpan(node);
-    const ins = e.clipboardData?.getData('text/plain') ?? '';
-    if (span) replaceSpan(node, span, ins.replace(/\r\n?/g, '\n'), 'insertFromPaste');
+    if (span) applyEdit(node, span, 'insertFromPaste', e.clipboardData?.getData('text/plain') ?? '');
   }
 
   // The browser's copy of the lines has a Return at every wrap and the hidden
@@ -1505,7 +1528,7 @@
     if (!span || span[0] === span[1]) return;
     e.preventDefault();
     e.clipboardData.setData('text/plain', node.textContent.slice(...span));
-    if (e.type === 'cut') replaceSpan(node, span, '', 'deleteByCut');
+    if (e.type === 'cut') applyEdit(node, span, 'deleteByCut');
   }
 
   // Whatever the browser did change - a composition, an input it would not let
@@ -1519,6 +1542,7 @@
   }
   function onEditInput(e) {
     if (!composing) readBack(e.currentTarget);
+    else if (curveEdit) composeText = e.currentTarget.textContent;
   }
   function onCompositionStart() {
     composing = true;
@@ -1527,13 +1551,18 @@
     composing = false;
     const node = e.currentTarget;
     // WebKit ends the composition before its last input lands.
-    setTimeout(() => readBack(node));
+    setTimeout(() => {
+      composeText = null;
+      readBack(node);
+    });
   }
 
   function onEditBlur(e) {
+    composeText = null;
     endEdit(e.currentTarget.textContent);
   }
   function onEditKey(e) {
+    if (curveEdit && !e.isComposing && !e.altKey && !e.ctrlKey && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       stepField(e.currentTarget, e.shiftKey);
@@ -1552,6 +1581,99 @@
     caretNext = caretAfter(node.textContent, next);
     setBoxText(box, next);
     markUnsaved();
+  }
+
+  // ----- typing on the curve -----
+  // The editable nobody sees wraps the raw text at the box's width, so where
+  // the browser would put a caret for a click, or for Home and End, is its
+  // flat layout's idea and not the curve's. So those are placed here, on the
+  // glyphs, and the browser keeps the rest: Left and Right step through the
+  // raw text, which is the order the glyphs run in, and every edit goes
+  // through `beforeinput` as flat text's does.
+
+  // The caret and the selection, on the glyphs being drawn.
+  const curveMarks = $derived.by(() => {
+    if (!curveEdit || !edSel) return null;
+    const t = composeText ?? text;
+    const glyphs = layout ?? [];
+    const a = glyphIndex(t, edSel.a);
+    const f = glyphIndex(t, edSel.f);
+    return { caret: a === f ? caretAt(glyphs, f) : null, sel: selectionBoxes(glyphs, a, f) };
+  });
+
+  // Selects raw [a, f] in the editable (a caret when they are equal).
+  function setRawSel(a, f) {
+    const node = editEl;
+    if (!node) return;
+    const [ac, ai] = domPoint(node, a);
+    const [fc, fi] = domPoint(node, f);
+    window.getSelection().setBaseAndExtent(ac, ai, fc, fi);
+    edSel = { a, f };
+  }
+
+  // The raw offset nearest a pointer, on the glyphs. The overlay is the box,
+  // so the centre of its screen rect is the box centre whatever the turn; the
+  // turn is undone around it, and the box is never mirrored while typed into
+  // (`wrapMirror`), so the point is then in the glyphs' own frame.
+  function curvePoint(el, e) {
+    const r = el.getBoundingClientRect();
+    const dx = e.clientX - (r.left + r.width / 2);
+    const dy = e.clientY - (r.top + r.height / 2);
+    const rad = (-(s.rotation || 0) * Math.PI) / 180;
+    return [dx * Math.cos(rad) - dy * Math.sin(rad), dx * Math.sin(rad) + dy * Math.cos(rad)];
+  }
+  function curveOffset(el, e) {
+    const t = editEl?.textContent ?? text;
+    return rawIndex(t, caretNearest(layout ?? [], ...curvePoint(el, e)));
+  }
+
+  // A click puts the caret at the glyph under it, a drag selects, and Shift
+  // extends. Default prevented, so the editable keeps the focus.
+  function onCurvePointerDown(e) {
+    if (e.button !== 0 || !editEl || composing) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const o = curveOffset(el, e);
+    const anchor = e.shiftKey && edSel ? edSel.a : o;
+    setRawSel(anchor, o);
+    el.setPointerCapture?.(e.pointerId);
+    const move = (ev) => setRawSel(anchor, curveOffset(el, ev));
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  }
+
+  // A double-click selects the word, and is the box's no further: the box's
+  // own double-click is the one that opens the edit.
+  function onCurveDblClick(e) {
+    e.stopPropagation();
+    if (!editEl || composing) return;
+    // The glyph under the pointer, not the caret beside it: the right half of
+    // a word's last letter puts the caret after the word, on the space.
+    const g = glyphNearest(layout ?? [], ...curvePoint(e.currentTarget, e));
+    if (!g) return;
+    const [a, b] = wordAt(editEl.textContent, rawIndex(editEl.textContent, g.i));
+    setRawSel(a, b);
+  }
+
+  // Home, End, Up and Down on the curve (`caretKey`); true when it took the key.
+  function curveKey(e) {
+    const node = e.currentTarget;
+    const sel = window.getSelection();
+    if (!sel.rangeCount) return false;
+    const a = rawOffset(node, sel.anchorNode, sel.anchorOffset);
+    const f = rawOffset(node, sel.focusNode, sel.focusOffset);
+    if (a == null || f == null) return false;
+    const to = caretKey(node.textContent, f, e.key, e.metaKey);
+    if (to == null) return false;
+    e.preventDefault();
+    setRawSel(e.shiftKey ? a : to, to);
+    return true;
   }
 
   const corners = [['corner', 'nw'], ['corner', 'ne'], ['corner', 'sw'], ['corner', 'se']];
@@ -1666,49 +1788,71 @@
         : 'left:0;top:0;width:0;height:0'}
       aria-hidden="true"
     ></canvas>
-  {:else if editing}
-    <div
-      class="txt editable"
-      contenteditable="true"
-      style="{editStyle}{inkShift ? `transform:translateY(${inkShift}px);` : ''}"
-      use:editField
-      onbeforeinput={onEditBeforeInput}
-      oninput={onEditInput}
-      oncompositionstart={onCompositionStart}
-      oncompositionend={onCompositionEnd}
-      onpaste={onEditPaste}
-      oncopy={onEditCopy}
-      oncut={onEditCopy}
-      ondragstart={(e) => e.preventDefault()}
-      onblur={onEditBlur}
-      onkeydown={onEditKey}
-    ></div>
-  {:else if layout}
-    <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
-         full set of glyph spans; they are all absolutely positioned already, so
-         no layer has to hold the others up. -->
-    <div class="arcstack" style={filterCss}>
-      {#each layers as ly, li (li)}
-        <div class="arc" style={ly.arc}>
-          {#each layout as g, i (i)}
-            <span
-              class="arc-ch"
-              style="{textStyle}{ly.bg
-                ? `${ly.bg}background-size:${ly.tile ? `${ly.tile}px ${ly.tile}px` : `${box.w * z}px ${box.h * z}px`};background-position:${-((box.w * z) / 2 + g.x - g.w / 2)}px ${-((box.h * z) / 2 + g.y - effSize / 2)}px;`
-                : ''}transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"
-            >{g.ch}</span>
-          {/each}
-        </div>
-      {/each}
-    </div>
   {:else}
-    <div class="txt shaped stack" style="{textStyle}{stackTransform}{filterCss}">
-      {#each layers as ly, li (li)}
-        <div class="tlayer" class:base={li === 0} style={ly.css}>
-          {#each shaped as ln, i (i)}<div class="tline" style="{ly.line}{indentCss(i)}">{ln === '' ? '\u200b' : ln}</div>{/each}
+    {#if layout}
+      <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
+           full set of glyph spans; they are all absolutely positioned already, so
+           no layer has to hold the others up. -->
+      <div class="arcstack" style={filterCss}>
+        {#each layers as ly, li (li)}
+          <div class="arc" style={ly.arc}>
+            {#each layout as g, i (i)}
+              <span
+                class="arc-ch"
+                style="{textStyle}{ly.bg
+                  ? `${ly.bg}background-size:${ly.tile ? `${ly.tile}px ${ly.tile}px` : `${box.w * z}px ${box.h * z}px`};background-position:${-((box.w * z) / 2 + g.x - g.w / 2)}px ${-((box.h * z) / 2 + g.y - effSize / 2)}px;`
+                  : ''}transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"
+              >{g.ch}</span>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    {/if}
+    {#if editing}
+      {#if curveEdit}
+        <!-- Curved text being typed into: the glyphs above are the result's,
+             and this draws the caret and the selection on them and takes the
+             pointer, so a click lands on the glyph under it rather than in the
+             editable below, which holds the text and is not seen. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="curve-edit" onpointerdown={onCurvePointerDown} onmousedown={(e) => e.preventDefault()} ondblclick={onCurveDblClick}>
+          {#if curveMarks}
+            {#each curveMarks.sel as r, i (i)}
+              <span class="csel" style="width:{r.w}px;height:{effSize}px;transform:translate(calc(-50% + {r.x}px), calc(-50% + {r.y}px)) rotate({r.rot}rad)"></span>
+            {/each}
+            {#if curveMarks.caret}
+              {@const c = curveMarks.caret}
+              <span class="ccaret" style="height:{effSize}px;transform:translate(calc(-50% + {c.x}px), calc(-50% + {c.y}px)) rotate({c.rot}rad)"></span>
+            {/if}
+          {/if}
         </div>
-      {/each}
-    </div>
+      {/if}
+      <div
+        class="txt editable"
+        class:ghost={curveEdit}
+        contenteditable="true"
+        style="{editStyle}{inkShift ? `transform:translateY(${inkShift}px);` : ''}"
+        use:editField
+        onbeforeinput={onEditBeforeInput}
+        oninput={onEditInput}
+        oncompositionstart={onCompositionStart}
+        oncompositionend={onCompositionEnd}
+        onpaste={onEditPaste}
+        oncopy={onEditCopy}
+        oncut={onEditCopy}
+        ondragstart={(e) => e.preventDefault()}
+        onblur={onEditBlur}
+        onkeydown={onEditKey}
+      ></div>
+    {:else if !layout}
+      <div class="txt shaped stack" style="{textStyle}{stackTransform}{filterCss}">
+        {#each layers as ly, li (li)}
+          <div class="tlayer" class:base={li === 0} style={ly.css}>
+            {#each shaped as ln, i (i)}<div class="tline" style="{ly.line}{indentCss(i)}">{ln === '' ? '\u200b' : ln}</div>{/each}
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
     {#if !warped && inkActive(s.ink)}
       <!-- Inside the clip wrapper so the visibility mask hides ink the same way
