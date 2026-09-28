@@ -769,15 +769,14 @@ export async function removeFontFace(name, slot) {
   } catch {
     /* ignore */
   }
+  const gone = !g.faces || !FACE_SLOTS.some((s) => g.faces[s]);
+  if (gone) app.fonts.user = app.fonts.user.filter((f) => f.name !== name);
   // Losing a face changes metrics as much as gaining one: every box on that
-  // family now matches against what is left, or against the fallback.
+  // family now matches against what is left, or against the fallback. Said
+  // after the family has left the list, so nothing laid out on the news can
+  // still resolve the name to a family that is gone.
   noteFontsChanged();
-  if (!g.faces || !FACE_SLOTS.some((s) => g.faces[s])) {
-    app.fonts.user = app.fonts.user.filter((f) => f.name !== name);
-    toast('Font removed');
-  } else {
-    toast(`${SLOT_LABEL[slot]} face removed`);
-  }
+  toast(gone ? 'Font removed' : `${SLOT_LABEL[slot]} face removed`);
 }
 
 export async function removeUserFont(name) {
