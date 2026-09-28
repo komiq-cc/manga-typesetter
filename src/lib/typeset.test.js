@@ -1205,6 +1205,78 @@ describe('a text too big for its balloon', () => {
 });
 
 // ===========================================================================
+// The solver's shortcuts through the breaker
+// ===========================================================================
+// The solver asks about sizes it throws away when the block is too tall, and
+// asks about one paragraph again and again as it is typed. Neither shortcut it
+// takes may change a line: a block it does lay out is the block the breaker
+// always gave, and a block it gives up on is one that really was too tall.
+describe('the breaker, asked only whether a block fits', () => {
+  const oval = (L) => Array.from({ length: L }, (_, k) => 8 + 22 * Math.sin((Math.PI * (k + 0.5)) / L));
+  const texts = [
+    'THE WORLD IS ENDING AND NOBODY CARES AT ALL',
+    'If we leave right now, we can still catch the last train before the storm hits the valley.',
+    'Unquestionably, extraordinarily, incomprehensibly complicated negotiations.',
+    'I DIE UNDERSTAND A MONSTER A NO',
+    'Hi you',
+    'WAIT!\n\nYou mean the one with the red door?\nNo way.',
+    '\nOne paragraph between two blank ones.\n',
+  ];
+
+  it('gives up only on a block with more lines than asked, and otherwise changes nothing', () => {
+    let gaveUp = 0;
+    let kept = 0;
+    for (const text of texts) {
+      for (const width of [6, 11, 18, 30, oval]) {
+        for (const metric of [chars, weighted]) {
+          for (const shape of ['auto', 'oval', 'rect']) {
+            const full = balanceScored(text, width, metric, { shape });
+            for (let stopAbove = 0; stopAbove <= 9; stopAbove++) {
+              const got = balanceScored(text, width, metric, { shape, stopAbove });
+              if (got === null) {
+                gaveUp++;
+                expect(full.lines.length).toBeGreaterThan(stopAbove);
+              } else {
+                kept++;
+                expect(got).toEqual(full);
+              }
+            }
+          }
+        }
+      }
+    }
+    // Both halves of the promise were exercised.
+    expect(gaveUp).toBeGreaterThan(100);
+    expect(kept).toBeGreaterThan(100);
+  });
+
+  it('never gives up on a block of several paragraphs', () => {
+    const text = 'WAIT!\n\nYou mean the one with the red door? The one nobody has opened since the war?\nNo way.';
+    expect(balanceScored(text, 8, chars, { stopAbove: 1 })).toEqual(balanceScored(text, 8, chars));
+  });
+});
+
+describe('the breaker, measuring one paragraph as it is typed', () => {
+  // A measure that says a string always measures the same may have its widths
+  // kept from one call to the next; the lines must be the ones a fresh measure
+  // gives, whatever the edit between the calls.
+  const kept = Object.assign((s) => weighted(s), { stable: true });
+  const text = 'If we leave right now, we can still catch the last train before the storm hits the valley.';
+
+  it('breaks as a fresh measure does, typed forwards, backwards and in the middle', () => {
+    const edits = [];
+    for (let i = 1; i <= text.length; i += 3) edits.push(text.slice(0, i));
+    for (let i = text.length; i > 0; i -= 7) edits.push(text.slice(0, i));
+    edits.push(text.replace('storm', 'STORM'), text.replace('train', 'bus'), text, text + ' Now.');
+    for (const t of edits) {
+      for (const width of [9, 16, 25, (L) => Array.from({ length: L }, (_, k) => 10 + 12 * Math.sin((Math.PI * (k + 0.5)) / L))]) {
+        expect(balanceScored(t, width, kept)).toEqual(balanceScored(t, width, (s) => weighted(s)));
+      }
+    }
+  });
+});
+
+// ===========================================================================
 // The same block, broken once
 // ===========================================================================
 // `layoutLines` is asked the same question repeatedly with the same answer: the

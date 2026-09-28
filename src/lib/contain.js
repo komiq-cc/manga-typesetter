@@ -190,6 +190,9 @@ export function manualReason(cand) {
 //   baseY    each baseline's offset inside its line box
 //
 // For curves, the glyph layout, positions relative to the box centre.
+//
+// `opts` is `layoutLines`' own. With `stopAbove`, null for straight text
+// certain to take more lines than that - a caller that asks has no use for it.
 export function placeBlock(cand, opts) {
   const s = cand.style;
   const size = s.size;
@@ -210,6 +213,7 @@ export function placeBlock(cand, opts) {
   const lineH = size * (s.lineHeight > 0 ? s.lineHeight : 1);
   const rows = balloonWidthsFor(cand, s, size);
   const lines = layoutLines(text, s, size, contentWidth(cand.w, s), rows, opts);
+  if (lines === null) return null;
   const { inks, shift } = blockInk(lines, s, size);
   const blockH = lines.length * lineH;
   const align = s.align === 'left' || s.align === 'right' ? s.align : 'center';

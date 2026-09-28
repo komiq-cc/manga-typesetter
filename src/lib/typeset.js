@@ -473,6 +473,37 @@ function widthsResolver(spec) {
   return (L) => new Array(L).fill(w);
 }
 
+// The widths of a paragraph's lines, by where each starts and ends in it (see
+// `spanWidth` in `breakParagraph`), kept from one call to the next. The solver
+// breaks one text at several widths and sizes in a row, and again on the next
+// keystroke, and every layout asks about the same lines; building each line's
+// string and looking it up again every time was a third of a solve.
+//
+// Only for a measure that says a string always measures the same
+// (`measureFn.stable` - measure.js's, which is dropped whenever a face changes).
+// Kept for the paragraph it was last asked about, and carried to the next one
+// when that one only adds to its end - which is what typing does: a line that
+// ends inside the old paragraph is the same string in the new one. Any other
+// change starts afresh, as does a paragraph too long for the key (SPAN_STRIDE)
+// or a store grown past SPANS_MAX.
+const SPAN_STRIDE = 16384;
+const SPANS_MAX = 20000;
+const keptSpans = new WeakMap(); // measureFn -> { para, widths }
+function spansFor(measureFn, para) {
+  if (!measureFn?.stable || para.length >= SPAN_STRIDE) return new Map();
+  let k = keptSpans.get(measureFn);
+  if (!k || !para.startsWith(k.para) || k.widths.size > SPANS_MAX) {
+    k = { para, widths: new Map() };
+    keptSpans.set(measureFn, k);
+  }
+  k.para = para;
+  return k.widths;
+}
+
+// How many positions apart two ends of a line may be and still have their width
+// kept in `breakParagraph`'s flat array rather than its map.
+const WIDTH_BAND = 48;
+
 // One paragraph - no newlines - broken every way the search keeps: the best
 // breaking at each line count it could use (`byCount`, ascending), and the one
 // of those that wins (`best`). Both in the published shape; see `balanceScored`.
@@ -503,6 +534,21 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
     if (v === undefined) {
       v = measureFn(s);
       measured.set(s, v);
+    }
+    return v;
+  };
+  // A line of this paragraph by where it starts and ends, and whether it ends in
+  // an added hyphen: `para.slice(start, end)`, plus the hyphen. Kept by those
+  // three numbers - across calls, when the measure allows it (`spansFor`) - so
+  // the string is built and looked up once rather than once a layout.
+  const spans = spansFor(measureFn, para);
+  const stride = para.length < SPAN_STRIDE ? SPAN_STRIDE : para.length + 1;
+  const spanWidth = (start, end, hyphen) => {
+    const key = (start * stride + end) * 2 + (hyphen ? 1 : 0);
+    let v = spans.get(key);
+    if (v === undefined) {
+      v = measure(para.slice(start, end) + (hyphen ? '-' : ''));
+      spans.set(key, v);
     }
     return v;
   };
@@ -547,7 +593,7 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   //
   // It works in words, `[first, end)` per line, because it never breaks inside
   // one; `fallback` below turns those into the positions everything else uses.
-  const wordsWidth = (i, j) => measure(para.slice(words[i].s, words[j - 1].e));
+  const wordsWidth = (i, j) => spanWidth(words[i].s, words[j - 1].e, false);
   const greedyAt = (w) => {
     const out = [];
     const allow = (k) => w[Math.min(k, w.length - 1)];
@@ -646,20 +692,42 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
 
   const lineText = (a, b) =>
     para.slice(pos[a].start, pos[b].end) + (pos[b].hy === HY_ADDED ? '-' : '');
-  const tokens = (a, b) => pos[b].wEnd - pos[a].wStart + 1;
+  // The word numbers each position starts and ends a line in, flat, for the
+  // search's inner loop - which asks for them hundreds of thousands of times a
+  // solve.
+  const wStartAt = pos.map((p) => p.wStart);
+  const wEndAt = pos.map((p) => p.wEnd);
+  const tokens = (a, b) => wEndAt[b] - wStartAt[a] + 1;
 
   // The measured width of the line as it will be DRAWN, hyphen included. A
   // hyphen that was not measured is a hyphen hanging out of the balloon. Kept
   // by position as well as by string, because the search asks about the same
   // pair many times and building the string to look it up would cost more than
   // the lookup saves.
-  const cache = new Map();
+  //
+  // In a flat array for the pairs less than WIDTH_BAND positions apart - every
+  // line the search tries is at most a row's worth of words, so that is nearly
+  // every pair it asks about, and a map lookup per ask was a sixth of a solve -
+  // and in a map for the few longer ones (the whole paragraph, a line of forty
+  // one-letter words). NaN is "not measured yet".
+  const band = new Array((M + 1) * WIDTH_BAND).fill(NaN);
+  const far = new Map();
   const width = (a, b) => {
+    const d = b - a;
+    if (d >= 0 && d < WIDTH_BAND) {
+      const i = b * WIDTH_BAND + d;
+      let v = band[i];
+      if (v !== v) {
+        v = spanWidth(pos[a].start, pos[b].end, pos[b].hy === HY_ADDED);
+        band[i] = v;
+      }
+      return v;
+    }
     const k = a * (M + 1) + b;
-    let v = cache.get(k);
+    let v = far.get(k);
     if (v === undefined) {
-      v = measure(lineText(a, b));
-      cache.set(k, v);
+      v = spanWidth(pos[a].start, pos[b].end, pos[b].hy === HY_ADDED);
+      far.set(k, v);
     }
     return v;
   };
@@ -678,13 +746,22 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   // fragment, and a fragment is not a word that has been left on its own, it is
   // part of one that is being carried across. What stops a fragment being a stub
   // is `minHyphenHead`/`minHyphenTail`, which is the rule written for that job.
+  //
+  // Whether a word may stand alone is the word's own business, so it is worked
+  // out once a word (`standsAlone`) rather than by two regexes every time the
+  // search tries that word on a line of its own - which is every line count and
+  // every row, and was a fifth of a solve.
+  const alone = new Array(n).fill(0); // 0 not asked yet, 1 may stand alone, 2 may not
+  const standsAlone = (j) => {
+    if (alone[j] === 0) alone[j] = hasHangul(words[j].t) || letterCount(words[j].t) >= o.minOrphan ? 1 : 2;
+    return alone[j] === 1;
+  };
   const orphanOk = (a, b, L) =>
     L === 1 ||
     tokens(a, b) > 1 ||
     pos[a].hy !== HY_NONE ||
     pos[b].hy !== HY_NONE ||
-    hasHangul(words[pos[a].wStart].t) ||
-    letterCount(words[pos[a].wStart].t) >= o.minOrphan;
+    standsAlone(pos[a].wStart);
 
   const totalW = width(0, M);
 
@@ -773,7 +850,8 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   // call passes `o.pinch`.
   const lineCostOf = (a, b, k, L, T, w, p, pinchW) => {
     const W = w[k - 1];
-    const r = width(a, b) / p[k - 1];
+    const lw = width(a, b);
+    const r = lw / p[k - 1];
     let c = o.ragged * (r - T) ** 2;
     // Both of these weight a line that falls SHORT of the target, and only that
     // direction: a line that runs long is a full line, which is what was
@@ -788,7 +866,7 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
     // And the other direction, once. `FIT_EPS` is subtracted for the same reason
     // `fits` adds it: a line that measures a rounding error over its box is not
     // hanging out of anything.
-    const over = (width(a, b) - W - FIT_EPS) / W;
+    const over = (lw - W - FIT_EPS) / W;
     if (over > 0) c += o.overflow * over * over;
     // Only reachable in the relaxed pass; the strict one never admits such a
     // line at all. Flat rather than proportional to anything, because an orphan
@@ -878,6 +956,56 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
       b = a;
     }
     return cuts;
+  };
+
+  // Whether `L` lines have any breaking at all: whether `solve(L, allowOrphan,
+  // ...)` would answer, without pricing anything. The same walk over the same
+  // positions - the same `reach`, the same two breaks, the same orphan rule -
+  // keeping only which positions a block of k lines can end at, and done with a
+  // position at the first start that reaches it. Priced, a position is reached
+  // exactly when it is reached here, as long as every price is a number; when
+  // one might not be - a weight, a width, a preferred width or a target that is
+  // not a finite number - the search itself is asked.
+  //
+  // Most counts a search walks past have no breaking at all - a long text has
+  // none at three lines - and pricing every line of every one of them to find
+  // that out was a third of a solve.
+  const finiteWeights = [
+    o.ragged, o.lastShort, o.pinch, o.pinchHard, o.overflow, o.orphanCost,
+    o.hyphen, o.lastWordHyphen, o.existingHyphen, o.hyphenPair,
+  ].every(Number.isFinite);
+  const hasBreaking = (L, allowOrphan) => {
+    const w = widthsOf(L);
+    const p = preferredOf(w);
+    const T = targetFor(p);
+    if (!finiteWeights || !Number.isFinite(T) || !p.every((v) => v > 0 && Number.isFinite(v))) {
+      return solve(L, allowOrphan, o.pinch, preferredOf) !== null;
+    }
+    let prev = new Array(M + 1).fill(0);
+    prev[0] = 1;
+    let reach = 0;
+    for (let k = 1; k <= L; k++) {
+      const cur = new Array(M + 1).fill(0);
+      let next = -1;
+      for (let b = k; b <= M - (L - k); b++) {
+        const from = Math.min(b - 1, reach);
+        if (from < b - 1 && pos[b].hy !== HY_ADDED && !fits(from, b, k, w)) break;
+        for (let a = from; a >= k - 1; a--) {
+          if (!fits(a, b, k, w)) break;
+          if (!prev[a]) continue;
+          if (!allowOrphan && !orphanOk(a, b, L)) continue;
+          if (Number.isFinite(width(a, b))) {
+            cur[b] = 1;
+            break;
+          }
+        }
+        if (cur[b]) next = b;
+      }
+      if (next < 0) return false;
+      reach = next;
+      prev = cur;
+    }
+    return prev[M] === 1;
   };
 
   // What a finished breaking is worth, always under the standard weights, so two
@@ -1010,19 +1138,50 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   // and a caller that only wants the winner is spared them. That is most of the
   // work in a wide box, where every count past the right one is still a legal
   // breaking and each takes a full search to price.
+  //
+  // A count with no breaking at all is passed over without being searched
+  // (`hasBreaking`). And with `o.stopAbove` (see below), a count past it that is
+  // cheaper than every count up to it is the end: the winner is at least that
+  // cheap, and a tie goes to the fewer lines, so the winner has more lines than
+  // the caller can use (`TOO_TALL`).
   const maxL = Math.min(M, o.maxLines);
+  const stop = !every && only == null ? o.stopAbove ?? null : null;
   const everyCount = (allowOrphan) => {
     const out = [];
     let cheapest = Infinity;
+    let within = Infinity;
     for (let L = only ?? 1; L <= (only ?? maxL); L++) {
       if (!every && o.lineCost * L >= cheapest) break;
+      if (!hasBreaking(L, allowOrphan)) continue;
       const cand = bestAt(L, allowOrphan);
       if (!cand) continue;
       out.push(cand);
       cheapest = Math.min(cheapest, cand.cost);
+      if (stop !== null) {
+        if (L <= stop) within = Math.min(within, cand.cost);
+        else if (cand.cost < within) return TOO_TALL;
+      }
     }
     return out;
   };
+
+  // A caller that only needs to know whether the block fits in `o.stopAbove`
+  // lines - the solver, trying a size it throws away when the text is too tall
+  // for its balloon - is told so (`TOO_TALL`) as soon as it is certain, rather
+  // than handed the best breaking at thirty lines of a balloon that holds six.
+  // Every count up to the one that wins has to be searched to find the winner,
+  // and those counts were most of a solve's work.
+  //
+  // Certain means that whatever this would otherwise return has more lines than
+  // that, whichever way it got there. No count up to it has any breaking at all
+  // (`hasBreaking`), with orphans refused or allowed, so neither pass below can
+  // find one there. And the fallback's greedy wrap, the one other answer, is
+  // longer too.
+  if (o.stopAbove != null && !every && only == null) {
+    let within = false;
+    for (let L = 1; L <= Math.min(o.stopAbove, maxL) && !within; L++) within = hasBreaking(L, true) || hasBreaking(L, false);
+    if (!within && greedy().length > o.stopAbove) return TOO_TALL;
+  }
 
   // The orphan rule is a hard constraint, and then it is not. Held hard, a text
   // like "Hi you" in a box only wide enough for one word at a time has no legal
@@ -1044,9 +1203,11 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
   // what keeps `byCount` and `best` telling the same story.
   let orphansRelaxed = false;
   let found = everyCount(false);
+  if (found === TOO_TALL) return TOO_TALL;
   if (!found.length) {
     orphansRelaxed = true;
     found = everyCount(true);
+    if (found === TOO_TALL) return TOO_TALL;
   }
   if (!found.length) return fallback();
   const byCount = found.map((cand) => publish(cand, false, orphansRelaxed));
@@ -1186,11 +1347,35 @@ function joinParagraphs(parts) {
 //                   orphan, hyphen or shape rule applied.
 //   orphansRelaxed  some paragraph had no breaking that keeps every short word
 //                   company, and carries the cheapest orphans instead.
+//
+// `opts.stopAbove`, for a caller that only needs to know whether the block fits
+// in that many lines: null instead of the breaking when it certainly does not
+// (see `breakParagraph`). Only for a block of one paragraph - less the blank
+// ones at either end, which `layoutLines` drops - whose lines are the block's.
+// Several paragraphs are broken again on each other's rows until their counts
+// settle (`onTheirRows`), so no one paragraph's count along the way is certain
+// to be the block's; for them it is ignored and the breaking is returned.
 export function balanceScored(text, width, measureFn, opts = {}) {
   const o = { ...TYPESET_DEFAULTS, ...opts };
-  const solve = (para, w) => breakParagraph(para, w, measureFn, o, false).best;
-  return joinParagraphs(onTheirRows(paragraphsOf(text), width, o, solve));
+  const paras = paragraphsOf(text);
+  if (o.stopAbove != null && paras.filter((para) => para.trim() !== '').length !== 1) o.stopAbove = null;
+  let tall = false;
+  const solve = (para, w) => {
+    const r = breakParagraph(para, w, measureFn, o, false);
+    if (r === TOO_TALL) {
+      tall = true;
+      return EMPTY_BLOCK;
+    }
+    return r.best;
+  };
+  const out = onTheirRows(paras, width, o, solve);
+  return tall ? null : joinParagraphs(out);
 }
+
+// What `breakParagraph` answers when asked to stop above a count it is certain
+// to exceed, and what stands in for it until `balanceScored` sees it.
+const TOO_TALL = Object.freeze({ tooTall: true });
+const EMPTY_BLOCK = Object.freeze({ lines: [], merit: 0, cost: 0, overflowLines: [], greedy: false, orphansRelaxed: false });
 
 // The best breaking at every line count the text can be set in, ascending, each
 // in `balanceScored`'s shape - for a caller that has a reason of its own to want
@@ -1245,7 +1430,7 @@ export function balanceCandidates(text, width, measureFn, opts = {}) {
 
 // The lines alone, which is all the renderer has ever needed.
 export function balanceLines(text, width, measureFn, opts = {}) {
-  return balanceScored(text, width, measureFn, opts).lines;
+  return balanceScored(text, width, measureFn, opts)?.lines ?? null;
 }
 
 // ===== auto-height =====

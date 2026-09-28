@@ -204,8 +204,30 @@ export function fontShorthand(style, sizePx, family) {
   return `${i}${w} ${sizePx}px ${family}`;
 }
 
+// The CSS family list a style's font name resolves to: the store's answer
+// (`fontCssFor`), which reads the font lists through their reactive proxies -
+// microseconds a call, and a solve asks thousands of times, once for every line
+// it measures. A caller doing a burst of synchronous work, in which no font can
+// arrive or leave, may hold the answers for as long as it runs
+// (`withFamiliesHeld`).
+let heldFamilies = null;
 export function familyFor(style) {
-  return fontCssFor(style.font);
+  if (!heldFamilies) return fontCssFor(style.font);
+  let f = heldFamilies.get(style.font);
+  if (f === undefined) {
+    f = fontCssFor(style.font);
+    heldFamilies.set(style.font, f);
+  }
+  return f;
+}
+export function withFamiliesHeld(fn) {
+  if (heldFamilies) return fn();
+  heldFamilies = new Map();
+  try {
+    return fn();
+  } finally {
+    heldFamilies = null;
+  }
 }
 
 export function applyCase(text, style) {
@@ -661,10 +683,7 @@ export function lineInk(line, style, sizePx) {
     const { ascent, descent } = fontMetrics(style, sizePx);
     return { left: x0, right: x0 + inked * cw + Math.max(0, inked - 1) * ls, ascent, descent };
   }
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
-  _ctx.textAlign = 'left';
-  _ctx.textBaseline = 'alphabetic';
-  const m = _ctx.measureText(str);
+  const m = inkMetrics(str, fontShorthand(style, sizePx, familyFor(style)));
   const x0 = start(m.width + n * ls);
   const L = m.actualBoundingBoxLeft;
   const R = m.actualBoundingBoxRight;
@@ -718,11 +737,159 @@ export function glyphInk(ch, style, sizePx) {
 // with ctx.letterSpacing). Trailing spaces are trimmed like the app does.
 export function lineWidth(line, style, sizePx) {
   if (!line || sizePx <= 0) return 0;
-  const s = line.replace(/\s+$/, '');
+  const s = trimEnd(line);
   if (!_ctx) return s.length * sizePx * 0.55;
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
+  const font = fontShorthand(style, sizePx, familyFor(style));
   const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0);
-  return _ctx.measureText(s).width + Math.max(0, [...s].length - 1) * ls;
+  return advance(s, font, advancesIn(font)) + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
+}
+
+// `lineWidth` for one style at one size, as the breaker asks it: thousands of
+// times a layout, so the font string and the memo it is kept in are looked up
+// once rather than on every string. The same number `lineWidth` gives.
+//
+// While its advances are kept, one function per font and letter spacing, marked
+// `stable` - the same string always measures the same through it - so the
+// breaker may keep what it measured with it from one layout to the next
+// (`spansFor` in typeset.js). A face changing drops it with the advances.
+function lineWidthIn(style, sizePx) {
+  if (!_ctx || !(sizePx > 0)) return (line) => lineWidth(line, style, sizePx);
+  const font = fontShorthand(style, sizePx, familyFor(style));
+  const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0);
+  const kept = keptFor(font);
+  const held = kept?.fns.get(ls);
+  if (held) return held;
+  const memo = kept?.adv ?? null;
+  const fn = (line) => {
+    if (!line) return 0;
+    const s = trimEnd(line);
+    return advance(s, font, memo) + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
+  };
+  if (kept) {
+    fn.stable = true;
+    kept.fns.set(ls, fn);
+  }
+  return fn;
+}
+
+// `line.replace(/\s+$/, '')`, without the regex for a line that ends in a
+// printable ASCII character - which no `\s` is, and which nearly every line
+// the breaker measures does.
+function trimEnd(line) {
+  const c = line.charCodeAt(line.length - 1);
+  return c > 32 && c < 127 ? line : line.replace(/\s+$/, '');
+}
+
+// ===== a string's advance, remembered =====
+//
+// Typing into an auto box re-solves it on every keystroke (FIT-2), and a solve
+// lays the text out a score of times - every size its search tries, and every
+// width at each size - while the breaker measures every line each of those
+// blocks could have. Most of those strings are the same from one layout to the
+// next and from one keystroke to the next: a typed letter only changes the
+// lines that end in the word being typed. A canvas `measureText` is the dearest
+// single thing the layout does - over two thirds of a solve in the real-font
+// lane, before this - so each advance is measured once and kept, by the font it
+// was measured in and the string. A kept advance is the same number a fresh
+// measurement gives, so no break, size or width moves.
+//
+// The ink box `lineInk` reads is kept the same way, beside the advances: the
+// containment check reads every line of every candidate a solve tries.
+//
+// Kept per font string, and the fonts not used for longest go first once the
+// whole holds more than MEASURE_MEMO_MAX entries: the working set is the handful
+// of sizes the search tries for the box being typed into, a few thousand
+// strings each.
+//
+// What a font string draws with can change under it. A face arriving, being
+// replaced or being removed is said by the store through `clearLayoutMemo`,
+// which clears this too. A face the page is still fetching measures as the
+// fallback until it arrives - and the store's own signal waits for the fonts to
+// settle - so nothing is kept or read back while the document has a face
+// loading, and the memo goes the moment a load starts or ends. A kept fallback
+// advance read back for a loaded face would be a size solved against a font
+// nobody sees (DET-4).
+const MEASURE_MEMO_MAX = 40000;
+// font -> { adv: Map(string -> advance), ink: Map(string -> metrics), fns: Map(spacing -> `lineWidthIn`) }
+const measureMemo = new Map();
+let measureMemoSize = 0;
+const _fontSet = typeof document !== 'undefined' ? document.fonts : null;
+function clearMeasureMemo() {
+  measureMemo.clear();
+  measureMemoSize = 0;
+}
+if (typeof _fontSet?.addEventListener === 'function') {
+  for (const ev of ['loading', 'loadingdone', 'loadingerror']) _fontSet.addEventListener(ev, clearMeasureMemo);
+}
+
+// What is kept for `font`, or null when nothing may be kept or read now.
+function keptFor(font) {
+  if (_fontSet?.status === 'loading') return null;
+  let k = measureMemo.get(font);
+  if (k) measureMemo.delete(font);
+  else k = { adv: new Map(), ink: new Map(), fns: new Map() };
+  // Last in the map is last used, so the trim below drops the oldest first.
+  measureMemo.set(font, k);
+  return k;
+}
+const advancesIn = (font) => keptFor(font)?.adv ?? null;
+
+function keep(map, key, v) {
+  map.set(key, v);
+  if (++measureMemoSize > MEASURE_MEMO_MAX) trimMeasureMemo();
+}
+
+function advance(s, font, memo) {
+  let v = memo?.get(s);
+  if (v === undefined) {
+    _ctx.font = font;
+    v = _ctx.measureText(s).width;
+    if (memo) keep(memo, s, v);
+  }
+  return v;
+}
+
+// `measureText`'s answer for a line drawn from the left on the alphabetic
+// baseline, as `lineInk` reads it: the advance and the ink box.
+function inkMetrics(str, font) {
+  const memo = keptFor(font)?.ink ?? null;
+  let v = memo?.get(str);
+  if (v === undefined) {
+    _ctx.font = font;
+    _ctx.textAlign = 'left';
+    _ctx.textBaseline = 'alphabetic';
+    const m = _ctx.measureText(str);
+    v = {
+      width: m.width,
+      actualBoundingBoxLeft: m.actualBoundingBoxLeft,
+      actualBoundingBoxRight: m.actualBoundingBoxRight,
+      actualBoundingBoxAscent: m.actualBoundingBoxAscent,
+      actualBoundingBoxDescent: m.actualBoundingBoxDescent,
+    };
+    if (memo) keep(memo, str, v);
+  }
+  return v;
+}
+
+// Down to half the bound, oldest font first - never the one being measured in,
+// which is the last used and which a caller may still be holding. When that one
+// font alone is past the bound (a long session typing at one size), its strings
+// are emptied in place instead: a caller holding its maps then only measures
+// again, and no advance it reads back is ever a different number.
+function trimMeasureMemo() {
+  let left = measureMemo.size;
+  for (const [font, k] of measureMemo) {
+    if (measureMemoSize <= MEASURE_MEMO_MAX / 2 || --left === 0) break;
+    measureMemo.delete(font);
+    measureMemoSize -= k.adv.size + k.ink.size;
+  }
+  if (measureMemoSize > MEASURE_MEMO_MAX) {
+    for (const k of measureMemo.values()) {
+      k.adv.clear();
+      k.ink.clear();
+    }
+    measureMemoSize = 0;
+  }
 }
 
 // Scanlation-shaped line breaking, with this module's real metric wired into
@@ -736,8 +903,11 @@ export function lineWidth(line, style, sizePx) {
 // top and the bottom, and a block laid out against one flat number runs into the
 // curve at both ends. `contentWidthPx` stays required and stays the answer when
 // no callback is supplied, so every existing caller means exactly what it did.
-export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor) {
-  return balanceLines(text, widthsFor ?? contentWidthPx, (s) => lineWidth(s, style, sizePx), {
+export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor, stopAbove) {
+  return balanceLines(text, widthsFor ?? contentWidthPx, lineWidthIn(style, sizePx), {
+    // Null instead of lines when the block certainly takes more lines than
+    // this - see `layoutLines`' `opts.stopAbove`.
+    stopAbove: stopAbove ?? null,
     minOrphan: style.minOrphan ?? 3,
     // `??` rather than a plain read, and the distinction is load-bearing:
     // `TYPESET_DEFAULTS.hyphenate` is true, so handing `undefined` across would
@@ -957,6 +1127,7 @@ function memoKey(text, style, sizePx, w, widthsFor) {
 // invalidated key by key.
 export function clearLayoutMemo() {
   memo.clear();
+  clearMeasureMemo();
 }
 
 // For the tests, and for the same sort of introspection `pagePixelsHeld` offers.
@@ -994,6 +1165,13 @@ export const layoutMemoSize = () => memo.size;
 // editor is actually drawing from, and the one it keeps is laid out again by the
 // editor and the exporter through the ordinary path anyway.
 //
+// `opts.stopAbove` is for a caller that throws the block away when it takes
+// more lines than that - the solver, trying sizes too big for a balloon (see
+// `trial` in auto-layout.js). The breaker may then answer null instead of the
+// lines, once it is certain the block would take more (`breakParagraph`), and a
+// null is never remembered. Lines that do come back are the same lines as
+// without it. Plain wrapping (`wrapLinesDOM`) ignores it.
+//
 // A tab comes out as one space (OVF-10). Nothing that draws these lines agrees
 // on what a tab is: a browser's canvas turns it into a space before it measures
 // or paints (the spec says to), the node canvas the real-font tests draw with
@@ -1028,7 +1206,8 @@ export function layoutLines(text, style, sizePx, contentWidthPx, widthsFor, opts
   const lines =
     !typesetEnabled() || (style.shape ?? 'auto') === 'off'
       ? wrapLinesDOM(text, style, sizePx, w)
-      : shapedLines(text, style, sizePx, w, widthsFor);
+      : shapedLines(text, style, sizePx, w, widthsFor, opts?.stopAbove);
+  if (lines === null) return null;
   let a = 0;
   let b = lines.length;
   while (a < b && !/\S/.test(lines[a])) a++;

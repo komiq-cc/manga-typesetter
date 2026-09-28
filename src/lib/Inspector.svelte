@@ -317,9 +317,11 @@
     box.style.rotation = wrap180(Math.round(box.style.rotation + d));
     touch();
   }
+  // The text alone, then `touch`, whose `boxEdited` fits the box for it. With
+  // `setBoxText`'s own fit as well, every keystroke here solved the box twice,
+  // the second time to the answer the first had just written.
   function setText(v) {
-
-    setBoxText(box, v);
+    setBoxText(box, v, page(), { fit: false });
     touch();
   }
 

@@ -82,7 +82,7 @@
 // (DET-4). The solver cannot tell; the store checks before it asks.
 
 import { placeBlock, placeAtHeight, containBox, inkHeight, fitBox, CONTAIN_TOL, REVIEW_REASONS } from './contain.js';
-import { applyCase, lineWidth, textInset, blockYFor, layoutLines } from './measure.js';
+import { applyCase, lineWidth, textInset, blockYFor, layoutLines, withFamiliesHeld } from './measure.js';
 import { interiorLineWidths, inscribedRect, balloonFrame, safetyInset } from './balloon.js';
 import { neededHeight, BALANCED_DEFAULTS } from './typeset.js';
 import { normalizeFit } from './data.js';
@@ -222,10 +222,19 @@ function onPage(ctx, c) {
 // widened, once and about its centre, for ink past its sides (an outline, a
 // lean, a glyph wider than its advance), as any box is grown for ink past its
 // lines. A width the region decided is not; ink past it is a width that fails.
-function trial(ctx, size, w, own = !ctx.R?.shape) {
+//
+// `probe` is for a caller that reads nothing of a candidate that fails but that
+// it failed (`bestAt`). A box whose width the region decided cannot pass once
+// its block is taller than the balloon's band, so the layout may stop as soon as
+// it is certain to be (`linesThatFit`) - most of the sizes a search tries for a
+// long text are far too big, and laying each out in full at twenty lines was
+// most of a solve. A box whose width is its own may still pass, wider.
+function trial(ctx, size, w, own = !ctx.R?.shape, probe = false) {
   const style = size === ctx.style.size ? ctx.style : { ...ctx.style, size };
   const base = { x: 0, y: 0, w, h: 0, style, text: ctx.text, fit: ctx.R?.shape ?? null };
-  const place = placeBlock(frame(ctx, base, ctx.minH), NO_CACHE);
+  const stop = probe && !own && ctx.R?.shape && !ctx.lk.height ? linesThatFit(ctx, style) : null;
+  const place = placeBlock(frame(ctx, base, ctx.minH), stop === null ? NO_CACHE : { cache: false, stopAbove: stop });
+  if (!place) return { ok: false };
   if (place.isCurve) {
     ctx.curve = true;
     return null;
@@ -251,9 +260,23 @@ function trial(ctx, size, w, own = !ctx.R?.shape) {
       : false;
   if (own && !v.fits && !ctx.lk.width) {
     const side = Math.max(v.overflow.l, v.overflow.r);
-    if (side > CONTAIN_TOL) return trial(ctx, size, w + 2 * Math.ceil(side), false);
+    if (side > CONTAIN_TOL) return trial(ctx, size, w + 2 * Math.ceil(side), false, probe);
   }
   return { c, place: p, v, ok: v.fits && !tall && onPage(ctx, c) && rowsFit(ctx, c, p) };
+}
+
+// The most lines a block at this style's size can have and not be `tall` in the
+// balloon's band: the same product and the same comparison `trial` makes, so the
+// two cannot disagree by a rounding. Null when there is no line height to count
+// in.
+function linesThatFit(ctx, style) {
+  const lineH = style.size * (style.lineHeight > 0 ? style.lineHeight : 1);
+  if (!(lineH > 0)) return null;
+  const room = ctx.R.height + CONTAIN_TOL;
+  let n = Math.max(0, Math.floor(room / lineH));
+  while (n > 0 && n * lineH > room) n--;
+  while ((n + 1) * lineH <= room) n++;
+  return n;
 }
 
 // The widths worth trying at a size, in order of preference: the first that
@@ -338,7 +361,7 @@ function addedHyphens(ctx, lines) {
 // The first candidate that fits at this size, or null.
 function bestAt(ctx, size) {
   for (const w of widthsAt(ctx, size)) {
-    const t = trial(ctx, size, w);
+    const t = trial(ctx, size, w, undefined, true);
     if (ctx.curve) return null;
     if (t.ok) return snug(ctx, size, t);
   }
@@ -397,7 +420,14 @@ function result(c, place, status, reasons = [], review = null) {
   return { size: c.style.size, x: c.x, y: c.y, w: c.w, h: c.h, lines: place.lines, status, reasons, review };
 }
 
-export function solveLayout({ text, style, refSize, region, locks, opts } = {}) {
+// Synchronous from end to end, so no font can arrive or leave while it runs: the
+// family each style resolves to is looked up once (`withFamiliesHeld`) rather
+// than for every line measured.
+export function solveLayout(args) {
+  return withFamiliesHeld(() => solve(args));
+}
+
+function solve({ text, style, refSize, region, locks, opts } = {}) {
   const o = opts ?? {};
   const ref = Number(refSize) > 0 ? Number(refSize) : Number(style?.size);
   if (!style || !(ref > 0)) return null;
