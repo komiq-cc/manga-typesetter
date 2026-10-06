@@ -123,5 +123,8 @@ describe('the solver answers as it always has', () => {
     expect(Object.keys(got)).toEqual(Object.keys(want));
     const changed = Object.keys(want).filter((k) => got[k] !== want[k]);
     expect(changed).toEqual([]);
-  });
+    // Four hundred solves in one test: a second alone, and several times that
+    // beside the rest of the suite on a busy machine, where the default five
+    // seconds failed it for nothing.
+  }, 30000);
 });
