@@ -1,7 +1,7 @@
 // Shared text measurement + line wrapping (used by curved rendering and export).
 import { fontCssFor } from './store.svelte.js';
-import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS } from './typeset.js';
-import { interiorLineWidths } from './balloon.js';
+import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS, ovalProfile } from './typeset.js';
+import { interiorLineWidths, safetyInset } from './balloon.js';
 import { normalizeFit } from './data.js';
 import { strokeExtent } from './text-paint.js';
 
@@ -904,22 +904,45 @@ function trimMeasureMemo() {
 // curve at both ends. `contentWidthPx` stays required and stays the answer when
 // no callback is supplied, so every existing caller means exactly what it did.
 export function shapedLines(text, style, sizePx, contentWidthPx, widthsFor, stopAbove) {
-  return balanceLines(text, widthsFor ?? contentWidthPx, lineWidthIn(style, sizePx), {
-    // Null instead of lines when the block certainly takes more lines than
-    // this - see `layoutLines`' `opts.stopAbove`.
-    stopAbove: stopAbove ?? null,
-    minOrphan: style.minOrphan ?? 3,
-    // `??` rather than a plain read, and the distinction is load-bearing:
-    // `TYPESET_DEFAULTS.hyphenate` is true, so handing `undefined` across would
-    // turn the feature OFF for every style saved before the knob existed. A
-    // missing key means "the default", which is what `normalizeStyle` would
-    // have supplied anyway had the style come through it.
-    hyphenate: style.hyphenate ?? true,
-    // The silhouette the block aims for inside the room its rows have (BRK-3):
-    // 'auto' fills each row, 'oval' tapers to the ends, 'rect' keeps the lines
-    // even. 'off' never gets here - `layoutLines` wraps plainly for it.
-    shape: style.shape ?? 'auto',
-  });
+  const measureFn = lineWidthIn(style, sizePx);
+  const run = (widths, stop = stopAbove) =>
+    balanceLines(text, widths, measureFn, {
+      // Null instead of lines when the block certainly takes more lines than
+      // this - see `layoutLines`' `opts.stopAbove`.
+      stopAbove: stop ?? null,
+      minOrphan: style.minOrphan ?? 3,
+      // `??` rather than a plain read, and the distinction is load-bearing:
+      // `TYPESET_DEFAULTS.hyphenate` is true, so handing `undefined` across would
+      // turn the feature OFF for every style saved before the knob existed. A
+      // missing key means "the default", which is what `normalizeStyle` would
+      // have supplied anyway had the style come through it.
+      hyphenate: style.hyphenate ?? true,
+      // The silhouette the block aims for inside the room its rows have (BRK-3):
+      // 'auto' fills each row, 'oval' tapers to the ends, 'rect' keeps the lines
+      // even. 'off' never gets here - `layoutLines` wraps plainly for it.
+      shape: style.shape ?? 'auto',
+    });
+  // Centred 'auto' text in an oval balloon is set to the balloon's rows cut to
+  // an oval (`balloonWidthsFor`'s `round`), and filling those is a round
+  // block. The oval holds less than the rows do, so it is kept only while the
+  // balloon holds its lines and every line fits its oval row - a line past its
+  // row is the breaker's fallback for text with no breaking in the oval, which
+  // is no oval at all. Otherwise the text fills the rows themselves.
+  const round = widthsFor?.round;
+  if (round) {
+    const lines = run(round, Math.min(stopAbove ?? Infinity, round.holds));
+    if (lines && fitsRound(round, lines, measureFn)) return lines;
+  }
+  return run(widthsFor ?? contentWidthPx);
+}
+
+// Whether `lines` are a round block: no more of them than the balloon holds,
+// and each inside its row of the oval (`balloonWidthsFor`'s `round`) - a
+// single word too long for any row excepted, as the breaker excepts it.
+function fitsRound(round, lines, measureFn) {
+  if (!(lines.length <= round.holds)) return false;
+  const rows = round(lines.length);
+  return lines.every((l, i) => measureFn(l) <= rows[i] + 0.5 || !/\s/.test(l.trim()));
 }
 
 // ===== the balloon a box was fitted to, as a `widthsFor` callback =====
@@ -1014,6 +1037,29 @@ export function balloonWidthsFor(box, style, sizePx) {
   // being avoided. Everything the closure captures is here; a `widthsFor` from
   // anywhere else carries no key and is simply not cached (see `memoKey`).
   fn.key = JSON.stringify([shape, lineH, valign, anchor, contentW, inset]);
+  // In an oval balloon, centred text set 'auto' is a round block: the rows are
+  // cut to an oval as wide as the widest of them, each line no wider than its
+  // share of that along `ovalProfile` - the letterer's curve, short lines at
+  // the top and the bottom and the long one in the middle. Taken from the rows rather
+  // than asked of the breaker as a preference, because a preference loses to
+  // the rows whenever the box is narrower than the balloon, and a box narrower
+  // than its balloon is how the solver makes a block round (auto-layout.js
+  // `roundest`). `holds` is how many lines the balloon's band holds: past
+  // that, `shapedLines` sets the rows themselves.
+  const centred = style.align !== 'left' && style.align !== 'right';
+  if (shape.kind === 'ellipse' && centred && (style.shape ?? 'auto') === 'auto') {
+    const round = (lineCount) => {
+      const rows = fn(lineCount);
+      const want = ovalProfile(lineCount);
+      const top = Math.max(...want);
+      // As wide as the widest row: a block in the flat middle of a tall
+      // balloon is as round as one in a round balloon.
+      const widest = Math.max(...rows);
+      return rows.map((w, i) => Math.max(1, Math.min(w, (widest * want[i]) / top)));
+    };
+    round.holds = Math.floor((2 * Math.max(0, shape.ry - safetyInset(shape))) / lineH + 1e-9);
+    fn.round = round;
+  }
   return fn;
 }
 

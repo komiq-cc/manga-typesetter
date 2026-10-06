@@ -1208,14 +1208,16 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     expect(b.fit.ry).toBeCloseTo(80, -1);
   });
 
-  it('sizes the box to that shape s frame, wider than tall', () => {
+  // The box is centred on the shape's frame and no wider than it: the text is
+  // set as the roundest block the balloon holds, not stretched across it.
+  it('sizes the box inside that shape s frame, centred on it', () => {
     loadProjectPages(noDetect('HELLO THERE'));
     pixels = ovalPage();
     placeActiveAt(250, 250);
     const b = page().boxes[0];
     const r = balloonFrame(b.fit);
-    expect([b.x, b.w].map(round2)).toEqual([r.x, r.w].map(round2));
-    expect(b.w).toBeGreaterThan(b.h);
+    expect(b.w).toBeLessThanOrEqual(r.w);
+    expect(b.x + b.w / 2).toBeCloseTo(r.x + r.w / 2, 6);
   });
 
   it('finds the same balloon from anywhere inside it', () => {

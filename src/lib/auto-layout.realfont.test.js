@@ -103,4 +103,29 @@ describe('solveLayout with real fonts', () => {
     expect(r.w).toBeGreaterThan(r.h);
     holds(r, s, TEXT, null);
   });
+
+  // A round balloon used to get a flat band: the box as wide as the balloon and
+  // the text on as few lines as that holds. It is now the roundest block the
+  // balloon holds - narrower, more lines, short at the top and the bottom.
+  it('sets centred text in a round balloon as a round block, tapered at both ends', () => {
+    const s = styleFor('Comic Neue', { align: 'center' });
+    const round = { kind: 'ellipse', cx: 350, cy: 320, rx: 150, ry: 130 };
+    const r = solveLayout({ text: TEXT, style: s, refSize: 22, region: round, opts: { minSize: 12 } });
+    expect(r.status).toBe('ok');
+    expect(r.lines.length).toBeGreaterThanOrEqual(5);
+    const ws = r.lines.map((l) => lineWidth(l, { ...s, size: r.size }, r.size));
+    const widest = Math.max(...ws);
+    expect(ws[0]).toBeLessThan(0.8 * widest);
+    expect(ws[ws.length - 1]).toBeLessThan(0.8 * widest);
+    expect(r.x + r.w / 2).toBeCloseTo(round.cx, 6);
+    holds(r, s, TEXT, round);
+  });
+
+  it('leaves a rectangle silhouette at the balloon s width', () => {
+    const s = styleFor('Comic Neue', { align: 'center', shape: 'rect' });
+    const round = { kind: 'ellipse', cx: 350, cy: 320, rx: 150, ry: 130 };
+    const r = solveLayout({ text: TEXT, style: s, refSize: 22, region: round, opts: { minSize: 12 } });
+    expect(r.lines.length).toBeLessThanOrEqual(3);
+    holds(r, s, TEXT, round);
+  });
 });

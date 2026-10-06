@@ -84,7 +84,7 @@
 import { placeBlock, placeAtHeight, containBox, inkHeight, fitBox, CONTAIN_TOL, REVIEW_REASONS } from './contain.js';
 import { applyCase, lineWidth, textInset, blockYFor, layoutLines, withFamiliesHeld } from './measure.js';
 import { interiorLineWidths, inscribedRect, balloonFrame, safetyInset } from './balloon.js';
-import { neededHeight, BALANCED_DEFAULTS } from './typeset.js';
+import { neededHeight, BALANCED_DEFAULTS, ovalProfile } from './typeset.js';
 import { normalizeFit } from './data.js';
 
 export const SIZE_STEP = 0.5;
@@ -345,6 +345,21 @@ function score(ctx, lines, blockW, blockH) {
   return Math.abs(Math.log(blockW / blockH / target)) + HYPHEN_COST * addedHyphens(ctx, lines);
 }
 
+// How far the block's silhouette is from the oval a balloon line is set to
+// (`ovalProfile`): the root mean square of each line's share of the widest
+// against the profile's, 0 for a block that is the oval exactly - and for any
+// block of one or two lines, which no breaking can taper.
+function offOval(lines, s) {
+  const ws = lines.map((l) => lineWidth(l, s, s.size));
+  const max = Math.max(0, ...ws);
+  if (!(max > 0) || ws.length < 2) return 0;
+  const want = ovalProfile(ws.length);
+  const top = Math.max(...want);
+  let sum = 0;
+  ws.forEach((w, i) => (sum += (w / max - want[i] / top) ** 2));
+  return Math.sqrt(sum / ws.length);
+}
+
 // Lines the breaker ended inside a word: the last token carries a '-' that no
 // word of the text has there. A break after a hyphen the text already has
 // (`WELL-` of `WELL-KNOWN`) is not one.
@@ -380,6 +395,79 @@ function snug(ctx, size, t) {
   if (!(w < t.c.w)) return t;
   const u = trial(ctx, size, w, true);
   return u.ok && u.place.lines.length === t.place.lines.length && u.c.w < t.c.w ? u : t;
+}
+
+// Centred text in an ellipse, as the roundest block the balloon holds. The
+// width a fitted box is placed at is the widest the balloon has, and the
+// breaker, handed it, sets the fewest lines it can: a flat band across the
+// middle of a round balloon. So narrower widths, down to ROUND_MIN of it, are
+// laid out too, and the block nearest the balloon line's aspect (`score`) and
+// its oval (`offOval`, at OVAL_COST) wins.
+//
+// A balloon the text all but fills has no room for a round block at its
+// largest size, so smaller sizes are tried as well, down to ROUND_SHRINK of
+// it, each at SIZE_COST for every tenth of the size it gives up. A block that
+// is round - three lines or more, within ROUND_OFF of the oval (`offOval`),
+// and at least ROUND_ASPECT times as wide as it is tall, as a () is and a
+// column is not - beats one that is not whatever the size: the round block is
+// what is asked for, and a block that could not be set round is the
+// breaker's best at filling rows, whose shape no score here reads well. The
+// largest size with a round block is the one kept.
+const ROUND_STEPS = 8;
+const ROUND_MIN = 0.4;
+const OVAL_COST = 4;
+const ROUND_SHRINK = 0.8;
+const SIZE_COST = 0.5;
+const SIZE_TRIES = 4;
+const ROUND_ASPECT = 1.1;
+const ROUND_OFF = 0.12;
+function roundest(ctx, size, t, floor) {
+  const s = t.place.s;
+  if (ctx.R?.kind !== 'ellipse' || ctx.lk.width || s.align === 'left' || s.align === 'right') return t;
+  // A block asked to be even, or not shaped at all, is left at the balloon's width.
+  if (s.shape === 'rect' || s.shape === 'off') return t;
+  const rate = (u) => {
+    const us = u.place.s;
+    const lines = u.place.lines;
+    const lh = us.size * (us.lineHeight > 0 ? us.lineHeight : 1);
+    const smaller = Math.log(size / us.size) / Math.log(1 / 0.9);
+    return score(ctx, lines, widestOf(lines, us), lines.length * lh) + OVAL_COST * offOval(lines, us) + SIZE_COST * smaller;
+  };
+  const roundOf = (u) => {
+    const us = u.place.s;
+    const lines = u.place.lines;
+    const lh = us.size * (us.lineHeight > 0 ? us.lineHeight : 1);
+    return lines.length >= 3 && widestOf(lines, us) >= ROUND_ASPECT * lines.length * lh && offOval(lines, us) <= ROUND_OFF;
+  };
+  let best = t;
+  let bestRound = roundOf(t);
+  let bestScore = rate(t);
+  const from = Math.max(t.c.w, ctx.R.fullW);
+  const to = Math.max(ctx.minW, from * ROUND_MIN);
+  // Smaller sizes on the grid, as every size the solver picks is - and only
+  // while the block at the size above them is not round already.
+  const sizes = [size];
+  const least = ctx.lk.size ? size : Math.max(floor, upToGrid(size * ROUND_SHRINK));
+  const step = Math.max(SIZE_STEP, upToGrid((size - least) / SIZE_TRIES));
+  for (let v = downToGrid(size - step); v >= least - 1e-9; v -= step) sizes.push(v);
+  for (const sz of sizes) {
+    if (sz < size && bestRound) break;
+    // Narrower only ever means more lines, so the first width whose block no
+    // longer fits the balloon ends the search.
+    for (let i = sz === size ? 1 : 0; i <= ROUND_STEPS; i++) {
+      const u = trial(ctx, sz, Math.round(from + ((to - from) * i) / ROUND_STEPS), undefined, true);
+      if (!u.ok) break;
+      const r = roundOf(u);
+      if (bestRound && !r) continue;
+      const k = rate(u);
+      if ((r && !bestRound) || k < bestScore - 1e-9) {
+        best = u;
+        bestRound = r;
+        bestScore = k;
+      }
+    }
+  }
+  return best;
 }
 
 // A single word wider than the room its row has - what the flag should say
@@ -451,11 +539,14 @@ function solve({ text, style, refSize, region, locks, opts } = {}) {
     curve: false,
   };
 
+  const floor = Math.min(ref, Math.max(SIZE_STEP, upToGrid(Number(o.minSize) || 0)));
   const own = bestAt(ctx, ref);
   if (ctx.curve) return null;
-  if (own) return result(own.c, own.place, balloon ? 'ok' : 'no-region');
+  if (own) {
+    const t = roundest(ctx, ref, own, floor);
+    return result(t.c, t.place, !balloon ? 'no-region' : t.c.style.size < ref ? 'shrunk' : 'ok');
+  }
 
-  const floor = Math.min(ref, Math.max(SIZE_STEP, upToGrid(Number(o.minSize) || 0)));
   if (ctx.lk.size || !(floor < ref)) return bestEffort(ctx, ref);
   let best = bestAt(ctx, floor);
   if (!best) return bestEffort(ctx, floor);
@@ -472,5 +563,6 @@ function solve({ text, style, refSize, region, locks, opts } = {}) {
       best = t;
     } else hi = mid;
   }
+  best = roundest(ctx, lo, best, floor);
   return result(best.c, best.place, balloon ? 'shrunk' : 'no-region');
 }

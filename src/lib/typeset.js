@@ -435,7 +435,7 @@ function hourglassPenalty(ratios, weight, tol) {
 // curve the lettering benchmark scores `ovalScore` against, so the preference
 // and the measurement cannot drift apart. A starting point to tune on real
 // pages, not a rule.
-function ovalProfile(n) {
+export function ovalProfile(n) {
   if (n === 1) return [1];
   return Array.from({ length: n }, (_, i) => {
     const u = (2 * i) / (n - 1) - 1;
