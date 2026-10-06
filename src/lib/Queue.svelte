@@ -43,6 +43,7 @@
   } from './editor/field-undo.svelte.js';
   import { modKey } from './format.js';
   import ReviewList from './ReviewList.svelte';
+  import ColorPicker from './ColorPicker.svelte';
 
   const p = $derived(page());
   // Which lines already have a box, in one pass over the page's boxes rather
@@ -396,7 +397,7 @@
                   <label class="qtf-lbl" for="qtf-out-{line.n}">Outline</label>
                   <input class="btick" id="qtf-out-{line.n}" type="checkbox" checked={form.outlineOn} onchange={(e) => (form.outlineOn = e.currentTarget.checked)} />
                   {#if form.outlineOn}
-                    <input type="color" value={form.outline} oninput={(e) => (form.outline = e.currentTarget.value)} />
+                    <ColorPicker value={form.outline} label="Outline colour" size={20} unclipped onchange={(hex) => (form.outline = hex)} />
                     <input type="number" min="0" max="20" step="0.5" value={form.outlineWidth} oninput={(e) => (form.outlineWidth = Math.max(0, Math.min(20, +e.currentTarget.value || 0)))} />
                   {/if}
                 </span>

@@ -97,6 +97,10 @@ fontdb = "0.24"
 # order they are tried in.
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "2.0.0-rc.10", features = ["coreml"] }
+# The colour picker's eyedropper (src/screen_color.rs): AppKit's NSColorSampler,
+# because WKWebView has no EyeDropper. Both crates are already in the tree via tao.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSColor", "NSColorSampler", "NSColorSpace"] }
+block2 = "0.6"
 
 # One archive carries both: CUDA for NVIDIA machines with CUDA 13 + cuDNN 9
 # installed, DirectML for every other GPU. The provider DLLs it ships are

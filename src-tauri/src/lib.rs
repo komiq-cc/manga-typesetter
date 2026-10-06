@@ -8,6 +8,7 @@ mod durability;
 #[cfg(any(target_os = "linux", test))]
 mod linux;
 mod memory;
+mod screen_color;
 mod system_fonts;
 
 /// Command-line flag that makes the binary probe one execution provider and
@@ -41,6 +42,7 @@ pub fn run() {
       detect::engine::detect_health,
       brush::brush_import,
       memory::process_memory,
+      screen_color::pick_screen_color,
       system_fonts::system_fonts,
       durability::fsync_path
     ])

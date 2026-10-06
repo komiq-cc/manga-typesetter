@@ -18,6 +18,7 @@ import {
   import { modKey } from './format.js';
   import { fontGroups, isFontOffered } from './font-menu.js';
   import { PATTERN_KINDS, GRADIENT_MAX_STOPS } from './data.js';
+  import ColorPicker from './ColorPicker.svelte';
 
   // app.bulk.style is the editable template; null when closed.
   const s = $derived(app.bulk.style);
@@ -502,7 +503,7 @@ import {
               {@render tick('color')}
               <span class="lbl">Color</span>
               <div class="color-field">
-                <span class="swatch"><input type="color" value={s.color} oninput={(e) => set('color', e.target.value)} /></span>
+                <ColorPicker value={s.color} label="Text colour" size={30} unclipped onchange={(hex) => set('color', hex)} />
                 <input type="text" class="hex" value={s.color} onchange={(e) => setHex('color', e.currentTarget.value, e.currentTarget)} />
               </div>
             </div>
@@ -559,7 +560,7 @@ import {
                     {#each s.strokes as st, i (i)}
                       <div class="sub-row">
                         <div class="color-field">
-                          <span class="swatch"><input type="color" value={st.color} oninput={(e) => { st.color = e.target.value; tickBulkProp('strokes'); }} /></span>
+                          <ColorPicker value={st.color} label="Stroke colour" size={30} unclipped onchange={(hex) => { st.color = hex; tickBulkProp('strokes'); }} />
                           <input type="text" class="hex" value={st.color} onchange={(e) => setStrokeHex(i, e.currentTarget.value, e.currentTarget)} />
                         </div>
                         <!-- Width floors at 0.5, not 0: the schema drops a
@@ -633,7 +634,7 @@ import {
                     {#each s.gradient.stops as st (st)}
                       <div class="sub-row">
                         <div class="color-field">
-                          <span class="swatch"><input type="color" value={st.color} oninput={(e) => { st.color = e.target.value; tickBulkProp('gradient'); }} /></span>
+                          <ColorPicker value={st.color} label="Stop colour" size={30} unclipped onchange={(hex) => { st.color = hex; tickBulkProp('gradient'); }} />
                           <input type="text" class="hex" value={st.color} onchange={(e) => setStopHex(s.gradient.stops.indexOf(st), e.currentTarget.value, e.currentTarget)} />
                         </div>
                         <input type="number" min="0" max="1" step="0.05" value={st.pos} title="Position 0..1" placeholder="Pos" oninput={(e) => { st.pos = clamp(+e.target.value || 0, 0, 1); tickBulkProp('gradient'); }} onchange={() => sortStops()} />
@@ -659,14 +660,14 @@ import {
                   <div class="field">
                     <span class="sub-lbl">FG</span>
                     <div class="color-field">
-                      <span class="swatch"><input type="color" value={s.pattern.fg} oninput={(e) => { s.pattern.fg = e.target.value; tickBulkProp('pattern'); }} /></span>
+                      <ColorPicker value={s.pattern.fg} label="Pattern foreground colour" size={30} unclipped onchange={(hex) => { s.pattern.fg = hex; tickBulkProp('pattern'); }} />
                       <input type="text" class="hex" value={s.pattern.fg} onchange={(e) => setPatternHex('fg', e.currentTarget.value, e.currentTarget)} />
                     </div>
                   </div>
                   <div class="field">
                     <span class="sub-lbl">BG</span>
                     <div class="color-field">
-                      <span class="swatch"><input type="color" value={s.pattern.bg} oninput={(e) => { s.pattern.bg = e.target.value; tickBulkProp('pattern'); }} /></span>
+                      <ColorPicker value={s.pattern.bg} label="Pattern background colour" size={30} unclipped onchange={(hex) => { s.pattern.bg = hex; tickBulkProp('pattern'); }} />
                       <input type="text" class="hex" value={s.pattern.bg} onchange={(e) => setPatternHex('bg', e.currentTarget.value, e.currentTarget)} />
                     </div>
                   </div>
@@ -697,7 +698,7 @@ import {
                       <div class="sub-card">
                         <div class="sub-row">
                           <div class="color-field">
-                            <span class="swatch"><input type="color" value={sh.color} oninput={(e) => { sh.color = e.target.value; tickBulkProp('shadows'); }} /></span>
+                            <ColorPicker value={sh.color} label="Shadow colour" size={30} unclipped onchange={(hex) => { sh.color = hex; tickBulkProp('shadows'); }} />
                             <input type="text" class="hex" value={sh.color} onchange={(e) => setShadowHex(i, e.currentTarget.value, e.currentTarget)} />
                           </div>
                           <button class="sub-del" title="Remove shadow" onclick={() => removeShadow(i)}>×</button>

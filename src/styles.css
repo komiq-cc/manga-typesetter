@@ -555,10 +555,6 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
   flex:1 1 auto; min-width:0; background:var(--surface); color:var(--text);
   border:1px solid var(--line2); border-radius:5px; padding:2px 4px; font-family:inherit; font-size:11.5px; outline:none;
 }
-.qtf-row input[type='color']{
-  flex:0 0 26px; height:20px; padding:0; border:1px solid var(--line2); border-radius:5px;
-  background:var(--surface); cursor:pointer;
-}
 /* The two things this form has to say in words: that the name was already
    taken, and what deleting a tag does and does not do. Both wrap - they are
    sentences, not labels - and both are the same quiet weight as `.bulk-note`. */
@@ -675,12 +671,10 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
 
 /* color field */
 .color-field{ display:flex; align-items:center; gap:8px; }
-.swatch{ width:30px; height:30px; border-radius:6px; border:1px solid var(--line2); cursor:pointer; flex:0 0 auto; position:relative; overflow:hidden; }
-.swatch input[type=color]{ position:absolute; inset:-4px; width:140%; height:140%; border:none; padding:0; cursor:pointer; background:none; }
+/* The swatch is ColorPicker's own trigger, sized by its `size` prop: 24 in the
+   Inspector, where it shares a 28px row with the field beside it, and 30 in the
+   bulk panel, whose fields are 30. */
 .color-field .hex{ flex:1 1 auto; }
-/* 24 inside the Inspector, where the swatch shares a 28px row with the field
-   beside it; the base 30 stays for the bulk panel, whose fields are 30. */
-.insp .swatch{ width:24px; height:24px; border-radius:5px; }
 
 .insp .btn-danger{
   margin-top:4px; height:32px; background:transparent; border:1px solid var(--warn);
@@ -995,12 +989,6 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .brow .seg{ width:max-content; max-width:100%; }
 .brow .seg button{ flex:0 0 auto; padding:0 10px; }
 .brow .color-field .hex{ flex:1 1 auto; min-width:0; }
-/* No swatch override here. It used to shrink to 26px square, from a time when
-   the hex beside it was 26px too; the hex now takes 30px from the panel-wide
-   input rule, and three colour rows sat 4px out of alignment with the field
-   they belong to. The base `.swatch` is already 30px - the same height - so the
-   row lines up by having no opinion rather than by carrying a second number
-   that has to be kept in step with the first. */
 
 /* Native, on purpose: the checkbox is the one control the platform draws
    correctly in both themes once `color-scheme` is declared on :root, and

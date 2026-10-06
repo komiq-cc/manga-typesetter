@@ -79,11 +79,13 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "app"
 version = "0.3.1"
 dependencies = [
+ "block2",
  "flate2",
  "fontdb",
  "image",
  "libc",
  "log",
+ "objc2-app-kit",
  "ort",
  "ort-sys",
  "reqwest 0.12.28",

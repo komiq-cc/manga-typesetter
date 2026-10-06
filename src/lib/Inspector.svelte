@@ -38,6 +38,7 @@
   import { liquifyTool, setLiquifyMode, LIQUIFY_RADIUS_MIN, LIQUIFY_RADIUS_MAX } from './liquify-tool.svelte.js';
   import { LIQUIFY_MODES } from './liquify.js';
   import BrushPanel from './BrushPanel.svelte';
+  import ColorPicker from './ColorPicker.svelte';
   import { brushArmed } from './brush-tool.svelte.js';
   // Which tab is open is session state shared with the keyboard - see
   // inspector-tabs.svelte.js. The panel is one of two writers, not the owner.
@@ -379,6 +380,17 @@
     hexFlag(el, el.value !== '' && !HEX.test(el.value));
   }
 
+  // A colour picker's change. The picker's popover floats in <body>, outside
+  // `.insp`, so the capture-phase pointerdown/keydown that arms the undo
+  // snapshot never sees a press on its square or its fields: the snapshot is
+  // armed here instead, before the write, or a pick made after a pause would
+  // record before === after and be lost to undo.
+  function setColour(obj, key, hex) {
+    armSnap();
+    obj[key] = hex;
+    touch();
+  }
+
   function setHex(obj, key, v, el) {
     const raw = String(v ?? '').trim();
     if (HEX.test(raw)) {
@@ -467,9 +479,9 @@
   // handles sit on a rail of the same width below it. `$state` only because
   // `bind:this` writes it; nothing renders from either of these.
   let barEl = $state(null);
-  // The <input type=color> behind the selected stop's swatch, so a double-click
-  // on a handle can open the same picker the swatch opens.
-  let stopSwatchEl = $state(null);
+  // The colour picker behind the selected stop's swatch, so a double-click on
+  // a handle can open the same picker the swatch opens.
+  let stopPicker = $state(null);
   // The index being dragged, or null. Not `$state`: nothing renders from it.
   let dragging = null;
 
@@ -609,7 +621,7 @@
   function openStopColour(e, i) {
     e.stopPropagation();
     stopIdx = i;
-    stopSwatchEl?.click();
+    stopPicker?.show();
   }
 
   function removeStop(i) {
@@ -789,7 +801,7 @@
      "Colour" inputs are three identical names to a screen reader. -->
 {#snippet colorField(obj, key, label = 'Colour')}
   <div class="color-field">
-    <span class="swatch"><input type="color" bind:value={obj[key]} oninput={touch} aria-label={label} /></span>
+    <ColorPicker value={obj[key]} {label} size={24} unclipped onchange={(hex) => setColour(obj, key, hex)} />
     <input type="text" class="hex" value={obj[key]} aria-label="{label} hex" oninput={hexInput} onchange={(e) => setHex(obj, key, e.target.value, e.target)} />
   </div>
 {/snippet}
@@ -797,7 +809,7 @@
 <!-- The swatch on its own, for the compact list rows where the swatch and the
      hex field are two cells of the row's grid rather than a nested pair. -->
 {#snippet swatchCell(obj, key, label)}
-  <span class="swatch" title={label}><input type="color" bind:value={obj[key]} oninput={touch} aria-label={label} /></span>
+  <ColorPicker value={obj[key]} {label} size={24} unclipped onchange={(hex) => setColour(obj, key, hex)} />
 {/snippet}
 
 <!-- The one control that removes a list item. It closes every row, so the ×
@@ -986,11 +998,9 @@
             <div class="grad-sel">
               <span class="grad-n">{Math.min(stopIdx, s.gradient.stops.length - 1) + 1}/{s.gradient.stops.length}</span>
               <!-- The swatch snippet's own markup, spelled out here because this
-                   one needs a handle on the input: a double-click on a stop
-                   opens this picker. -->
-              <span class="swatch" title="Stop colour">
-                <input type="color" bind:this={stopSwatchEl} bind:value={selStop.color} oninput={touch} aria-label="Stop colour" />
-              </span>
+                   one needs a handle on the picker: a double-click on a stop
+                   opens it. -->
+              <ColorPicker bind:this={stopPicker} value={selStop.color} label="Stop colour" size={24} unclipped onchange={(hex) => setColour(selStop, 'color', hex)} />
               <input type="text" class="hex" value={selStop.color} aria-label="Stop hex colour" oninput={hexInput} onchange={(e) => setHex(selStop, 'color', e.target.value, e.target)} />
               <input type="number" min="0" max="100" step="1" value={pct(selStop.pos)} aria-label="Stop position" title="Position along the gradient, %" oninput={(e) => setAlpha(selStop, 'pos', e.target.value)} onchange={() => sortStops()} />
               <input type="number" min="0" max="100" step="1" value={pct(selStop.opacity)} aria-label="Stop opacity" title="Opacity of this stop, %" oninput={(e) => setAlpha(selStop, 'opacity', e.target.value)} />

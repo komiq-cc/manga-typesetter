@@ -44,6 +44,7 @@
   } from './brush-library.svelte.js';
   import { settleTips } from './brush-tips.js';
   import { filterBrushes, pickedSettings, tipDims } from './brush-picker.js';
+  import ColorPicker from './ColorPicker.svelte';
   import { tipCell } from './brush-tip-cell.js';
   import { brushTabIcons } from './tab-icons.js';
   import BrushBoard from './BrushBoard.svelte';
@@ -345,7 +346,7 @@
   <div class="grp">
     <span class="lbl">{label}</span>
     <div class="colour-row">
-      <span class="swatch"><input type="color" bind:value={obj[key]} aria-label={label} /></span>
+      <ColorPicker value={obj[key]} {label} size={24} unclipped onchange={(hex) => (obj[key] = hex)} />
       <span class="hex">{obj[key]}</span>
     </div>
   </div>
