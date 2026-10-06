@@ -1,7 +1,8 @@
 // `pub` because the `.sut` parser and its scorer are reachable from the crate's
 // tests as well as from the `brush_import` command below.
 pub mod brush;
-mod detect;
+// `pub` for examples/detect_pages.rs, the headless Detect scripts call.
+pub mod detect;
 mod durability;
 // Linux-only at runtime; compiled under `test` everywhere so its unit tests
 // run on the Mac too (the code is plain POSIX).
