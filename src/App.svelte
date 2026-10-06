@@ -16,7 +16,7 @@
   import NewChapterDialog from './lib/home/NewChapterDialog.svelte';
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -280,6 +280,17 @@
       if (isTranslateMode() || !app.selectedId) return false;
       toggleLayoutLock(app.selectedId);
     },
+    // Declined whenever the press could mean copying text instead - text
+    // selected somewhere on screen - so the browser's own copy still runs.
+    'box.copy': () => {
+      if (!app.selectedId || isTranslateMode() || hasTextSelection()) return false;
+      if (!copyBox(app.selectedId)) return false;
+      toast('Box copied');
+    },
+    'box.paste': () => {
+      if (isTranslateMode() || !hasCopiedBox()) return false;
+      pasteBox();
+    },
     'box.delete': deleteSelected,
     'box.deleteAlt': deleteSelected,
     'box.resetRotation': () => {
@@ -330,6 +341,10 @@
     releaseContextMenu = null;
   });
 
+  function hasTextSelection() {
+    const sel = typeof window !== 'undefined' ? window.getSelection?.() : null;
+    return !!sel && !sel.isCollapsed && sel.toString().trim() !== '';
+  }
   function deleteSelected() {
     if (!app.selectedId || isTranslateMode()) return false;
     deleteBox(app.selectedId);

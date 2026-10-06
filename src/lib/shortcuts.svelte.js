@@ -271,6 +271,10 @@ const DEFS = [
   // Selected box. Duplicate and the style clipboard are pure Mod combos -
   // no layout produces one by typing - so they stay live in a text field.
   { id: 'box.duplicate', label: 'Duplicate box', group: 'Text box', combo: 'Mod+d', whenTyping: true },
+  // Copy and paste a whole box, onto this page or any other. Not live while
+  // typing: in a text field Mod+C and Mod+V are the field's own copy and paste.
+  { id: 'box.copy', label: 'Copy box', group: 'Text box', combo: 'Mod+c' },
+  { id: 'box.paste', label: 'Paste box', group: 'Text box', combo: 'Mod+v' },
   { id: 'box.delete', label: 'Delete box', group: 'Text box', combo: 'Delete' },
   { id: 'box.deleteAlt', label: 'Delete box (alternate)', group: 'Text box', combo: 'Backspace' },
   { id: 'box.resetRotation', label: 'Reset rotation to 0°', group: 'Text box', combo: 'Mod+0', whenTyping: true },

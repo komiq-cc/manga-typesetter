@@ -19,6 +19,7 @@ import {
   settleEdits,
   recordEdit,
   placeActiveAt,
+  nextPage,
   activateLine,
   toggleTagOnLine,
   setSaver,
@@ -67,6 +68,9 @@ import {
   setBoxText,
   deleteBox,
   duplicateBox,
+  copyBox,
+  pasteBox,
+  hasCopiedBox,
   addInkBox,
   setBoxInk,
   resizeBox,
@@ -106,7 +110,7 @@ import {
   SIDEBAR_MAX_SHARE,
   toggleBalloonFit,
 } from './store.svelte.js';
-import { defaultStyle, normalizeStyle, GRADIENT_MAX_STOPS } from './data.js';
+import { defaultStyle, normalizeStyle, normalizeAuto, GRADIENT_MAX_STOPS } from './data.js';
 import { setPref } from './prefs.svelte.js';
 import { bindTags, tags, lineTags, setLineTags } from './tags.svelte.js';
 import { initHistory, resetHistory, undo, redo } from './editor/history.svelte.js';
@@ -2957,6 +2961,111 @@ describe('duplicating a box', () => {
     expect(log[0].t).toBe('place');
     expect(log[0].box.id).toBe(copyId);
     expect(log[0].line.n).toBe(byId(copyId).lineN);
+  });
+});
+
+describe('copying a box and pasting it', () => {
+  beforeEach(() => {
+    app.chapterRef = null;
+    app.chapterMode = 'typeset';
+    loadProjectPages([
+      { id: 1, w: 800, h: 1200, lines: [{ n: 1, type: 'sfx', jp: 'ドン', en: 'DON' }], boxes: [] },
+      { id: 2, w: 800, h: 1200, lines: [], boxes: [] },
+      { id: 3, w: 300, h: 300, lines: [], boxes: [] },
+    ]);
+  });
+
+  it('pastes onto another page at the same place, with the words and style of the copy', () => {
+    placeActiveAt(200, 300);
+    const src = page().boxes[0];
+    src.style.size = 42;
+    expect(copyBox(src.id)).toBe(true);
+    nextPage();
+    const copy = byId(pasteBox());
+    expect(page().id).toBe(2);
+    expect(page().boxes.length).toBe(1);
+    expect([copy.x, copy.y, copy.w, copy.h]).toEqual([src.x, src.y, src.w, src.h]);
+    expect(copy.style.size).toBe(42);
+    expect(boxText(copy)).toBe('DON');
+    const ln = lineByN(page(), copy.lineN);
+    expect([ln.type, ln.jp, ln.en]).toEqual(['sfx', 'ドン', 'DON']);
+    expect(app.selectedId).toBe(copy.id);
+  });
+
+  // Every attribute, the solver's record included: a copy that lost its locks
+  // or its reference size would lay itself out apart from its source.
+  it('carries the auto-fit record and its locks, as a copy of its own', () => {
+    const id = addEmptyBox(100, 100);
+    endEdit('typed');
+    const src = byId(id);
+    src.auto = normalizeAuto({ refSize: 30, minSize: 12, locks: { size: true, width: true } });
+    copyBox(id);
+    nextPage();
+    const copy = byId(pasteBox());
+    expect(copy.auto).toMatchObject({ on: true, refSize: 30, minSize: 12, locks: { size: true, width: true } });
+    copy.auto.locks.size = false;
+    expect(src.auto.locks.size).toBe(true);
+  });
+
+  it('holds what was copied, not what the source became afterwards', () => {
+    const id = addEmptyBox(100, 100);
+    endEdit('before');
+    copyBox(id);
+    setBoxText(byId(id), 'after');
+    byId(id).style.size = 99;
+    const copy = byId(pasteBox());
+    expect(boxText(copy)).toBe('before');
+    expect(copy.style.size).not.toBe(99);
+  });
+
+  it('steps each paste on one page down from the last, starting from the source', () => {
+    const id = addEmptyBox(100, 100);
+    endEdit('x');
+    const src = byId(id);
+    copyBox(id);
+    const a = byId(pasteBox());
+    const b = byId(pasteBox());
+    expect([a.x, a.y]).toEqual([src.x + 16, src.y + 16]);
+    expect([b.x, b.y]).toEqual([src.x + 32, src.y + 32]);
+    expect(a.style).not.toBe(b.style);
+  });
+
+  it('keeps the paste on a smaller page', () => {
+    const id = addEmptyBox(700, 1100);
+    endEdit('edge');
+    copyBox(id);
+    nextPage();
+    nextPage();
+    const copy = byId(pasteBox());
+    expect(copy.x).toBeGreaterThanOrEqual(0);
+    expect(copy.y).toBeGreaterThanOrEqual(0);
+    expect(copy.x).toBeLessThanOrEqual(Math.max(0, 300 - copy.w));
+  });
+
+  it('refuses with nothing to copy, nothing copied, or in a translate chapter', () => {
+    expect(copyBox('nosuchbox')).toBe(false);
+    const id = addEmptyBox(100, 100);
+    endEdit('typed');
+    copyBox(id);
+    expect(hasCopiedBox()).toBe(true);
+    app.chapterMode = 'translate';
+    expect(pasteBox()).toBe(null);
+    expect(page().boxes.length).toBe(1);
+  });
+
+  it('is one undo step', () => {
+    const id = addEmptyBox(100, 100);
+    endEdit('typed');
+    copyBox(id);
+    nextPage();
+    const log = [];
+    const off = setRecorder((e) => log.push(e));
+    const copyId = pasteBox();
+    off();
+    expect(log.length).toBe(1);
+    expect(log[0].t).toBe('place');
+    expect(log[0].pageId).toBe(2);
+    expect(log[0].box.id).toBe(copyId);
   });
 });
 

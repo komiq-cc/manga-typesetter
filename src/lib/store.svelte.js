@@ -3735,19 +3735,54 @@ export function duplicateBox(id = app.selectedId) {
   const p = page();
   const src = p.boxes.find((b) => b.id === id);
   if (!src) return null;
+  const snap = boxSnapshot(src, p);
+  return placeSnapshot(p, snap, snap.box.x + DUP_OFFSET, snap.box.y + DUP_OFFSET);
+}
+
+// What a copy needs of its source, taken whole at the moment of the copy: the
+// box, and the line it reads its words from. Plain data, so a clipboard holding
+// it is untouched by later edits to the source - or by the source's page being
+// turned away from, or the source being deleted.
+function boxSnapshot(src, p) {
   const from = lineByN(p, src.lineN);
-  const ln = {
-    n: nextFreeLineN(p),
-    type: from?.type ?? 'dialogue',
-    jp: from?.jp ?? '',
-    // What the source SHOWS, not what its line says: a queue-placed box can
-    // override its line with `box.text`, and a legacy free box has no line at
-    // all, so `boxText` is the only reader that answers for every case.
-    en: boxText(src, p),
-  };
   const tags = lineTags(from);
-  if (tags.length) ln.tags = [...tags];
+  const text = boxText(src, p);
+  return {
+    box: {
+      x: src.x,
+      y: src.y,
+      w: src.w,
+      h: src.h,
+      style: cloneStyle(src.style),
+      fit: normalizeFit($state.snapshot(src.fit)),
+      // The solver's record: whether it manages the box, the size it was solved
+      // from and the locks the user set. A copy that lost it would lay itself
+      // out differently the first time either box is edited.
+      auto: normalizeAuto($state.snapshot(src.auto)),
+      // Whether the box is still the solve's answer. The copy is the same solve
+      // somewhere else - its fit moves with it - so it keeps the answer the way
+      // a moved box does (`moveBoxTo`), and only then.
+      solved: !!src.auto && src.auto.status !== 'pending' && solveStands(src, text),
+    },
+    line: {
+      type: from?.type ?? 'dialogue',
+      jp: from?.jp ?? '',
+      // What the source SHOWS, not what its line says: a queue-placed box can
+      // override its line with `box.text`, and a legacy free box has no line at
+      // all, so `boxText` is the only reader that answers for every case.
+      en: text,
+      ...(tags.length ? { tags: [...tags] } : null),
+    },
+  };
+}
+
+// A snapshot made into a new box on `p`, its top-left at (x, y) or as near as
+// the page allows. One undo entry, and the copy ends up selected.
+function placeSnapshot(p, snap, x, y) {
+  const ln = { n: nextFreeLineN(p), ...snap.line };
+  if (ln.tags) ln.tags = [...ln.tags];
   p.lines.push(ln);
+  const src = snap.box;
   const b = {
     id: 'b' + boxSeq++,
     lineN: ln.n,
@@ -3756,10 +3791,12 @@ export function duplicateBox(id = app.selectedId) {
     // here left a non-null override that `boxText` kept showing while every
     // edit went to the line - the copy looked frozen on the original's words.
     text: null,
-    x: clamp(src.x + DUP_OFFSET, 0, Math.max(0, p.w - src.w)),
-    y: clamp(src.y + DUP_OFFSET, 0, Math.max(0, p.h - src.h)),
+    x: clamp(x, 0, Math.max(0, p.w - src.w)),
+    y: clamp(y, 0, Math.max(0, p.h - src.h)),
     w: src.w,
     h: src.h,
+    // Cloned again, not handed over: one clipboard pasted twice is two boxes
+    // that must restyle apart.
     style: cloneStyle(src.style),
     fit: null,
   };
@@ -3768,7 +3805,11 @@ export function duplicateBox(id = app.selectedId) {
   // draws its block (`balloonWidthsFor`), so a fit left where the original's
   // balloon is would break the copy's lines on other rows. With it carried,
   // the copy breaks exactly where the original does.
-  b.fit = translateFit(normalizeFit($state.snapshot(src.fit)), b.x - src.x, b.y - src.y);
+  b.fit = translateFit(normalizeFit(structuredClone(src.fit)), b.x - src.x, b.y - src.y);
+  if (src.auto) {
+    b.auto = normalizeAuto(structuredClone(src.auto));
+    if (src.solved) b.auto.stamp = solveStamp(b, ln.en);
+  }
   // The copy's own verdict, before the record takes its snapshot. Not the
   // source's flag copied across: the copy sits somewhere else and reads its
   // text off a line of its own.
@@ -3787,6 +3828,49 @@ export function duplicateBox(id = app.selectedId) {
   markUnsaved();
   selectBox(b.id);
   return b.id;
+}
+
+// ---------- copy / paste ----------
+// A box copied with Mod+C and pasted with Mod+V, onto the page on screen - the
+// same page or any other. The clipboard is the app's own rather than the
+// system's: what it holds is a box, not text, and the system clipboard stays
+// the text fields' to use.
+//
+// `landed` is where the clipboard last landed on each page, the copy's own
+// page counting its source. A paste onto a page it has landed on steps down
+// and right from there, as a duplicate does, so pasting twice gives two boxes
+// rather than one on top of the other; a first paste onto another page lands
+// where the box stood on its own page, which on a chapter of same-sized pages
+// is the same place in the panel layout.
+let boxClipboard = null;
+
+export const hasCopiedBox = () => !!boxClipboard;
+
+export function copyBox(id = app.selectedId) {
+  if (!app.pages.length || isTranslateMode()) return false;
+  const p = page();
+  const src = p.boxes.find((b) => b.id === id);
+  if (!src) return false;
+  // A debounced edit still pending on the box would otherwise be missing from
+  // the copy: the user copies what they see.
+  settleEdits();
+  const snap = boxSnapshot(src, p);
+  boxClipboard = { ...snap, landed: new Map([[p.id, { x: src.x, y: src.y }]]) };
+  return true;
+}
+
+export function pasteBox() {
+  if (!boxClipboard || !app.pages.length || isTranslateMode()) return null;
+  settleEdits(); // see `duplicateBox`
+  const p = page();
+  const { landed, box } = boxClipboard;
+  const last = landed.get(p.id);
+  const id = last
+    ? placeSnapshot(p, boxClipboard, last.x + DUP_OFFSET, last.y + DUP_OFFSET)
+    : placeSnapshot(p, boxClipboard, box.x, box.y);
+  const b = p.boxes.find((x) => x.id === id);
+  landed.set(p.id, { x: b.x, y: b.y });
+  return id;
 }
 
 // ---------- a box born from the brush board ----------
