@@ -207,7 +207,7 @@ export function defaultStyle() {
   return {
     font: 'Comic Neue',
     size: 26,
-    bold: true,
+    bold: false,
     italic: false,
     align: 'center',
     valign: 'middle', // top | middle | bottom
@@ -217,7 +217,7 @@ export function defaultStyle() {
     // Solid fill colour. Still the single source for the glyph colour when
     // neither gradient nor pattern is on; when one of them is on it is the
     // colour behind the fill layer (and the PSD fallback colour).
-    color: '#1a1a1a',
+    color: '#000000',
     // Gradient fill. `scope` decides what the gradient spans: 'box' runs once
     // across the whole text block, 'line' restarts on every wrapped line.
     // `kind` is 'linear' or 'radial'.

@@ -1111,7 +1111,7 @@ export async function reconstructForeign(psd) {
             // the size of its text - a slow drift upward on every round trip
             // through a PSD whose embedded project Photoshop has rewritten.
             valign: 'top',
-            color: st.fillColor ? rgbHex(st.fillColor) : '#1a1a1a',
+            color: st.fillColor ? rgbHex(st.fillColor) : '#000000',
             strokes,
           },
         });

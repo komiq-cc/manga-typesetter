@@ -1139,7 +1139,7 @@ describe('the style schema migration', () => {
 const BULK_VALUES = () => ({
   font: 'Bangers',
   size: 44,
-  bold: false,
+  bold: true,
   italic: true,
   uppercase: true,
   align: 'left',
