@@ -1495,9 +1495,12 @@ describe('placement chooses the size (FIT-1)', () => {
   };
   const placeAt = (size, en = TEXT) => {
     loadProjectPages(noDetect(en));
-    app.lastStyle = { ...defaultStyle(), size };
+    tags.sizes[''] = size;
     pixels = ovalPage();
     placeActiveAt(250, 250);
+    // The placement's size came from the memory; what the cases below check is
+    // what writes it next.
+    tags.sizes = {};
     return page().boxes[0];
   };
   const inside = (b) => {
@@ -1545,7 +1548,7 @@ describe('placement chooses the size (FIT-1)', () => {
     // The repro: 240 by 180, and a reference size of 40 the text cannot keep.
     const overflowed = () => {
       loadProjectPages(noDetect(LONGER));
-      app.lastStyle = { ...defaultStyle(), size: 40 };
+      tags.sizes[''] = 40;
       const img = pageImage(500, 500);
       drawEllipse(img, 250, 250, 120, 90);
       pixels = img;
@@ -1759,7 +1762,7 @@ describe('placement chooses the size (FIT-1)', () => {
     // its height back.
     it('gives the height back when an edge drag makes the box wider, and keeps the width through later edits', () => {
       loadProjectPages(noDetect(`${TEXT} ${TEXT}`));
-      app.lastStyle = { ...defaultStyle(), size: 26 };
+      tags.sizes[''] = 26;
       placeActiveAt(250, 250);
       const b = page().boxes[0];
       expect(b.fit).toBe(null);
@@ -2039,7 +2042,7 @@ describe('placement chooses the size (FIT-1)', () => {
   // stands - its flag with it.
   it('rescales the reference size with the page, and keeps a standing solve', () => {
     loadProjectPages(noDetect('I TOLD YOU WE SHOULD HAVE LEFT BEFORE THE RAIN'));
-    app.lastStyle = { ...defaultStyle(), size: 40 };
+    tags.sizes[''] = 40;
     const img = pageImage(500, 500);
     drawEllipse(img, 250, 250, 120, 90);
     pixels = img;

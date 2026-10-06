@@ -409,6 +409,11 @@
       <div class="settings-section">
         <div class="settings-title">EDITOR</div>
         <div class="field">
+          <span>Inherit previous box settings</span>
+          {@render toggle('inheritBoxStyle', 'Inherit previous box settings', prefs.inheritBoxStyle)}
+        </div>
+        <div class="qhint">In Place and Text modes, reuse the previous box’s angle and text styling. Turn off to start new boxes with app and tag defaults.</div>
+        <div class="field">
           <span>Brush tool (work in progress)</span>
           {@render toggle('brushTool', 'Brush tool (work in progress)', prefs.brushTool)}
         </div>

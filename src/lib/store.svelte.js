@@ -47,6 +47,7 @@ import {
   carryTagsForward,
   tagSize,
   rememberTagSize,
+  findTag,
 } from './tags.svelte.js';
 // The one edge in this file that points at a module which points back: `measure`
 // imports `fontCssFor` from here. Both directions are lazy - neither module
@@ -412,7 +413,7 @@ export const app = $state({
   selectedId: null,
   editingId: null, // box currently in inline-edit mode
   tool: 'place', // one of TOOLS - see setTool
-  lastStyle: defaultStyle(), // style new boxes inherit (follows the previous box; size is per tag, see sizeKeyFor)
+  lastStyle: defaultStyle(), // remembered style; new boxes inherit it when enabled (size is per tag, see sizeKeyFor)
   // Bulk-style picker mode. `style` is the template being edited, `targets` the
   // boxes clicked on the canvas (`targetSet` its membership index - see
   // `isBulkTarget`), `mask` which of the template's properties this edit is
@@ -1274,24 +1275,40 @@ export function cloneStyle(s) {
   return normalizeStyle($state.snapshot(s));
 }
 
-// ---------- font size remembered per tag ----------
-// The size a new box is born at follows the last box that carried the SAME
-// primary tag, not the last box touched: an `sfx` box sized up to 60 must not
-// drag the next dialogue box up with it, and the dialogue size must not pull
-// the next `sfx` back down. Everything else about the style still follows
+// Mirrored by prefs.svelte.js, which imports the store and cannot be imported back.
+let inheritBoxStyle = true;
+export function setInheritBoxStyle(enabled) {
+  inheritBoxStyle = !!enabled;
+}
+
+// ---------- font size per tag ----------
+// The size a new box is born at follows the box before it that carries the
+// SAME primary tag, not the last box touched: an `sfx` box sized up to 60 must
+// not drag the next dialogue box up with it, and the dialogue size must not
+// pull the next `sfx` back down. Everything else about the style still follows
 // `lastStyle`. The group is the line's first tag - the same one `styleForLine`
 // lets win - and an untagged line is its own group, keyed by the empty string.
 //
-// Persisted beside the tag registry, in project.json, and for the same reason:
-// "sfx is about 60 here" is a fact about this series, not about the person or
-// about any one chapter - see `bindTags`.
+// "Before it" is reading order: the nearest earlier line of the group that has
+// a box, on this page or the pages before (`previousGroupBox`). Not the group's
+// last EDITED box: going back to fix an older `sfx` box and then placing the
+// next one used to hand the new box the older box's size - the one before the
+// one before it - rather than its neighbour's.
 //
-// What is remembered is a REFERENCE size (FIT-1): the size the user chose for
-// this kind of text, which the solver starts from and never exceeds - not the
-// size a balloon made it shrink to, which fed back in would ratchet every later
-// box smaller. So it is written on a deliberate size change and on nothing
-// else. It used to be written on every `selectBox` too, which made it "the last
-// size clicked": one click on a big SFX box set every later SFX box.
+// A group with no box before the new one falls back to its size memory, kept
+// beside the tag registry in project.json for the same reason the registry is
+// kept there: "sfx is about 60 here" is a fact about this series, not about
+// the person or about any one chapter - see `bindTags`. Then to the tag's own
+// default size (set in its form), then to the default style's. Never to the
+// size of another group.
+//
+// What is followed and remembered is a REFERENCE size (FIT-1): the size the
+// user chose for this kind of text, which the solver starts from and never
+// exceeds - not the size a balloon made it shrink to, which fed back in would
+// ratchet every later box smaller. So the memory is written on a deliberate
+// size change and on nothing else. It used to be written on every `selectBox`
+// too, which made it "the last size clicked": one click on a big SFX box set
+// every later SFX box.
 export const sizeKeyFor = (line) => (line ? lineTags(line)[0] ?? '' : '');
 
 // The size the user chose for a box: its solver record's `refSize`, or - for a
@@ -1362,14 +1379,50 @@ export function rememberStyle(box) {
   if (size > 0) app.lastStyle.size = size;
 }
 
-// The style a box is born with: `lastStyle` under the line's tag defaults,
-// with the size taken from the line's own group when that group has been
-// seen before. A group with no memory yet falls back to `lastStyle.size`.
-// Either way a reference size (see above), which placement solves down from.
-export function inheritedStyleFor(ln) {
-  const style = styleForLine(ln, applyBoxDefaults(cloneStyle(app.lastStyle)));
-  const size = tagSize(sizeKeyFor(ln));
-  if (size != null) style.size = size;
+// The box of `ln`'s group nearest before `ln` in reading order: the highest
+// earlier line on `p`, else the last line of the group on the nearest page
+// before it. Null when the group has no box before `ln`.
+function previousGroupBox(p, ln) {
+  const key = sizeKeyFor(ln);
+  const lastOf = (pg, below) => {
+    let best = null;
+    let bestN = -Infinity;
+    for (const b of pg.boxes ?? []) {
+      if (b.lineN == null || !(b.lineN < below) || b.lineN < bestN) continue;
+      if (sizeKeyFor(lineByN(pg, b.lineN)) !== key) continue;
+      best = b;
+      bestN = b.lineN;
+    }
+    return best;
+  };
+  const here = lastOf(p, ln.n);
+  if (here) return here;
+  for (let i = app.pages.indexOf(p) - 1; i >= 0; i--) {
+    const b = lastOf(app.pages[i], Infinity);
+    if (b) return b;
+  }
+  return null;
+}
+
+// The size a box of `ln`'s group is born at - see above.
+function groupSizeFor(p, ln) {
+  const key = sizeKeyFor(ln);
+  // With inheritance off, use the tag's configured default, not sizes learned
+  // from boxes in this chapter or remembered from earlier chapters.
+  if (!inheritBoxStyle) return findTag(key)?.size ?? defaultStyle().size;
+  const prev = p && ln ? refSizeOf(previousGroupBox(p, ln)) : null;
+  if (prev > 0) return prev;
+  return tagSize(key) ?? findTag(key)?.size ?? defaultStyle().size;
+}
+
+// The style a box is born with: the remembered style (when enabled) or app
+// defaults under the line's tag defaults,
+// with the size its group gives it (`groupSizeFor`). A reference size (see
+// above), which placement solves down from.
+export function inheritedStyleFor(ln, p = page()) {
+  const base = inheritBoxStyle ? cloneStyle(app.lastStyle) : defaultStyle();
+  const style = styleForLine(ln, applyBoxDefaults(base));
+  style.size = groupSizeFor(p, ln);
   return style;
 }
 
@@ -2819,16 +2872,15 @@ const ontoPage = (p, r) => {
 // with text that only lacked its face is 'pending', and is solved when the face
 // arrives (`solvePending`).
 //
-// Per-tag font size (untagged is its own group), everything else still
-// inherits `lastStyle` - the font, colour and strokes chosen by hand on the
-// last box touched - plus the preferences for the five typesetting flags
-// (see `applyBoxDefaults`).
+// Tag defaults plus the preferences for the five typesetting flags. When style
+// inheritance is enabled, size follows the tag group and the rest follows
+// `lastStyle`; otherwise, styling and size start from app and tag defaults.
 //
 // `measured` is a fit already measured for this line's block, or null for one
 // measured and found irregular (`placeDetectedInChapter`); undefined measures
 // here.
 function bornBox(p, ln, imgX, imgY, measured) {
-  const style = inheritedStyleFor(ln);
+  const style = inheritedStyleFor(ln, p);
   const text = lineText(ln);
   const measurable = /\S/.test(text) && canMeasure();
   const solvable = measurable && faceReady(style);
@@ -3616,10 +3668,9 @@ export function addEmptyBox(imgX, imgY, target = null) {
     y: clamp(imgY - h / 2, 0, Math.max(0, p.h - h)),
     w,
     h,
-    // Through `inheritedStyleFor` like `placeActiveAt`: font size follows the
-    // untagged size memory (or `lastStyle.size`), defaults come from preferences,
-    // and everything else inherits `lastStyle`.
-    style: inheritedStyleFor(ln),
+    // Through `inheritedStyleFor` like `placeActiveAt`, respecting the same
+    // style inheritance preference and new-box defaults.
+    style: inheritedStyleFor(ln, p),
     // Never fitted at birth: a box typed onto the page is not on a detected
     // bubble and there is no block to seed a fill from. The user can ask for one
     // from the Inspector once the box is where they want it, which is what

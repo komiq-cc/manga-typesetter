@@ -1,7 +1,7 @@
 // ===== Tags =====
 // A tag is a name the user puts on a queued line - `sfx`, `narration`, whatever
-// else they invent - plus an optional default font and outline that a box picks
-// up at the moment it is placed.
+// else they invent - plus an optional default font, outline and font size that a
+// box picks up at the moment it is placed.
 //
 // Two halves, deliberately kept apart, because they persist in different places
 // and for different reasons:
@@ -67,6 +67,7 @@ export function normalizeTagName(raw) {
 export const tags = $state({ list: [], sizes: {} });
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const okSize = (v) => (isNum(v) && v > 0 ? v : null);
 
 // A stored registry is a preference of the least important kind, so the same rule
 // as the panel geometry applies: anything that does not parse, or does not carry
@@ -94,6 +95,7 @@ export function sanitizeTags(stored) {
       font: typeof e?.font === 'string' && e.font !== '' ? e.font : null,
       outline: typeof e?.outline === 'string' && e.outline !== '' ? e.outline : null,
       outlineWidth: isNum(e?.outlineWidth) ? e.outlineWidth : null,
+      size: okSize(e?.size),
     });
   }
   return out;
@@ -148,6 +150,15 @@ export function rememberTagSize(key, size) {
   save();
 }
 
+// A default size the user has just set in the tag's form is also the size the
+// group is remembered at: it is the newest deliberate choice for this kind of
+// text, and a memory left over from an older chapter must not outrank it. Only
+// a CHANGED default writes it, so saving the form for its font does not throw
+// away a size learned from the boxes since. No save here - the caller saves.
+function seedSize(name, before, after) {
+  if (after != null && after !== before) tags.sizes[name] = after;
+}
+
 export const findTag = (name) => tags.list.find((t) => t.name === name) ?? null;
 
 // Registering and re-ranking are one operation because they are one event: the
@@ -165,7 +176,9 @@ export function touchTag(name, defaults = null) {
     font: defaults?.font ?? null,
     outline: defaults?.outline ?? null,
     outlineWidth: isNum(defaults?.outlineWidth) ? defaults.outlineWidth : null,
+    size: okSize(defaults?.size),
   };
+  if (!found) seedSize(n, null, entry.size);
   tags.list = [entry, ...tags.list.filter((t) => t.name !== n)];
   save();
   return entry;
@@ -197,6 +210,11 @@ export function updateTag(name, patch = {}) {
   if (patch.outline !== undefined)
     t.outline = typeof patch.outline === 'string' && patch.outline !== '' ? patch.outline : null;
   if (patch.outlineWidth !== undefined) t.outlineWidth = isNum(patch.outlineWidth) ? patch.outlineWidth : null;
+  if (patch.size !== undefined) {
+    const size = okSize(patch.size);
+    seedSize(t.name, t.size, size);
+    t.size = size;
+  }
   save();
   return t;
 }
@@ -218,7 +236,9 @@ export function saveTagDefaults(name, defaults = {}) {
     font: typeof defaults.font === 'string' && defaults.font !== '' ? defaults.font : null,
     outline: typeof defaults.outline === 'string' && defaults.outline !== '' ? defaults.outline : null,
     outlineWidth: isNum(defaults.outlineWidth) ? defaults.outlineWidth : null,
+    size: okSize(defaults.size),
   };
+  seedSize(n, null, entry.size);
   tags.list = [...tags.list, entry];
   save();
   return entry;
@@ -267,6 +287,8 @@ export function tagFormFields(t) {
     font: t?.font ?? '',
     outline: t?.outline ?? '#ffffff',
     outlineWidth: t?.outlineWidth ?? 3,
+    // '' is "no default size", shown as an empty field.
+    size: t?.size ?? '',
   };
 }
 
@@ -278,6 +300,7 @@ export function tagFormDefaults(f) {
     font: f.font === '' ? null : f.font,
     outline: f.outlineOn ? f.outline : null,
     outlineWidth: f.outlineOn ? f.outlineWidth : null,
+    size: f.size === '' || f.size == null ? null : +f.size,
   };
 }
 

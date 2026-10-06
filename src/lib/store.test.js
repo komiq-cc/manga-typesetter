@@ -112,7 +112,7 @@ import {
 } from './store.svelte.js';
 import { defaultStyle, normalizeStyle, normalizeAuto, GRADIENT_MAX_STOPS } from './data.js';
 import { setPref } from './prefs.svelte.js';
-import { bindTags, tags, lineTags, setLineTags } from './tags.svelte.js';
+import { bindTags, unbindTags, tags, lineTags, setLineTags } from './tags.svelte.js';
 import { initHistory, resetHistory, undo, redo } from './editor/history.svelte.js';
 
 beforeEach(() => {
@@ -3734,7 +3734,8 @@ describe('the typesetting defaults a new box is born with', () => {
     setPref('defaultAutoHeight', true);
     const s = byId(addEmptyBox(100, 100)).style;
     expect(s.autoHeight).toBe(true);
-    expect(s.size).toBe(44);
+    // The size is the group's (see 'font size per tag'), never lastStyle's.
+    expect(s.size).toBe(defaultStyle().size);
     expect(s.color).toBe('#ff0000');
   });
 
@@ -3879,6 +3880,109 @@ describe('the style the next placed box follows', () => {
     const id = addEmptyBox(500, 500);
     expect(byId(id).style.size).toBe(32);
     expect(byId(id).style.autoHeight).toBe(true);
+  });
+});
+
+describe('optional previous-box style inheritance', () => {
+  beforeEach(() => {
+    app.chapterRef = null;
+    unbindTags();
+    loadProjectPages([{
+      id: 1,
+      w: 800,
+      h: 1200,
+      lines: [
+        { n: 1, type: 'dialogue', jp: 'one', en: '' },
+        { n: 2, type: 'sfx', jp: 'two', en: '', tags: ['sfx'] },
+        { n: 3, type: 'dialogue', jp: 'three', en: '' },
+        { n: 4, type: 'sfx', jp: 'four', en: '', tags: ['sfx'] },
+      ],
+      boxes: [],
+    }]);
+    app.lastStyle = defaultStyle();
+    setPref('inheritBoxStyle', true);
+  });
+
+  afterEach(() => {
+    setPref('inheritBoxStyle', true);
+    setPref('defaultAutoHeight', true);
+    setPref('defaultShape', true);
+    setPref('defaultHyphenate', true);
+    unbindTags();
+  });
+
+  const place = (n) => {
+    activateLine(n);
+    placeActiveAt(300, 300);
+    return page().boxes.at(-1);
+  };
+
+  const styleSource = (b) => {
+    Object.assign(b.style, {
+      font: 'Bangers', size: 48, rotation: 30, bold: true,
+      color: '#123456', curve: 25, flipH: true,
+      strokes: [{ color: '#ff0000', width: 8, opacity: 1 }],
+    });
+    rememberStyle(b);
+    return cloneStyle(b.style);
+  };
+
+  it('starts placed and typed boxes at defaults when off, leaving existing boxes alone', () => {
+    const first = place(1);
+    const original = styleSource(first);
+    setPref('inheritBoxStyle', false);
+
+    expect(place(3).style).toEqual(defaultStyle());
+    expect(byId(addEmptyBox(500, 500)).style).toEqual(defaultStyle());
+    expect(first.style).toEqual(original);
+  });
+
+  it('resumes following the remembered style and group size when turned back on', () => {
+    const original = styleSource(place(1));
+    setPref('inheritBoxStyle', false);
+    expect(byId(addEmptyBox(500, 500)).style.rotation).toBe(0);
+    setPref('inheritBoxStyle', true);
+
+    expect(place(3).style).toEqual(original);
+    expect(byId(addEmptyBox(500, 500)).style).toEqual(original);
+  });
+
+  it('keeps configured tag defaults while ignoring previous and remembered tag sizes', () => {
+    bindTags({
+      list: [{ name: 'sfx', font: 'Bangers', size: 64, outline: '#abcdef', outlineWidth: 5 }],
+      sizes: { sfx: 90, '': 42 },
+    });
+    styleSource(place(2));
+    setPref('inheritBoxStyle', false);
+
+    const s = place(4).style;
+    expect(s.font).toBe('Bangers');
+    expect(s.size).toBe(64);
+    expect(s.rotation).toBe(0);
+    expect(s.strokes).toEqual([{ color: '#abcdef', width: 5, opacity: 1 }]);
+    expect(byId(addEmptyBox(500, 500)).style.size).toBe(defaultStyle().size);
+  });
+
+  it('still honors new-box typesetting preferences when inheritance is off', () => {
+    styleSource(place(1));
+    setPref('inheritBoxStyle', false);
+    setPref('defaultAutoHeight', false);
+    setPref('defaultShape', false);
+    setPref('defaultHyphenate', false);
+
+    for (const b of [place(3), byId(addEmptyBox(500, 500))]) {
+      expect(b.style).toMatchObject({
+        rotation: 0, autoHeight: false, shape: 'off', hyphenate: false,
+      });
+    }
+  });
+
+  it('keeps a duplicate styled like its source while inheritance is off', () => {
+    const first = place(1);
+    const original = styleSource(first);
+    setPref('inheritBoxStyle', false);
+
+    expect(byId(duplicateBox(first.id)).style).toEqual(original);
   });
 });
 
@@ -4122,12 +4226,85 @@ describe('font size remembered per tag', () => {
     expect(b4.style.size).toBe(60);
   });
 
-  it('a tag with no memory yet falls back to app.lastStyle.size', () => {
+  it('a group with nothing to follow takes the default size, never the last box touched', () => {
     app.lastStyle.size = 42;
     activateLine(2);
     placeActiveAt(100, 100);
     const b = page().boxes.find((b) => b.lineN === 2);
-    expect(b.style.size).toBe(42);
+    expect(b.style.size).toBe(defaultStyle().size);
+  });
+
+  // The box before, not the box last edited: fixing an older sfx box and then
+  // placing the next one handed the new box the older box's size.
+  it('follows the previous box of the same tag, not the last one edited', () => {
+    const p = page();
+    p.lines.push({ n: 5, type: 'sfx', jp: 'five', en: '', tags: ['sfx'] });
+    activateLine(2);
+    placeActiveAt(100, 100);
+    const first = p.boxes.find((b) => b.lineN === 2);
+    selectBox(first.id);
+    first.style.size = 60;
+    rememberStyle(first);
+    activateLine(4);
+    placeActiveAt(300, 300);
+    const second = p.boxes.find((b) => b.lineN === 4);
+    expect(second.style.size).toBe(60);
+    selectBox(second.id);
+    second.style.size = 44;
+    rememberStyle(second);
+    // Back to the first box, and a size edit there.
+    selectBox(first.id);
+    first.style.size = 30;
+    rememberStyle(first);
+    activateLine(5);
+    placeActiveAt(500, 500);
+    expect(p.boxes.find((b) => b.lineN === 5).style.size).toBe(44);
+  });
+
+  it('is not moved by boxes of another tag or by untagged boxes', () => {
+    const p = page();
+    activateLine(2);
+    placeActiveAt(100, 100);
+    const sfx = p.boxes.find((b) => b.lineN === 2);
+    selectBox(sfx.id);
+    sfx.style.size = 60;
+    rememberStyle(sfx);
+    activateLine(3);
+    placeActiveAt(300, 300);
+    const plain = p.boxes.find((b) => b.lineN === 3);
+    expect(plain.style.size).toBe(defaultStyle().size);
+    selectBox(plain.id);
+    plain.style.size = 18;
+    rememberStyle(plain);
+    activateLine(4);
+    placeActiveAt(500, 500);
+    expect(p.boxes.find((b) => b.lineN === 4).style.size).toBe(60);
+  });
+
+  it('follows the group onto the next page', () => {
+    loadProjectPages([
+      { id: 1, w: 800, h: 1200, lines: [{ n: 1, type: 'sfx', jp: 'a', en: '', tags: ['sfx'] }], boxes: [] },
+      { id: 2, w: 800, h: 1200, lines: [{ n: 1, type: 'sfx', jp: 'b', en: '', tags: ['sfx'] }], boxes: [] },
+    ]);
+    activateLine(1);
+    placeActiveAt(100, 100);
+    const b = page().boxes[0];
+    selectBox(b.id);
+    b.style.size = 52;
+    rememberStyle(b);
+    tags.sizes = {};
+    nextPage();
+    activateLine(1);
+    placeActiveAt(100, 100);
+    expect(page().boxes[0].style.size).toBe(52);
+  });
+
+  it("takes the tag's default size when nothing comes before and nothing is remembered", () => {
+    bindTags({ list: [{ name: 'sfx', size: 70 }] });
+    activateLine(2);
+    placeActiveAt(100, 100);
+    expect(page().boxes.find((b) => b.lineN === 2).style.size).toBe(70);
+    unbindTags();
   });
 
   it('addEmptyBox uses the untagged size', () => {

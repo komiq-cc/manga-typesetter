@@ -908,7 +908,7 @@ describe('tag registry per project', () => {
     rememberTagSize('sfx', 60);
     // Let the chained project.json write land.
     await new Promise((r) => setTimeout(r, 0));
-    expect(projectJson(a).tags).toEqual([{ name: 'sfx', font: 'Bangers', outline: '#000000', outlineWidth: 5 }]);
+    expect(projectJson(a).tags).toEqual([{ name: 'sfx', font: 'Bangers', outline: '#000000', outlineWidth: 5, size: null }]);
     expect(projectJson(a).tagSizes).toEqual({ sfx: 60 });
     closeChapter();
     expect(tags.list).toEqual([]);
@@ -944,7 +944,7 @@ describe('tag registry per project', () => {
     seedProject('own', JSON.stringify({ ...JSON.parse(PROJECT('p1', 'Own')), tags: [{ name: 'SFX', font: 'Bangers' }], tagSizes: { sfx: 44, bad: 'x' } }));
     seedProject('old', PROJECT('p2', 'Old'));
     await scanLibrary();
-    expect(projectById('p1').tags).toEqual([{ name: 'sfx', font: 'Bangers', outline: null, outlineWidth: null }]);
+    expect(projectById('p1').tags).toEqual([{ name: 'sfx', font: 'Bangers', outline: null, outlineWidth: null, size: null }]);
     expect(projectById('p1').tagSizes).toEqual({ sfx: 44 });
     // No legacy localStorage in node, so nothing to adopt.
     expect(projectById('p2').tags).toEqual([]);

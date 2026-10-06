@@ -81,7 +81,7 @@ describe('stored registry', () => {
   });
   it('vets each default on its own, so one bad field costs a field', () => {
     const [t] = sanitizeTags({ list: [{ name: 'sfx', font: 'Bangers', outline: 5, outlineWidth: 'fat' }] });
-    expect(t).toEqual({ name: 'sfx', font: 'Bangers', outline: null, outlineWidth: null });
+    expect(t).toEqual({ name: 'sfx', font: 'Bangers', outline: null, outlineWidth: null, size: null });
   });
   it('collapses duplicate names to the first spelling of them', () => {
     const list = sanitizeTags({ list: [{ name: 'SFX', font: 'Bangers' }, { name: 'sfx', font: 'Nunito' }] });
@@ -91,7 +91,7 @@ describe('stored registry', () => {
   it('round-trips through the saver', () => {
     createTag('sfx', { font: 'Bangers', outline: '#000000', outlineWidth: 5 });
     bindTags(saved);
-    expect(findTag('sfx')).toEqual({ name: 'sfx', font: 'Bangers', outline: '#000000', outlineWidth: 5 });
+    expect(findTag('sfx')).toEqual({ name: 'sfx', font: 'Bangers', outline: '#000000', outlineWidth: 5, size: null });
   });
 });
 
@@ -147,7 +147,7 @@ describe('saving a tag’s settings', () => {
     createTag('sign');
     createTag('sfx', { font: 'Bangers' });
     saveTagDefaults('sfx', { font: 'Nunito', outline: '#000000', outlineWidth: 4 });
-    expect(findTag('sfx')).toEqual({ name: 'sfx', font: 'Nunito', outline: '#000000', outlineWidth: 4 });
+    expect(findTag('sfx')).toEqual({ name: 'sfx', font: 'Nunito', outline: '#000000', outlineWidth: 4, size: null });
     // Configuring a tag is not using it, so it does not move.
     expect(tags.list.map((t) => t.name)).toEqual(['sfx', 'sign']);
   });
@@ -244,7 +244,7 @@ describe('the settings form’s round trip', () => {
     // width. The form seeded its switch from `outline` alone, so this opened
     // with the switch off and Save wrote `outlineWidth: null` over the 6.
     const [t] = sanitizeTags({ list: [{ name: 'sfx', outline: 5, outlineWidth: 6 }] });
-    expect(t).toEqual({ name: 'sfx', font: null, outline: null, outlineWidth: 6 });
+    expect(t).toEqual({ name: 'sfx', font: null, outline: null, outlineWidth: 6, size: null });
     const f = tagFormFields(t);
     expect(f.outlineOn).toBe(true);
     expect(tagFormDefaults(f).outlineWidth).toBe(6);
@@ -256,20 +256,52 @@ describe('the settings form’s round trip', () => {
       font: 'Bangers',
       outline: '#000000',
       outlineWidth: 5,
+      size: null,
     });
   });
 
   it('reads unset as unset, both ways', () => {
     const f = tagFormFields(null);
     expect(f.outlineOn).toBe(false);
-    expect(tagFormDefaults(f)).toEqual({ font: null, outline: null, outlineWidth: null });
+    expect(tagFormDefaults(f)).toEqual({ font: null, outline: null, outlineWidth: null, size: null });
     // And turning the switch off clears both halves together, which is what the
     // switch says it does.
     expect(tagFormDefaults({ ...f, outlineOn: false, outline: '#000000', outlineWidth: 9 })).toEqual({
       font: null,
       outline: null,
       outlineWidth: null,
+      size: null,
     });
+  });
+
+  it('round-trips a default size, and reads an empty field as none', () => {
+    createTag('sfx', { size: 60 });
+    const f = tagFormFields(findTag('sfx'));
+    expect(f.size).toBe(60);
+    expect(tagFormDefaults(f).size).toBe(60);
+    expect(tagFormDefaults({ ...f, size: '' }).size).toBe(null);
+    expect(sanitizeTags({ list: [{ name: 'a', size: -3 }, { name: 'b', size: 'big' }] }).map((t) => t.size)).toEqual([null, null]);
+  });
+});
+
+describe('a tag’s default size', () => {
+  it('is remembered for the group when it is set, so it outranks an older memory', () => {
+    tags.sizes.sfx = 44;
+    createTag('sfx', { size: 60 });
+    expect(tags.sizes.sfx).toBe(60);
+    expect(saved.sizes.sfx).toBe(60);
+    saveTagDefaults('sfx', { size: 70 });
+    expect(tags.sizes.sfx).toBe(70);
+  });
+
+  it('does not overwrite the memory when the form is saved for something else', () => {
+    createTag('sfx', { size: 60 });
+    tags.sizes.sfx = 48; // learned from a box since
+    saveTagDefaults('sfx', { font: 'Bangers', size: 60 });
+    expect(tags.sizes.sfx).toBe(48);
+    saveTagDefaults('sfx', { size: null });
+    expect(findTag('sfx').size).toBe(null);
+    expect(tags.sizes.sfx).toBe(48);
   });
 });
 

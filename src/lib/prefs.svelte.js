@@ -15,7 +15,7 @@
 // which is what keeps that import-time apply safe: nothing here can run before
 // the module it is writing into has finished evaluating.
 import { setBoxDefaults, setTypesetDefault, setLegacyTypeset } from './data.js';
-import { app, setTool, setBrushToolAllowed, setMinFontSize } from './store.svelte.js';
+import { app, setTool, setBrushToolAllowed, setMinFontSize, setInheritBoxStyle } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
 
 const KEY = 'mt.prefs';
@@ -37,6 +37,8 @@ export const prefs = $state({
   typeset: true,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
+  // Place and Text tools can start from defaults instead of the last box's style.
+  inheritBoxStyle: true,
   // ---- typesetting defaults for NEW text boxes ----
   // These five are per-BOX style properties (`style.autoHeight`, `style.shape`
   // and friends - see `defaultStyle` in data.js). What lives here is only the
@@ -95,7 +97,7 @@ const cleanNames = (v) =>
 
 // The box defaults, split by what a value of theirs may be. Named once so the
 // setter's validation and the loader's validation cannot drift apart.
-const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool'];
+const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool', 'inheritBoxStyle'];
 const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
 const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'] };
 
@@ -131,6 +133,7 @@ function persist() {
         defaultMinOrphan: prefs.defaultMinOrphan,
         minFontSize: prefs.minFontSize,
         brushTool: prefs.brushTool,
+        inheritBoxStyle: prefs.inheritBoxStyle,
         shortcuts: $state.snapshot(prefs.shortcuts),
         hiddenBuiltinFonts: $state.snapshot(prefs.hiddenBuiltinFonts),
         shownSystemFonts: $state.snapshot(prefs.shownSystemFonts),
@@ -184,6 +187,7 @@ export function setPref(key, value) {
   // No relayout: it bounds what the next fit may do, and moves nothing already
   // on the page.
   if (key === 'minFontSize') setMinFontSize(value);
+  if (key === 'inheritBoxStyle') setInheritBoxStyle(value);
   // No relayout for these: they are what the NEXT box is born with, and boxes
   // already on the page keep the flags they carry. Re-measuring here would be
   // re-measuring nothing.
@@ -252,6 +256,7 @@ function load() {
   applyBoxDefaults();
   setMinFontSize(prefs.minFontSize);
   setBrushToolAllowed(prefs.brushTool);
+  setInheritBoxStyle(prefs.inheritBoxStyle);
 }
 
 load();

@@ -365,7 +365,7 @@
                     onkeydown={(e) => e.key === 'Enter' && submitForm(line)}
                   />
                 {/if}
-                <button class="qtag-ic" class:on={form.tools} title="Default font and outline" onclick={() => (form.tools = !form.tools)}>
+                <button class="qtag-ic" class:on={form.tools} title="Default font, outline and size" onclick={() => (form.tools = !form.tools)}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="16" cy="7" r="2.2" /><path d="M4 7h9.8M18.2 7H20" /><circle cx="9" cy="16" r="2.2" /><path d="M4 16h2.8M11.2 16H20" /></svg>
                 </button>
                 <button class="qtf-go" onclick={() => submitForm(line)}>{form.edit ? 'Save' : 'Add'}</button>
@@ -400,6 +400,13 @@
                     <ColorPicker value={form.outline} label="Outline colour" size={20} unclipped onchange={(hex) => (form.outline = hex)} />
                     <input type="number" min="0" max="20" step="0.5" value={form.outlineWidth} oninput={(e) => (form.outlineWidth = Math.max(0, Math.min(20, +e.currentTarget.value || 0)))} />
                   {/if}
+                </span>
+
+                <!-- The size a box of this tag starts at when no box of it comes
+                     before. Empty is no default. -->
+                <span class="qtf-row">
+                  <label class="qtf-lbl" for="qtf-size-{line.n}">Size</label>
+                  <input id="qtf-size-{line.n}" type="number" min="6" max="200" step="1" placeholder="-" title="Font size, px" value={form.size} onchange={(e) => { const v = e.currentTarget.value.trim(); form.size = v === '' ? '' : Math.max(6, Math.min(200, +v || 6)); e.currentTarget.value = String(form.size); }} />
                 </span>
               {/if}
               {#if form.edit}
