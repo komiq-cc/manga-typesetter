@@ -59,7 +59,7 @@
     OCTAVES,
     TILE_SS,
   } from './text-paint.js';
-  import { warpActive } from './warp.js';
+  import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
   import { maskTool } from './mask-tool.svelte.js';
   import { inspectorTab, effectsSubTab } from './inspector-tabs.svelte.js';
@@ -406,8 +406,9 @@
   // by construction rather than by two painters agreeing.
   //
   // This is the substitution the PSD export already makes for a box Photoshop
-  // cannot re-render, and it costs the same things: no caret, no selection, and
-  // no drawing tool. See `onDblClick` and `maskArmed` below.
+  // cannot re-render, and it costs the same things: no caret and no selection.
+  // See `onDblClick` below. The mask tools still work: `maskShapePoint` carries
+  // the pointer back through the mesh.
   const warped = $derived(warpActive(s, box.w, box.h));
   let warpEl = $state(null);
   let warpGeom = $state(null);
@@ -1144,11 +1145,11 @@
   // is armed and this box is selected, a transparent overlay takes the
   // pointer and turns gestures into mask shapes, committed one per gesture
   // with one undo record each, like the path gizmo's drags.
-  // ...and never on a warped box: a mask shape is stated in box-local px and is
-  // applied to the texture BEFORE the mesh carries it, so the shape would land
-  // where the pointer is not. The tool comes back the moment the warp is
-  // switched off.
-  const maskArmed = $derived(selected && !editing && !warped && !bulkOn && s.clip?.on && maskTool.id);
+  // A warped box takes them too: a mask shape is stated in box-local px and is
+  // applied to the texture BEFORE the mesh carries it, so the pointer is taken
+  // back through the mesh on the way in (`maskShapePoint`) and the outlines
+  // forward through it on the way out (`maskOutline`).
+  const maskArmed = $derived(selected && !editing && !bulkOn && s.clip?.on && maskTool.id);
 
   // The gesture in progress: a shape being drawn, not yet in the style.
   const maskDraft = $state({ shape: null, poly: null });
@@ -1169,6 +1170,46 @@
     return flipPoint(maskPoint(ev), box);
   }
 
+  // The mesh the mask is carried through on screen, or null for a box that is
+  // not warped. The shapes are cut from the texture before the mesh moves it,
+  // so a pointer on the deformed picture is taken back through the mesh to
+  // the texture point under it (`maskShapePoint`), and a stored shape is drawn
+  // forward through it (`maskOutline`) to sit on the cut it makes.
+  const maskMesh = $derived(warped ? meshMap(s.warp.pts, s.warp.cols, s.warp.rows, box.w, box.h) : null);
+
+  function maskShapePoint(ev) {
+    const p = maskLocal(ev);
+    return maskMesh ? unwarpPoint(s.warp.pts, s.warp.cols, s.warp.rows, box.w, box.h, p[0], p[1]) : p;
+  }
+
+  // Stored points as an SVG points list at the zoom. Through a mesh, a
+  // straight edge in the texture is a curve on screen, so each edge is cut
+  // into steps of a few page px before it is carried.
+  function maskOutline(pts, closed = false) {
+    let out = pts;
+    if (maskMesh) {
+      out = [];
+      const n = closed ? pts.length : pts.length - 1;
+      for (let i = 0; i < n; i++) {
+        const [ax, ay] = pts[i];
+        const [bx, by] = pts[(i + 1) % pts.length];
+        const k = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 4));
+        for (let t = 0; t < k; t++) out.push(maskMesh.at(ax + ((bx - ax) * t) / k, ay + ((by - ay) * t) / k));
+      }
+      if (!closed && pts.length) out.push(maskMesh.at(...pts[pts.length - 1]));
+    }
+    return out.map(([px, py]) => `${px * z},${py * z}`).join(' ');
+  }
+
+  // An ellipse as the polygon `maskOutline` can carry through a mesh.
+  function ellipsePts(sh) {
+    const n = 48;
+    return Array.from({ length: n }, (_, i) => {
+      const a = (i / n) * Math.PI * 2;
+      return [sh.cx + sh.rx * Math.cos(a), sh.cy + sh.ry * Math.sin(a)];
+    });
+  }
+
   // A shape changes the verdict as well as the picture: an include mask cuts
   // the ink the check counts (contain.js), and the fit effect does not read the
   // mask, so the flag is brought up to date here.
@@ -1184,7 +1225,7 @@
     if (e.button !== 0 || !maskArmed || !pageFrameEl) return;
     e.preventDefault();
     e.stopPropagation();
-    const p = maskLocal(e);
+    const p = maskShapePoint(e);
     // The polygon is click-built rather than dragged; the other two are drags.
     if (maskTool.id === 'poly') {
       maskDraft.poly = [...(maskDraft.poly ?? []), p];
@@ -1197,7 +1238,7 @@
     else maskDraft.shape = { kind: 'ellipse', cx: p[0], cy: p[1], rx: 0, ry: 0 };
     const move = (ev) => {
       if (ev.pointerId !== pid || !maskDraft.shape) return;
-      const q = maskLocal(ev);
+      const q = maskShapePoint(ev);
       if (maskDraft.shape.kind === 'stroke') {
         const last = maskDraft.shape.pts[maskDraft.shape.pts.length - 1];
         if (Math.hypot(q[0] - last[0], q[1] - last[1]) > 1.5) maskDraft.shape.pts.push(q);
@@ -1911,21 +1952,18 @@
         />
       {/if}
       {#each maskShapesShown as sh, i (i)}
-        {#if sh.kind === 'ellipse'}
+        {#if sh.kind === 'ellipse' && !maskMesh}
           <ellipse cx={sh.cx * z} cy={sh.cy * z} rx={sh.rx * z} ry={sh.ry * z} />
-        {:else if sh.kind === 'poly'}
-          <polygon points={sh.pts.map(([px, py]) => `${px * z},${py * z}`).join(' ')} />
+        {:else if sh.kind === 'ellipse' || sh.kind === 'poly'}
+          <polygon points={maskOutline(sh.kind === 'ellipse' ? ellipsePts(sh) : sh.pts, true)} />
         {:else}
-          <polyline
-            class="stroke"
-            points={sh.pts.map(([px, py]) => `${px * z},${py * z}`).join(' ')}
-            style="stroke-width:{sh.size * z}px"
-          />
+          <polyline class="stroke" points={maskOutline(sh.pts)} style="stroke-width:{sh.size * z}px" />
         {/if}
       {/each}
       {#if maskDraft.poly}
-        <polyline class="draft" points={maskDraft.poly.map(([px, py]) => `${px * z},${py * z}`).join(' ')} />
-        {#each maskDraft.poly as [px, py], i (i)}
+        <polyline class="draft" points={maskOutline(maskDraft.poly)} />
+        {#each maskDraft.poly as p, i (i)}
+          {@const [px, py] = maskMesh ? maskMesh.at(p[0], p[1]) : p}
           <circle class="vert" cx={px * z} cy={py * z} r="3.5" />
         {/each}
       {/if}

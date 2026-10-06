@@ -13,6 +13,7 @@ import {
   warpActive,
   meshMap,
   affineWarpPoint,
+  unwarpPoint,
 } from './warp.js';
 import { normalizeStyle, normalizeWarp, defaultStyle } from './data.js';
 
@@ -249,6 +250,53 @@ describe('warpPoint', () => {
   it('hands back a box with no area, or a point that is not a number, unchanged', () => {
     expect(warpPoint(BR, 1, 1, 0, 0, 5, 6)).toEqual([5, 6]);
     expect(warpPoint(BR, 1, 1, W, H, NaN, 6)[0]).toBeNaN();
+  });
+});
+
+describe('unwarpPoint', () => {
+  // warpPoint(unwarpPoint(p)) is p again, to well under a pixel.
+  const roundTrip = (pts, c, r, w, h, targets) => {
+    for (const [x, y] of targets) {
+      const [ux, uy] = unwarpPoint(pts, c, r, w, h, x, y);
+      const [bx, by] = warpPoint(pts, c, r, w, h, ux, uy);
+      expect(bx).toBeCloseTo(x, 4);
+      expect(by).toBeCloseTo(y, 4);
+    }
+  };
+
+  it('moves nothing through an identity mesh or no mesh', () => {
+    expect(unwarpPoint(identityMesh(2, 2, W, H), 2, 2, W, H, 17, 43)).toEqual([17, 43]);
+    expect(unwarpPoint([], 1, 1, W, H, 17, 43)).toEqual([17, 43]);
+  });
+
+  it('undoes a four-handle perspective, inside the box and past it', () => {
+    roundTrip(BR, 1, 1, W, H, [[50, 50], [110, 120], [5, 95], [-80, -60], [300, 250]]);
+    const [x, y] = unwarpPoint(BR, 1, 1, W, H, 120, 140);
+    expect(x).toBeCloseTo(100, 4);
+    expect(y).toBeCloseTo(100, 4);
+  });
+
+  it('undoes a one-cell parallelogram (the affine map)', () => {
+    const shear = [[0, 0], [100, 0], [30, 100], [130, 100]];
+    roundTrip(shear, 1, 1, W, H, [[65, 50], [0, 0], [200, -40]]);
+  });
+
+  it('undoes the bicubic surface of a bent grid', () => {
+    const bent = identityMesh(3, 3, W, H).map((p, k) => (k === 5 ? [45, 50] : p));
+    roundTrip(bent, 3, 3, W, H, [[45, 50], [40, 40], [60, 70], [10, 90], [-150, 20], [140, 400]]);
+  });
+
+  // A real box's mesh (a short wide balloon line, 2x2, gently skewed), with
+  // the pointer across it and out to the far edge of the mask tool's reach.
+  it('undoes a real, gently bent 2x2 on a wide, short box', () => {
+    const w = 169.79796330845772;
+    const h = 40.379990494296585;
+    const pts = [
+      [0.0594106463878461, -6.55002376425864], [85.02894244320231, -6.137862404943007], [176.53364534267826, -6.501752614068437],
+      [0, 20.189995247148293], [84.89898165422886, 20.189995247148293], [169.79796330845772, 20.189995247148293],
+      [-3.5980572718631834, 46.339620960076054], [83.92241915422886, 45.726948669201484], [178.24912775712698, 44.234256178707206],
+    ];
+    roundTrip(pts, 2, 2, w, h, [[20, 10], [85, 20], [160, 40], [-300, -300], [470, 340]]);
   });
 });
 

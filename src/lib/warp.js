@@ -555,6 +555,81 @@ export function warpPoint(pts, cols, rows, w, h, x, y) {
   return m ? m.at(px, py) : [px, py];
 }
 
+// The other way round: the box-local point the mesh carries ONTO (x, y), which
+// is where a pointer on the deformed picture lands in the texture. It is what a
+// tool that stores points before the mesh (the mask brush) needs, so the cut it
+// makes sits under the pointer once the mesh has carried it.
+//
+// There is no closed form for the bicubic surface, so it is solved: start from
+// the nearest point of a coarse sampling of the map (the box and a box's width
+// and height past it on every side, where the map continues straight), then
+// Newton's method on `meshMap`'s own `at`, each step shortened until it gets
+// closer. A mesh folded over itself has more than one answer; this finds the
+// one nearest where the search began, and if nothing converges it hands back
+// the closest point it reached. Unchanged for an identity mesh, like
+// `warpPoint`.
+export function unwarpPoint(pts, cols, rows, w, h, x, y) {
+  const tx = +x;
+  const ty = +y;
+  if (!Number.isFinite(tx) || !Number.isFinite(ty)) return [tx, ty];
+  const m = meshMap(pts, cols, rows, w, h);
+  if (!m) return [tx, ty];
+  const W = Number(w);
+  const H = Number(h);
+  const miss = (p) => Math.hypot(p[0] - tx, p[1] - ty);
+  let best = null;
+  let bestD = Infinity;
+  const N = 12;
+  for (let j = 0; j <= N; j++) {
+    for (let i = 0; i <= N; i++) {
+      const sx = -W + (3 * W * i) / N;
+      const sy = -H + (3 * H * j) / N;
+      const d = miss(m.at(sx, sy));
+      if (d < bestD) {
+        bestD = d;
+        best = [sx, sy];
+      }
+    }
+  }
+  let [px, py] = best;
+  let f = m.at(px, py);
+  let r = bestD;
+  const e = 1e-3;
+  for (let k = 0; k < 40 && r > 1e-7; k++) {
+    const fx = m.at(px + e, py);
+    const fy = m.at(px, py + e);
+    const a = (fx[0] - f[0]) / e;
+    const b = (fy[0] - f[0]) / e;
+    const c = (fx[1] - f[1]) / e;
+    const d = (fy[1] - f[1]) / e;
+    const det = a * d - b * c;
+    if (!(Math.abs(det) > 1e-12)) break;
+    const ex = tx - f[0];
+    const ey = ty - f[1];
+    const dx = (d * ex - b * ey) / det;
+    const dy = (a * ey - c * ex) / det;
+    let t = 1;
+    let moved = false;
+    for (let s = 0; s < 12; s++) {
+      const nx = px + t * dx;
+      const ny = py + t * dy;
+      const nf = m.at(nx, ny);
+      const nr = miss(nf);
+      if (nr < r) {
+        px = nx;
+        py = ny;
+        f = nf;
+        r = nr;
+        moved = true;
+        break;
+      }
+      t /= 2;
+    }
+    if (!moved) break;
+  }
+  return [px, py];
+}
+
 // Whether a style's warp changes anything, which is the question every renderer
 // asks before it pays for a texture pass.
 //
