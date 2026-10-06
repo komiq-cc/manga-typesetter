@@ -435,12 +435,18 @@ function hourglassPenalty(ratios, weight, tol) {
 // curve the lettering benchmark scores `ovalScore` against, so the preference
 // and the measurement cannot drift apart. A starting point to tune on real
 // pages, not a rule.
+//
+// One array a count, kept: a solve asks for the same few counts for every
+// block it tries. Nothing that reads one writes to it.
+const profiles = [];
 export function ovalProfile(n) {
-  if (n === 1) return [1];
-  return Array.from({ length: n }, (_, i) => {
-    const u = (2 * i) / (n - 1) - 1;
-    return 1 - 0.62 * u * u + 0.24 * u ** 4;
-  });
+  return (profiles[n] ??=
+    n === 1
+      ? [1]
+      : Array.from({ length: n }, (_, i) => {
+          const u = (2 * i) / (n - 1) - 1;
+          return 1 - 0.62 * u * u + 0.24 * u ** 4;
+        }));
 }
 
 // The width argument, normalised to one shape: a function from a line count to
@@ -974,6 +980,55 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
     o.ragged, o.lastShort, o.pinch, o.pinchHard, o.overflow, o.orphanCost,
     o.hyphen, o.lastWordHyphen, o.existingHyphen, o.hyphenPair,
   ].every(Number.isFinite);
+
+  // The walk in `hasBreaking`, for the one thing it is asked - whether the last
+  // position is reached on the last line - without the table: how far a block
+  // of `L` lines gets when every line starts where the one before it ended
+  // furthest (`reach`), with orphans allowed.
+  //
+  // That is the walk's own answer, not an estimate of it. A position past
+  // `reach` has one start the walk tries first, `reach` itself (`from`), which
+  // is always reached; so with orphans allowed the position is reached exactly
+  // when that one line fits, the walk stops looking further at the same
+  // position this does, and the last one reached is the next line's `reach`.
+  // The positions behind `reach`, which the walk went over again on every
+  // line, decide nothing: the next position on is one token from `reach` and
+  // always fits. That going over was most of a no - every position times every
+  // line, for each count a text too long for its rows was asked about, which is
+  // most of what a solver's search asks.
+  //
+  // With orphans refused the answer is the same while no line on the way is
+  // one the orphan rule refuses (`whole`): the walk reaches each of those
+  // positions by the same start, and can reach none past them, since a start
+  // further back is tried only after `reach` has fitted. A no needs that of
+  // the lines before the last, a yes of the last as well. A line the rule does
+  // refuse may be reached from further back or not at all, and the walk says
+  // which.
+  //
+  // Null, and the walk is asked, for that, for a width that is not a number,
+  // and for more lines than there are positions to end them at.
+  const furthest = (L, w) => {
+    let reach = 0;
+    let whole = true;
+    for (let k = 1; k <= L; k++) {
+      const last = M - (L - k);
+      let next = -1;
+      for (let b = reach + 1; b <= last; b++) {
+        if (!fits(reach, b, k, w)) {
+          if (b > reach + 1 && pos[b].hy !== HY_ADDED) break;
+          continue;
+        }
+        if (!Number.isFinite(width(reach, b))) return null;
+        next = b;
+      }
+      if (next < 0) return null;
+      if (k === L) return { reached: next === M, whole: next === M ? whole && orphanOk(reach, M, L) : whole };
+      if (!orphanOk(reach, next, L)) whole = false;
+      reach = next;
+    }
+    return null;
+  };
+
   const hasBreaking = (L, allowOrphan) => {
     const w = widthsOf(L);
     const p = preferredOf(w);
@@ -981,6 +1036,8 @@ function breakParagraph(para, widthSpec, measureFn, o, every, only) {
     if (!finiteWeights || !Number.isFinite(T) || !p.every((v) => v > 0 && Number.isFinite(v))) {
       return solve(L, allowOrphan, o.pinch, preferredOf) !== null;
     }
+    const far = furthest(L, w);
+    if (far !== null && (allowOrphan || far.whole)) return far.reached;
     let prev = new Array(M + 1).fill(0);
     prev[0] = 1;
     let reach = 0;

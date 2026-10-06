@@ -103,15 +103,24 @@ export function blockYFor(style, boxH, blockH, inkShift = 0) {
 // `fontBoundingBoxAscent`/`Descent` are the same ascent and descent its layout
 // engine builds line boxes from. A stand-in of 0.8/0.2 of the size where there
 // is no canvas or the browser predates the property, so the function is total.
+//
+// Kept per font with the advances, and dropped with them (`keptFor`): they are
+// the font's alone, and a solve asks for them once for every block it places
+// (`baselineInLine`). The object is shared; nothing that reads it writes to it.
 export function fontMetrics(style, sizePx) {
   const size = sizePx > 0 ? sizePx : 0;
   const fallback = { ascent: size * 0.8, descent: size * 0.2 };
   if (!_ctx || !(size > 0)) return fallback;
-  _ctx.font = fontShorthand(style, size, familyFor(style));
+  const font = fontShorthand(style, size, familyFor(style));
+  const kept = keptFor(font);
+  if (kept?.box) return kept.box;
+  _ctx.font = font;
   const m = _ctx.measureText('Hg');
   const a = m.fontBoundingBoxAscent;
   const d = m.fontBoundingBoxDescent;
-  return a >= 0 && d >= 0 ? { ascent: a, descent: d } : fallback;
+  const box = a >= 0 && d >= 0 ? { ascent: a, descent: d } : fallback;
+  if (kept) kept.box = box;
+  return box;
 }
 
 // The baseline's offset from the top of its line box, as the browser lays it.
@@ -1023,12 +1032,24 @@ export function balloonWidthsFor(box, style, sizePx) {
   const lineH = sizePx * (style.lineHeight ?? 1);
   const valign = style.valign ?? 'middle';
   const anchor = Math.round((box.y + blockYFor(style, box.h, 0)) * 1000) / 1000;
+  // The balloon's safety inset is the shape's alone, so it is worked out once
+  // here and handed over rather than again for every count asked about. And a
+  // count's rows are kept for as long as this closure is - one layout, which
+  // asks for the same count more than once: for each paragraph, and in an oval
+  // for the oval's rows and then the balloon's own (`shapedLines`). The arrays
+  // are shared; nothing that reads them writes to them.
+  const safety = safetyInset(shape);
+  const kept = new Map();
   const fn = (lineCount) => {
+    let rows = kept.get(lineCount);
+    if (rows) return rows;
     const blockH = lineCount * lineH;
     const top = anchor + blockYFor(style, box.h, blockH) - blockYFor(style, box.h, 0);
-    return interiorLineWidths(shape, lineH, lineCount, valign, { top }).map((w) =>
+    rows = interiorLineWidths(shape, lineH, lineCount, valign, { top, inset: safety }).map((w) =>
       Math.max(1, Math.min(contentW, w - inset * 2)),
     );
+    kept.set(lineCount, rows);
+    return rows;
   };
   // What this closure IS, written down, so `layoutLines` can memoise a result
   // that depends on it. A callback cannot be a cache key - two closures built
@@ -1048,16 +1069,21 @@ export function balloonWidthsFor(box, style, sizePx) {
   // that, `shapedLines` sets the rows themselves.
   const centred = style.align !== 'left' && style.align !== 'right';
   if (shape.kind === 'ellipse' && centred && (style.shape ?? 'auto') === 'auto') {
+    const keptRound = new Map();
     const round = (lineCount) => {
+      let cut = keptRound.get(lineCount);
+      if (cut) return cut;
       const rows = fn(lineCount);
       const want = ovalProfile(lineCount);
       const top = Math.max(...want);
       // As wide as the widest row: a block in the flat middle of a tall
       // balloon is as round as one in a round balloon.
       const widest = Math.max(...rows);
-      return rows.map((w, i) => Math.max(1, Math.min(w, (widest * want[i]) / top)));
+      cut = rows.map((w, i) => Math.max(1, Math.min(w, (widest * want[i]) / top)));
+      keptRound.set(lineCount, cut);
+      return cut;
     };
-    round.holds = Math.floor((2 * Math.max(0, shape.ry - safetyInset(shape))) / lineH + 1e-9);
+    round.holds = Math.floor((2 * Math.max(0, shape.ry - safety)) / lineH + 1e-9);
     fn.round = round;
   }
   return fn;
