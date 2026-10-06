@@ -47,6 +47,12 @@ export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$HOME/.tauri/type
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 npm run tauri build
 
+# The DMG carries the licence (`bundle.licenseFile`), so attaching it asks the
+# user to agree first, and with no one at a terminal to answer hdiutil cancels
+# the attach ("user canceled operation"). `yes` answers it. The subshell keeps
+# `yes` dying of SIGPIPE from failing the pipeline under pipefail.
+attach() { (yes 2>/dev/null || true) | hdiutil attach "$@"; }
+
 DMG=$(ls -t src-tauri/target/release/bundle/dmg/*.dmg | head -1)
 [ -n "$DMG" ] || { echo "no DMG was produced"; exit 1; }
 echo "== built $DMG =="
@@ -54,14 +60,14 @@ echo "== built $DMG =="
 # Tauri stages the configured dmg background next to the app while bundling,
 # so a visible copy lands in the image root beside the hidden .background one.
 # Strip it: convert rw, delete, convert back.
-PEEK=$(hdiutil attach "$DMG" -nobrowse -readonly | grep -o '/Volumes/.*' | tail -1)
+PEEK=$(attach "$DMG" -nobrowse -readonly | grep -o '/Volumes/.*' | tail -1)
 STRAY=0
 [ -f "$PEEK/dmg-background.png" ] && STRAY=1
 hdiutil detach "$PEEK" -force >/dev/null
 if [ "$STRAY" = 1 ]; then
   echo "== stripping stray background from image root =="
   hdiutil convert "$DMG" -format UDRW -o "$DMG.rw.dmg" >/dev/null
-  M=$(hdiutil attach "$DMG.rw.dmg" | grep -o '/Volumes/.*' | tail -1)
+  M=$(attach "$DMG.rw.dmg" | grep -o '/Volumes/.*' | tail -1)
   rm -f "$M/dmg-background.png"
   hdiutil detach "$M" -force >/dev/null
   rm -f "$DMG"
@@ -75,7 +81,7 @@ if pgrep -f "/Applications/$APP" >/dev/null; then
   osascript -e 'quit app "Manga Typesetter"' 2>/dev/null || true
   sleep 2
 fi
-MOUNT=$(hdiutil attach "$DMG" -nobrowse -readonly | grep -o '/Volumes/.*' | tail -1)
+MOUNT=$(attach "$DMG" -nobrowse -readonly | grep -o '/Volumes/.*' | tail -1)
 [ -n "$MOUNT" ] || { echo "could not mount $DMG"; exit 1; }
 # Replaced rather than merged: a leftover file from an older version inside the
 # bundle is exactly the kind of thing that makes one machine behave unlike
