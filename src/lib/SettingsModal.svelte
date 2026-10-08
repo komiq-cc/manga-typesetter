@@ -8,7 +8,7 @@
   import { resetPanels } from './editor/panels.svelte.js';
   import { processMemory, ROLE_LABELS } from './memory.js';
   import { prefs, setPref } from './prefs.svelte.js';
-  import { engineSwitch } from './engine-switch.svelte.js';
+  import { engineSwitch, engineHasNoFont } from './engine-switch.svelte.js';
   import { OCR_MODEL_OPTIONS } from './ocr-models.js';
   import {
     shortcutGroups,
@@ -596,15 +596,16 @@
           {:else if engineSwitch.phase === 'failed'}
             Could not start - {engineSwitch.error}. Text is measured by the
             browser. Turn the switch off and on to try again.
-          {:else if engineSwitch.phase === 'on' && engineSwitch.lastResort}
+          {:else if engineHasNoFont()}
+            Switched on, but nothing is measuring: the Rust engine has no font
+            it can read, and it measures only in fonts this computer has. Add
+            a font in the Font Library and it starts by itself. Until then
+            text is laid out by estimate and no box is resized.
+          {:else if engineSwitch.phase === 'on'}
             On. Line breaks and box sizes are measured from your font files and
             this computer's fonts, the same on every system. A font this
             computer does not have, the built-in web fonts included, is set in
             {engineSwitch.lastResort} and listed as missing in the Text Queue.
-          {:else if engineSwitch.phase === 'on'}
-            On, but there is no font to measure with: add one in the Font
-            Library. Until then text is laid out by estimate and nothing is
-            resized.
           {:else}
             Off: text is measured by the browser, as before. On, line breaks
             and box sizes are measured from your font files and this computer's

@@ -233,6 +233,18 @@ export function whyFontMissing(name) {
   return sync.whyMissing(name);
 }
 
+/**
+ * Whether the switch is on with nothing to measure in. No font ships with the
+ * app, so the engine measures only in fonts the machine brought; with none it
+ * can read - a plain browser and no font of the user's, or only WOFF files
+ * there - no engine is installed (`apply`), and `phase` is still 'on' because
+ * the switch is: it starts by itself when a font arrives. Whoever words the
+ * state asks this, so "on" is not read as "measuring".
+ */
+export function engineHasNoFont() {
+  return engineSwitch.phase === 'on' && !engineSwitch.lastResort;
+}
+
 // ---- letters no face has ----
 // With the Rust engine measuring, a letter the box's face lacks is looked for
 // in the fallback chain, and one nothing in the chain has is measured as the

@@ -6,13 +6,14 @@
   // only way to find out was to open a box and read its font menu.
   //
   // With the Rust engine measuring it also lists the boxes holding letters no
-  // loaded face has, which a browser never tells anyone.
+  // loaded face has, which a browser never tells anyone. And with the engine
+  // switched on but no font for it to read, it says that nothing is measuring.
   //
   // It is the review list's sibling and sits under it, so it wears the same
   // clothes: the rules below are that component's, copied because a
   // component's styles are its own.
-  import { app, missingFonts, fontNameFor, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
-  import { boxesMissingLetters, whyFontMissing } from './engine-switch.svelte.js';
+  import { app, missingFonts, fontNameFor, fontByName, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
+  import { boxesMissingLetters, whyFontMissing, engineHasNoFont } from './engine-switch.svelte.js';
   import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { plural } from './format.js';
 
@@ -29,7 +30,18 @@
   // With the Rust engine on it reads every box's text, so a keystroke makes it
   // again; the engine is asked only about a face and string it has not seen
   // (engine-switch.svelte.js keeps the answers), the rest is one lookup a box.
-  const missing = $derived(missingFonts(app.pages));
+  //
+  // `idle` is the switch on with no font the engine can read: no engine is
+  // installed, and to the font sync EVERY name is one it has no bytes for -
+  // the built-ins the browser is drawing included. Passing that list on would
+  // say an engine had judged them. What is listed then is what is true with
+  // no engine: the user's fonts the engine could not take, with why (they are
+  // the reason it has nothing), and the names nothing on this machine has.
+  const idle = $derived(engineHasNoFont());
+  const missing = $derived.by(() => {
+    const all = missingFonts(app.pages);
+    return idle ? all.filter((m) => WHY[whyFontMissing(m.name)] || !fontByName(m.name)) : all;
+  });
   const letters = $derived(boxesMissingLetters(app.pages));
   let open = $state(false);
 
@@ -43,6 +55,17 @@
   const rows = $derived.by(() => {
     if (!open) return [];
     const out = [];
+    if (idle) {
+      out.push({
+        key: 'idle',
+        pill: '!',
+        text: 'No font to measure with',
+        why: 'the Rust text engine is switched on but can read no font here, so nothing is measuring · add a font in the Font Library, or switch it off in Settings',
+        title: 'The Rust engine measures only in fonts this computer has. Until it has one, text is laid out by estimate and no box is resized.',
+        pageIndex: null,
+        boxId: null,
+      });
+    }
     for (const m of missing) {
       let first = null;
       app.pages.some((pg, pageIndex) => {
@@ -80,6 +103,7 @@
 
   const headline = $derived(
     [
+      idle ? 'Rust engine has no font to measure with' : '',
       missing.length ? `${plural(missing.length, 'font')} missing` : '',
       letters.length ? `${plural(letters.length, 'box', 'boxes')} with letters no font has` : '',
     ]
@@ -95,7 +119,7 @@
   }
 </script>
 
-{#if missing.length || letters.length}
+{#if missing.length || letters.length || idle}
   <div class="rv">
     <button class="rv-head" aria-expanded={open} onclick={() => (open = !open)}>
       <span class="rv-mark" aria-hidden="true">!</span>
