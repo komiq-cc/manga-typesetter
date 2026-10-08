@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "build:engine": "node scripts/build-text-engine.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
@@ -17,6 +18,7 @@
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tauri-apps/cli": "^2.11.2",
     "@testing-library/svelte": "^5.4.2",
+    "harfbuzzjs": "1.6.2",
     "jsdom": "^28.1.0",
     "svelte": "^5.55.5",
     "vite": "^8.0.12",
