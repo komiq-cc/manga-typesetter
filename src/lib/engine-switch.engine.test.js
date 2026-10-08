@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { rustEngine, fixtureFont } from '../test/rust-engine.js';
 import { buildCollection, systemFaceAnswer } from '../test/font-collection.js';
-import { app, loadProjectPages, page, autoFitBox, fontNameFor, fontCssFor, fontMissing, missingFonts } from './store.svelte.js';
-import { initHistory, resetHistory } from './editor/history.svelte.js';
+import {
+  app, loadProjectPages, page, autoFitBox, fontNameFor, fontCssFor, fontMissing, missingFonts, placeActiveAt, boxEdited, recordEdit, fitGeom, cloneStyle,
+} from './store.svelte.js';
+import { initHistory, resetHistory, undo, redo, peekStack } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, boxesMissingLetters, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { addFontFile, removeUserFont, systemFontEntry, watchUserFaces } from './fonts.js';
@@ -265,6 +267,80 @@ describe('a family with one face in and another still being decoded', () => {
     const fresh = page().boxes[0];
     expect(settled).toEqual({ w: fresh.w, h: fresh.h, size: fresh.style.size });
     expect(lines.length).toBeGreaterThan(0);
+  });
+});
+
+// The native side with a system file that takes its time: every family but
+// the last resort waits for `land()`.
+function slowSystem() {
+  let land;
+  const read = new Promise((resolve) => (land = resolve));
+  const native = async (cmd, args) => {
+    if (cmd === 'system_font_face' && args.family !== 'DejaVu Sans') await read;
+    return invoke(cmd, args);
+  };
+  _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => native, booted: async () => {}, os: () => 'linux' });
+  return () => land();
+}
+const rect = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size });
+
+describe('a box in a system family whose file is still being read', () => {
+  it('is placed at the constants and solved in its own face when the file lands, one undo for all of it', async () => {
+    const land = slowSystem();
+    await useTextEngine('rust');
+    loadProjectPages([{ id: 1, w: 800, h: 1200, lines: [{ n: 1, en: 'THE QUICK BROWN FOX JUMPS OVER' }], boxes: [], activeLineN: 1 }]);
+    app.lastStyle.font = 'Comic Bangers';
+    placeActiveAt(400, 600);
+    const b = page().boxes[0];
+    expect(b.style.font).toBe('Comic Bangers');
+    // Not the balanced size of the text in the last resort: no number that was
+    // measured meanwhile is in the box or in its history entry.
+    expect(b).toMatchObject({ w: 220, h: 92 });
+    expect(b.auto.status).toBe('pending');
+    expect(peekStack().undo[0].box).toMatchObject({ w: 220, h: 92 });
+
+    land();
+    await _engineSwitchSync().settled();
+    expect(b.auto.status).not.toBe('pending');
+    const solved = rect(b);
+    expect(solved).not.toMatchObject({ w: 220, h: 92 });
+    const cand = boxCandidate(b, 'THE QUICK BROWN FOX JUMPS OVER');
+    expect(containBox(cand, placeBlock(cand)).fits).toBe(true);
+    expect(peekStack().undo).toHaveLength(1);
+    expect(undo()).toBe(true);
+    expect(page().boxes).toHaveLength(0);
+    expect(redo()).toBe(true);
+    expect(rect(page().boxes[0])).toEqual(solved);
+  });
+
+  it('edited before the file lands: undo then redo gives back the fitted edit, not the box the edit left', async () => {
+    const land = slowSystem();
+    await useTextEngine('rust');
+    loadProjectPages(doc([box('Comic Bangers', { w: 60, h: 60 })]));
+    const b = page().boxes[0];
+    const opened = rect(b);
+    expect(opened).toMatchObject({ w: 60, h: 60 });
+
+    // The Inspector's size field, typed while the family is on its way.
+    const before = cloneStyle(b.style);
+    const geomBefore = fitGeom(b);
+    b.style.size = 34;
+    boxEdited(b, page());
+    recordEdit({ t: 'style', pageId: 1, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
+    expect(rect(b)).toEqual({ ...opened, size: 34 });
+
+    land();
+    await _engineSwitchSync().settled();
+    const fitted = rect(b);
+    expect(fitted.h).toBeGreaterThan(60);
+    // Still the one entry, and it ends where the edit ended.
+    expect(peekStack().undo).toHaveLength(1);
+    expect(peekStack().undo[0].geomAfter).toMatchObject(fitted);
+    expect(peekStack().undo[0].fitOwed).toBeUndefined();
+    expect(undo()).toBe(true);
+    expect(rect(b)).toEqual(opened);
+    expect(redo()).toBe(true);
+    expect(rect(b)).toEqual(fitted);
   });
 });
 

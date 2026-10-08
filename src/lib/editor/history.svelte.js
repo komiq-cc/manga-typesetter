@@ -17,6 +17,11 @@ import {
   reviewBox,
   solvePending,
   markSelectedSize,
+  fitHeld,
+  anyFitHeld,
+  dropHeldFit,
+  payHeldFit,
+  setFitLander,
 } from '../store.svelte.js';
 
 export const MAX_STEPS = 5;
@@ -378,6 +383,156 @@ const KINDS = {
   },
 };
 
+// ---------- a fit owed to an entry ----------
+// An entry carries its box's geometry on both sides of the edit, fit included,
+// and the fit normally runs before the entry is recorded. Not always: with the
+// Rust text engine measuring, a box whose face is still on its way is not
+// fitted - a fit measured in a stand-in would be a number nobody chose - and
+// the fit runs when the face lands (`autoFitBox`, `relayoutAll` in the store).
+// The entry was recorded in between, with the box as the edit left it. Undo
+// then redo put back that rectangle, 60x60 where the finished edit was 128x70.
+//
+// So an entry recorded while its box is held says so (`fitOwed`, the box ids),
+// and three things keep it honest, none of them a step of its own:
+//
+//   the fit lands   the latest owing entry for the box takes the box as it now
+//                   stands as its after side (`fitLanded`), and owes nothing.
+//   a step is taken the box is back at the after side of the entry now on top
+//                   of the undo stack for it. If that entry still owes the fit
+//                   - it was undone before the face came, or it sits under a
+//                   later edit that took the landing - the box is fitted here,
+//                   or held again while the face is still coming, and both
+//                   entries either side of that state are corrected
+//                   (`settleOwed`). If it owes nothing, a fit still held for
+//                   the box is dropped: it belonged to an edit no longer there.
+//
+// Only the kinds and boxes that have a geometry to correct are ever marked, so
+// a lock change or a deletion made meanwhile cannot take the landing instead
+// of the edit it belongs to. With the browser measuring nothing is ever held,
+// no entry is marked, and none of this runs.
+
+// Where an entry keeps the geometry of box `id` on one side of its edit
+// ('before' | 'after'), as { get, set } over a copy of the entry - or null
+// when it keeps none. A placement's after side is the placed box itself.
+function geomSlot(e, id, side) {
+  const key = side === 'after' ? 'geomAfter' : 'geomBefore';
+  const fields = (get, set) => ({ get, set });
+  if (e.t === 'move' || e.t === 'resize') {
+    if (e.boxId !== id || !e[side]) return null;
+    return fields(() => e[side], (g) => ({ ...e, [side]: g }));
+  }
+  if (e.t === 'style' || e.t === 'text' || e.t === 'refit') {
+    if (e.boxId !== id || !e[key]) return null;
+    return fields(() => e[key], (g) => ({ ...e, [key]: g }));
+  }
+  if (e.t === 'line' || e.t === 'bulk') {
+    const list = e.t === 'line' ? 'boxes' : 'items';
+    const i = (e[list] ?? []).findIndex((it) => it.boxId === id && it[key]);
+    if (i === -1) return null;
+    return fields(() => e[list][i][key], (g) => ({ ...e, [list]: e[list].map((it, j) => (j === i ? { ...it, [key]: g } : it)) }));
+  }
+  if (side !== 'after') return null;
+  // The box as it was placed, whole: its rectangle, its size inside its style,
+  // and its solver record.
+  const boxed = (box, put) =>
+    fields(
+      () => ({ x: box.x, y: box.y, w: box.w, h: box.h, size: box.style?.size, ...(box.auto ? { auto: box.auto } : null) }),
+      (g) => {
+        const next = { ...box, x: g.x, y: g.y, w: g.w, h: g.h, style: { ...box.style, size: g.size } };
+        if (g.auto) next.auto = g.auto;
+        return put(next);
+      },
+    );
+  if (e.t === 'place') return e.box?.id === id ? boxed(e.box, (box) => ({ ...e, box })) : null;
+  if (e.t === 'placeMany') {
+    const i = (e.items ?? []).findIndex((it) => it.box?.id === id);
+    return i === -1 ? null : boxed(e.items[i].box, (box) => ({ ...e, items: e.items.map((it, j) => (j === i ? { ...it, box } : it)) }));
+  }
+  return null;
+}
+
+// Every box an entry keeps an after-side geometry for.
+function boxesOf(e) {
+  const ids = [e.boxId, e.box?.id, ...(e.boxes ?? []).map((g) => g.boxId), ...(e.items ?? []).map((it) => it.boxId ?? it.box?.id)];
+  return [...new Set(ids.filter((id) => id != null && geomSlot(e, id, 'after')))];
+}
+
+const owes = (e, id) => Array.isArray(e.fitOwed) && e.fitOwed.includes(id);
+
+// The entry with `geom` as its `side` for box `id`. Only the fields a fit can
+// move are written, over what the entry had, so a balloon fit or ink it
+// carried stays. A move or a resize carries only the fields its edit changed,
+// and puts back only those: the other side is given the fit's fields too,
+// from the box as it stood before the fit, so what one direction writes the
+// other can take back.
+function withGeom(e, id, side, geom, other) {
+  const slot = geomSlot(e, id, side);
+  if (!slot) return e;
+  const fit = structuredClone(geom);
+  let next = slot.set({ ...slot.get(), ...fit });
+  if (next.t === 'move' || next.t === 'resize') {
+    const far = side === 'after' ? 'before' : 'after';
+    const filled = { ...next[far] };
+    for (const k of Object.keys(fit)) if (!(k in filled) && other && k in other) filled[k] = structuredClone(other[k]);
+    next = { ...next, [far]: filled };
+  }
+  return next;
+}
+
+const paid = (e, id) => {
+  const left = (e.fitOwed ?? []).filter((x) => x !== id);
+  const { fitOwed: _was, ...rest } = e;
+  return left.length ? { ...rest, fitOwed: left } : rest;
+};
+
+// The latest entry of a stack that keeps an after side for the box.
+function latestFor(stack, pageId, id) {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (stack[i].pageId === pageId && geomSlot(stack[i], id, 'after')) return i;
+  }
+  return -1;
+}
+
+// A held fit has landed (the store's `relayoutAll`). The entry it belongs to
+// is the latest one about the box, when that one owes it; one that owes
+// nothing was recorded with the box already fitted, and is left alone.
+function fitLanded(pageId, boxId, was, now) {
+  const amend = (undo) => {
+    const i = latestFor(undo, pageId, boxId);
+    if (i === -1 || !owes(undo[i], boxId)) return false;
+    undo[i] = paid(withGeom(undo[i], boxId, 'after', now, was), boxId);
+    return true;
+  };
+  // A page whose stack is not the live one keeps it in the history file.
+  if (offscreenAmend?.(pageId, amend)) return;
+  if (amend(undoStack)) sink?.(history.pageId);
+}
+
+// After a step: every box the stepped entry is about now stands at the after
+// side of the entry on top of the undo stack for it. See above.
+function settleOwed(entry, dir) {
+  if (!anyFitHeld() && !entry.fitOwed?.length && !undoStack.some((e) => e.fitOwed?.length)) return;
+  const p = pageById(entry.pageId);
+  if (!p) return;
+  const ids = new Set([...boxesOf(entry), ...(entry.fitOwed ?? [])]);
+  for (const id of ids) {
+    const b = p.boxes.find((x) => x.id === id);
+    if (!b) continue;
+    const i = latestFor(undoStack, entry.pageId, id);
+    if (i === -1 || !owes(undoStack[i], id)) {
+      dropHeldFit(b);
+      continue;
+    }
+    const fit = payHeldFit(b, p);
+    if (!fit) continue;
+    undoStack[i] = paid(withGeom(undoStack[i], id, 'after', fit.now, fit.was), id);
+    // The entry just undone starts from that same state.
+    const top = redoStack.length - 1;
+    if (dir === 'undo' && redoStack[top] === entry) redoStack[top] = withGeom(entry, id, 'before', fit.now, fit.was);
+    reviewBox(b, p);
+  }
+}
+
 // The history file registers itself here so a new entry can schedule its own
 // write. Without it the live page's stack would only reach disk on a page
 // switch, and an edit made and then abandoned would be lost on quit.
@@ -423,6 +578,18 @@ export function setOffscreenSink(fn) {
   };
 }
 
+// The history file's half of `fitLanded`, for a page whose stack it holds: it
+// is handed the function that corrects an undo stack in place, and answers
+// true when the page is one of its own.
+let offscreenAmend = null;
+export function setOffscreenAmender(fn) {
+  const prev = offscreenAmend;
+  offscreenAmend = fn;
+  return () => {
+    if (offscreenAmend === fn) offscreenAmend = prev;
+  };
+}
+
 export function record(entry) {
   if (applying) return;
   if (!KINDS[entry?.t]) return;
@@ -432,6 +599,13 @@ export function record(entry) {
   // Both halves earn their place - `snapshot` unwraps the proxies, and it hands
   // plain objects straight back, which is exactly the aliasing case.
   const flat = structuredClone($state.snapshot(entry));
+  // Recorded while a box of it waits for its face to be fitted: the after side
+  // is not the finished edit yet (see "a fit owed to an entry").
+  if (anyFitHeld()) {
+    const p = pageById(flat.pageId);
+    const owed = p ? boxesOf(flat).filter((id) => fitHeld(p.boxes.find((b) => b.id === id))) : [];
+    if (owed.length) flat.fitOwed = owed;
+  }
   // An entry belongs to the page it names, and this is the one line that makes
   // that true of every mutation site at once rather than of the careful ones.
   // With no sink registered - a build with no history file, and every test of
@@ -483,6 +657,8 @@ function step(from, to, dir) {
     // the selected box would take it for one the user just typed and make it
     // the box's reference, locked (see `noteSizeEdit`).
     markSelectedSize();
+    // After the mark, so a fit run here is not read as a size the user typed.
+    settleOwed(entry, dir);
     markUnsaved();
     sync();
     return true;
@@ -571,7 +747,10 @@ export function resetHistory() {
 // only ever rewind half a step. Releasing our own registration first is what the
 // unsubscribe the store hands back is for.
 let releaseRecorder = null;
+let releaseLander = null;
 export function initHistory() {
   releaseRecorder?.();
   releaseRecorder = setRecorder(record);
+  releaseLander?.();
+  releaseLander = setFitLander(fitLanded);
 }
