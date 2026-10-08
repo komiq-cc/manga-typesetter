@@ -82,8 +82,11 @@ export function readSystemFace(buffer) {
 export function createFontSync({ engine, fonts, os = null, systemFace = null, toSfnt = null, onArrival = () => {} }) {
   // family -> Map(slot -> { state: 'ready' | 'decoding' | 'unusable', why })
   const user = new Map();
-  // family -> { state: 'loading' | 'ready' | 'failed' }
+  // family -> { state: 'loading' | 'ready' | 'failed', seen }
   const system = new Map();
+  // System families the engine still holds as they were before a scan found
+  // their files moved, and that have no record above any more (`followSystemList`).
+  const stale = new Set();
   // name -> { family, state }: what `resolve` last answered, until anything changes
   const cache = new Map();
   const flights = new Set();
@@ -125,6 +128,9 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       system: systemFace ? fonts.system.map((f) => f.name).filter((n) => !failed(n) || user.has(n)) : [],
       user: [...user].filter(([, fam]) => usable(fam)).map(([name]) => name),
     });
+    // No box need name the last resort, so nobody else would ask again for
+    // one whose files moved; it stands as it was until the new bytes are in.
+    if (pick && stale.has(pick.name) && !system.has(pick.name)) startSystem(pick.name);
     if (pick && engine.hasFamily(pick.name) && measurable(pick.name)) {
       setResort(pick.name);
       return;
@@ -133,8 +139,20 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     if (resort && (!engine.hasFamily(resort) || !measurable(resort))) setResort(null);
   }
 
+  // What a list entry says of the files behind a family, as far as this side
+  // can know it: the scan's fingerprint of them (`stamp`, see system_fonts.rs)
+  // and which faces there are. Two scans that agree on both found the same
+  // files; the engine's copy of them is still the font.
+  const filesSeen = (entry) => `${entry?.stamp ?? ''}|${FACE_SLOTS.filter((s) => entry?.faces?.[s]).join(',')}`;
+
   // The system list is replaced wholesale by a scan. A family it no longer
-  // lists has been uninstalled, and one that failed gets another try.
+  // lists has been uninstalled, and one that failed gets another try. One
+  // whose files moved - a bold installed where there was none, a font updated
+  // in place - is forgotten too, and sent for again the next time it is asked
+  // about: the webview is already drawing the new files, and bytes kept from
+  // before would measure a font nobody sees. What the engine holds of such a
+  // family stays until the new bytes replace it (`fetchSystem`), so the last
+  // resort is never measured as nothing while it is re-read.
   function followSystemList() {
     const list = fonts.system;
     if (list === systemSeen && list.length === systemSeenLength) return false;
@@ -142,9 +160,16 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     systemSeenLength = list.length;
     systemByName = new Map(list.map((f) => [f.name, f]));
     for (const [name, rec] of [...system]) {
-      if (systemByName.has(name) && rec.state !== 'failed') continue;
+      const entry = systemByName.get(name);
+      if (entry && rec.state !== 'failed' && rec.seen === filesSeen(entry)) continue;
       system.delete(name);
-      if (!user.has(name)) engine.removeFamily(name);
+      if (entry && rec.state === 'ready') stale.add(name);
+      else if (!user.has(name)) engine.removeFamily(name);
+    }
+    for (const name of [...stale]) {
+      if (systemByName.has(name)) continue;
+      stale.delete(name);
+      engine.removeFamily(name);
     }
     cache.clear();
     relist();
@@ -176,9 +201,11 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
 
   // Whether the engine can measure `name` as itself at this moment, ready or
   // not: a user family with one face in while another is decoded can.
+  // So can a system family that is to be read again because its files moved:
+  // the engine still has it as it was.
   function measurable(name) {
     const mine = user.get(name);
-    return mine ? usable(mine) : stateOf(name) === 'ready';
+    return mine ? usable(mine) : stale.has(name) || stateOf(name) === 'ready';
   }
 
   function resolve(name) {
@@ -227,17 +254,15 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     }
     // The user's own font took the name while these were on the way.
     if (system.get(name) !== rec || disposed) return false;
-    try {
-      for (const file of files) engine.addFaces(name, file.bytes, file.faces);
-    } catch (error) {
-      engine.removeFamily(name);
-      throw error;
-    }
+    // What the engine had of it from before its files moved goes now, whole:
+    // a slot the family no longer has must not outlive the file it came from.
+    if (stale.delete(name)) engine.removeFamily(name);
+    for (const file of files) engine.addFaces(name, file.bytes, file.faces);
     return true;
   }
 
   function startSystem(name) {
-    const rec = { state: 'loading', error: '' };
+    const rec = { state: 'loading', error: '', seen: filesSeen(systemByName.get(name)) };
     system.set(name, rec);
     track(
       fetchSystem(name, rec).then(
@@ -250,6 +275,10 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
           if (system.get(name) !== rec || disposed) return;
           rec.state = 'failed';
           rec.error = String(error?.message ?? error);
+          // Nothing of it is left to be measured as itself: not half of what
+          // was being registered, and not the faces from before its files moved.
+          stale.delete(name);
+          engine.removeFamily(name);
           landed(name);
         },
       ),
@@ -259,8 +288,8 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
   // A user family and a system family of one name are one name to the engine,
   // and the user's own wins it, as it does in the store's lookup.
   function claimName(family) {
-    if (!system.has(family)) return;
-    system.delete(family);
+    const held = stale.delete(family);
+    if (!system.delete(family) && !held) return;
     engine.removeFamily(family);
   }
 
@@ -385,9 +414,10 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     /** Takes everything this put into the engine back out. */
     dispose() {
       disposed = true;
-      for (const name of new Set([...user.keys(), ...system.keys()])) engine.removeFamily(name);
+      for (const name of new Set([...user.keys(), ...system.keys(), ...stale])) engine.removeFamily(name);
       user.clear();
       system.clear();
+      stale.clear();
       cache.clear();
       resort = null;
       engine.setFallbacks([]);

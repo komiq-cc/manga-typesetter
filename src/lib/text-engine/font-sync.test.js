@@ -305,6 +305,127 @@ describe('system faces', () => {
     expect(invoke.calls.filter((c) => c[1].family === 'Ghost')).toHaveLength(2);
   });
 
+  describe('after another scan', () => {
+    // Fonts that differ in what follows the tag: the native stand-in copies
+    // the bytes into its answer, so which file the engine holds is told by content.
+    const font = (fill) => Uint8Array.from([0, 1, 0, 0, fill, fill, fill, fill]);
+    const held = (t, family, slot) => [...t.engine.families.get(family)[slot].file];
+    const listed = (stamps = {}) => [
+      { ...sysEntry('Helvetica Neue', ['regular', 'bold']), stamp: stamps['Helvetica Neue'] ?? 'aaaa' },
+      { ...sysEntry('Zapfino'), stamp: stamps.Zapfino ?? 'bbbb' },
+    ];
+    async function loaded({ hold = false } = {}) {
+      const files = { 'Helvetica Neue': [{ slots: { regular: 0, bold: 1 }, bytes: font(1) }], Zapfino: [{ slots: { regular: 0 }, bytes: font(2) }] };
+      const t = setup({ system: listed(), files, hold });
+      t.files = files;
+      t.sync.refresh();
+      expect(t.sync.ready('Zapfino')).toBe(false);
+      await vi.waitFor(() => expect(t.invoke.calls).toHaveLength(2));
+      t.invoke.release();
+      await t.sync.settled();
+      expect(t.engine.registered()).toEqual({ 'Helvetica Neue': ['regular', 'bold'], Zapfino: ['regular'] });
+      t.invoke.calls.length = 0;
+      t.onArrival.mockClear();
+      return t;
+    }
+    const rescan = (t, list) => {
+      t.fonts.system = list;
+      t.sync.refresh();
+    };
+
+    it('leaves alone a family whose files are as they were', async () => {
+      const t = await loaded();
+      rescan(t, listed());
+      expect(t.sync.ready('Zapfino')).toBe(true);
+      expect(t.sync.nameFor('Zapfino')).toBe('Zapfino');
+      expect(t.sync.ready('Helvetica Neue')).toBe(true);
+      await t.sync.settled();
+      expect(t.invoke.calls).toEqual([]);
+    });
+
+    it('sends again for a family that has a face it did not have', async () => {
+      const t = await loaded();
+      // A bold was installed: the engine has been smearing one from the regular.
+      t.files.Zapfino.push({ slots: { bold: 0 }, bytes: font(3) });
+      rescan(t, [listed()[0], { ...sysEntry('Zapfino', ['regular', 'bold']), stamp: 'bbbb' }]);
+      // Not sent for until somebody asks about it.
+      expect(t.invoke.calls).toEqual([]);
+      expect(t.sync.ready('Zapfino')).toBe(false);
+      // Shown as itself meanwhile, in what the engine has of it.
+      expect(t.sync.nameFor('Zapfino')).toBe('Zapfino');
+      await t.sync.settled();
+      expect(t.invoke.calls.map(([, args]) => `${args.family}/${args.slot}`)).toEqual(['Zapfino/regular', 'Zapfino/bold']);
+      expect(t.engine.registered().Zapfino).toEqual(['regular', 'bold']);
+      expect(held(t, 'Zapfino', 'bold')).toEqual([...font(3)]);
+      expect(t.sync.ready('Zapfino')).toBe(true);
+      expect(t.onArrival).toHaveBeenCalledWith('Zapfino');
+    });
+
+    it('sends again for a family whose file was replaced where it is, which only the stamp shows', async () => {
+      const t = await loaded();
+      t.files.Zapfino = [{ slots: { regular: 0 }, bytes: font(4) }];
+      rescan(t, listed({ Zapfino: 'cccc' }));
+      expect(t.sync.ready('Zapfino')).toBe(false);
+      expect(held(t, 'Zapfino', 'regular')).toEqual([...font(2)]);
+      await t.sync.settled();
+      expect(held(t, 'Zapfino', 'regular')).toEqual([...font(4)]);
+      // And nobody else was read again.
+      expect(t.invoke.calls.map(([, args]) => args.family)).toEqual(['Zapfino']);
+    });
+
+    it('drops a face the family no longer has', async () => {
+      const t = await loaded();
+      t.files['Helvetica Neue'] = [{ slots: { regular: 0 }, bytes: font(5) }];
+      rescan(t, [{ ...sysEntry('Helvetica Neue', ['regular']), stamp: 'dddd' }, listed()[1]]);
+      await t.sync.settled();
+      expect(t.engine.registered()['Helvetica Neue']).toEqual(['regular']);
+    });
+
+    it('reads the last resort again though no box names it, and measures in its old bytes until the new ones are in', async () => {
+      const t = await loaded({ hold: true });
+      expect(t.sync.lastResort()).toBe('Helvetica Neue');
+      t.files['Helvetica Neue'] = [{ slots: { regular: 0, bold: 1 }, bytes: font(6) }];
+      rescan(t, listed({ 'Helvetica Neue': 'eeee' }));
+      await vi.waitFor(() => expect(t.invoke.calls).toHaveLength(1));
+      // Being read again, and still what every missing name is measured in.
+      expect(t.sync.ready('Helvetica Neue')).toBe(false);
+      expect(t.sync.lastResort()).toBe('Helvetica Neue');
+      expect(t.sync.nameFor('Nowhere')).toBe('Helvetica Neue');
+      expect(held(t, 'Helvetica Neue', 'regular')).toEqual([...font(1)]);
+      t.invoke.release();
+      await t.sync.settled();
+      expect(held(t, 'Helvetica Neue', 'regular')).toEqual([...font(6)]);
+      expect(t.sync.lastResort()).toBe('Helvetica Neue');
+      expect(t.sync.ready('Helvetica Neue')).toBe(true);
+    });
+
+    it('takes out what it had of a family whose new files cannot be read', async () => {
+      const t = await loaded();
+      delete t.files.Zapfino;
+      rescan(t, listed({ Zapfino: 'ffff' }));
+      t.sync.ready('Zapfino');
+      await t.sync.settled();
+      expect(t.engine.registered().Zapfino).toBeUndefined();
+      expect(t.sync.missing('Zapfino')).toBe(true);
+      expect(t.sync.nameFor('Zapfino')).toBe('Helvetica Neue');
+    });
+
+    it('takes out a family that moved and was then uninstalled before anybody asked', async () => {
+      const t = await loaded();
+      rescan(t, listed({ Zapfino: 'cccc' }));
+      rescan(t, [listed()[0]]);
+      expect(t.engine.registered().Zapfino).toBeUndefined();
+      expect(t.sync.missing('Zapfino')).toBe(true);
+    });
+
+    it('leaves nothing in the engine when it is disposed with a family waiting to be read again', async () => {
+      const t = await loaded();
+      rescan(t, listed({ Zapfino: 'cccc' }));
+      t.sync.dispose();
+      expect(t.engine.registered()).toEqual({});
+    });
+  });
+
   it('gives the name to the user’s own family when both have it', async () => {
     const { engine, sync, invoke } = setup({ system: [sysEntry('Arial')], files: { Arial: [{ slots: { regular: 0 }, bytes: SFNT() }] }, hold: true });
     sync.ready('Arial');

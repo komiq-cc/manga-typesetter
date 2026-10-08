@@ -545,5 +545,11 @@ describe('fontGroups', () => {
     expect(e.css).toBe('"O\'Brien", sans-serif');
     expect(e.faces).toEqual({ regular: { file: null }, bold: null, italic: { file: null }, boldItalic: null });
     expect(e.system).toBe(true);
+    // An older native side sends no fingerprint; the entry then has none.
+    expect('stamp' in e).toBe(false);
+  });
+
+  it('a system entry carries the scan’s fingerprint of its files, for whoever keeps bytes of them', () => {
+    expect(systemFontEntry({ name: 'Zapfino', faces: { regular: true }, stamp: '00ab34cd00ab34cd' }).stamp).toBe('00ab34cd00ab34cd');
   });
 });

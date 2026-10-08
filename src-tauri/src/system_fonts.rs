@@ -33,6 +33,9 @@ pub struct Faces {
 pub struct SystemFont {
     pub name: String,
     pub faces: Faces,
+    /// Changes when anything about the files behind the family does; says
+    /// nothing else. See `stamp_of`.
+    pub stamp: String,
 }
 
 /// CSS `font-weight: bold` is 700, and the browser's bold matching picks the
@@ -211,7 +214,35 @@ fn scan_db(db: &fontdb::Database) -> (Vec<SystemFont>, FontIndex) {
         );
     }
     stat_files(&mut index);
-    (map.into_iter().map(|(name, faces)| SystemFont { name, faces }).collect(), index)
+    let list = map
+        .into_iter()
+        .map(|(name, faces)| {
+            let stamp = index.get(&name).map(stamp_of).unwrap_or_default();
+            SystemFont { name, faces, stamp }
+        })
+        .collect();
+    (list, index)
+}
+
+/// A family's fingerprint for the frontend: sixteen hex digits that move when
+/// any of its four slots is now a different file, a different face of its
+/// file, or a file of a different length or date - and say nothing of where
+/// the files are.
+///
+/// The list the frontend holds is names and which faces exist. That cannot
+/// tell it that a bold was installed into a slot the engine had been
+/// synthesising, or that a font was updated in place: the names and the faces
+/// are the same before and after. The Rust text engine keeps the bytes it was
+/// given, so without this it would go on measuring the old file while the
+/// webview drew the new one. Compared only between two scans of one run of
+/// the app, so the hash need not be the same in the next build.
+fn stamp_of(files: &FaceFiles) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for file in files {
+        file.as_ref().map(|f| (&f.path, f.index, f.stat)).hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 /// Notes every chosen file as it stands now. After the fold rather than in
@@ -615,6 +646,30 @@ mod tests {
     }
 
     #[test]
+    fn a_family_s_stamp_moves_when_its_files_do_and_only_then() {
+        let regular = temp_font("stamp", "regular.ttf", &fixture(DEJAVU));
+        let italic = temp_font("stamp", "italic.ttf", &fixture(OBLIQUE));
+        let other = temp_font("stamp", "other.ttf", &fixture(BANGERS));
+        let stamp = |faces: &[(&str, u16, bool, &Path, u32)]| stamp_of(&scanned(faces)["F"]);
+        let first = stamp(&[("F", 400, false, &regular, 0)]);
+        // The same scan again is the same stamp.
+        assert_eq!(first, stamp(&[("F", 400, false, &regular, 0)]));
+        // A face installed into a slot that was empty.
+        let with_italic = stamp(&[("F", 400, false, &regular, 0), ("F", 400, true, &italic, 0)]);
+        assert_ne!(first, with_italic);
+        // The same file behind another slot, another face of the file, another file.
+        assert_ne!(first, stamp(&[("F", 700, false, &regular, 0)]));
+        assert_ne!(first, stamp(&[("F", 400, false, &regular, 1)]));
+        assert_ne!(first, stamp(&[("F", 400, false, &other, 0)]));
+        // The file replaced where it is: the path and the face are the same, the bytes are not.
+        std::fs::write(&regular, fixture(BANGERS)).unwrap();
+        assert_ne!(first, stamp(&[("F", 400, false, &regular, 0)]));
+        // Sixteen hex digits, and nothing of a path.
+        assert_eq!(first.len(), 16);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()), "{first}");
+    }
+
+    #[test]
     fn a_file_over_the_limit_is_refused_without_being_read() {
         // A sparse file: the length is all there is of it.
         let big = temp_font("large", "huge.ttc", b"");
@@ -664,8 +719,13 @@ mod tests {
         // Nothing about a path or an index is in what the frontend receives.
         let sent = serde_json::to_value(&list[0]).unwrap();
         let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-        assert_eq!(keys(&sent), ["faces", "name"]);
+        assert_eq!(keys(&sent), ["faces", "name", "stamp"]);
         assert_eq!(keys(&sent["faces"]), ["bold", "boldItalic", "italic", "regular"]);
+        // The stamp is sixteen hex digits and holds no part of any path.
+        for font in &list {
+            assert_eq!(font.stamp.len(), 16, "{}", font.name);
+            assert!(font.stamp.chars().all(|c| c.is_ascii_hexdigit()), "{}", font.stamp);
+        }
 
         // The first face found: its answer is a font fontdb can parse, with a
         // face at the index the header gives.

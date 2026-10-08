@@ -345,13 +345,18 @@ async function getInvoke() {
   return invokeFn;
 }
 
-export function systemFontEntry({ name, faces }) {
+// `stamp` is the scan's fingerprint of the files behind the family: it moves
+// when a face is installed, removed or replaced, which the name and the faces
+// map cannot always show (a font updated in place has the same of both). Only
+// whoever keeps the family's bytes reads it - the Rust text engine's registry
+// (text-engine/font-sync.js) - and an entry made without one has none.
+export function systemFontEntry({ name, faces, stamp }) {
   const out = emptyFaces();
   for (const slot of FACE_SLOTS) if (faces?.[slot]) out[slot] = { file: null };
   // The generic fallback after the name is what the browser draws if the family
   // vanishes; matches the shape of a built-in's `css`.
   // Double-quoted, because installed family names carry apostrophes.
-  return { name, css: `"${name.replace(/"/g, '\\"')}", sans-serif`, faces: out, system: true };
+  return { name, css: `"${name.replace(/"/g, '\\"')}", sans-serif`, faces: out, system: true, ...(typeof stamp === 'string' && stamp ? { stamp } : null) };
 }
 
 let scanning = null;
