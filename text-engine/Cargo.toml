@@ -1,0 +1,31 @@
+[package]
+name = "mt-text"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Text engine for manga-typesetter: font parsing, shaping, metrics and glyph raster"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["paint"]
+# The rasteriser is behind a feature so its size cost can be measured on its own.
+paint = ["dep:tiny-skia"]
+# tiny-skia's SIMD paths. Only takes effect when the target has the
+# instructions, i.e. with RUSTFLAGS="-C target-feature=+simd128" for wasm.
+simd = ["tiny-skia?/simd"]
+
+[dependencies]
+harfrust = { version = "0.14", default-features = false, features = ["std"] }
+skrifa = { version = "0.48", default-features = false, features = ["std"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std"], optional = true }
+unicode-linebreak = "0.1.5"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
