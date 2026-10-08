@@ -131,7 +131,15 @@ for (const f of fonts) {
       const sk = skMeasure(f.family, size, text, 'left', 'alphabetic')
       const mt = engine.lineInk(face, text)
       const row = { ...at, text, kind }
-      add('advance (measureText.width)', { ...row, sk: sk.width, mt: engine.advance(face, text) })
+      // A tab is a rule difference, not a measuring one: a browser's canvas
+      // measures it as a space and so does the engine (RULES.md); Skia
+      // measures the font's tab glyph. Those strings get rows of their own.
+      const tab = /[\t\n\f\r]/.test(text) ? ' [tab: engine measures a space]' : ''
+      add(`advance (measureText.width)${tab}`, { ...row, sk: sk.width, mt: engine.advance(face, text) })
+      if (tab) {
+        for (const key of ['left', 'right', 'ascent', 'descent']) add(`ink ${key}${tab}`, { ...row, sk: sk[key], mt: mt[key] })
+        continue
+      }
       rule.widthRounded.total++
       const residual = Math.abs(sk.width - round2(mt.width))
       rule.widthRounded.maxResidual = Math.max(rule.widthRounded.maxResidual, residual)
@@ -281,6 +289,7 @@ tableCase('ComicNeue, typo changed, flag cleared', 'ComicNeue', (fs) => [
 rmSync(tmp, { recursive: true, force: true })
 
 function explain(q, r) {
+  if (q.includes('[tab')) return 'rule difference: the engine measures a tab as a space, as browsers do; Skia measures the tab glyph'
   if (q.startsWith('advance')) {
     return Math.abs(r.sk - round2(r.mt)) < 1e-4
       ? 'Skia rounds the line width to 0.01 px; engine value rounds to the same number'

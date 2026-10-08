@@ -16,7 +16,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use crate::engine::{Engine, Face, Synth};
+use crate::engine::{BoldAdvance, Engine, Face, FontBoxRule, Synth};
 use crate::memory::{self, AbiBytes};
 use crate::wrap::WrapOptions;
 use crate::{Error, ABI_VERSION};
@@ -110,13 +110,20 @@ fn code<T: Into<i32>>(r: Result<T, Error>) -> i32 {
     }
 }
 
+/// `flags`: bit 0 synthetic bold, bit 1 synthetic oblique, bits 8 and up the
+/// fallback chain's handle (zero for none).
 fn face(font: u32, size: f64, flags: u32) -> Face {
     Face {
         font,
         size,
         synth: Synth::from_bits(flags),
+        chain: flags >> 8,
     }
 }
+
+/// Rule switches for `mt_rule_set`.
+pub const RULE_BOLD_ADVANCE: u32 = 1;
+pub const RULE_FONT_BOX: u32 = 2;
 
 fn put_u32s(out: &mut Vec<u8>, values: impl IntoIterator<Item = u32>) -> i32 {
     out.clear();
@@ -228,7 +235,7 @@ pub extern "C" fn mt_font_remove(font: u32) -> i32 {
 ///
 /// `[units_per_em, glyph_count, axis_count, faces_in_file, byte_len,
 ///   use_typo_metrics, present_mask, hhea_asc, hhea_desc, hhea_gap,
-///   typo_asc, typo_desc, typo_gap, win_asc, win_desc]`
+///   typo_asc, typo_desc, typo_gap, win_asc, win_desc, truetype_outlines]`
 ///
 /// where `present_mask` has bit 0 for `hhea`, 1 for typo, 2 for win. Strings
 /// go to the out buffer as UTF-8 lines: family, subfamily, full name,
@@ -250,7 +257,7 @@ pub extern "C" fn mt_font_info(font: u32) -> i32 {
             v.typo.unwrap_or_default(),
             v.win.unwrap_or_default(),
         );
-        let numbers = [
+        let numbers: [f64; RESULT_SLOTS] = [
             f64::from(info.units_per_em),
             f64::from(info.glyph_count),
             info.axes.len() as f64,
@@ -266,6 +273,7 @@ pub extern "C" fn mt_font_info(font: u32) -> i32 {
             t.line_gap,
             w.ascent,
             w.descent,
+            f64::from(u8::from(info.truetype)),
         ];
         s.result[..numbers.len()].copy_from_slice(&numbers);
         let mut text = [
@@ -296,12 +304,56 @@ pub extern "C" fn mt_font_bytes_held(font: u32) -> f64 {
     })
 }
 
-/// Advance in pixels of the first `text_len` bytes of the text buffer shaped
-/// as one run. NaN on failure.
+/// Sets one of the rules that are switches. Returns 0, or `BadSpec` for an
+/// unknown rule or value.
+///
+/// - `RULE_BOLD_ADVANCE` (1): 0 a synthetic bold leaves advances alone
+///   (Chromium), 1 it adds `size / 36` to every glyph (WebKit).
+/// - `RULE_FONT_BOX` (2): 0 the browsers' whole-pixel `hhea` box, 1 Skia's
+///   unrounded table ladder.
 #[no_mangle]
-pub extern "C" fn mt_advance(font: u32, size: f64, text_len: usize) -> f64 {
+pub extern "C" fn mt_rule_set(rule: u32, value: u32) -> i32 {
+    with(|s| {
+        let rules = &mut s.engine.rules;
+        match (rule, value) {
+            (RULE_BOLD_ADVANCE, 0) => rules.bold_advance = BoldAdvance::Unchanged,
+            (RULE_BOLD_ADVANCE, 1) => rules.bold_advance = BoldAdvance::WebKit,
+            (RULE_FONT_BOX, 0) => rules.font_box = FontBoxRule::Browser,
+            (RULE_FONT_BOX, 1) => rules.font_box = FontBoxRule::Skia,
+            _ => return Status::BadSpec as i32,
+        }
+        0
+    })
+}
+
+/// Makes an empty fallback chain and returns its handle (never zero).
+#[no_mangle]
+pub extern "C" fn mt_chain_new() -> u32 {
+    with(|s| s.engine.chain_new())
+}
+
+/// Appends `font`, with the styles to synthesise for it, to a chain.
+#[no_mangle]
+pub extern "C" fn mt_chain_push(chain: u32, font: u32, flags: u32) -> i32 {
+    with(
+        |s| match s.engine.chain_push(chain, font, Synth::from_bits(flags)) {
+            Ok(()) => 0,
+            Err(e) => Status::from(e) as i32,
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn mt_chain_free(chain: u32) -> i32 {
+    with(|s| i32::from(s.engine.chain_free(chain)))
+}
+
+/// Advance in pixels of the first `text_len` bytes of the text buffer. NaN on
+/// failure.
+#[no_mangle]
+pub extern "C" fn mt_advance(font: u32, size: f64, flags: u32, text_len: usize) -> f64 {
     with_text(text_len, |engine, text, _| {
-        engine.advance(Face::new(font, size), text)
+        engine.advance(face(font, size, flags), text)
     })
     .unwrap_or(f64::NAN)
 }
@@ -382,12 +434,12 @@ pub extern "C" fn mt_wrap_plain(
     }))
 }
 
-/// Returns how many clusters have no glyph in the font; the out buffer holds
-/// their UTF-16 offsets as `u32`.
+/// Returns how many clusters have no glyph in the font or in the chain that
+/// `flags` names; the out buffer holds their UTF-16 offsets as `u32`.
 #[no_mangle]
-pub extern "C" fn mt_missing(font: u32, text_len: usize) -> i32 {
+pub extern "C" fn mt_missing(font: u32, flags: u32, text_len: usize) -> i32 {
     code(with_text(text_len, |engine, text, st| {
-        let missing = engine.missing(font, text)?;
+        let missing = engine.missing_in(face(font, 1.0, flags), text)?;
         Ok(put_u32s(st.out, missing))
     }))
 }
@@ -515,7 +567,7 @@ mod tests {
         let id = load("ComicNeue-Regular.ttf");
         assert_ne!(id, 0);
         let n = set_text("WHAT THE HELL?!");
-        let through_abi = mt_advance(id, 22.5, n);
+        let through_abi = mt_advance(id, 22.5, 0, n);
         let direct = with(|s| s.engine.advance(Face::new(id, 22.5), "WHAT THE HELL?!"));
         assert_eq!(Ok(through_abi), direct);
         assert!(through_abi > 0.0);
@@ -533,7 +585,7 @@ mod tests {
         let p = mt_text_reserve(2);
         // SAFETY: two bytes fit; 0xFF 0xFE is never valid UTF-8.
         unsafe { p.copy_from(&[0xFFu8, 0xFE] as *const u8, 2) };
-        assert!(mt_advance(id, 16.0, 2).is_nan());
+        assert!(mt_advance(id, 16.0, 0, 2).is_nan());
         assert_eq!(mt_shape(id, 2), Status::BadText as i32);
         assert_eq!(mt_shape(9999, 0), Status::UnknownFont as i32);
     }
@@ -541,7 +593,7 @@ mod tests {
     #[test]
     fn font_info_reports_names_and_metrics() {
         let id = load("Bangers-Regular.ttf");
-        assert_eq!(mt_font_info(id), 15);
+        assert_eq!(mt_font_info(id), 16);
         let (upem, names) = with(|s| (s.result[0], String::from_utf8(s.out.clone()).unwrap()));
         assert_eq!(upem, 1000.0);
         let mut lines = names.lines();

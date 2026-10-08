@@ -251,6 +251,10 @@ The engine returns zeros and `hasInk: false`.
 
 ## 6. Rules derived
 
+> These are the rules as derived from Skia in the spike. Phase P4 set them
+> against Chromium and WebKit and changed several (line box, whitespace,
+> `middle`, `rand`, the bold advance switch): RULES.md is the one in force.
+
 Stated as what REF-SK does. "Engine" says what this crate does today.
 
 1. **Advance.** Sum of shaped x advances in integer font units, times

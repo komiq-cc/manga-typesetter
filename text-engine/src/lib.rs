@@ -28,17 +28,20 @@ mod metrics;
 pub mod paint;
 mod wrap;
 
-pub use engine::{Engine, Face, FontId, Glyph, Synth};
+pub use engine::{
+    BoldAdvance, ChainId, Engine, Face, FontBoxRule, FontId, Glyph, Part, Rules, Synth,
+    WEBKIT_BOLD_ADVANCE,
+};
 pub use font::{
     AxisInfo, BoundsPen, FontEntry, FontInfo, GlyphBounds, LineBox, SharedBytes, VerticalMetrics,
     OBLIQUE_SKEW,
 };
-pub use metrics::{bold_outset, line_box, FontBox, Ink};
+pub use metrics::{bold_outset, browser_line_units, line_box, FontBox, Ink};
 pub use wrap::{LineRange, WrapOptions};
 
 /// Bumped whenever an export's signature, a buffer layout or an ownership
 /// rule changes. The JS loader refuses a module with a different number.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {

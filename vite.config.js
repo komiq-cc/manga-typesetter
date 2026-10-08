@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     environment: 'node',
-    // Three lanes, one `npx vitest run`.
+    // Four lanes, one `npx vitest run`.
     //
     //   unit      every test the app has always had: no canvas, and the stand-in
     //             metric (`chars x size x 0.55`) wherever a test grants one.
@@ -21,13 +21,17 @@ export default defineConfig({
     //             build, where `mount()` throws. The file-level
     //             `@vitest-environment` pragma cannot change resolve
     //             conditions, so the suffix is what selects the lane.
+    //   engine    `*.engine.test.js` only: tests that run the Rust text engine.
+    //             They read the wasm `npm run build:engine` writes and FAIL,
+    //             saying so, when it is not there (src/test/rust-engine.js).
+    //             No canvas and no document: the engine measures by itself.
     projects: [
       {
         extends: true,
         test: {
           name: 'unit',
           include: ['src/**/*.test.js'],
-          exclude: ['**/node_modules/**', 'src/**/*.realfont.test.js', 'src/**/*.dom.test.js'],
+          exclude: ['**/node_modules/**', 'src/**/*.realfont.test.js', 'src/**/*.dom.test.js', 'src/**/*.engine.test.js'],
         },
       },
       {
@@ -45,6 +49,13 @@ export default defineConfig({
           name: 'realfont',
           include: ['src/**/*.realfont.test.js'],
           setupFiles: ['src/test/real-fonts.js'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'engine',
+          include: ['src/**/*.engine.test.js'],
         },
       },
     ],

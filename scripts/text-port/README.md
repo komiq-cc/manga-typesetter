@@ -199,7 +199,7 @@ in device pixels, right and bottom exclusive, or `null` for an empty texture.
 |---|---|
 | `src/test/text-port/corpus.js` | builds the synthetic cases; pure, runs anywhere |
 | `src/test/text-port/probe.js` | runs corpus cases through the app's functions and yields records; pure, takes the app modules as an argument, no file or network access |
-| `src/lib/text-port-capture.realfont.test.js` | node host (`ref-sk`): registers the fonts with `@napi-rs/canvas`, runs the probe, writes the run. Does nothing unless `TP_CAPTURE=1` |
+| `src/lib/text-port-capture.realfont.test.js` | node host (`ref-sk`, `new`): registers the fonts with `@napi-rs/canvas`, runs the probe, writes the run. For `new` it also loads the wasm, registers every face with the Rust engine (`src/lib/text-engine/rust.js`) and installs it before anything measures; the exporter still paints with Skia. Does nothing unless `TP_CAPTURE=1` |
 | `scripts/text-port/capture-node.mjs` | launches that lane with the right environment |
 | `capture.html` + `src/test/text-port/host-browser.js` | browser host (`ref-cr`, `ref-wk`): a dev-only page that loads the fonts and corpus from the collector, runs the probe, posts the records back |
 | `scripts/text-port/collector.mjs` | local HTTP server on `127.0.0.1`: serves `fonts/` and `corpus/` from `$TP_DATA`, accepts the run's files |
@@ -212,6 +212,7 @@ in device pixels, right and bottom exclusive, or `null` for an empty texture.
 
 ```
 node scripts/text-port/capture-node.mjs [--data <dir>] [--run <id>]          # ref-sk
+node scripts/text-port/capture-node.mjs [--data <dir>] [--run <id>] --engine new   # the Rust engine; needs `npm run build:engine`
 node scripts/text-port/collector.mjs   [--data <dir>] [--port 8787] [--origin http://localhost:5173]
 # then, with the dev server running, open in the browser under test:
 #   /capture.html?engine=ref-cr|ref-wk&run=<id>&collector=http://127.0.0.1:<port>
@@ -222,9 +223,11 @@ text) to the one page origin it is given and refuses every other; stop it when
 the captures are done.
 
 The page sets its title to `tp done` or `tp failed` and `window.__tp` to the
-result; a run that failed leaves `error.txt` in its folder and no manifest. The
-node host has no DOM line breaker, so it skips `plain` mode and `shape: 'off'`
-cases (written as skips). Safari stops a page it is not showing: keep its
+result; a run that failed leaves `error.txt` in its folder and no manifest. A
+host whose measuring engine cannot break plain text skips `plain` mode and
+`shape: 'off'` cases (written as skips): that is `ref-sk`, which has a canvas
+and no DOM line layout. `new` has the engine's own breaker and skips nothing;
+it fails at once when the wasm has not been built. Safari stops a page it is not showing: keep its
 window visible for a `ref-wk` run. Chromium runs hidden.
 
 What the references are worth, measured on this corpus: `ref-sk` and `ref-wk`

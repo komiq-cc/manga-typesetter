@@ -112,7 +112,7 @@ for (const f of fonts) {
   const face = engine.face(f.id, 22.5)
   const transfer = perCall(lines, (l) => engine.putText(l))
   const n = engine.putText(lines[0])
-  const bare = perCall(lines, () => engine.exports.mt_advance(f.id, 22.5, n))
+  const bare = perCall(lines, () => engine.exports.mt_advance(f.id, 22.5, 0, n))
   const one = perCall(lines, () => engine.advance(face, 'A'))
   const accented = lines.map((l) => l.replace('A', 'É').replace('O', 'Ö') + '…')
   const utf8 = perCall(accented, (l) => engine.advance(face, l))
