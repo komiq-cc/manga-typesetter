@@ -20,7 +20,11 @@ struct State {
     /// `[x, y, width, height]` of the last raster, in device pixels. Boxed
     /// so its address survives the thread-local being moved into place.
     result: Box<[f64; 4]>,
-    #[cfg(feature = "raster-compare")]
+    #[cfg(any(
+        feature = "raster-tiny-skia",
+        feature = "raster-zeno",
+        feature = "raster-vello"
+    ))]
     rasterizer: u32,
 }
 
@@ -57,9 +61,17 @@ pub extern "C" fn mt_paint_job(byte_len: usize) -> i32 {
         *s.result = [0.0; 4];
         let painted = (|| -> Result<Option<Raster>, Error> {
             let request = paint::decode(s.job.get(..byte_len).ok_or(Error::BadSpec)?)?;
-            #[cfg(feature = "raster-compare")]
+            #[cfg(any(
+                feature = "raster-tiny-skia",
+                feature = "raster-zeno",
+                feature = "raster-vello"
+            ))]
             let rasterizer = paint::compare::by_id(s.rasterizer).ok_or(Error::BadSpec)?;
-            #[cfg(not(feature = "raster-compare"))]
+            #[cfg(not(any(
+                feature = "raster-tiny-skia",
+                feature = "raster-zeno",
+                feature = "raster-vello"
+            )))]
             let rasterizer: &dyn paint::Rasterizer = &paint::Exact;
             with_engine(|engine| paint::paint_job_with(engine, &request, rasterizer))
         })();
@@ -103,9 +115,13 @@ pub extern "C" fn mt_paint_wire_version() -> u32 {
 }
 
 /// Picks the rasteriser for the jobs that follow: 0 exact area (the one the
-/// painter ships with), 1 tiny-skia, 2 zeno. Returns 0, or -5 for an unknown
-/// id. Only in the comparison build.
-#[cfg(feature = "raster-compare")]
+/// painter ships with), 1 tiny-skia, 2 zeno, 3 vello_cpu. Returns 0, or -5 for an unknown
+/// id. Only in a comparison build.
+#[cfg(any(
+    feature = "raster-tiny-skia",
+    feature = "raster-zeno",
+    feature = "raster-vello"
+))]
 #[no_mangle]
 pub extern "C" fn mt_paint_rasterizer(id: u32) -> i32 {
     if paint::compare::by_id(id).is_none() {

@@ -30,7 +30,11 @@ mod shade;
 mod shape;
 mod stroke;
 
-#[cfg(feature = "raster-compare")]
+#[cfg(any(
+    feature = "raster-tiny-skia",
+    feature = "raster-zeno",
+    feature = "raster-vello"
+))]
 #[path = "raster_compare.rs"]
 pub mod compare;
 
@@ -169,16 +173,26 @@ impl Glyphs {
 
     /// The ring a band of canvas `lineWidth = line` covers around the glyphs
     /// `range`: everything within half of it of the outline, on both sides.
+    /// Returned as the two shapes of `stroke::stroke_sides`.
     ///
     /// A synthesised bold is itself a pen run round the outline, and with a
     /// round join two round pens add up to one wider pen, so the band of a
     /// bold glyph is one stroke of the plain outline.
-    fn band(&self, range: core::ops::Range<usize>, line: f64, tol: f64) -> Polys {
-        let mut out = Polys::default();
+    fn band(&self, range: core::ops::Range<usize>, line: f64, tol: f64) -> (Polys, Polys) {
+        let (mut outer, mut inner) = (Polys::default(), Polys::default());
         for g in &self.items[range] {
-            stroke::stroke(&g.polys, line / 2.0 + g.bold, Join::Round, tol, &mut out);
+            let radius = line / 2.0 + g.bold;
+            stroke::stroke_sides(
+                &g.polys,
+                radius,
+                g.out,
+                Join::Round,
+                tol,
+                &mut outer,
+                &mut inner,
+            );
         }
-        out
+        (outer, inner)
     }
 }
 
@@ -204,6 +218,8 @@ fn pixel_box(polys: &Polys) -> Option<IBox> {
 /// what to paint it with.
 struct Planned<'a> {
     polys: Polys,
+    /// For a stroke: its inner shape, to be taken out of `polys`.
+    minus: Option<Polys>,
     bx: IBox,
     shader: Shader<'a>,
     alpha: f32,
@@ -227,10 +243,24 @@ fn plan<'a>(
     let bx = pixel_box(&polys)?;
     Some(Planned {
         polys,
+        minus: None,
         bx,
         shader,
         alpha: alpha.min(1.0) as f32,
     })
+}
+
+/// [`plan`] for a stroke given as its outer and inner shapes.
+fn plan_ring<'a>(
+    outer: &Polys,
+    inner: &Polys,
+    transform: &Affine,
+    shader: Shader<'a>,
+    alpha: f64,
+) -> Option<Planned<'a>> {
+    let mut planned = plan(outer, transform, shader, alpha)?;
+    planned.minus = Some(inner.map(transform));
+    Some(planned)
 }
 
 fn finish(planned: Vec<Planned<'_>>, surface: IBox, rasterizer: &dyn Rasterizer) -> Vec<u8> {
@@ -240,7 +270,10 @@ fn finish(planned: Vec<Planned<'_>>, surface: IBox, rasterizer: &dyn Rasterizer)
             let bx = p.bx.intersect(&surface);
             (!bx.is_empty()).then(|| Layer {
                 bx,
-                cov: rasterizer.prepare(&p.polys, bx),
+                cov: match &p.minus {
+                    Some(inner) => rasterizer.prepare_ring(&p.polys, inner, bx),
+                    None => rasterizer.prepare(&p.polys, bx),
+                },
                 shader: p.shader,
                 alpha: p.alpha,
             })
@@ -319,9 +352,10 @@ pub fn paint_job_with(
             if !positive(band.line) {
                 continue;
             }
-            let shape = glyphs.band(all.clone(), band.line, tol);
+            let (outer, inner) = glyphs.band(all.clone(), band.line, tol);
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
-            planned.extend(shader.and_then(|s| plan(&shape, transform, s, band.opacity)));
+            planned
+                .extend(shader.and_then(|s| plan_ring(&outer, &inner, transform, s, band.opacity)));
         }
         // One fill layer per run of glyphs that share a fill. A job-wide
         // fill is one layer; per-line and per-glyph fills are one each,

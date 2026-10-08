@@ -8,10 +8,12 @@ use crate::font::FontEntry;
 /// How far, in device pixels, a flattened curve may lie from the curve.
 ///
 /// A chord cuts off a sliver at most this deep, so the coverage of an edge
-/// pixel is wrong by at most this share of a pixel: a fortieth of a pixel is
-/// six of the 255 alpha levels at the very worst and under one on average
-/// (`parity/raster.mjs` measures it against a 32x supersampled raster).
-pub const FLATTEN_TOLERANCE: f64 = 0.025;
+/// pixel is wrong by at most this share of a pixel: an eightieth of a pixel
+/// is three of the 255 alpha levels at the very worst. Measured against a
+/// 32x supersampled raster (`parity/raster.mjs`) the mean error of a fill's
+/// edge pixels is 0.7 levels at this value and 1.1 at twice it, at no cost
+/// in time that could be told from noise.
+pub const FLATTEN_TOLERANCE: f64 = 0.0125;
 
 /// Most chords one curve segment is cut into. A guard against an absurd
 /// transform, not a quality setting.

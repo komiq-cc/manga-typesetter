@@ -63,6 +63,25 @@ pub trait Rasterizer {
     /// `polys` are closed polylines in device pixels, filled with the
     /// non-zero rule; only the part inside `bx` is wanted.
     fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage>;
+
+    /// A stroke given as two shapes (`stroke::stroke_sides`): what is inside
+    /// `outer` and not inside `inner`. The two wind the same way round what
+    /// they hold, and `inner` winds the other way, or not at all, wherever
+    /// it holds nothing.
+    ///
+    /// The default is for a rasteriser that can only fill: the two as one
+    /// shape, `inner` walked backwards so that it cuts a hole.
+    fn prepare_ring(&self, outer: &Polys, inner: &Polys, bx: IBox) -> Box<dyn Coverage> {
+        let mut ring = outer.clone();
+        let from = ring.pts.len();
+        ring.append(inner);
+        let mut start = from;
+        for &end in &ring.ends[outer.ends.len()..] {
+            ring.pts[start..end].reverse();
+            start = end;
+        }
+        self.prepare(&ring, bx)
+    }
 }
 
 /// Exact-area coverage by signed-area accumulation.
@@ -79,17 +98,16 @@ struct Edge {
     dir: f32,
 }
 
-struct ExactCoverage {
+/// The edges of one shape, sorted into the strips they cross.
+struct Edges {
     edges: Vec<Edge>,
     /// `bucket[k]..bucket[k + 1]` indexes `order` for the box's `k`th strip.
     bucket: Vec<u32>,
     order: Vec<u32>,
-    bx: IBox,
-    first_strip: i32,
 }
 
-impl Rasterizer for Exact {
-    fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+impl Edges {
+    fn new(polys: &Polys, bx: IBox) -> Self {
         let (ox, oy) = (f64::from(bx.x0), f64::from(bx.y0));
         let height = bx.height() as f64;
         let mut edges = Vec::with_capacity(polys.pts.len());
@@ -116,11 +134,12 @@ impl Rasterizer for Exact {
         // Counting sort of the edges into the strips they cross.
         let first_strip = strip_of(bx.y0);
         let strips = (strip_of(bx.y1 - 1) - first_strip + 1).max(1) as usize;
+        let last_row = bx.y1 - bx.y0 - 1;
         let strip_range = |e: &Edge| {
-            let top = (e.y0.max(0.0).floor() as i32).min(bx.y1 - bx.y0 - 1);
+            let top = (e.y0.max(0.0).floor() as i32).min(last_row);
             // The last row an edge reaches is the one holding the point just
             // above its lower end.
-            let bottom = ((e.y1.min(height).ceil() as i32) - 1).clamp(top, bx.y1 - bx.y0 - 1);
+            let bottom = ((e.y1.min(height).ceil() as i32) - 1).clamp(top, last_row);
             let a = (strip_of(bx.y0 + top) - first_strip) as usize;
             let b = (strip_of(bx.y0 + bottom) - first_strip) as usize;
             (a, b)
@@ -144,41 +163,36 @@ impl Rasterizer for Exact {
                 fill[k] += 1;
             }
         }
-        Box::new(ExactCoverage {
+        Self {
             edges,
             bucket,
             order,
-            bx,
-            first_strip,
-        })
+        }
     }
-}
 
-impl Coverage for ExactCoverage {
-    fn render(
-        &mut self,
-        y0: i32,
-        y1: i32,
+    /// Adds, to every pixel of rows `row_lo..row_hi` (counted from the box's
+    /// top, all in strip `k` of the box), the signed area each edge leaves to
+    /// its right, and widens `spans` to the columns touched. A running sum
+    /// along a row then gives the integral of the winding number over each
+    /// pixel.
+    #[allow(clippy::too_many_arguments)]
+    fn accumulate(
+        &self,
+        k: usize,
+        row_lo: usize,
+        row_hi: usize,
+        width: usize,
         out: &mut [f32],
         stride: usize,
         spans: &mut [(u32, u32)],
     ) {
-        let width = self.bx.width();
-        debug_assert!(stride >= width + 2);
-        debug_assert_eq!(strip_of(y0), strip_of(y1 - 1));
-        let rows = (y1 - y0) as usize;
-        let (row_lo, row_hi) = ((y0 - self.bx.y0) as f64, (y1 - self.bx.y0) as f64);
-        let wf = width as f64;
-        for s in spans[..rows].iter_mut() {
-            *s = (u32::MAX, 0);
-        }
-        let k = (strip_of(y0) - self.first_strip) as usize;
+        let (lo, hi, wf) = (row_lo as f64, row_hi as f64, width as f64);
         let (from, to) = (self.bucket[k] as usize, self.bucket[k + 1] as usize);
         for &i in &self.order[from..to] {
             let e = self.edges[i as usize];
             let dxdy = (e.x1 - e.x0) / (e.y1 - e.y0);
-            let top = e.y0.max(row_lo);
-            let bottom = e.y1.min(row_hi);
+            let top = e.y0.max(lo);
+            let bottom = e.y1.min(hi);
             if bottom <= top {
                 continue;
             }
@@ -199,7 +213,7 @@ impl Coverage for ExactCoverage {
                 let (xa, xb) = (xa.clamp(0.0, wf), xb.clamp(0.0, wf));
                 x = x_end;
                 let d = dy as f32 * e.dir;
-                let local = row - (row_lo as usize);
+                let local = row - row_lo;
                 let line = &mut out[local * stride..(local + 1) * stride];
                 let ia = xa.floor() as usize;
                 let ib = xb.ceil() as usize;
@@ -238,22 +252,135 @@ impl Coverage for ExactCoverage {
                 }
             }
         }
+    }
+}
+
+/// What is taken out of a ring: the stroke's inner shape.
+struct Minus {
+    edges: Edges,
+    /// The sign the running sum has inside the part to take out.
+    sign: f32,
+    sums: Vec<f32>,
+    spans: Vec<(u32, u32)>,
+}
+
+struct ExactCoverage {
+    plus: Edges,
+    minus: Option<Minus>,
+    bx: IBox,
+    first_strip: i32,
+}
+
+impl Rasterizer for Exact {
+    fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+        Box::new(ExactCoverage {
+            plus: Edges::new(polys, bx),
+            minus: None,
+            bx,
+            first_strip: strip_of(bx.y0),
+        })
+    }
+
+    /// The outer shape's winding sum less the inner shape's, each summed on
+    /// its own.
+    ///
+    /// As one shape, the two sides of a stem thinner than the pen are two
+    /// bands that overlap, and a signed-area sum counts the overlap twice.
+    /// Apart, each is one curve round its region. The inner one counts only
+    /// where it winds the way the outer one does, which drops the parts of
+    /// an inward offset that have turned inside out.
+    fn prepare_ring(&self, outer: &Polys, inner: &Polys, bx: IBox) -> Box<dyn Coverage> {
+        // A region wound +1 in the sense of `area2` has its left edge
+        // running up, so the running sum inside it is -1.
+        let area = outer.area2();
+        let minus = (area != 0.0 && !inner.is_empty()).then(|| Minus {
+            edges: Edges::new(inner, bx),
+            sign: if area > 0.0 { -1.0 } else { 1.0 },
+            sums: Vec::new(),
+            spans: vec![(0, 0); STRIP_ROWS as usize],
+        });
+        Box::new(ExactCoverage {
+            plus: Edges::new(outer, bx),
+            minus,
+            bx,
+            first_strip: strip_of(bx.y0),
+        })
+    }
+}
+
+impl Coverage for ExactCoverage {
+    fn render(
+        &mut self,
+        y0: i32,
+        y1: i32,
+        out: &mut [f32],
+        stride: usize,
+        spans: &mut [(u32, u32)],
+    ) {
+        let width = self.bx.width();
+        debug_assert!(stride >= width + 2);
+        debug_assert_eq!(strip_of(y0), strip_of(y1 - 1));
+        let rows = (y1 - y0) as usize;
+        let (row_lo, row_hi) = ((y0 - self.bx.y0) as usize, (y1 - self.bx.y0) as usize);
+        let k = (strip_of(y0) - self.first_strip) as usize;
+        for s in spans[..rows].iter_mut() {
+            *s = (u32::MAX, 0);
+        }
+        self.plus
+            .accumulate(k, row_lo, row_hi, width, out, stride, spans);
+        if let Some(m) = &mut self.minus {
+            m.sums.clear();
+            m.sums.resize(stride * rows, 0.0);
+            for s in m.spans[..rows].iter_mut() {
+                *s = (u32::MAX, 0);
+            }
+            m.edges
+                .accumulate(k, row_lo, row_hi, width, &mut m.sums, stride, &mut m.spans);
+        }
         // The running sum of what the edges left is the signed coverage.
         for (row, span) in spans[..rows].iter_mut().enumerate() {
-            if span.0 >= span.1 {
+            let end = (span.1 as usize).min(width);
+            let start = span.0 as usize;
+            if start >= end {
                 *span = (0, 0);
                 continue;
             }
-            let end = (span.1 as usize).min(width);
-            let line = &mut out[row * stride..(row + 1) * stride];
+            *span = (start as u32, end as u32);
+            let line = &mut out[row * stride + start..row * stride + end];
             let mut acc = 0.0f32;
-            for cell in &mut line[span.0 as usize..end] {
+            let Some(m) = &self.minus else {
+                for cell in line.iter_mut() {
+                    acc += *cell;
+                    *cell = acc.abs().min(1.0);
+                }
+                continue;
+            };
+            // A ring. The outer sum is kept unclamped until the inner one is
+            // off it: where the grown shapes of two contours overlap it is
+            // 2, and taking one contour's inside out of that must leave the
+            // other's stroke standing, as the non-zero rule would.
+            for cell in line.iter_mut() {
                 acc += *cell;
-                *cell = acc.abs().min(1.0);
+                *cell = acc.abs();
             }
-            span.1 = end as u32;
-            if span.0 >= span.1 {
-                *span = (0, 0);
+            let (from, to) = (
+                m.spans[row].0 as usize,
+                (m.spans[row].1 as usize).min(width),
+            );
+            if from < to {
+                // The inner shape's sum starts where its own edges start;
+                // outside the outer shape's columns there is nothing to cut.
+                let sums = &m.sums[row * stride..row * stride + to];
+                let mut acc = 0.0f32;
+                for (x, &v) in sums.iter().enumerate().skip(from) {
+                    acc += v;
+                    if x >= start && x < end {
+                        out[row * stride + x] -= (acc * m.sign).max(0.0);
+                    }
+                }
+            }
+            for cell in out[row * stride + start..row * stride + end].iter_mut() {
+                *cell = cell.clamp(0.0, 1.0);
             }
         }
     }
@@ -360,6 +487,49 @@ mod tests {
         let c = render(&ring, bx(0, 0, 10, 10));
         assert_eq!(c[5 * 10 + 5], 0.0);
         assert_eq!(c[2 * 10 + 2], 1.0);
+    }
+
+    #[test]
+    fn a_ring_is_the_outer_shape_less_the_inner_whichever_way_they_wind() {
+        let outer = [(1.0, 1.0), (9.0, 1.0), (9.0, 9.0), (1.0, 9.0)];
+        let inner = [(3.5, 3.0), (7.0, 3.0), (7.0, 7.0), (3.5, 7.0)];
+        let rev = |p: &[(f64, f64)]| p.iter().rev().copied().collect::<Vec<_>>();
+        for (o, i) in [
+            (poly(&outer), poly(&inner)),
+            (poly(&rev(&outer)), poly(&rev(&inner))),
+        ] {
+            let mut cov = Exact.prepare_ring(&o, &i, bx(0, 0, 10, 10));
+            let mut out = vec![0.0f32; 12 * 10];
+            let mut spans = vec![(0u32, 0u32); 10];
+            cov.render(0, 10, &mut out, 12, &mut spans);
+            let at = |x: usize, y: usize| out[y * 12 + x];
+            assert_eq!(at(2, 2), 1.0);
+            assert_eq!(at(5, 5), 0.0);
+            assert_eq!(at(3, 5), 0.5);
+            assert_eq!(at(8, 5), 1.0);
+            assert_eq!(at(0, 5), 0.0);
+        }
+        // An inner shape wound against the outer one has turned inside out:
+        // it holds nothing, and nothing is taken out.
+        let mut cov = Exact.prepare_ring(&poly(&outer), &poly(&rev(&inner)), bx(0, 0, 10, 10));
+        let mut out = vec![0.0f32; 12 * 10];
+        let mut spans = vec![(0u32, 0u32); 10];
+        cov.render(0, 10, &mut out, 12, &mut spans);
+        assert_eq!(out[5 * 12 + 5], 1.0);
+        // A rasteriser that only fills gets the same ring as one shape.
+        struct FillOnly;
+        impl Rasterizer for FillOnly {
+            fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+                Exact.prepare(polys, bx)
+            }
+        }
+        let mut cov = FillOnly.prepare_ring(&poly(&outer), &poly(&inner), bx(0, 0, 10, 10));
+        let mut out = vec![0.0f32; 12 * 10];
+        cov.render(0, 10, &mut out, 12, &mut spans);
+        assert_eq!(
+            (out[5 * 12 + 5], out[5 * 12 + 3], out[2 * 12 + 2]),
+            (0.0, 0.5, 1.0)
+        );
     }
 
     #[test]

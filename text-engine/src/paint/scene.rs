@@ -12,7 +12,7 @@ use super::outline::FLATTEN_TOLERANCE;
 use super::raster::Exact;
 use super::shade::Shader;
 use super::shape::shape_run;
-use super::{finish, plan, Glyphs, Planned, MAX_SIDE};
+use super::{finish, plan, plan_ring, Glyphs, Planned, MAX_SIDE};
 use crate::engine::{Engine, Face};
 use crate::Error;
 
@@ -105,15 +105,19 @@ impl Scene {
         if scale > 0.0 && self.transform.invert().is_some() {
             let tol = FLATTEN_TOLERANCE / scale;
             for op in &self.ops {
-                let (shape, color) = match *op {
+                let shader = |color| Shader::new(&Fill::Solid(color), &self.transform, &[]);
+                planned.extend(match *op {
                     Op::Stroke(n, line, color) if line > 0.0 => {
-                        (self.glyphs.band(0..n, line, tol), color)
+                        let (outer, inner) = self.glyphs.band(0..n, line, tol);
+                        shader(color)
+                            .and_then(|s| plan_ring(&outer, &inner, &self.transform, s, 1.0))
                     }
-                    Op::Stroke(..) => continue,
-                    Op::Fill(n, color) => (self.glyphs.solid(0..n, 0.0, tol), color),
-                };
-                let shader = Shader::new(&Fill::Solid(color), &self.transform, &[]);
-                planned.extend(shader.and_then(|s| plan(&shape, &self.transform, s, 1.0)));
+                    Op::Stroke(..) => None,
+                    Op::Fill(n, color) => {
+                        let shape = self.glyphs.solid(0..n, 0.0, tol);
+                        shader(color).and_then(|s| plan(&shape, &self.transform, s, 1.0))
+                    }
+                });
             }
         }
         finish(planned, surface, &Exact)

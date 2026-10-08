@@ -14,10 +14,13 @@ default = ["paint"]
 # The painter is behind a feature so its size cost can be measured on its own.
 # It needs no crate the rest of the engine does not already use.
 paint = []
-# The rasterisers the painter's own was measured against (tiny-skia's
-# supersampling one and zeno's), selectable at run time through
-# `mt_paint_rasterizer`. For `parity/raster.mjs` only; never in a shipped build.
-raster-compare = ["paint", "dep:tiny-skia", "dep:zeno"]
+# The rasterisers the painter's own was measured against, each selectable at
+# run time through `mt_paint_rasterizer`. For `parity/raster.mjs` only; never
+# in a shipped build. One feature each so each one's size can be read off.
+raster-tiny-skia = ["paint", "dep:tiny-skia"]
+raster-zeno = ["paint", "dep:zeno"]
+raster-vello = ["paint", "dep:vello_cpu"]
+raster-compare = ["raster-tiny-skia", "raster-zeno", "raster-vello"]
 # tiny-skia's SIMD paths, for the comparison build. Only takes effect when the
 # target has the instructions, i.e. with RUSTFLAGS="-C target-feature=+simd128".
 simd = ["tiny-skia?/simd"]
@@ -27,6 +30,7 @@ harfrust = { version = "0.14", default-features = false, features = ["std"] }
 skrifa = { version = "0.48", default-features = false, features = ["std"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std"], optional = true }
 unicode-linebreak = "0.1.5"
+vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline"], optional = true }
 zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"], optional = true }
 
 [profile.release]

@@ -1,7 +1,7 @@
 //! Offsetting closed polylines: the stroke of an outline, and an outline
 //! grown outward.
 //!
-//! Both come from one routine, [`offset_loop`], which walks a contour and
+//! Both come from one routine, `offset_loop`, which walks a contour and
 //! writes the curve a fixed distance to one side of it. What it writes is
 //! *weakly* correct: the loop may cross itself, but filled with the non-zero
 //! rule it covers exactly the true region. In terms of the pieces a stroke is
@@ -45,19 +45,50 @@ impl Side {
 const STRAIGHT: f64 = 1e-10;
 
 /// The region within `radius` of the contours of `src` (canvas `stroke()`
-/// with `lineWidth = 2 * radius` on closed paths), appended to `out` as
-/// contours to fill with the non-zero rule.
-pub fn stroke(src: &Polys, radius: f64, join: Join, tol: f64, out: &mut Polys) {
+/// with `lineWidth = 2 * radius` on closed paths), as a difference of two
+/// shapes: everything inside `outer` (non-zero rule) that is not inside
+/// `inner`.
+///
+/// `away` is the side of the contours that faces away from the ink. `outer`
+/// gets the contours moved `radius` that way: the ink grown by `radius`.
+/// `inner` gets them moved `radius` into the ink. Both are turned to wind
+/// +1 round what they hold (in the sense in which a contour with positive
+/// [`Polys::area2`] winds +1): for `inner` that is the part of the ink more
+/// than `radius` from its edge, and everywhere else it winds zero or less. Where the ink is thinner than `2 * radius`
+/// the inward offset turns inside out and winds the other way, which is how
+/// "nothing is left of it" comes out of the arithmetic without a special
+/// case.
+///
+/// Why two shapes: as one shape the two sides of a thin stem are two
+/// overlapping bands, and a rasteriser that sums signed areas counts their
+/// overlap twice. Each of these two is a single curve round its region.
+pub fn stroke_sides(
+    src: &Polys,
+    radius: f64,
+    away: Side,
+    join: Join,
+    tol: f64,
+    outer: &mut Polys,
+    inner: &mut Polys,
+) {
     if !positive(radius) {
         return;
     }
     for c in src.contours() {
-        offset_loop(c, radius, Side::Left, join, tol, out);
-        let from = out.pts.len();
-        offset_loop(c, radius, Side::Right, join, tol, out);
-        // Walked backwards, the far side turns the same way round the
-        // stroke as the near side does.
-        out.pts[from..].reverse();
+        let (o, i) = (outer.pts.len(), inner.pts.len());
+        match away {
+            // Ink on the left: the contours already wind +1 round it.
+            Side::Right => {
+                offset_loop(c, radius, Side::Right, join, tol, outer);
+                offset_loop(c, radius, Side::Left, join, tol, inner);
+            }
+            Side::Left => {
+                offset_loop(c, radius, Side::Left, join, tol, outer);
+                offset_loop(c, radius, Side::Right, join, tol, inner);
+                outer.pts[o..].reverse();
+                inner.pts[i..].reverse();
+            }
+        }
     }
 }
 
@@ -201,15 +232,24 @@ mod tests {
 
     #[test]
     fn a_round_stroke_reaches_exactly_one_radius_from_the_outline() {
-        let mut out = Polys::default();
-        stroke(&square(10.0), 3.0, Join::Round, 0.001, &mut out);
+        let (mut out, mut inner) = (Polys::default(), Polys::default());
+        let sq = square(10.0);
+        stroke_sides(
+            &sq,
+            3.0,
+            Side::Right,
+            Join::Round,
+            0.001,
+            &mut out,
+            &mut inner,
+        );
         let (x0, y0, x1, y1) = out.bounds().unwrap();
         for (got, want) in [(x0, -3.0), (y0, -3.0), (x1, 13.0), (y1, 13.0)] {
             assert!((got - want).abs() < 1e-9, "{got} vs {want}");
         }
-        // Two loops per contour, and every point of the outer one within a
+        // One loop each side, and every point of the outer one within a
         // radius of the square (a round corner, not a mitred one).
-        assert_eq!(out.ends.len(), 2);
+        assert_eq!((out.ends.len(), inner.ends.len()), (1, 1));
         for p in &out.pts {
             let dx = (p.x - p.x.clamp(0.0, 10.0)).abs();
             let dy = (p.y - p.y.clamp(0.0, 10.0)).abs();
@@ -271,10 +311,70 @@ mod tests {
     }
 
     #[test]
+    fn the_two_sides_of_a_stroke_are_the_shape_grown_and_the_shape_shrunk() {
+        let (mut outer, mut inner) = (Polys::default(), Polys::default());
+        // Ink on the left of this square, so away from it is the right.
+        stroke_sides(
+            &square(10.0),
+            3.0,
+            Side::Right,
+            Join::Round,
+            1e-5,
+            &mut outer,
+            &mut inner,
+        );
+        let grown = 100.0 + 120.0 + core::f64::consts::PI * 9.0;
+        assert!((outer.area2() / 2.0 - grown).abs() < 1e-2);
+        // What is left more than 3 from the edge: a 4 x 4 square, wound +1.
+        assert!((inner.area2() / 2.0 - 16.0).abs() < 1e-9);
+
+        // The same square walked the other way round: ink on the right. The
+        // inner shape is turned so that it still winds +1.
+        let mut cw = square(10.0);
+        cw.pts.reverse();
+        let (mut outer, mut inner) = (Polys::default(), Polys::default());
+        stroke_sides(
+            &cw,
+            3.0,
+            Side::Left,
+            Join::Round,
+            1e-5,
+            &mut outer,
+            &mut inner,
+        );
+        assert!((outer.area2() / 2.0 - grown).abs() < 1e-2);
+        assert!((inner.area2() / 2.0 - 16.0).abs() < 1e-9);
+
+        // Thinner than the pen: the inward offset turns inside out, so its
+        // area is negative and nothing is taken out of the stroke.
+        let (mut outer, mut inner) = (Polys::default(), Polys::default());
+        stroke_sides(
+            &square(4.0),
+            3.0,
+            Side::Right,
+            Join::Round,
+            1e-5,
+            &mut outer,
+            &mut inner,
+        );
+        assert!(inner.area2() <= 0.0, "{}", inner.area2());
+    }
+
+    #[test]
     fn a_radius_larger_than_the_shape_still_yields_a_closed_loop() {
-        let mut out = Polys::default();
-        stroke(&square(1.0), 5.0, Join::Round, 0.01, &mut out);
-        assert_eq!(out.ends.len(), 2);
+        let (mut out, mut inner) = (Polys::default(), Polys::default());
+        let sq = square(1.0);
+        stroke_sides(
+            &sq,
+            5.0,
+            Side::Right,
+            Join::Round,
+            0.01,
+            &mut out,
+            &mut inner,
+        );
+        assert_eq!((out.ends.len(), inner.ends.len()), (1, 1));
+        assert!(inner.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
         assert!(out.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
         let (x0, _, x1, _) = out.bounds().unwrap();
         assert!((x0 + 5.0).abs() < 1e-9 && (x1 - 6.0).abs() < 1e-9);
