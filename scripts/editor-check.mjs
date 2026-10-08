@@ -349,7 +349,7 @@ if (ONLY.has('bytes') && DSF === 1) {
   await sleep(300);
   const after = (await ec('sameAsExporter')).map((r) => r.editor?.[0]);
   report.densityChange = {
-    scaleFollowed: rows.every((r) => r.scale === 2 && r.painted && r.bytes === 0),
+    scaleFollowed: rows.every((r) => r.scale >= 2 && r.painted && r.bytes === 0),
     widths: { at1x: before.slice(0, 3), at2x: rows.slice(0, 3).map((r) => r.editor?.[0]), backAt1x: after.slice(0, 3) },
   };
   log('display density 1 -> 2 -> 1:', JSON.stringify(report.densityChange));

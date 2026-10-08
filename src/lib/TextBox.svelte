@@ -111,7 +111,7 @@
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
-  const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale()) : 0);
+  const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
   // Whether the box is near the viewport: null until the observer has said.
   let rootEl = $state(null);
   let near = $state(null);

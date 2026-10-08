@@ -20,7 +20,7 @@ import { restoreFonts, scanSystemFonts, addFontFile } from '../../lib/fonts.js';
 import { engineSwitch, useTextEngine } from '../../lib/engine-switch.svelte.js';
 import { textEngine, glyphPainter } from '../../lib/text-engine/index.js';
 import { renderBoxTexture, renderPageCanvas, warpTexture } from '../../lib/exporter.js';
-import { PICTURE_MAX_PX } from '../../lib/editor/box-picture.js';
+import { PICTURE_MAX_PX, pictureScale } from '../../lib/editor/box-picture.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
 
 const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -258,9 +258,9 @@ window.__ec = {
   // Editor against exporter: for every box shown as the engine's picture, the
   // canvas's bytes against `renderBoxTexture` asked for the same scale.
   sameAsExporter() {
-    const scale = app.zoom * devicePixelRatio;
     const pg = page();
     return pg.boxes.map((b) => {
+      const scale = pictureScale(app.zoom, devicePixelRatio, b.style.rotation);
       const cnv = boxEl(b.id)?.querySelector('canvas.warpl[data-painter="engine"]');
       if (!cnv) return { id: b.id, canvas: false };
       if (!cnv.width) return { id: b.id, canvas: true, painted: false };

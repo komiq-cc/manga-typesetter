@@ -22,7 +22,7 @@ vi.mock('./text-paint.js', async (original) => {
 import TextBox from './TextBox.svelte';
 import { app, loadProjectPages, page, selectBox, beginEdit, endEdit, setZoom, setZoomLive, moveBoxTo, moveGeom, noteFontsChanged } from './store.svelte.js';
 import { engineSwitch } from './engine-switch.svelte.js';
-import { paintBoxPicture, PICTURE_MAX_PX } from './editor/box-picture.js';
+import { paintBoxPicture, PICTURE_MAX_PX, TURNED_OVERSAMPLE } from './editor/box-picture.js';
 import { paintWarpedBox, renderBoxTexture } from './exporter.js';
 import { _setDisplayScale } from './editor/display-scale.svelte.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
@@ -120,6 +120,8 @@ async function mounted(id, { zoom = 1, props = {} } = {}) {
   const root = view.container.querySelector('.tbox');
   return { view, root, box: b, pg, canvas: () => root.querySelector('canvas'), paints: () => paintBoxPicture.mock.calls.length };
 }
+// A turned box is painted at twice the display's scale (TURNED_OVERSAMPLE).
+const turned = (b) => ((b.style.rotation || 0) % 90 ? TURNED_OVERSAMPLE : 1);
 // What the exporter says the box's footprint is, in page px.
 const footprint = (b, pg) => {
   const r = renderBoxTexture(b, pg, null, 1);
@@ -198,6 +200,37 @@ describe('what a box is, with the engine drawing', () => {
 });
 
 describe('the scale the picture is painted at', () => {
+  it('a box turned off the axes is painted at twice the scale, and shown at the same size', async () => {
+    _setDisplayScale(2);
+    const m = await mounted('straight', { zoom: 1.5 });
+    const f = footprint(m.box, m.pg);
+    const el = m.canvas();
+    const upright = css(el);
+    expect(el.width).toBe(Math.ceil(f.cw * 3));
+    // The first degree repaints, once: the picture has to be made finer.
+    m.box.style.rotation = 7;
+    await tick();
+    expect(m.paints()).toBe(2);
+    expect(paintBoxPicture.mock.calls[1][3]).toBeCloseTo(3 * TURNED_OVERSAMPLE, 9);
+    expect(el.width).toBe(Math.ceil(f.cw * 3 * TURNED_OVERSAMPLE));
+    expect(css(el).width).toBeCloseTo(upright.width, 6);
+    expect(css(el).height).toBeCloseTo(upright.height, 6);
+    // The rest of the turn is CSS's.
+    for (const deg of [8, 21, -40, 179]) {
+      m.box.style.rotation = deg;
+      await tick();
+    }
+    expect(m.paints()).toBe(2);
+    // A quarter turn lands texel on pixel and needs no more than the screen has.
+    m.box.style.rotation = 90;
+    await tick();
+    expect(m.paints()).toBe(3);
+    expect(el.width).toBe(Math.ceil(f.cw * 3));
+    m.box.style.rotation = 270;
+    await tick();
+    expect(m.paints()).toBe(3);
+  });
+
   for (const [zoom, dpr] of [[1, 1], [1, 2], [0.5, 2], [3, 1], [3, 2], [0.37, 2]]) {
     it(`zoom ${zoom} on a ${dpr}x display: one texture pixel per device pixel`, async () => {
       _setDisplayScale(dpr);
@@ -289,6 +322,7 @@ describe('what repaints the picture, and what does not', () => {
     const m = await quiet('move', (m) => moveBoxTo(m.box, 333.3, 77.7, m.pg, moveGeom(m.box)));
     expect(m.root.style.left).toBe('333.3px');
   });
+  // 'finish' is a turned box already: another angle is the same picture.
   it('a turn does not', () => quiet('rotation', (m) => (m.box.style.rotation = 33)));
   it('the opacity does not', () => quiet('opacity', (m) => (m.box.style.opacity = 0.2)));
   it('a flip does not', () => quiet('flip', (m) => (m.box.style.flipV = true)));
@@ -297,7 +331,7 @@ describe('what repaints the picture, and what does not', () => {
 
   it('a resize does', async () => {
     const m = await loud('width', (m) => (m.box.w = 300));
-    expect(m.canvas().width).toBe(footprint(m.box, m.pg).cw);
+    expect(m.canvas().width).toBe(footprint(m.box, m.pg).cw * turned(m.box));
   });
   it('a taller box does', () => loud('height', (m) => (m.box.h = 140)));
   it('the text does', () => loud('text', (m) => (m.box.text = 'SOMETHING ELSE')));
@@ -314,7 +348,7 @@ describe('what repaints the picture, and what does not', () => {
   it('a font arriving does', () => loud('fonts', () => noteFontsChanged()));
   it('a zoom that is not a gesture does', async () => {
     const m = await loud('zoom', () => setZoom(2));
-    expect(m.canvas().width).toBe(Math.ceil(footprint(m.box, m.pg).cw * 2));
+    expect(m.canvas().width).toBe(Math.ceil(footprint(m.box, m.pg).cw * 2 * turned(m.box)));
   });
 
   it('a zoom gesture does not, until it settles, and then once', async () => {
@@ -328,12 +362,12 @@ describe('what repaints the picture, and what does not', () => {
     }
     // The bitmap that is there, stretched by the browser to the new CSS box.
     expect(m.paints()).toBe(1);
-    expect(el.width).toBe(f.cw);
+    expect(el.width).toBe(f.cw * turned(m.box));
     expect(css(el).width).toBeCloseTo(f.cw * 2.2, 6);
     setZoomLive(false);
     await tick();
     expect(m.paints()).toBe(2);
-    expect(el.width).toBe(Math.ceil(f.cw * 2.2));
+    expect(el.width).toBe(Math.ceil(f.cw * 2.2 * turned(m.box)));
     // Nothing more is owed.
     await tick();
     expect(m.paints()).toBe(2);
@@ -560,5 +594,77 @@ describe('a paint that lands late', () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(m.paints()).toBe(1);
     expect([el.width, el.height]).toEqual([0, 0]);
+  });
+});
+
+describe('the display, as a browser tells of it', () => {
+  // The other cases set the density by hand, which goes round the part that
+  // listens. Here nothing is set: the ratio is the window's, and a change is
+  // the `resolution` media query's, as when the window is dragged to another
+  // display. (The first version wrote state on first read, inside a derived;
+  // every case above passed and no box was painted in a browser.)
+  let queries;
+  const density = (dpr) => Object.defineProperty(window, 'devicePixelRatio', { value: dpr, configurable: true });
+  beforeEach(() => {
+    _setDisplayScale(0);
+    queries = [];
+    window.matchMedia = (text) => {
+      const q = { text, listeners: new Set(), addEventListener: (_, fn) => q.listeners.add(fn), removeEventListener: (_, fn) => q.listeners.delete(fn) };
+      queries.push(q);
+      return q;
+    };
+  });
+  afterEach(() => {
+    density(1);
+    delete window.matchMedia;
+  });
+  // What a display change is to the page: the ratio is new, and the query
+  // that matched the old one says so, once.
+  const moveTo = async (dpr) => {
+    density(dpr);
+    for (const q of queries.slice()) for (const fn of [...q.listeners]) (q.listeners.delete(fn), fn());
+    await tick();
+  };
+
+  it('paints at the window\'s own ratio with nobody having said what it is', async () => {
+    density(2);
+    const m = await mounted('straight');
+    expect(m.paints()).toBe(1);
+    expect(m.canvas().width).toBe(footprint(m.box, m.pg).cw * 2);
+    expect(queries.at(-1).text).toBe('(resolution: 2dppx)');
+  });
+
+  it('repaints when the display changes, and listens for the next change', async () => {
+    density(1);
+    const m = await mounted('straight');
+    const f = footprint(m.box, m.pg);
+    expect(m.canvas().width).toBe(f.cw);
+    await moveTo(2);
+    expect(m.paints()).toBe(2);
+    expect(m.canvas().width).toBe(f.cw * 2);
+    expect(queries.at(-1).text).toBe('(resolution: 2dppx)');
+    await moveTo(1.5);
+    expect(m.paints()).toBe(3);
+    expect(m.canvas().width).toBe(Math.ceil(f.cw * 1.5));
+    await moveTo(1);
+    expect(m.paints()).toBe(4);
+    expect(m.canvas().width).toBe(f.cw);
+  });
+
+  it('stops listening when the last picture is gone', async () => {
+    density(2);
+    const m = await mounted('straight');
+    const live = () => queries.reduce((n, q) => n + q.listeners.size, 0);
+    expect(live()).toBe(1);
+    m.view.unmount();
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(live()).toBe(0);
+  });
+
+  it('with the flag false nothing listens at all', async () => {
+    engineSwitch.painting = false;
+    await mounted('straight');
+    expect(queries).toHaveLength(0);
   });
 });

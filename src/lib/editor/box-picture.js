@@ -30,9 +30,20 @@ import { renderBoxTexture, warpTexture } from '../exporter.js';
 // (16384 a side, 64 MP: warp-paint.js) and what the engine will paint (67 MP).
 export const PICTURE_MAX_PX = 8 * 1024 * 1024;
 
+// A turned box is painted finer than the screen. Its turn is CSS's, so the
+// compositor resamples the picture whatever it is painted at, and a picture
+// with one texel to the device pixel comes out of that soft. Measured in
+// Chromium on 22px type turned 7 degrees, at 100% on a 1x display: 67% of its
+// inked pixels were neither paper nor ink, against 49% for the DOM text and
+// for the export. With two texels to the pixel each way the resample is an
+// average of four, which is what an antialiased edge is, and the figure is
+// 43%. Four times the pixels, for turned boxes only, inside the same budget.
+// Quarter turns are left alone: they land texel on pixel.
+export const TURNED_OVERSAMPLE = 2;
+
 /** Device px per page px a box is painted at when nothing caps it. */
-export function pictureScale(zoom, dpr) {
-  return zoom * (dpr > 0 ? dpr : 1);
+export function pictureScale(zoom, dpr, rotation = 0) {
+  return zoom * (dpr > 0 ? dpr : 1) * (rotation % 90 ? TURNED_OVERSAMPLE : 1);
 }
 
 // The finished bitmap onto the editor's canvas, pixel for pixel, and the
@@ -59,6 +70,10 @@ function show(el, r, maxPx, release) {
   const ctx = el.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalCompositeOperation = 'copy';
+  // One to one there is nothing to smooth, and a canvas that filters anyway
+  // (Skia's 'high' is a cubic at any scale) would hand back other bytes.
+  const same = w === r.canvas.width && h === r.canvas.height;
+  ctx.imageSmoothingEnabled = !same;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(r.canvas, 0, 0, w, h);
   ctx.globalCompositeOperation = 'source-over';
