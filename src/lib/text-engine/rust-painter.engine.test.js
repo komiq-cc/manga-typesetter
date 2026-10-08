@@ -194,7 +194,7 @@ describe('the Rust engine behind the glyph-painter seam', () => {
         expect(Math.abs(b.y0 - 2 * (60 - m.ascent)), `${boldAdvance} top`).toBeLessThanOrEqual(1);
         expect(Math.abs(b.y1 + 1 - 2 * (60 + m.descent)), `${boldAdvance} bottom`).toBeLessThanOrEqual(1);
       } finally {
-        rust.setRules({ boldAdvance: 'unchanged' });
+        rust.setRules({ boldAdvance: 'webkit' });
       }
     }
   });
