@@ -71,6 +71,13 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
+/// Runs `f` with the engine the exports share, for exports that live in
+/// another file (`abi_paint.rs`).
+#[cfg(feature = "paint")]
+pub(crate) fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> R {
+    with(|s| f(&mut s.engine))
+}
+
 /// Runs `f` with the engine and the first `len` bytes of the text buffer.
 fn with_text<R>(
     len: usize,

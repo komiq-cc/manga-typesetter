@@ -18,6 +18,8 @@
 //!   the instance must be thrown away.
 
 pub mod abi;
+#[cfg(feature = "paint")]
+pub mod abi_paint;
 mod engine;
 mod font;
 pub mod memory;

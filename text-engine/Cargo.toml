@@ -11,10 +11,15 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["paint"]
-# The rasteriser is behind a feature so its size cost can be measured on its own.
-paint = ["dep:tiny-skia"]
-# tiny-skia's SIMD paths. Only takes effect when the target has the
-# instructions, i.e. with RUSTFLAGS="-C target-feature=+simd128" for wasm.
+# The painter is behind a feature so its size cost can be measured on its own.
+# It needs no crate the rest of the engine does not already use.
+paint = []
+# The rasterisers the painter's own was measured against (tiny-skia's
+# supersampling one and zeno's), selectable at run time through
+# `mt_paint_rasterizer`. For `parity/raster.mjs` only; never in a shipped build.
+raster-compare = ["paint", "dep:tiny-skia", "dep:zeno"]
+# tiny-skia's SIMD paths, for the comparison build. Only takes effect when the
+# target has the instructions, i.e. with RUSTFLAGS="-C target-feature=+simd128".
 simd = ["tiny-skia?/simd"]
 
 [dependencies]
@@ -22,6 +27,7 @@ harfrust = { version = "0.14", default-features = false, features = ["std"] }
 skrifa = { version = "0.48", default-features = false, features = ["std"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std"], optional = true }
 unicode-linebreak = "0.1.5"
+zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"], optional = true }
 
 [profile.release]
 panic = "abort"
