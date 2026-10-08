@@ -116,8 +116,8 @@ pub fn browser_line_units(info: &FontInfo) -> (f64, f64) {
 /// `units / unitsPerEm` goes through a 16.16 fixed-point number first, so a
 /// value that is exactly half a pixel in real arithmetic can land a hair
 /// under it and round the other way (Bebas Neue at 25 px: 22.5 becomes 22).
-/// Measured on 4,263 face and size pairs: this split reproduces every one;
-/// one rule for both kinds misses 10 (all exact) or 66 (all fixed).
+/// On 2,049 face and size pairs (`parity/fontbox.mjs`) this split reproduces
+/// every one; plain arithmetic for both kinds misses 4, fixed point 31.
 fn coretext_scale(units: f64, info: &FontInfo, size: f64) -> f64 {
     let upem = f64::from(info.units_per_em);
     if info.truetype {

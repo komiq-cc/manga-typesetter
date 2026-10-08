@@ -184,6 +184,16 @@ describe('solveLayout on the Rust engine (after auto-layout.realfont.test.js)', 
     holds(r, s, TEXT, OVAL);
   });
 
+  it('brings 20 and 40 to about the same size in a balloon that holds about 20 (FIT-1)', () => {
+    const s = style('Comic Neue');
+    const tight = { kind: 'ellipse', cx: 350, cy: 320, rx: 120, ry: 85 };
+    const a = solveLayout({ text: TEXT, style: s, refSize: 20, region: tight, opts: { minSize: 12 } });
+    const b = solveLayout({ text: TEXT, style: s, refSize: 40, region: tight, opts: { minSize: 12 } });
+    expect(b.size).toBeLessThan(40);
+    expect(Math.abs(b.size - a.size)).toBeLessThanOrEqual(3);
+    holds(b, s, TEXT, tight);
+  });
+
   it('keeps a heavy outline inside the box', () => {
     const s = style('Bangers', { strokes: [{ color: '#ffffff', width: 6, opacity: 1 }] });
     const rect = { kind: 'rect', x: 80, y: 60, w: 420, h: 120 };
@@ -225,6 +235,18 @@ describe('solveLayout on the Rust engine (after auto-layout.realfont.test.js)', 
   });
 });
 
+describe('solveLayout on the Rust engine, the rectangle silhouette', () => {
+  it('leaves a rectangle silhouette at the balloon s width', () => {
+    const s = normalizeStyle({ ...defaultStyle(), font: 'Comic Neue', bold: false, align: 'center', shape: 'rect' });
+    const text = 'If we leave right now, we can still catch the last train before the storm hits.';
+    const round = { kind: 'ellipse', cx: 350, cy: 320, rx: 150, ry: 130 };
+    const r = solveLayout({ text, style: s, refSize: 22, region: round, opts: { minSize: 12 } });
+    expect(r.lines.length).toBeLessThanOrEqual(3);
+    const box = { x: r.x, y: r.y, w: r.w, h: r.h, style: { ...s, size: r.size }, fit: round };
+    expect(containBox(boxCandidate(box, text)).fits).toBe(true);
+  });
+});
+
 describe('while editing, the lines are layoutLines on the Rust engine (after edit-lines.realfont.test.js)', () => {
   const shown = (seg, s) => applyCase(seg.body, s).replace(/\t/g, ' ') + (seg.hyphen ? '-' : '');
   const joined = (segs) => segs.map((g) => g.head + g.body + g.tail).join('');
@@ -237,9 +259,9 @@ describe('while editing, the lines are layoutLines on the Rust engine (after edi
     'Whatever happens next\n',
   ];
 
-  for (const uppercase of [false, true]) {
-    it(`Comic Neue${uppercase ? ', uppercase' : ''}: flat width and balloon`, () => {
-      const s = normalizeStyle({ ...defaultStyle(), font: 'Comic Neue', size: 24, bold: false, uppercase });
+  for (const [font, uppercase] of [['Comic Neue', false], ['Comic Neue', true], ['Bangers', false], ['Bangers', true]]) {
+    it(`${font}${uppercase ? ', uppercase' : ''}: flat width and balloon`, () => {
+      const s = normalizeStyle({ ...defaultStyle(), font, size: 24, bold: false, uppercase });
       let hyphens = 0;
       for (const w of [90, 150, 240]) {
         const box = { x: 0, y: 0, w, h: 200, fit: { kind: 'ellipse', cx: w / 2, cy: 100, rx: w / 2 + 20, ry: 110 } };
