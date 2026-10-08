@@ -287,20 +287,19 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
             decoded = Promise.reject(error);
           }
           track(
-            decoded
-              .then(
-                (sfnt) => {
-                  if (!current()) return;
-                  register(family, slot, rec, asBytes(sfnt));
-                  landed(family);
-                },
-                () => {
-                  if (!current()) return;
-                  rec.state = 'unusable';
-                  rec.why = 'unreadable';
-                  landed(family);
-                },
-              ),
+            decoded.then(
+              (sfnt) => {
+                if (!current()) return;
+                register(family, slot, rec, asBytes(sfnt));
+                landed(family);
+              },
+              () => {
+                if (!current()) return;
+                rec.state = 'unusable';
+                rec.why = 'unreadable';
+                landed(family);
+              },
+            ),
           );
         }
       } else {

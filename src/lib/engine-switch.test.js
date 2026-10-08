@@ -272,6 +272,20 @@ describe('starting', () => {
     await starting;
     expect(engine.registered()).toEqual({ WildWords: ['regular'], AnimeAce: ['bold'] });
   });
+
+  it('hands the engine each face once, the one that arrived while it starts included', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    const added = vi.spyOn(engine, 'addFace');
+    let boot;
+    deps({ booted: () => new Promise((resolve) => (boot = resolve)) });
+    const starting = useTextEngine('rust');
+    await vi.waitFor(() => expect(boot).toBeTypeOf('function'));
+    // Told by the watcher now, and in the library read that follows the boot.
+    await addFontFile(fontFile('AnimeAce-Bold.ttf'));
+    boot();
+    await starting;
+    expect(added.mock.calls.map(([family, slot]) => `${family}/${slot}`).sort()).toEqual(['AnimeAce/bold', 'WildWords/regular']);
+  });
 });
 
 describe('the user’s faces, through every way one arrives or leaves', () => {

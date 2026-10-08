@@ -124,6 +124,9 @@ async function start() {
   // fonts.js reports from now; what it says before the engine has the library
   // is kept and said again after, in order, so nothing falls between the two.
   const early = [];
+  // The faces that arrived that way: the library read below would only hand
+  // the same bytes over a second time.
+  const told = new Set();
   let live = false;
   const tell = (change) => {
     if (!live) {
@@ -134,7 +137,10 @@ async function start() {
     if (engineSwitch.phase === 'on') apply();
   };
   deps.watch({
-    added: (family, slot, bytes) => tell((s) => s.setUserFace(family, slot, bytes)),
+    added: (family, slot, bytes) => {
+      if (!live) told.add(`${family}::${slot}`);
+      tell((s) => s.setUserFace(family, slot, bytes));
+    },
     removed: (family, slot) => tell((s) => s.removeUserFace(family, slot)),
     removedFamily: (family) => tell((s) => s.removeUserFamily(family)),
     scanned: () => tell((s) => s.refresh()),
@@ -163,7 +169,7 @@ async function start() {
       toSfnt: invoke ? (bytes) => invoke('font_to_sfnt', bytes) : null,
       onArrival: arrived,
     });
-    for (const rec of records) sync.setUserFace(rec.name, rec.slot, rec.data);
+    for (const rec of records) if (!told.has(`${rec.name}::${rec.slot}`)) sync.setUserFace(rec.name, rec.slot, rec.data);
     live = true;
     for (const change of early.splice(0)) change(sync);
     sync.refresh();
