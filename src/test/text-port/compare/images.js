@@ -7,7 +7,10 @@ export function alphaBbox(alpha, width, height) {
   let b = 0;
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     if (!alpha[y * width + x]) continue;
-    l = Math.min(l, x); t = Math.min(t, y); r = Math.max(r, x + 1); b = Math.max(b, y + 1);
+    l = Math.min(l, x);
+    t = Math.min(t, y);
+    r = Math.max(r, x + 1);
+    b = Math.max(b, y + 1);
   }
   return r ? [l, t, r, b] : null;
 }
@@ -22,7 +25,7 @@ function origin(record) {
   return { x: x * ss, y: y * ss, ss, layer };
 }
 
-export function alignImages(a, b, recordA, recordB) {
+export function alignImages(a, b, recordA, recordB, crop = false) {
   const oa = origin(recordA);
   const ob = origin(recordB);
   if (oa.ss !== ob.ss || oa.layer !== ob.layer) throw new Error('Incompatible image coordinate systems or supersampling');
@@ -31,15 +34,35 @@ export function alignImages(a, b, recordA, recordB) {
   if (Math.abs(dx - Math.round(dx)) > 1e-8 || Math.abs(dy - Math.round(dy)) > 1e-8) throw new Error('Image origins do not share a device-pixel grid');
   const bx = Math.round(dx);
   const by = Math.round(dy);
-  const minX = Math.min(0, bx);
-  const minY = Math.min(0, by);
-  const width = Math.max(a.width, bx + b.width) - minX;
-  const height = Math.max(a.height, by + b.height) - minY;
+  let minX = Math.min(0, bx);
+  let minY = Math.min(0, by);
+  let maxX = Math.max(a.width, bx + b.width);
+  let maxY = Math.max(a.height, by + b.height);
+  if (crop) {
+    const boxes = [a.bbox === undefined ? alphaBbox(a.alpha, a.width, a.height) : a.bbox,
+      b.bbox === undefined ? alphaBbox(b.alpha, b.width, b.height) : b.bbox];
+    const bounds = boxes.flatMap((box, i) => box ? [[box[0] + (i ? bx : 0), box[1] + (i ? by : 0), box[2] + (i ? bx : 0), box[3] + (i ? by : 0)]] : []);
+    if (bounds.length) {
+      minX = Math.min(...bounds.map(box => box[0])) - 1;
+      minY = Math.min(...bounds.map(box => box[1])) - 1;
+      maxX = Math.max(...bounds.map(box => box[2])) + 1;
+      maxY = Math.max(...bounds.map(box => box[3])) + 1;
+    } else {
+      maxX = minX + 1;
+      maxY = minY + 1;
+    }
+  }
+  const width = maxX - minX;
+  const height = maxY - minY;
   if (width * height > 100000000) throw new Error('Aligned image exceeds 100 million pixels');
   const before = new Uint8Array(width * height);
   const after = new Uint8Array(width * height);
   function place(image, dest, x, y) {
-    for (let row = 0; row < image.height; row++) dest.set(image.alpha.subarray(row * image.width, (row + 1) * image.width), (row + y) * width + x);
+    const left = Math.max(0, -x);
+    const right = Math.min(image.width, width - x);
+    for (let row = Math.max(0, -y); row < Math.min(image.height, height - y); row++) {
+      if (right > left) dest.set(image.alpha.subarray(row * image.width + left, row * image.width + right), (row + y) * width + x + left);
+    }
   }
   place(a, before, -minX, -minY);
   place(b, after, bx - minX, by - minY);
@@ -59,8 +82,14 @@ export function compareAlpha(aligned) {
     const b = after[i] >= 128;
     if (a && b) intersection++;
     if (a || b) union++;
-    if (before[i] || after[i]) { support++; sum += Math.abs(before[i] - after[i]); }
-    if (a !== b) { xor[i] = 1; xorCount++; }
+    if (before[i] || after[i]) {
+      support++;
+      sum += Math.abs(before[i] - after[i]);
+    }
+    if (a !== b) {
+      xor[i] = 1;
+      xorCount++;
+    }
   }
   const bboxA = alphaBbox(before, width, height);
   const bboxB = alphaBbox(after, width, height);

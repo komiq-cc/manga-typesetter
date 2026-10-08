@@ -5,28 +5,45 @@ comparator imports no app modules. Run it with:
 
 ```sh
 node scripts/text-port/compare.mjs BEFORE AFTER --corpus CORPUS --out REPORT
-node scripts/text-port/envelope.mjs REFERENCE1 REFERENCE2 REFERENCE3 --out envelope.json
+node scripts/text-port/envelope.mjs REFERENCE1 REFERENCE2 REFERENCE3 --corpus CORPUS --out envelope.json
 node scripts/text-port/fake-runs.mjs node_modules/.cache/text-port-test/fake
 ```
 
-`--limit` defaults to 150, per recording group (`metrics`, `layout`, `pixels`),
-and accepts zero. Every gate exception gets assets even when
-the aggregate fraction passes. All cases, all numeric observations, all
-exceptions and statistics remain in `report.json`; the limit only controls
-image files. Exact capture PNGs are copied, and alpha-only aligned views are
-also saved so differing origins and canvas dimensions do not confuse flicker.
+`--limit` defaults to 150 per recording group and accepts zero. Gate
+exceptions rank first, followed by severity and id; a failing gate never lifts
+the cap. `--assets all` lifts the image cap explicitly. Only pixel records have
+capture PNGs. Each selected pixel produces five files: exact before/after,
+aligned alpha before/after, and a heat map. Reusing an output directory removes
+its previous `img/` files before writing the new selection.
 
-The report embeds compact case display data and initially renders 100 case
-rows, with filters and a show-more button. It needs no server or network.
-Original PNGs retain their colors; comparison, aligned views and heat maps use
-only alpha. Skips and one-sided skips are listed separately; missing captures
-and explicit engine errors always make the run fail, even if a custom gates
-file omits the corresponding integrity checks.
-Manifest counts are checked against JSONL row totals (including skipped/error
-rows), and `counts.skipped` against skip records across all three files. Stale
-counts are input errors, preventing common dropped rows from passing without a
-corpus. The README does not explicitly define whether group counts include
-skips; this implementation uses inclusive record counts.
+`report.json` is a streamed summary: manifests, counts, gates, capped exception
+ids, font/field statistics and 200-worst lists, font/tag gate tables, and asset
+selection ids. It contains no `cases` array. Every joined case, including skips,
+missing records and errors, is written as a complete row to
+`cases/metrics.jsonl`, `cases/layout.jsonl` or `cases/pixels.jsonl`.
+Non-finite differences remain explicit strings, including in streamed rows.
+Large summaries are serialized in chunks rather than one giant string.
+
+The self-contained HTML embeds only cases with image assets and the worst
+`--limit` metric and layout rows. It states that these are a sample, gives the
+full totals, and links the three JSONL files. The first 100 sample rows render
+initially; font/tag/gate/search filters, show-more and flicker remain available.
+HTML font and tag tables show gate quantities; complete font/field numeric
+statistics and their 200-worst lists remain in the JSON summary.
+
+Missing captures and explicit engine errors always fail, even if custom gates
+omit their integrity guards. Manifest group counts include all JSONL rows;
+`counts.skipped` and `counts.errors` must match the corresponding records
+across all groups. A stale count is an input error.
+
+Metric rows are processed in batches of 500. Statistics accumulate numeric
+observations and bounded worst lists without copying every observation into a
+second object graph. The CLI streams full rows and releases processed metric
+input records, retaining only detailed HTML sample rows. Pixel comparisons run
+in at most two worker threads, recycled after 128 cases each to bound native
+PNG-decoder allocations. Alpha alignment and the exact distance transform use
+the union of the validated ink bounds plus a one-pixel background margin.
+Original capture images and their integrity checks remain unchanged.
 
 ## Gate file format
 
@@ -61,8 +78,29 @@ Rules:
 
 Other selectors are `mode` and `minSize`. `atLeast` is the required fraction of
 cases within tolerance, default 1. No eligible cases are reported as `empty`
-and 0/0, not presented as evidence that a populated gate passed. Gate exceptions
-are exhaustive, including the allowed tail of a fractional gate.
+and 0/0, not presented as evidence that a populated gate passed. Every case's failing gates are retained in its JSONL row, including allowed
+fractional tails. Each summary exception list contains at most 2,000 ids;
+`exceptionCount`, `failures` and `exceptionsTruncated` disclose the full count.
+Unknown-size ids are likewise capped with an uncapped `unknownSizeCount`.
+
+`excludeTags` rejects a case carrying any listed tag. `onlyTags` includes cases
+carrying any listed tag; if both selectors appear their filters intersect.
+Even empty tag-selector arrays require `--corpus`; omitting it is exit 2.
+Every default number/image/line gate excludes `uncovered` and has an otherwise
+identical `.uncovered` report-only twin. Integrity gates remain unconditional.
+
+Each group's `byTag` table has a row per corpus tag and explicit `covered` and
+`uncovered` rows. Tags can overlap; case counts include every status, while
+quantity observations count only eligible cases. Numeric gate quantities are
+per-case maximum absolute differences across selected fields; image quantities
+are raw metrics, including raw IoU; line/decision/integrity quantities are 0 or
+1. Each row reports eligible count, failure count and p50/p99/max per gate.
+`byFont` uses the same quantities. Ungated cases do not receive invented zeros.
+
+Curved layouts have no straight lines or straight coordinates. Their null
+fields are valid and line gates exclude them; their curve glyphs and changes
+remain reported. Smart-line shares use cases with comparable line arrays,
+including solver lines.
 
 Without `--corpus`, font grouping uses the id's first dot-separated component;
 `smart`/`plain` is recognized only as an id suffix. Font sizes remain unknown;
@@ -119,3 +157,31 @@ shift fixture uses alpha 100 (below the mask threshold), so its 3-pixel shift
 changes bboxDelta without changing threshold-mask thickness or IoU. These
 choices make the six failing pairs fail exactly one gate each. With opaque
 glyphs, the same changes can fail several gates under the specified formula.
+
+## Reference envelope at scale
+
+The envelope processes one pair at a time, releases its detailed rows, and
+writes no image assets. It retains pooled distributions and also `pairwise`
+rows with `metrics` (all cases), `covered` and `uncovered` distributions for
+every numeric field and pixel metric. IoU keeps both raw and `loss` statistics.
+Each pair counts cases skipped by either reference, including group totals,
+and excludes them from that pair's observations. `smartLines` gives count,
+identical count and share for all, covered and uncovered line-eligible layouts.
+
+Different line/curve array lengths can leave coordinates without a counterpart.
+Those observations have no finite delta and are counted by field in
+`unpairedObservations`; array length differences remain measured. Null or
+missing coordinates inside paired array elements still reject the reference.
+Missing cases, explicit capture errors, hash mismatches and invalid metric
+numbers remain input errors. Without `--corpus`, coverage tables are null and
+metadata explicitly states that tags are unknown.
+
+For a reproducible mostly failing scale fixture:
+
+```sh
+node scripts/text-port/fake-runs.mjs node_modules/.cache/text-port-test/scale \
+  --metrics 20000 --layout 2000 --pixels 300 --passing-only --failing
+```
+
+Set `TP_PROFILE=1` to print phase timings and RSS to stderr. Worker decode and
+image times sum work across both threads; they are not wall-clock totals.

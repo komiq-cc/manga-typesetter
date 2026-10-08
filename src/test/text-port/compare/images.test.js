@@ -41,6 +41,24 @@ describe('exact distance transform and alpha comparison', () => {
     const aligned = alignImages(a, b, { ...origin, ss: 2 }, { ...origin, ss: 2, ox: 1 });
     expect(compareAlpha(aligned)).toMatchObject({ bboxDelta: 0, iou: 1, meanAbs: 0, thick: 0 });
   });
+  it('crops transparent canvas space without changing any comparison quantity', () => {
+    const a = image(1200, 1100, new Uint8Array(1200 * 1100));
+    const b = image(1300, 1150, new Uint8Array(1300 * 1150));
+    for (let y = 500; y < 510; y++) {
+      for (let x = 550; x < 560; x++) {
+        a.alpha[y * a.width + x] = 255;
+        b.alpha[y * b.width + x + 2] = 170;
+      }
+    }
+    const cropped = alignImages(a, b, origin, origin, true);
+    expect(cropped.width).toBe(14);
+    expect(cropped.height).toBe(12);
+    const fullResult = compareAlpha(alignImages(a, b, origin, origin));
+    const croppedResult = compareAlpha(cropped);
+    for (const key of ['bboxDelta', 'iou', 'meanAbs', 'thick', 'xorCount', 'support']) {
+      expect(croppedResult[key]).toBe(fullResult[key]);
+    }
+  });
   it('uses the opposite origin sign for cropped page layers', () => {
     const a = image(3, 1, [0, 0, 255]);
     const b = image(1, 1, [255]);

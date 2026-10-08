@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compareNumbers, numberDifference, numberStatistics } from './numbers.js';
+import { compareNumbers, numberDifference, numberStatistics, NumberAccumulator } from './numbers.js';
 import { summarize, json } from './stats.js';
 
 describe('numeric differences', () => {
@@ -31,6 +31,18 @@ describe('numeric differences', () => {
     expect(stats.worst).toHaveLength(200);
     expect(new Set(stats.worst.map(item => item.id)).size).toBe(200);
     expect(stats.worst[0]).toMatchObject({ id: 'm.249', tags: ['kern'] });
+  });
+  it('retains the exact worst 200 through streamed batches and rejected candidates', () => {
+    const cases = Array.from({ length: 1700 }, (_, index) => ({
+      group: 'metrics', status: 'compared', font: 'Test', id: `m.${index}`, tags: [],
+      numbers: compareNumbers({ adv: 1 }, { adv: 1 + ((index * 997) % 1700) })
+    }));
+    const accumulator = new NumberAccumulator('metrics');
+    for (let offset = 0; offset < cases.length; offset += 113) accumulator.add(cases.slice(offset, offset + 113));
+    const [result] = accumulator.finish();
+    const expected = cases.sort((a, b) => b.numbers[0].abs - a.numbers[0].abs || a.id.localeCompare(b.id)).slice(0, 200);
+    expect(result.worst.map(item => item.id)).toEqual(expected.map(item => item.id));
+    expect(result.absolute).toMatchObject({ count: 1700, p50: 849.5, p99: 1682, max: 1699 });
   });
   it('defines median, nearest-rank p99, empty samples and JSON infinities', () => {
     expect(summarize([4, 1, 3, 2])).toMatchObject({ max: 4, median: 2.5, p99: 4 });

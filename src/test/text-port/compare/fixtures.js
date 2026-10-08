@@ -20,7 +20,11 @@ export function fakeAlpha(width = 16, height = 12, kind = 'normal') {
 
 async function writePixel(dir, record, alpha, width, height) {
   const rgba = new Uint8ClampedArray(alpha.length * 4);
-  for (let i = 0; i < alpha.length; i++) { rgba[i * 4] = 17; rgba[i * 4 + 1] = 103; rgba[i * 4 + 3] = alpha[i]; }
+  for (let i = 0; i < alpha.length; i++) {
+    rgba[i * 4] = 17;
+    rgba[i * 4 + 1] = 103;
+    rgba[i * 4 + 3] = alpha[i];
+  }
   record.bbox = alphaBbox(alpha, width, height);
   record.alphaSum = alpha.reduce((sum, value) => sum + value, 0);
   await saveRgba(path.join(dir, record.png), width, height, rgba);
@@ -28,7 +32,10 @@ async function writePixel(dir, record, alpha, width, height) {
 
 // All fixtures contain real alpha PNGs and hash their actual corpus bytes.
 // Failure variants isolate one enforced gate so CLI exit codes are meaningful.
-export async function makeFakeRuns(root, { pixelCount = 3, metricCount = 2, layoutCount = 2, width = 16, height = 12, variants = true } = {}) {
+export async function makeFakeRuns(root, {
+  pixelCount = 3, metricCount = 2, layoutCount = 2, width = 16, height = 12,
+  variants = true, failing = false, uncoveredEvery = 0
+} = {}) {
   await mkdir(root, { recursive: true });
   const corpus = path.join(root, 'corpus');
   await mkdir(corpus, { recursive: true });
@@ -52,6 +59,13 @@ export async function makeFakeRuns(root, { pixelCount = 3, metricCount = 2, layo
     records.pixels.push({ id, png: `png/${id}.png`, ox: 0, oy: 0, cw: width, ch: height, ss: 1 });
     images.push(fakeAlpha(width, height, kind));
   }
+  if (uncoveredEvery) {
+    for (const group of Object.keys(definitions)) {
+      definitions[group].forEach((item, index) => {
+        if (index % uncoveredEvery === 0) item.tags.push('uncovered');
+      });
+    }
+  }
   const corpusHashes = {};
   for (const group of ['metrics', 'layout', 'pixels']) {
     const bytes = JSON.stringify({ version: 1, cases: definitions[group] });
@@ -60,7 +74,7 @@ export async function makeFakeRuns(root, { pixelCount = 3, metricCount = 2, layo
   }
   const manifest = { engine: 'ref-sk', runId: 'fake', commit: '0000000000000000000000000000000000000000', dirty: false,
     host: { userAgent: 'fake', platform: 'node', dpr: 1 }, fonts: hash('fake fonts'), corpus: corpusHashes,
-    counts: { metrics: metricCount, layout: layoutCount, pixels: pixelCount, skipped: 0 }, startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:00:01Z' };
+    counts: { metrics: metricCount, layout: layoutCount, pixels: pixelCount, skipped: 0, errors: 0 }, startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:00:01Z' };
   const before = path.join(root, 'before');
   await mkdir(path.join(before, 'png'), { recursive: true });
   for (let i = 0; i < pixelCount; i++) await writePixel(before, records.pixels[i], images[i], width, height);
@@ -78,6 +92,11 @@ export async function makeFakeRuns(root, { pixelCount = 3, metricCount = 2, layo
     const meta = clone(manifest);
     meta.engine = 'new';
     for (const record of data.pixels) await copyFile(path.join(before, record.png), path.join(dir, record.png));
+    if (failing && name === 'pass') {
+      for (const record of data.metrics) record.adv += 2;
+      for (const record of data.layout) record.lines = ['changed lines'];
+      for (const record of data.pixels) record.ox = -3;
+    }
     if (name === 'advance') data.metrics[0].adv += 0.5;
     if (name === 'lines') data.layout[0].lines = ['one', 'two three four'];
     if (name === 'blob') {
@@ -86,7 +105,10 @@ export async function makeFakeRuns(root, { pixelCount = 3, metricCount = 2, layo
       await writePixel(dir, data.pixels[1], alpha, width, height);
     }
     if (name === 'shift') data.pixels[2].ox = -3;
-    if (name === 'missing') { data.metrics.pop(); meta.counts.metrics--; }
+    if (name === 'missing') {
+      data.metrics.pop();
+      meta.counts.metrics--;
+    }
     if (name === 'hash') meta.corpus.metrics = hash('different corpus');
     await save(dir, data, meta);
     pairs[name] = dir;

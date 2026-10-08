@@ -1,32 +1,66 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { readRun, readJson } from '../../src/test/text-port/compare/io.js';
+import { mkdir } from 'node:fs/promises';
+import { readRun, readCorpus, writeJsonStream } from '../../src/test/text-port/compare/io.js';
 import { compareRuns } from '../../src/test/text-port/compare/compare.js';
-import { buildEnvelope } from '../../src/test/text-port/compare/envelope.js';
-import { json } from '../../src/test/text-port/compare/stats.js';
+import { EnvelopeAccumulator } from '../../src/test/text-port/compare/envelope.js';
 
 export async function main(args) {
   const runs = [];
-  let out;
+  const options = {};
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--out' && !out && args[i + 1] && !args[i + 1].startsWith('--')) out = args[++i];
-    else if (args[i].startsWith('--')) throw new Error('Unknown or duplicate envelope option');
-    else runs.push(args[i]);
+    const arg = args[i];
+    if (!arg.startsWith('--')) {
+      runs.push(arg);
+    } else if (['--out', '--corpus'].includes(arg) && !options[arg]
+      && args[i + 1] && !args[i + 1].startsWith('--')) {
+      options[arg] = args[++i];
+    } else {
+      throw new Error('Unknown or duplicate envelope option');
+    }
   }
-  if (runs.length < 2 || !out) throw new Error('Usage: node scripts/text-port/envelope.mjs <run> <run> [<run>...] --out <file>');
+  const out = options['--out'];
+  if (runs.length < 2 || !out) {
+    throw new Error('Usage: node scripts/text-port/envelope.mjs <run> <run> [<run>...] [--corpus <dir>] --out <file>');
+  }
   const recordings = await Promise.all(runs.map(readRun));
-  const gates = await readJson(fileURLToPath(new URL('./gates.json', import.meta.url)));
-  const reports = [];
-  for (let a = 0; a < recordings.length; a++) for (let b = a + 1; b < recordings.length; b++) reports.push(await compareRuns(recordings[a], recordings[b], { gates }));
-  const envelope = buildEnvelope(reports, recordings);
+  const corpus = await readCorpus(options['--corpus']);
+  const accumulator = new EnvelopeAccumulator(recordings);
+  for (let a = 0; a < recordings.length; a++) {
+    for (let b = a + 1; b < recordings.length; b++) {
+      const report = await compareRuns(recordings[a], recordings[b], {
+        corpus, gates: { version: 1, gates: [] }, statistics: false
+      });
+      accumulator.add(report);
+      // Pair summaries own their observations; release detailed rows before
+      // allocating the next pair, including across the following await.
+      report.cases.length = 0;
+    }
+  }
+  const envelope = accumulator.finish();
+  envelope.metadataSource = options['--corpus'] ? 'corpus' : 'unknown tags; covered/uncovered tables unavailable';
+  if (!options['--corpus']) {
+    envelope.covered = null;
+    envelope.uncovered = null;
+    for (const pair of envelope.pairwise) {
+      pair.covered = null;
+      pair.uncovered = null;
+      pair.smartLines.covered = null;
+      pair.smartLines.uncovered = null;
+    }
+  }
   await mkdir(path.dirname(path.resolve(out)), { recursive: true });
-  await writeFile(out, json(envelope, 2));
-  console.log(`Envelope: ${recordings.length} runs, ${reports.length} pairs, ${Object.keys(envelope.metrics).length} metrics -> ${out}`);
+  await writeJsonStream(out, envelope);
+  console.log(`Envelope: ${recordings.length} runs, ${envelope.pairs} pairs, ${Object.keys(envelope.metrics).length} metrics -> ${out}`);
   return 0;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).then(code => { process.exitCode = code; }).catch(error => { console.error(`Input error: ${error.message}`); process.exitCode = 2; });
+  main(process.argv.slice(2)).then(code => {
+    process.exitCode = code;
+  }).catch(error => {
+    console.error(`Input error: ${error.message}`);
+    process.exitCode = 2;
+  });
 }

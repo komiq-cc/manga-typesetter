@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateGates, validateGates } from './gates.js';
+import { compareLayout } from './layout.js';
 import { compareNumbers } from './numbers.js';
 import { buildEnvelope } from './envelope.js';
 
@@ -10,9 +11,22 @@ describe('gates and reference envelope', () => {
     const cases = Array.from({ length: 1000 }, (_, i) => numericCase(`m.${i}`, { adv: 1000, chars: [10, 1000] }, { adv: 1000.4, chars: [10.01, i === 0 ? 1001 : 1000.4] }));
     const [gate] = evaluateGates(cases, [], config({ rule: 'number', group: 'metrics', fields: ['adv', 'chars'], abs: 0.02, rel: 0.0005, atLeast: 0.999 }));
     expect(gate).toMatchObject({ pass: true, count: 1000, failures: 1, fraction: 0.999 });
-    expect(gate.exceptions[0]).toMatchObject({ id: 'm.0', details: [{ path: 'chars[1]' }] });
+    expect(gate.exceptions[0]).toMatchObject({ id: 'm.0', group: 'metrics' });
     expect(cases[0].gates).toEqual(['test']);
     expect(evaluateGates(cases.slice(0, 999), [], config({ rule: 'number', group: 'metrics', fields: ['chars'], abs: 0.02, rel: 0.0005, atLeast: 0.999 }))[0].pass).toBe(false);
+  });
+  it('filters tag selectors, supports their intersection, and requires corpus metadata', () => {
+    const cases = ['covered', 'uncovered', 'uncovered'].map((label, i) => ({
+      ...numericCase(`m.${i}`, { adv: 1 }, { adv: 3 }),
+      tags: label === 'covered' ? ['kern'] : i === 1 ? ['uncovered', 'kern'] : ['uncovered']
+    }));
+    const base = { rule: 'number', group: 'metrics', fields: ['adv'], abs: 0 };
+    const filters = config({ ...base, excludeTags: ['uncovered'] });
+    expect(() => evaluateGates(cases, [], filters)).toThrow('require --corpus');
+    expect(evaluateGates(cases, [], filters, undefined, 2, true)[0]).toMatchObject({ count: 1, failures: 1 });
+    expect(evaluateGates(cases, [], config({ ...base, onlyTags: ['uncovered'], enforce: false }), undefined, 2, true)[0]).toMatchObject({ count: 2, failures: 2, enforce: false });
+    expect(evaluateGates(cases, [], config({ ...base, onlyTags: ['uncovered'], excludeTags: ['kern'] }), undefined, 2, true)[0]).toMatchObject({ count: 1, failures: 1 });
+    expect(() => validateGates(config({ ...base, onlyTags: 'uncovered' }))).toThrow('Invalid onlyTags');
   });
   it('counts cases rather than individual array entries', () => {
     const cases = [numericCase('m.a', { chars: [1, 1, 1] }, { chars: [3, 3, 3] }), numericCase('m.b', { chars: [1] }, { chars: [1] })];
@@ -31,6 +45,16 @@ describe('gates and reference envelope', () => {
     const cases = ['smart', 'plain'].map(mode => ({ id: `l.${mode}`, group: 'layout', status: 'compared', mode, gates: [], numbers: [], layout: { linesIdentical: false, verdictChanged: true } }));
     expect(evaluateGates(cases, [], config({ group: 'layout', rule: 'identical-lines', mode: 'smart', atLeast: 0.99 }))[0]).toMatchObject({ count: 1, failures: 1 });
     expect(evaluateGates(cases, [], config({ group: 'layout', rule: 'unchanged', property: 'verdictChanged', enforce: false }))[0]).toMatchObject({ pass: false, enforce: false, failures: 2 });
+  });
+  it('excludes valid curved null lines but fails missing straight line arrays', () => {
+    const curved = { curve: [], lines: null, lineX: null };
+    const broken = { curve: null, lineX: [] };
+    const cases = [curved, broken].map((record, index) => ({
+      id: `l.${index}`, group: 'layout', status: 'compared', gates: [], numbers: [],
+      layout: compareLayout(record, record)
+    }));
+    expect(evaluateGates(cases, [], config({ group: 'layout', rule: 'identical-lines' }))[0]).toMatchObject({ count: 1, failures: 1 });
+    expect(cases[1].gates).toContain('test');
   });
   it('applies within-envelope to absolute numbers and image overlap loss', () => {
     const envelope = { metrics: { 'metrics.adv': { max: 0.3, p99: 0.2 }, 'pixels.iou': { max: 1, loss: { max: 0.04, p99: 0.02 } } } };

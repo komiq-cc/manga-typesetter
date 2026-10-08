@@ -16,7 +16,11 @@ async function compare(name, extra = []) {
   const out = path.join(root, `report-${name}`);
   const result = cli('compare', [fixture.before, fixture.pairs[name] ?? path.join(root, name), '--corpus', fixture.corpus, '--out', out, '--limit', '1', ...extra]);
   const report = result.status === 2 ? null : JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8'));
-  return { result, report, out };
+  const cases = report ? (await Promise.all(['metrics', 'layout', 'pixels'].map(async group => {
+    const text = await readFile(path.join(out, 'cases', `${group}.jsonl`), 'utf8');
+    return text.trim() ? text.trim().split('\n').map(line => JSON.parse(line)) : [];
+  }))).flat() : [];
+  return { result, report, cases, out };
 }
 async function modify(name, group, change) {
   const dir = path.join(root, name);
@@ -28,6 +32,7 @@ async function modify(name, group, change) {
   const manifestFile = path.join(dir, 'manifest.json');
   const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
   manifest.counts[group] = records.length;
+  manifest.counts.errors = records.filter(record => record.error !== undefined).length;
   manifest.counts.skipped = records.filter(record => record.skip !== undefined).length;
   await writeFile(manifestFile, JSON.stringify(manifest));
   return dir;
@@ -44,7 +49,7 @@ afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }
 
 describe('complete CLI', () => {
   it('passes a fake pair and writes escaped, self-contained HTML with a valid inline script', async () => {
-    const { result, report, out } = await compare('pass');
+    const { result, report, cases, out } = await compare('pass');
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('Overall: PASS');
     expect(report.summary.pixels.compared).toBe(3);
@@ -54,50 +59,52 @@ describe('complete CLI', () => {
     expect(html).toContain('Start flicker');
     expect(html).not.toMatch(/<script[^>]*src=|<link[^>]*href=|https?:\/\//);
     expect(() => new vm.Script(html.match(/<script>\n([\s\S]*?)<\/script>/)[1])).not.toThrow();
-    const item = report.cases.find(item => item.images);
+    const item = cases.find(item => item.images);
     for (const relative of Object.values(item.images)) expect((await readFile(path.join(out, relative))).length).toBeGreaterThan(0);
   });
   it.each([['advance', 'metrics.advance'], ['lines', 'layout.smart-lines'], ['blob', 'pixels.thick'], ['shift', 'pixels.bbox'], ['missing', 'capture.missing'], ['hash', 'capture.hashes']])('fails %s with exactly the expected enforced gate %s', async (name, expected) => {
-    const { result, report, out } = await compare(name);
+    const { result, report, cases, out } = await compare(name);
     expect(result.status, result.stderr).toBe(1);
     expect(report.gates.filter(gate => gate.enforce && !gate.pass).map(gate => gate.id)).toEqual([expected]);
     expect(result.stdout).toMatch(new RegExp(`${expected.replaceAll('.', '\\.')}\\s+FAIL`));
-    if (name === 'blob' || name === 'shift') expect(report.cases.find(item => item.gates.includes(expected)).images).toBeDefined();
+    if (name === 'blob' || name === 'shift') expect(cases.find(item => item.gates.includes(expected)).images).toBeDefined();
     if (name === 'hash') expect(await readFile(path.join(out, 'report.html'), 'utf8')).toContain('MEANINGLESS COMPARISON');
   });
   it('counts and lists skips, and one-sided skips do not fail', async () => {
     await modify('skips', 'metrics', records => { records[0] = { id: records[0].id, skip: 'unsupported' }; });
-    const { result, report } = await compare('skips');
+    const { result, report, cases } = await compare('skips');
     expect(result.status, result.stderr).toBe(0);
     expect(report.summary.metrics).toMatchObject({ 'skip-mismatch': 1, skippedAfter: 1, skippedBefore: 0 });
-    expect(report.cases.find(item => item.status === 'skip-mismatch').after.skip).toBe('unsupported');
+    expect(cases.find(item => item.status === 'skip-mismatch').after.skip).toBe('unsupported');
   });
   it('makes any capture error fail the run', async () => {
     await modify('errors', 'metrics', records => { records[0] = { id: records[0].id, error: 'font missing' }; });
-    const { result, report } = await compare('errors');
+    const { result, report, cases } = await compare('errors');
     expect(result.status).toBe(1);
     expect(report.gates.find(gate => gate.id === 'capture.errors').pass).toBe(false);
+    expect(cases.find(item => item.status === 'error').gates).toContain('capture.errors');
   });
-  it('includes failure assets even with a zero image limit', async () => {
+  it('respects a zero image limit even for gate failures', async () => {
     const out = path.join(root, 'zero-limit');
     const result = cli('compare', [fixture.before, fixture.pairs.blob, '--corpus', fixture.corpus, '--out', out, '--limit', '0']);
     expect(result.status, result.stderr).toBe(1);
     const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8'));
-    expect(report.assets.pixelCases).toBe(1);
-    expect(report.cases.find(item => item.id === 'p.fake.1').images.heat).toBeDefined();
+    expect(report.assets.pixelCases).toBe(0);
   });
   it('reports missing/null numeric fields rather than skipping them', async () => {
-    await modify('nulls', 'metrics', records => { records[0].adv = null; delete records[0].font.descent; records[0].chars.pop(); });
-    const { result, report } = await compare('nulls');
+    await modify('nulls', 'metrics', records => { records[0].adv = null;
+      delete records[0].font.descent;
+      records[0].chars.pop(); });
+    const { result, report, cases } = await compare('nulls');
     expect(result.status).toBe(1);
-    expect(report.cases.find(item => item.id === 'm.fake.0').numbers.filter(diff => diff.invalid).map(diff => diff.path)).toEqual(expect.arrayContaining(['adv', 'font.descent', 'chars[1]']));
+    expect(cases.find(item => item.id === 'm.fake.0').numbers.filter(diff => diff.invalid).map(diff => diff.path)).toEqual(expect.arrayContaining(['adv', 'font.descent', 'chars[1]']));
   });
   it('report-only gates never fail an otherwise valid pair', async () => {
     const config = structuredClone(gates);
     config.gates.find(gate => gate.id === 'metrics.advance').enforce = false;
     const file = path.join(root, 'report-only.json');
     await writeFile(file, JSON.stringify(config));
-    const { result, report } = await compare('advance', ['--gates', file]);
+    const { result, report, cases } = await compare('advance', ['--gates', file]);
     expect(result.status).toBe(0);
     expect(report.gates.find(gate => gate.id === 'metrics.advance')).toMatchObject({ pass: false, enforce: false });
   });
@@ -120,9 +127,31 @@ describe('complete CLI', () => {
     const corpus = await readCorpus(fixture.corpus);
     expect(corpus.pixels.get('p.fake.1').box.style.size).toBe(12);
     expect([...((await loadAlpha(before, before.pixels.get('p.fake.0'))).alpha)].filter(a => a > 0)).toEqual(Array(35).fill(255));
-    const report = await compareRuns(before, after, { gates });
+    const unfiltered = structuredClone(gates);
+    for (const gate of unfiltered.gates) {
+      delete gate.excludeTags;
+      delete gate.onlyTags;
+    }
+    const report = await compareRuns(before, after, { gates: unfiltered });
     expect(report.cases.find(item => item.id === 'p.fake.0').font).toBe('p');
     expect(report.gates.find(gate => gate.id === 'pixels.iou').unknownSize).toHaveLength(3);
+  });
+  it('rejects tag-aware gates without a corpus with exit 2', () => {
+    const result = cli('compare', [fixture.before, fixture.pairs.pass, '--out', path.join(root, 'no-corpus')]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('Tag selectors require --corpus');
+  });
+  it('rejects stale error counts in a manifest', async () => {
+    const dir = await modify('stale-errors', 'metrics', records => {
+      records[0] = { id: records[0].id, error: 'capture error' };
+    });
+    const file = path.join(dir, 'manifest.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    manifest.counts.errors = 0;
+    await writeFile(file, JSON.stringify(manifest));
+    const result = cli('compare', [dir, dir, '--corpus', fixture.corpus, '--out', path.join(root, 'stale-errors-report')]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('manifest counts.errors');
   });
   it('builds every reference pair and supports within-envelope and annotation in the compare CLI', async () => {
     const file = path.join(root, 'envelope.json');

@@ -35,31 +35,96 @@ export function compareNumbers(before, after, path = '') {
   return result;
 }
 
-export function numberStatistics(cases, group) {
-  const buckets = new Map();
-  for (const item of cases.filter(item => item.group === group && item.status === 'compared')) {
-    for (const diff of item.numbers) {
-      const key = JSON.stringify([item.font, diff.field]);
-      if (!buckets.has(key)) buckets.set(key, { font: item.font, field: diff.field, entries: [] });
-      buckets.get(key).entries.push({ id: item.id, tags: item.tags, ...diff });
+export class NumberAccumulator {
+  constructor(group) {
+    this.group = group;
+    this.buckets = new Map();
+  }
+
+  add(cases) {
+    const buckets = this.buckets;
+    for (const item of cases) {
+      if (item.group !== this.group || item.status !== 'compared') continue;
+      const local = new Map();
+      for (const diff of item.numbers) {
+        const key = `${item.font}\0${diff.field}`;
+        if (!buckets.has(key)) {
+          buckets.set(key, {
+            font: item.font,
+            field: diff.field,
+            absolute: [], relative: [], perAbs: [], perRel: [],
+            invalid: 0,
+            worst: [],
+            cutoff: null
+          });
+        }
+        const bucket = buckets.get(key);
+        bucket.absolute.push(diff.abs);
+        bucket.relative.push(diff.rel);
+        bucket.invalid += Number(diff.invalid);
+        if (!local.has(key)) {
+          local.set(key, {
+            id: item.id,
+            tags: item.tags,
+            // Reuse the bucket's path for scalar fields instead of retaining
+            // a separately constructed path string for every observation.
+            path: diff.path === diff.field ? bucket.field : diff.path,
+            before: diff.before,
+            after: diff.after,
+            abs: diff.abs,
+            rel: diff.rel,
+            invalid: diff.invalid,
+            structural: Boolean(diff.structural),
+            elements: 0
+          });
+        }
+        const entry = local.get(key);
+        if (diff.abs > entry.abs) {
+          entry.path = diff.path === diff.field ? bucket.field : diff.path;
+          entry.before = diff.before;
+          entry.after = diff.after;
+        }
+        entry.abs = Math.max(entry.abs, diff.abs);
+        entry.rel = Math.max(entry.rel, diff.rel);
+        entry.invalid ||= diff.invalid;
+        entry.structural ||= Boolean(diff.structural);
+        entry.elements++;
+      }
+      for (const [key, entry] of local) {
+        const bucket = buckets.get(key);
+        bucket.perAbs.push(entry.abs);
+        bucket.perRel.push(entry.rel);
+        if (!bucket.cutoff || worstOrder(entry, bucket.cutoff) < 0) {
+          bucket.worst.push(entry);
+          if (bucket.worst.length >= 250 || (bucket.worst.length === 200 && !bucket.cutoff)) {
+            bucket.worst = bucket.worst.sort(worstOrder).slice(0, 200);
+            bucket.cutoff = bucket.worst[199];
+          }
+        }
+      }
     }
   }
-  return [...buckets.values()].map(({ font, field, entries }) => {
-    const byCase = new Map();
-    for (const entry of entries) {
-      if (!byCase.has(entry.id)) byCase.set(entry.id, { ...entry, elements: 0 });
-      const item = byCase.get(entry.id);
-      if (entry.abs > item.abs) Object.assign(item, { path: entry.path, before: entry.before, after: entry.after });
-      item.abs = Math.max(item.abs, entry.abs);
-      item.rel = Math.max(item.rel, entry.rel);
-      item.invalid ||= entry.invalid;
-      item.elements++;
-    }
-    const caseValues = [...byCase.values()];
-    return { font, field, caseCount: caseValues.length,
-      absolute: summarize(entries.map(entry => entry.abs)), relative: summarize(entries.map(entry => entry.rel)),
-      perCase: { absolute: summarize(caseValues.map(entry => entry.abs)), relative: summarize(caseValues.map(entry => entry.rel)) },
-      invalid: entries.filter(entry => entry.invalid).length,
-      worst: caseValues.sort((a, b) => b.abs - a.abs || b.rel - a.rel || a.id.localeCompare(b.id)).slice(0, 200) };
-  }).sort((a, b) => a.font.localeCompare(b.font) || a.field.localeCompare(b.field));
+
+  finish() {
+    return [...this.buckets.values()].map(bucket => ({
+      font: bucket.font,
+      field: bucket.field,
+      caseCount: bucket.perAbs.length,
+      absolute: summarize(bucket.absolute),
+      relative: summarize(bucket.relative),
+      perCase: { absolute: summarize(bucket.perAbs), relative: summarize(bucket.perRel) },
+      invalid: bucket.invalid,
+      worst: bucket.worst.sort(worstOrder).slice(0, 200)
+    })).sort((a, b) => a.font.localeCompare(b.font) || a.field.localeCompare(b.field));
+  }
+}
+
+export function numberStatistics(cases, group) {
+  const accumulator = new NumberAccumulator(group);
+  accumulator.add(cases);
+  return accumulator.finish();
+}
+
+function worstOrder(a, b) {
+  return b.abs - a.abs || b.rel - a.rel || a.id.localeCompare(b.id);
 }
