@@ -3,6 +3,8 @@ import * as measure from '../../lib/measure.js';
 import * as contain from '../../lib/contain.js';
 import * as exporter from '../../lib/exporter.js';
 import * as solver from '../../lib/auto-layout.js';
+import { textEngine, setTextEngine } from '../../lib/text-engine/index.js';
+import { createRustTextEngine } from '../../lib/text-engine/rust.js';
 import { probe } from './probe.js';
 import { prepareFonts } from './fonts.js';
 
@@ -24,7 +26,21 @@ async function capture() {
   const startedAt = new Date().toISOString();
   const query = new URLSearchParams(location.search);
   const engine = query.get('engine') || 'ref-cr';
-  if (!['ref-cr', 'ref-wk'].includes(engine)) throw new Error(`Invalid browser engine '${engine}'`);
+  if (!['ref-cr', 'ref-wk', 'new'].includes(engine)) throw new Error(`Invalid browser engine '${engine}'`);
+  // `new` measures with the Rust engine inside this browser. Its numbers must
+  // be the node host's numbers, byte for byte: that is the check that the
+  // wasm gives one answer on every machine. The pictures are still painted by
+  // this browser's canvas.
+  let rust = null;
+  let wasmHash = null;
+  if (engine === 'new') {
+    const response = await fetch('/text-engine/js/generated/mt_text.wasm');
+    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('wasm')) throw new Error('mt_text.wasm is not served; run npm run build:engine');
+    const wasm = await response.arrayBuffer();
+    wasmHash = await sha256(wasm);
+    const rules = Object.fromEntries((query.get('rules') || '').split(',').filter(Boolean).map((pair) => pair.split('=')));
+    rust = await createRustTextEngine(wasm, { rules });
+  } else if (query.has('rules')) throw new Error('rules are switches of the Rust engine: use engine=new');
   const collector = (query.get('collector') || 'http://127.0.0.1:8787').replace(/\/$/, '');
   const runId = safeId(query.get('run') || startedAt.replace(/[-:]/g, '').replace('T', '-').slice(0, 15));
   const selected = query.has('only') ? query.get('only').split(',') : ['metrics', 'layout', 'pixels'];
@@ -51,6 +67,7 @@ async function capture() {
     const descriptors = {};
     if (['bold', 'boldItalic'].includes(f.slot)) descriptors.weight = '700';
     if (['italic', 'boldItalic'].includes(f.slot)) descriptors.style = 'italic';
+    rust?.addFace(f.family, f.slot, new Uint8Array(bytes));
     const face = new FontFace(f.family, bytes, descriptors);
     await face.load();
     document.fonts.add(face);
@@ -59,6 +76,10 @@ async function capture() {
   }
   await document.fonts.ready;
   if (faces.some((f) => f.status !== 'loaded')) throw new Error(`Fonts not loaded: ${faces.filter((f) => f.status !== 'loaded').map((f) => f.family).join(', ')}`);
+  // measure.js installed the browser engine as it loaded; the Rust engine
+  // replaces it here, before anything has been measured.
+  if (rust) setTextEngine(rust);
+  if (textEngine()?.id !== (rust ? 'rust' : 'browser')) throw new Error(`Wrong measuring engine installed: ${textEngine()?.id}`);
   measure.clearLayoutMemo();
   const corpus = {}, hashes = {};
   for (const kind of ['metrics', 'layout', 'pixels']) {
@@ -121,7 +142,8 @@ async function capture() {
   }
   const manifest = {
     engine, runId, commit: metadata.commit, dirty: metadata.dirty,
-    host: { userAgent: navigator.userAgent, platform: navigator.platform, dpr: devicePixelRatio },
+    host: { userAgent: `${navigator.userAgent}${wasmHash ? `; mt-text wasm ${wasmHash}` : ''}`, platform: navigator.platform, dpr: devicePixelRatio },
+    ...(rust ? { rules: rust.rules() } : {}),
     corpus: hashes, fonts: await sha256(fontBytes), counts, startedAt, finishedAt: new Date().toISOString(),
   };
   await put('manifest.json', JSON.stringify(manifest, null, 2) + '\n');
@@ -137,7 +159,7 @@ capture().catch((error) => {
   // read (a webview, a background tab) fails where nobody can see the page.
   const query = new URLSearchParams(location.search);
   const base = (query.get('collector') || 'http://127.0.0.1:8787').replace(/\/$/, '');
-  if (/^[a-z0-9][a-z0-9._-]*$/.test(query.get('run') ?? '') && /^ref-(cr|wk)$/.test(query.get('engine') ?? 'ref-cr')) {
+  if (/^[a-z0-9][a-z0-9._-]*$/.test(query.get('run') ?? '') && /^(ref-cr|ref-wk|new)$/.test(query.get('engine') ?? 'ref-cr')) {
     fetch(`${base}/runs/${query.get('engine') || 'ref-cr'}/${query.get('run')}/error.txt`, { method: 'PUT', body: `${message}\n${JSON.stringify(counts)}\n${error.stack ?? ''}\n` }).catch(() => {});
   }
   progress.textContent = `CAPTURE FAILED\n${message}\n${JSON.stringify(counts)}`;
