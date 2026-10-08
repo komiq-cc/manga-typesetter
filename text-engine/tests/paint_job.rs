@@ -278,6 +278,52 @@ fn the_transform_scales_turns_and_moves_the_ink() {
     }
 }
 
+/// A band, a synthesised bold and a weight all move the outline to one side
+/// of the way it runs, and a mirror swaps the sides.
+#[test]
+fn a_mirrored_job_is_the_job_mirrored() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let bold = Synth {
+        bold: true,
+        oblique: false,
+    };
+    let band = Band {
+        color: RED,
+        opacity: 1.0,
+        line: 6.0,
+    };
+    for (rule, synth, bands, weight) in [
+        (BoldAdvance::Unchanged, Synth::NONE, vec![band], 0.0),
+        (BoldAdvance::Unchanged, bold, Vec::new(), 0.0),
+        (BoldAdvance::WebKit, bold, vec![band], 0.0),
+        (BoldAdvance::Unchanged, Synth::NONE, Vec::new(), 1.5),
+    ] {
+        e.rules.bold_advance = rule;
+        let mut j = job(vec![run("Rb", 20.0, 60.0)]);
+        j.bands = bands;
+        let face = Face {
+            synth,
+            ..Face::new(font, 40.0)
+        };
+        let mut r = request(j, face);
+        r.weight = weight;
+        let straight = paint(&mut e, &r);
+        r.transform = Affine([-1.0, 0.0, 0.0, 1.0, 200.0, 0.0]);
+        let mirrored = paint(&mut e, &r);
+        let (a, b) = (inked(&straight), inked(&mirrored));
+        assert_eq!((200 - a.2, a.1, 200 - a.0, a.3), b, "{rule:?} {synth:?}");
+        for y in a.1..a.3 {
+            for x in a.0..a.2 {
+                let (p, q) = (px(&straight, x, y), px(&mirrored, 199 - x, y));
+                for c in 0..4 {
+                    assert!(p[c].abs_diff(q[c]) <= 2, "{x},{y}: {p:?} vs {q:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_surface_beyond_the_guard_is_refused() {
     let mut e = Engine::new();

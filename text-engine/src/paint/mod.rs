@@ -211,7 +211,9 @@ impl Glyphs {
     ///
     /// Nothing here asks which way a contour runs. Each glyph is handed to
     /// the rasteriser moved both ways and the rasteriser tells grown from
-    /// shrunk by the sign of what it sums (`raster.rs`).
+    /// shrunk by the sign of what it sums (`raster.rs`). The sides are the
+    /// rasteriser's, in device pixels: a transform that mirrors turns what
+    /// was moved to the right in job units into what is on the left there.
     fn parts(
         &self,
         range: core::ops::Range<usize>,
@@ -220,6 +222,11 @@ impl Glyphs {
         transform: &Affine,
         tol: f64,
     ) -> Vec<Part> {
+        let (right, left) = if transform.det() < 0.0 {
+            (Side::Left, Side::Right)
+        } else {
+            (Side::Right, Side::Left)
+        };
         self.items[range]
             .iter()
             .filter_map(|g| {
@@ -230,8 +237,8 @@ impl Glyphs {
                     return (!ring).then(|| Part::plain(g.polys.map(transform)));
                 }
                 Some(Part {
-                    right: Self::moved(g, extra, Side::Right, tol).map(transform),
-                    left: Some(Self::moved(g, extra, Side::Left, tol).map(transform)),
+                    right: Self::moved(g, extra, right, tol).map(transform),
+                    left: Some(Self::moved(g, extra, left, tol).map(transform)),
                     ring,
                 })
             })
