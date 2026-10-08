@@ -43,7 +43,9 @@ input records, retaining only detailed HTML sample rows. Pixel comparisons run
 in at most two worker threads, recycled after 128 cases each to bound native
 PNG-decoder allocations. Alpha alignment and the exact distance transform use
 the union of the validated ink bounds plus a one-pixel background margin.
-Original capture images and their integrity checks remain unchanged.
+Asset workers are recycled after 32 cases. Original capture images and their
+integrity checks remain unchanged; the full-alignment size bound still applies
+before cropping, and computed device origins must be finite.
 
 ## Gate file format
 
@@ -78,7 +80,8 @@ Rules:
 
 Other selectors are `mode` and `minSize`. `atLeast` is the required fraction of
 cases within tolerance, default 1. No eligible cases are reported as `empty`
-and 0/0, not presented as evidence that a populated gate passed. Every case's failing gates are retained in its JSONL row, including allowed
+and 0/0, not presented as evidence that a populated gate passed. Every case's
+failing gates are retained in its JSONL row, including allowed
 fractional tails. Each summary exception list contains at most 2,000 ids;
 `exceptionCount`, `failures` and `exceptionsTruncated` disclose the full count.
 Unknown-size ids are likewise capped with an uncapped `unknownSizeCount`.
@@ -87,7 +90,7 @@ Unknown-size ids are likewise capped with an uncapped `unknownSizeCount`.
 carrying any listed tag; if both selectors appear their filters intersect.
 Even empty tag-selector arrays require `--corpus`; omitting it is exit 2.
 Every default number/image/line gate excludes `uncovered` and has an otherwise
-identical `.uncovered` report-only twin. Integrity gates remain unconditional.
+identical `.uncovered` report-only twin. Default integrity gates remain unconditional.
 
 Each group's `byTag` table has a row per corpus tag and explicit `covered` and
 `uncovered` rows. Tags can overlap; case counts include every status, while

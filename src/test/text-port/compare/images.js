@@ -22,7 +22,10 @@ function origin(record) {
   const x = layer ? record.left : -record.ox;
   const y = layer ? record.top : -record.oy;
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Missing or invalid image origin');
-  return { x: x * ss, y: y * ss, ss, layer };
+  const deviceX = x * ss;
+  const deviceY = y * ss;
+  if (!Number.isFinite(deviceX) || !Number.isFinite(deviceY)) throw new Error('Invalid device image origin');
+  return { x: deviceX, y: deviceY, ss, layer };
 }
 
 export function alignImages(a, b, recordA, recordB, crop = false) {
@@ -38,6 +41,11 @@ export function alignImages(a, b, recordA, recordB, crop = false) {
   let minY = Math.min(0, by);
   let maxX = Math.max(a.width, bx + b.width);
   let maxY = Math.max(a.height, by + b.height);
+  // Preserve the original full-alignment safety bound even when transparent
+  // space can be cropped away, including two empty pictures far apart.
+  if ((maxX - minX) * (maxY - minY) > 100000000) {
+    throw new Error('Aligned image exceeds 100 million pixels');
+  }
   if (crop) {
     const boxes = [a.bbox === undefined ? alphaBbox(a.alpha, a.width, a.height) : a.bbox,
       b.bbox === undefined ? alphaBbox(b.alpha, b.width, b.height) : b.bbox];

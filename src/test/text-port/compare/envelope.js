@@ -1,20 +1,29 @@
-import { summarize } from './stats.js';
+import { summarize, Distribution } from './stats.js';
 import { metricKey } from './gates.js';
 
 function add(buckets, key, value, relative) {
-  if (!buckets.has(key)) buckets.set(key, { values: [], relative: [] });
+  if (!buckets.has(key)) buckets.set(key, { values: new Distribution(), relative: new Distribution() });
   const bucket = buckets.get(key);
   bucket.values.push(value);
   if (relative !== undefined) bucket.relative.push(relative);
 }
 
 function summarizeBuckets(buckets) {
-  return Object.fromEntries([...buckets].sort(([a], [b]) => a.localeCompare(b)).map(([key, bucket]) => [key, {
-    ...summarize(bucket.values),
-    min: bucket.values.reduce((min, value) => Math.min(min, value), Infinity),
-    ...(bucket.relative.length ? { relative: summarize(bucket.relative) } : {}),
-    ...(key === 'pixels.iou' ? { loss: summarize(bucket.values.map(value => 1 - value)) } : {})
-  }]));
+  return Object.fromEntries([...buckets].sort(([a], [b]) => a.localeCompare(b)).map(([key, bucket]) => {
+    const loss = new Distribution();
+    if (key === 'pixels.iou') {
+      for (const [value, count] of bucket.values.values) {
+        loss.values.set(1 - value, count);
+        loss.count += count;
+      }
+    }
+    return [key, {
+      ...summarize(bucket.values),
+      min: [...bucket.values.values.keys()].reduce((min, value) => Math.min(min, value), Infinity),
+      ...(bucket.relative.count ? { relative: summarize(bucket.relative) } : {}),
+      ...(key === 'pixels.iou' ? { loss: summarize(loss) } : {})
+    }];
+  }));
 }
 
 export class EnvelopeAccumulator {
@@ -28,14 +37,28 @@ export class EnvelopeAccumulator {
   }
 
   add(report) {
-    if (report.hashDifferences.length || report.cases.some(item => ['missing', 'error'].includes(item.status))) {
+    this.beginPair(report.before?.manifest.engine, report.after?.manifest.engine);
+    this.addBatch(report.cases, report.hashDifferences);
+    this.endPair();
+  }
+
+  beginPair(before, after) {
+    this.current = {
+      before, after,
+      buckets: { all: new Map(), covered: new Map(), uncovered: new Map() },
+      skipped: [], unpaired: {},
+      lines: Object.fromEntries(['all', 'covered', 'uncovered'].map(label => [label, { count: 0, identical: 0 }]))
+    };
+  }
+
+  addBatch(cases, hashDifferences) {
+    if (hashDifferences.length || cases.some(item => ['missing', 'error'].includes(item.status))) {
       throw new Error('Reference runs have mismatched hashes, missing cases or capture errors');
     }
-    const buckets = { all: new Map(), covered: new Map(), uncovered: new Map() };
-    const skipped = report.cases.filter(item => ['skipped', 'skip-mismatch'].includes(item.status));
-    const unpaired = {};
-    const lines = Object.fromEntries(['all', 'covered', 'uncovered'].map(label => [label, { count: 0, identical: 0 }]));
-    for (const item of report.cases) {
+    const { buckets, skipped, unpaired, lines } = this.current;
+    skipped.push(...cases.filter(item => ['skipped', 'skip-mismatch'].includes(item.status))
+      .map(item => ({ group: item.group, id: item.id, status: item.status })));
+    for (const item of cases) {
       if (item.status !== 'compared') continue;
       const label = item.tags?.includes('uncovered') ? 'uncovered' : 'covered';
       const record = (key, value, relative) => {
@@ -67,10 +90,14 @@ export class EnvelopeAccumulator {
         }
       }
     }
-    this.skipped.push(skipped.map(item => ({ group: item.group, id: item.id, status: item.status })));
+  }
+
+  endPair() {
+    const { before, after, buckets, skipped, unpaired, lines } = this.current;
+    this.skipped.push(skipped);
     this.pairwise.push({
-      before: report.before?.manifest.engine,
-      after: report.after?.manifest.engine,
+      before,
+      after,
       skipped: skipped.length,
       unpairedObservations: unpaired,
       skippedByGroup: Object.fromEntries(['metrics', 'layout', 'pixels'].map(group => [group, skipped.filter(item => item.group === group).length])),
@@ -81,6 +108,7 @@ export class EnvelopeAccumulator {
         ...value, share: value.count ? value.identical / value.count : null
       }]))
     });
+    this.current = null;
   }
 
   finish() {

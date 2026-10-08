@@ -33,6 +33,14 @@ describe('scale, sampling and tag gates', () => {
       for (const [group, count] of Object.entries({ metrics: 20000, layout: 2000, pixels: 300 })) {
         const full = await rows(out, group);
         expect(full).toHaveLength(count);
+        for (const row of full) {
+          expect(row).not.toHaveProperty('before');
+          expect(row).not.toHaveProperty('after');
+          if (row.numbers) {
+            expect(Array.isArray(row.numbers)).toBe(false);
+            for (const field of Object.keys(row.numbers)) expect(field).not.toMatch(/glyphs\.[^.]+\.|\[\d+\]/);
+          }
+        }
         expect(new Set(full.map(item => item.id)).size).toBe(count);
       }
       expect(report.assets.pixelCases).toBe(5);

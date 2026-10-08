@@ -70,6 +70,11 @@ describe('exact distance transform and alpha comparison', () => {
     expect(() => alignImages(a, a, origin, { ...origin, ss: 2 })).toThrow('supersampling');
     expect(compareAlpha(alignImages(a, a, { ...origin, ox: 0.25 }, { ...origin, ox: 0.25 })).iou).toBe(1);
   });
+  it('preserves alignment bounds and finite device origins when cropping empty images', () => {
+    const empty = image(1, 1, [0]);
+    expect(() => alignImages(empty, empty, origin, { ...origin, ox: 100000, oy: 100000 }, true)).toThrow('100 million pixels');
+    expect(() => alignImages(empty, empty, { ox: 1e308, oy: 0, ss: 2 }, { ox: 1e308, oy: 0, ss: 2 }, true)).toThrow('device image origin');
+  });
   it('computes alpha support mean, threshold IoU, exclusive bbox and XOR thickness', () => {
     const aligned = alignImages(image(2, 1, [128, 100]), image(2, 1, [127, 0]), origin, origin);
     expect(compareAlpha(aligned)).toMatchObject({ bboxDelta: 1, iou: 0, meanAbs: 50.5, thick: 2, xorCount: 1 });

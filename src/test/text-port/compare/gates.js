@@ -1,4 +1,4 @@
-import { summarize } from './stats.js';
+import { summarize, Distribution } from './stats.js';
 
 const rules = new Set(['integrity', 'number', 'image', 'identical-lines', 'unchanged', 'within-envelope']);
 const kinds = new Set(['errors', 'missing', 'hashes', 'invalid']);
@@ -101,11 +101,11 @@ export function evaluateGates(cases, hashDifferences, config, envelope, hashChec
     let exceptions = [];
     let failures = 0;
     let count = candidates.length;
-    const values = [];
+    const values = new Distribution();
     const envelopeComparisons = new Map();
     let collected;
     if (collector) {
-      if (!collector.has(gate.id)) collector.set(gate.id, { values: [], envelope: new Map() });
+      if (!collector.has(gate.id)) collector.set(gate.id, { values: new Distribution(), envelope: new Map() });
       collected = collector.get(gate.id);
     }
     let quantity = 0;
@@ -115,10 +115,10 @@ export function evaluateGates(cases, hashDifferences, config, envelope, hashChec
       collected?.values.push(value);
       const entry = envelopeEntry(envelope, gate.group, field);
       if (!entry) return;
-      if (!envelopeComparisons.has(field)) envelopeComparisons.set(field, { field, candidate: [], reference: entry });
+      if (!envelopeComparisons.has(field)) envelopeComparisons.set(field, { field, candidate: new Distribution(), reference: entry });
       envelopeComparisons.get(field).candidate.push(value);
       if (collected) {
-        if (!collected.envelope.has(field)) collected.envelope.set(field, { field, candidate: [], reference: entry });
+        if (!collected.envelope.has(field)) collected.envelope.set(field, { field, candidate: new Distribution(), reference: entry });
         collected.envelope.get(field).candidate.push(value);
       }
     }
@@ -255,8 +255,15 @@ export function matchesTags(item, gate) {
     && (gate.onlyTags === undefined || gate.onlyTags.some(tag => tags.includes(tag)));
 }
 
-export function gateTables(cases, config, key) {
-  const groups = {};
+export class GateTableAccumulator {
+  constructor(config, key) {
+    this.config = config;
+    this.key = key;
+    this.groups = {};
+  }
+
+  add(cases) {
+    const { config, key, groups } = this;
   for (const item of cases) {
     groups[item.group] ??= new Map();
     const labels = key === 'tag' ? [...new Set([...(item.tags ?? []), item.tags?.includes('uncovered') ? 'uncovered' : 'covered'])] : [item.font];
@@ -266,7 +273,7 @@ export function gateTables(cases, config, key) {
       const row = table.get(label);
       row.cases++;
       for (const gate of config.gates.filter(gate => !gate.group || gate.group === item.group)) {
-        if (!row.gates.has(gate.id)) row.gates.set(gate.id, { count: 0, failures: 0, values: [] });
+        if (!row.gates.has(gate.id)) row.gates.set(gate.id, { count: 0, failures: 0, values: new Distribution() });
         const bucket = row.gates.get(gate.id);
         bucket.failures += Number(item.gates.includes(gate.id));
         if (item.quantities?.[gate.id] !== undefined) {
@@ -276,6 +283,10 @@ export function gateTables(cases, config, key) {
       }
     }
   }
+  }
+
+  finish() {
+    const { groups, key } = this;
   for (const group of ['metrics', 'layout', 'pixels']) {
     groups[group] ??= new Map();
     if (key === 'tag') {
@@ -289,4 +300,12 @@ export function gateTables(cases, config, key) {
       count: bucket.count, failures: bucket.failures, quantity: summarize(bucket.values)
     }])) })).sort((a, b) => a[key].localeCompare(b[key]))
   ]));
+}
+
+}
+
+export function gateTables(cases, config, key) {
+  const accumulator = new GateTableAccumulator(config, key);
+  accumulator.add(cases);
+  return accumulator.finish();
 }

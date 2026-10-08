@@ -57,7 +57,7 @@ export async function main(args) {
   const timings = {};
   let start = performance.now();
   const options = parseArgs(args);
-  const [before, after] = await Promise.all(options.positional.map(readRun));
+  const [before, after] = await Promise.all(options.positional.map(dir => readRun(dir, { stream: true })));
   const data = process.env.TP_DATA ?? 'node_modules/.cache/text-port';
   const out = path.resolve(options.out ?? path.join(data, 'reports', `${before.manifest.engine}-vs-${after.manifest.engine}-${Date.now()}`));
   // Output must not overwrite a recording's input files.
@@ -68,7 +68,7 @@ export async function main(args) {
   const gates = await readJson(options.gates ?? fileURLToPath(new URL('./gates.json', import.meta.url)));
   const envelope = options.envelope ? validateEnvelope(await readJson(options.envelope)) : undefined;
   timings.read = performance.now() - start;
-  const report = await compareRuns(before, after, { corpus, gates, envelope, out, sampleLimit: options.limit, releaseInputs: true });
+  const report = await compareRuns(before, after, { corpus, gates, envelope, out, sampleLimit: options.limit });
   report.sampleLimit = options.limit;
   start = performance.now();
   await attachImages(report, before, after, out, options.assets === 'all' ? 'all' : options.limit);

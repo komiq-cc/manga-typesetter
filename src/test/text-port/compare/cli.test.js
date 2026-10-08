@@ -75,7 +75,7 @@ describe('complete CLI', () => {
     const { result, report, cases } = await compare('skips');
     expect(result.status, result.stderr).toBe(0);
     expect(report.summary.metrics).toMatchObject({ 'skip-mismatch': 1, skippedAfter: 1, skippedBefore: 0 });
-    expect(cases.find(item => item.status === 'skip-mismatch').after.skip).toBe('unsupported');
+    expect(cases.find(item => item.status === 'skip-mismatch').skipReasons.after).toBe('unsupported');
   });
   it('makes any capture error fail the run', async () => {
     await modify('errors', 'metrics', records => { records[0] = { id: records[0].id, error: 'font missing' }; });
@@ -97,7 +97,7 @@ describe('complete CLI', () => {
       records[0].chars.pop(); });
     const { result, report, cases } = await compare('nulls');
     expect(result.status).toBe(1);
-    expect(cases.find(item => item.id === 'm.fake.0').numbers.filter(diff => diff.invalid).map(diff => diff.path)).toEqual(expect.arrayContaining(['adv', 'font.descent', 'chars[1]']));
+    expect(cases.find(item => item.id === 'm.fake.0').numbers).toMatchObject({ adv: 'Infinity', 'font.descent': 'Infinity', chars: 'Infinity' });
   });
   it('report-only gates never fail an otherwise valid pair', async () => {
     const config = structuredClone(gates);
@@ -125,7 +125,7 @@ describe('complete CLI', () => {
     const before = await readRun(fixture.before);
     const after = await readRun(fixture.pairs.pass);
     const corpus = await readCorpus(fixture.corpus);
-    expect(corpus.pixels.get('p.fake.1').box.style.size).toBe(12);
+    expect(corpus.pixels.get('p.fake.1').size).toBe(12);
     expect([...((await loadAlpha(before, before.pixels.get('p.fake.0'))).alpha)].filter(a => a > 0)).toEqual(Array(35).fill(255));
     const unfiltered = structuredClone(gates);
     for (const gate of unfiltered.gates) {
@@ -189,7 +189,7 @@ describe('complete CLI', () => {
     const manifest = JSON.parse(await readFile(file, 'utf8'));
     manifest.counts.metrics++;
     await writeFile(file, JSON.stringify(manifest));
-    const result = cli('compare', [dir, dir, '--out', path.join(root, 'stale-counts-report')]);
+    const result = cli('compare', [dir, dir, '--corpus', fixture.corpus, '--out', path.join(root, 'stale-counts-report')]);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('manifest counts.metrics');
   });

@@ -37,12 +37,12 @@ export function renderHtml(report) {
     mode: item.mode,
     status: item.status,
     gates: item.gates,
-    before: item.status === 'compared' ? undefined : item.before,
-    after: item.status === 'compared' ? undefined : item.after,
+    skipReasons: item.skipReasons,
+    errors: item.errors,
     image: item.image,
     images: item.images,
-    linesA: item.before?.solve?.lines ?? item.before?.lines,
-    linesB: item.after?.solve?.lines ?? item.after?.lines,
+    linesA: item.linesA ?? item.before?.solve?.lines ?? item.before?.lines,
+    linesB: item.linesB ?? item.after?.solve?.lines ?? item.after?.lines,
     layout: item.layout ? { ...item.layout, numbers: undefined } : undefined,
     differences: item.numbers.filter(diff => diff.abs !== 0 || diff.structural).map(diff => ({
       path: diff.path, before: diff.before, after: diff.after, abs: diff.abs, rel: diff.rel
@@ -185,7 +185,7 @@ ol {
 </style>
 <body><h1>Text port comparison: <span class="${report.pass ? 'pass' : 'fail'}">${report.pass ? 'PASS' : 'FAIL'}</span></h1>
 ${report.hashDifferences.length ? `<p class="warning">MEANINGLESS COMPARISON: corpus or font hashes differ (${escape(report.hashDifferences.join(', '))}). Results cannot verify the port.</p>` : ''}
-<p>Metadata: ${escape(report.metadataSource)}. <a href="report.json">Summary, gate exceptions and worst 200 observations per font/field</a>.</p>
+<p>Metadata: ${escape(report.metadataSource)}. <a href="report.json">Summary, gate exceptions and worst 200 cases per field</a>.</p>
 <div class="manifests">${manifest('before')}${manifest('after')}</div>
 <h2>Cases</h2>
 ${caseTable}
@@ -279,7 +279,7 @@ function reportUi() {
         + escape(JSON.stringify(item.layout, null, 2)) + '</pre></details>';
     }
     if (item.status !== 'compared') {
-      content += '<pre>' + escape(JSON.stringify({ before: item.before, after: item.after }, null, 2)) + '</pre>';
+      content += '<pre>' + escape(JSON.stringify({ skipReasons: item.skipReasons, errors: item.errors }, null, 2)) + '</pre>';
     }
     if (item.differences.length) {
       content += '<details><summary>' + item.differences.length + ' numeric differences</summary><pre>'

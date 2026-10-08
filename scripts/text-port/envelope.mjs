@@ -24,18 +24,18 @@ export async function main(args) {
   if (runs.length < 2 || !out) {
     throw new Error('Usage: node scripts/text-port/envelope.mjs <run> <run> [<run>...] [--corpus <dir>] --out <file>');
   }
-  const recordings = await Promise.all(runs.map(readRun));
+  const recordings = await Promise.all(runs.map(dir => readRun(dir, { stream: true })));
   const corpus = await readCorpus(options['--corpus']);
   const accumulator = new EnvelopeAccumulator(recordings);
   for (let a = 0; a < recordings.length; a++) {
     for (let b = a + 1; b < recordings.length; b++) {
+      accumulator.beginPair(recordings[a].manifest.engine, recordings[b].manifest.engine);
       const report = await compareRuns(recordings[a], recordings[b], {
-        corpus, gates: { version: 1, gates: [] }, statistics: false
+        corpus, gates: { version: 1, gates: [] }, statistics: false, retainCases: false,
+        onBatch: (batch, hashes) => accumulator.addBatch(batch, hashes)
       });
-      accumulator.add(report);
-      // Pair summaries own their observations; release detailed rows before
-      // allocating the next pair, including across the following await.
-      report.cases.length = 0;
+      if (report.hashDifferences.length) throw new Error('Reference runs have mismatched hashes');
+      accumulator.endPair();
     }
   }
   const envelope = accumulator.finish();

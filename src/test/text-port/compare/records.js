@@ -29,11 +29,7 @@ export function joinRuns(before, after, corpus = {}) {
     for (const id of new Set([...before[group].keys(), ...after[group].keys(), ...(corpus[group]?.keys() ?? [])])) {
       const a = before[group].get(id);
       const b = after[group].get(id);
-      let status = 'compared';
-      if (a?.error !== undefined || b?.error !== undefined) status = 'error';
-      else if (!a || !b) status = 'missing';
-      else if (a.skip !== undefined || b.skip !== undefined) status = a.skip !== undefined && b.skip !== undefined ? 'skipped' : 'skip-mismatch';
-      cases.push({ group, id, ...caseMetadata(id, corpus[group]), status, before: a ?? null, after: b ?? null, numbers: [], gates: [] });
+      cases.push(joinCase(group, id, a, b, corpus[group]));
     }
   }
   return cases;
@@ -41,4 +37,20 @@ export function joinRuns(before, after, corpus = {}) {
 
 export function manifestDifferences(a, b) {
   return ['corpus', 'fonts'].filter(key => !equal(a[key], b[key]));
+}
+
+export function joinCase(group, id, a, b, corpus) {
+  let status = 'compared';
+  if (a?.error !== undefined || b?.error !== undefined) status = 'error';
+  else if (!a || !b) status = 'missing';
+  else if (a.skip !== undefined || b.skip !== undefined) status = a.skip !== undefined && b.skip !== undefined ? 'skipped' : 'skip-mismatch';
+  return {
+    group, id, ...caseMetadata(id, corpus), status, before: a ?? null, after: b ?? null,
+    beforeSkipped: a?.skip !== undefined, afterSkipped: b?.skip !== undefined,
+    ...(a?.skip !== undefined || b?.skip !== undefined
+      ? { skipReasons: { before: a?.skip ?? null, after: b?.skip ?? null } } : {}),
+    ...(a?.error !== undefined || b?.error !== undefined
+      ? { errors: { before: a?.error ?? null, after: b?.error ?? null } } : {}),
+    numbers: [], gates: []
+  };
 }
