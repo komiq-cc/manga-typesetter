@@ -203,7 +203,7 @@ export function useTextEngine(mode) {
 
 /**
  * Why the Rust engine counts `name` as missing, for the notice that lists it:
- * 'compressed', 'unreadable' or 'absent'; null when it is not the one
+ * 'compressed', 'unsaved', 'unreadable' or 'absent'; null when it is not the one
  * measuring or the name is not missing.
  */
 export function whyFontMissing(name) {

@@ -53,6 +53,24 @@ describe('the answer of the system face command', () => {
 });
 
 describe('user faces', () => {
+  it('takes a face there are no bytes of as the user’s and unusable, and says which kind of unusable', () => {
+    const { engine, sync } = setup({ system: [sysEntry('Wild Words')], files: { 'Wild Words': [{ slots: { regular: 0 }, bytes: SFNT() }] } });
+    sync.setUserFace('Anchor', 'regular', SFNT());
+    sync.setUserFace('Wild Words', 'regular', null);
+    expect(engine.registered()).toEqual({ Anchor: ['regular'] });
+    expect(sync.ready('Wild Words')).toBe(true);
+    expect(sync.missing('Wild Words')).toBe(true);
+    expect(sync.whyMissing('Wild Words')).toBe('unsaved');
+    expect(sync.nameFor('Wild Words')).toBe('Anchor');
+    // The bytes turn up after all (the file was added again): a face like any other.
+    sync.setUserFace('Wild Words', 'regular', SFNT());
+    expect(sync.missing('Wild Words')).toBe(false);
+    expect(sync.whyMissing('Wild Words')).toBe(null);
+    // And one that had bytes and now has none loses the face it had.
+    sync.setUserFace('Wild Words', 'regular', null);
+    expect(engine.registered()).toEqual({ Anchor: ['regular'] });
+  });
+
   it('registers a face under its family and slot, as the bytes are', () => {
     const { engine, sync } = setup();
     const regular = SFNT();

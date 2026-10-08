@@ -307,18 +307,26 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
   }
 
   return {
-    /** A user face was registered, or replaced the one in its slot. */
+    /**
+     * A user face was registered, or replaced the one in its slot. `data` is
+     * null for a face the app has loaded but has no bytes of to give (its save
+     * failed before anybody was here to take them): it is the user's, so the
+     * name is theirs, and it is unusable until the file is added again.
+     */
     setUserFace(family, slot, data) {
       if (!FACE_SLOTS.includes(slot)) return;
-      const bytes = asBytes(data);
+      const bytes = data == null ? null : asBytes(data);
       followSystemList();
       claimName(family);
       let fam = user.get(family);
       if (!fam) user.set(family, (fam = new Map()));
       const rec = { state: 'unusable', why: '' };
       fam.set(slot, rec);
-      const kind = fontKind(bytes);
-      if (kind === 'woff' || kind === 'woff2') {
+      const kind = bytes ? fontKind(bytes) : 'none';
+      if (!bytes) {
+        engine.removeFace(family, slot);
+        rec.why = 'unsaved';
+      } else if (kind === 'woff' || kind === 'woff2') {
         // The face that was in the slot is not the file the user now has there.
         engine.removeFace(family, slot);
         if (!toSfnt) {
@@ -395,12 +403,13 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     },
     /**
      * Why a missing name is missing: 'compressed' (a WOFF file and nothing to
-     * decode it), 'unreadable' (the engine refused the file), or 'absent'.
+     * decode it), 'unsaved' (the app has the face but no bytes of it to give),
+     * 'unreadable' (the engine refused the file), or 'absent'.
      */
     whyMissing(name) {
       if (resolve(name).state !== 'missing') return null;
       const mine = user.get(name);
-      if (mine) return [...mine.values()].some((f) => f.why === 'compressed') ? 'compressed' : 'unreadable';
+      if (mine) return ['compressed', 'unsaved'].find((why) => [...mine.values()].some((f) => f.why === why)) ?? 'unreadable';
       return system.get(name)?.state === 'failed' ? 'unreadable' : 'absent';
     },
     lastResort() {

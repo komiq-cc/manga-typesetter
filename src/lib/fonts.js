@@ -555,6 +555,8 @@ async function dbDelete(keys) {
 let faceWatcher = null;
 export function watchUserFaces(watcher) {
   faceWatcher = watcher ?? null;
+  // Nobody is left to hand them to (`unsavedFaces`).
+  if (!faceWatcher) for (const rec of unsavedFaces.values()) rec.data = null;
 }
 
 // Settled once the boot restore and the boot scan have each finished, however
@@ -567,15 +569,26 @@ const firstScan = new Promise((resolve) => (scanSettled = resolve));
 export const fontsBooted = () => Promise.all([firstRestore, firstScan]);
 
 // Faces loaded this session whose bytes never reached IndexedDB because the
-// save failed. They draw until the app closes, so `loadedFaceRecords` has to
-// be able to hand them over too; kept only for those, and dropped with the face.
+// save failed. They draw until the app closes - the browser has its own copy -
+// but there is nowhere to read them back from, so the only bytes a watcher
+// could be handed later are ones held here. They are held only while somebody
+// watches: a session that never turns the Rust engine on must not carry a
+// font file in memory for it, and one that turns it off gives them back. A
+// face recorded here with no bytes (`data: null`) is one that cannot be handed
+// over any more; the watcher that starts after says so, and the way out is to
+// remove the face and add the file again. Dropped with the face.
 const unsavedFaces = new Map();
+function couldNotSave(family, slot, file, buf) {
+  unsavedFaces.set(recordKey(family, slot), { name: family, slot, file, data: faceWatcher ? buf : null });
+}
 
 // The bytes of every user face the session has loaded, as
 // [{ name, slot, file, data }]: what a watcher that starts mid-session reads to
 // catch up. Read back from IndexedDB rather than kept, for the reason above. A
 // record whose face is not the one loaded (replaced in another window, or a
-// name a built-in has since taken) is left out.
+// name a built-in has since taken) is left out. A face that is loaded but
+// whose bytes are nowhere - the save failed with nobody watching - is in the
+// list with `data: null`, so the reader knows of it and can say why it has it not.
 export async function loadedFaceRecords() {
   const found = new Map();
   if (typeof indexedDB !== 'undefined') {
@@ -594,6 +607,10 @@ export async function loadedFaceRecords() {
   for (const rec of found.values()) {
     const loaded = app.fonts.user.find((f) => f.name === rec.name)?.faces?.[rec.slot];
     if (!loaded || loaded.file !== rec.file) continue;
+    if (rec.data == null) {
+      out.push({ ...rec });
+      continue;
+    }
     try {
       out.push({ ...rec, data: rec.data instanceof ArrayBuffer || ArrayBuffer.isView(rec.data) ? rec.data : await rec.data.arrayBuffer() });
     } catch {
@@ -747,7 +764,7 @@ export async function installFontFace({ family, slot, file, data }) {
   try {
     await dbPut({ key: recordKey(family, slot), name: family, slot, file, data: buf });
   } catch (e) {
-    unsavedFaces.set(recordKey(family, slot), { name: family, slot, file, data: buf });
+    couldNotSave(family, slot, file, buf);
     toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return 'installed';
@@ -813,7 +830,7 @@ export async function addFontFile(file, target = null) {
     // that failed - so this is a warning and not a rejection. Reported
     // separately from the load failure above because the two ask the user for
     // completely different things.
-    unsavedFaces.set(recordKey(family, slot), { name: family, slot, file: file.name, data: buf });
+    couldNotSave(family, slot, file.name, buf);
     toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return { family, slot };

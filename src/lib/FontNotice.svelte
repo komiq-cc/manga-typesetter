@@ -25,6 +25,7 @@
   const WHY = {
     compressed: 'a WOFF file, which the Rust engine can read only in the desktop app',
     unreadable: 'the Rust engine could not read this font file',
+    unsaved: 'this font could not be stored when it was added, so the Rust engine has no copy of it · remove it and add the file again',
   };
 
   // Built only while the list is open, like the review list's.

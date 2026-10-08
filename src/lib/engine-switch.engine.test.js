@@ -14,6 +14,7 @@ import {
 import { neededHeight } from './typeset.js';
 import { boxCandidate, placeBlock, containBox } from './contain.js';
 import { defaultStyle, normalizeStyle } from './data.js';
+import { fakeIndexedDB } from '../test/fake-indexeddb.js';
 
 // ===========================================================================
 // The switch on the real engine: the wasm, the fixture fonts, the real store
@@ -59,6 +60,10 @@ function fakeInvoke() {
 }
 
 const original = { engine: textEngine(), typeset: typesetEnabled(), system: app.fonts.system };
+// The user's font library: where a watcher that starts late reads the bytes
+// back from. One for the file, emptied between cases - fonts.js keeps its
+// connection.
+const library = fakeIndexedDB();
 let engine;
 let invoke;
 // What each fixture measures by itself, from an engine nobody else touches.
@@ -71,6 +76,7 @@ beforeEach(async () => {
     }
   });
   vi.stubGlobal('document', { fonts: { add() {}, delete() {} } });
+  vi.stubGlobal('indexedDB', library);
   initHistory();
   resetHistory();
   app.chapterRef = null;
@@ -98,6 +104,7 @@ afterEach(async () => {
   _setEngineSwitchDeps(null);
   watchUserFaces(null);
   for (const f of [...app.fonts.user]) await removeUserFont(f.name);
+  library.rows.clear();
   app.fonts.system = original.system;
   loadProjectPages([]);
   setTextEngine(original.engine);
