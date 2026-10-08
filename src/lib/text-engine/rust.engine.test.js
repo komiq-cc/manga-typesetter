@@ -126,3 +126,200 @@ describe('face selection', () => {
     expect(engine.advance({ ...a, size: 40 }, 'WAIT')).toBe(wa * 2);
   });
 });
+
+describe('the rules a browser canvas follows', () => {
+  it('measures a tab, a newline, a form feed and a carriage return as a space', () => {
+    for (const font of ['Comic Neue', 'Bangers', 'DejaVu Sans']) {
+      const f = face(font, 22.5);
+      const spaced = engine.advance(f, 'A B');
+      for (const ws of ['\t', '\n', '\f', '\r']) {
+        expect(engine.advance(f, `A${ws}B`)).toBe(spaced);
+        expect(engine.lineInk(f, `A${ws}B`)).toEqual(engine.lineInk(f, 'A B'));
+        expect(engine.missing(f, `A${ws}B`)).toEqual([]);
+      }
+      // Any other space is the font's own glyph, or its absence.
+      expect(engine.advance(f, 'A B')).not.toBe(spaced);
+    }
+  });
+
+  it('reports the line box in whole pixels, from hhea', () => {
+    expect(engine.fontBox(face('Comic Neue', 20))).toEqual({ ascent: 18, descent: 5 });
+    expect(engine.fontBox(face('Comic Neue', 14.5))).toEqual({ ascent: 13, descent: 4 });
+    // hhea 1901/483 of 2048, not the OS/2 typo 1556/492.
+    expect(engine.fontBox(face('DejaVu Sans', 20))).toEqual({ ascent: 19, descent: 5 });
+    // 4.5 by plain arithmetic; a TrueType font is scaled in 16.16 fixed point
+    // and comes out a hair under, as it does in both browsers.
+    expect(engine.fontBox(face('Comic Neue', 5))).toEqual({ ascent: 4, descent: 1 });
+  });
+
+  it('gives a string without ink a width and an empty box', () => {
+    const f = face('Comic Neue', 40);
+    for (const text of ['', ' ', '   ', '\t']) {
+      const ink = engine.lineInk(f, text);
+      expect(ink.width).toBe(engine.advance(f, text));
+      expect([ink.left, ink.right, ink.ascent, ink.descent]).toEqual([0, 0, 0, 0]);
+    }
+    // Spaces around ink move it or widen the line; they are not ink.
+    const g = engine.lineInk(f, 'g');
+    const sp = engine.advance(f, ' ');
+    const padded = engine.lineInk(f, ' g ');
+    expect(padded.width).toBeCloseTo(g.width + 2 * sp, 9);
+    expect(padded.right).toBeCloseTo(g.right + sp, 9);
+    expect(padded.left).toBeCloseTo(g.left - sp, 9);
+    expect([padded.ascent, padded.descent]).toEqual([g.ascent, g.descent]);
+  });
+
+  it('keeps a synthesised bold on the regular advances unless told to widen them as WebKit does', async () => {
+    const e = await rustEngine();
+    const heard = vi.fn();
+    e.onFontsChange(heard);
+    const regular = face('Comic Neue', 36);
+    const bold = face('Comic Neue', 36, true);
+    const w = e.advance(regular, 'WAIT');
+    expect(e.rules()).toEqual({ boldAdvance: 'unchanged', fontBox: 'browser' });
+    expect(e.advance(bold, 'WAIT')).toBe(w);
+    expect(e.lineInk(bold, 'WAIT').right).toBeGreaterThan(e.lineInk(regular, 'WAIT').right);
+
+    e.setRules({ boldAdvance: 'webkit' });
+    // Numbers measured under the old rule are stale, and the listeners hear it.
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(e.advance(bold, 'WAIT')).toBeCloseTo(w + 4, 9);
+    expect(e.advance(regular, 'WAIT')).toBe(w);
+    // A real face is never widened: DejaVu's italic is a file, its bold is not.
+    const oblique = e.advance(face('DejaVu Sans', 36, false, true), 'WAIT');
+    expect(e.advance(face('DejaVu Sans', 36, true, true), 'WAIT')).toBeCloseTo(oblique + 4, 9);
+
+    e.setRules({ fontBox: 'skia' });
+    expect(e.fontBox(face('Comic Neue', 14.5)).ascent).toBeCloseTo(13.05, 9);
+    expect(e.rules()).toEqual({ boldAdvance: 'webkit', fontBox: 'skia' });
+    expect(() => e.setRules({ boldAdvance: 'gecko' })).toThrow('unknown rule boldAdvance=gecko');
+    expect(() => e.setRules({ kerning: 'off' })).toThrow('unknown rule kerning=off');
+  });
+});
+
+describe('wrapPlain, the CSS breaker', () => {
+  const opts = (width, letterSpacing = 0) => ({ width, lineHeight: 1.2, letterSpacing, align: 'left' });
+  const f = face('Comic Neue', 20);
+
+  it('fills each line with the words that fit and hangs the spaces at its end', () => {
+    const ab = engine.advance(f, 'AB');
+    expect(engine.wrapPlain(f, 'AB AB', opts(1000))).toEqual(['AB AB']);
+    expect(engine.wrapPlain(f, 'AB      AB', opts(ab))).toEqual(['AB', 'AB']);
+    expect(engine.wrapPlain(f, 'AB AB', opts(engine.advance(f, 'AB AB')))).toEqual(['AB AB']);
+    expect(engine.wrapPlain(f, 'AB AB', opts(engine.advance(f, 'AB AB') - 0.01))).toEqual(['AB', 'AB']);
+    const text = 'WHAT THE HELL ARE YOU DOING?!';
+    const lines = engine.wrapPlain(f, text, opts(120));
+    expect(lines.join(' ')).toBe(text);
+    for (const line of lines) expect(engine.advance(f, line)).toBeLessThanOrEqual(120);
+  });
+
+  it('keeps hard breaks, empty lines and the spaces that open a paragraph', () => {
+    expect(engine.wrapPlain(f, 'ONE\n\nTWO', opts(1000))).toEqual(['ONE', '', 'TWO']);
+    expect(engine.wrapPlain(f, 'ONE\n', opts(1000))).toEqual(['ONE', '']);
+    expect(engine.wrapPlain(f, '', opts(1000))).toEqual(['']);
+    expect(engine.wrapPlain(f, '  ONE\n  TWO', opts(1000))).toEqual(['  ONE', '  TWO']);
+  });
+
+  it('breaks after a hyphen and never at a no-break space', () => {
+    expect(engine.wrapPlain(f, 'WELL-KNOWN', opts(70))).toEqual(['WELL-', 'KNOWN']);
+    expect(engine.wrapPlain(f, 'NO BREAK HERE', opts(95))).toEqual(['NO BREAK', 'HERE']);
+  });
+
+  it('moves a word wider than the line to its own line before cutting it', () => {
+    const w = engine.advance(f, 'W');
+    expect(engine.wrapPlain(f, 'A WWWWW', opts(3 * w + 0.01))).toEqual(['A', 'WWW', 'WW']);
+    // A line always takes one letter, in a box narrower than any; a width
+    // below a pixel is a pixel.
+    expect(engine.wrapPlain(f, 'WW', opts(0))).toEqual(['W', 'W']);
+    expect(engine.wrapPlain(f, 'éé', opts(1))).toEqual(['é', 'é']);
+  });
+
+  it('counts letter spacing after every letter of the line', () => {
+    const h = engine.advance(f, 'H');
+    expect(engine.wrapPlain(f, 'HHHH', opts(4 * h + 12, 3))).toEqual(['HHHH']);
+    expect(engine.wrapPlain(f, 'HHHH', opts(4 * h + 10.5, 3))).toEqual(['HHH', 'H']);
+    // Spaced letters are not joined: DejaVu's ff ligature is narrower than two f.
+    const d = face('DejaVu Sans', 40);
+    const apart = 2 * engine.advance(d, 'f');
+    expect(engine.advance(d, 'ff')).toBeLessThan(apart - 0.5);
+    expect(engine.wrapPlain(d, 'ff', opts(apart + 6, 3))).toEqual(['ff']);
+    expect(engine.wrapPlain(d, 'ff', opts(apart + 5.95, 3))).toEqual(['f', 'f']);
+  });
+});
+
+describe('fallback for a letter the face lacks', () => {
+  const OMEGA = 'Ω';
+  const HANGUL = '한';
+  const opts = (width) => ({ width, lineHeight: 1.2, letterSpacing: 0, align: 'left' });
+
+  it('draws nothing from another font until a list is set', () => {
+    const f = face('Comic Neue', 40);
+    expect(engine.fallbacks()).toEqual([]);
+    expect(engine.missing(f, `A${OMEGA}B${OMEGA}${HANGUL}`)).toEqual([0x3a9, 0xd55c]);
+    expect(engine.missing(face('DejaVu Sans', 40), `A${OMEGA}B`)).toEqual([]);
+  });
+
+  it('measures the letter in the first listed family that has it, and reports only what none has', async () => {
+    const e = await rustEngine();
+    const heard = vi.fn();
+    e.onFontsChange(heard);
+    const f = face('Comic Neue', 40);
+    const d = face('DejaVu Sans', 40);
+    const notdef = e.advance(f, `A${OMEGA}B`);
+
+    // A name that is not registered is passed over.
+    e.setFallbacks(['Wild Words', 'Bangers', 'DejaVu Sans']);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(e.fallbacks()).toEqual(['Wild Words', 'Bangers', 'DejaVu Sans']);
+    const want = e.advance(f, 'A') + e.advance(d, OMEGA) + e.advance(f, 'B');
+    expect(e.advance(f, `A${OMEGA}B`)).toBeCloseTo(want, 9);
+    expect(e.advance(f, `A${OMEGA}B`)).not.toBeCloseTo(notdef, 1);
+    expect(e.missing(f, `A${OMEGA}B${HANGUL}`)).toEqual([0xd55c]);
+
+    // Ink is the borrowed glyph's own.
+    const line = e.lineInk(f, `A${OMEGA}`);
+    expect(line.width).toBeCloseTo(e.advance(f, 'A') + e.advance(d, OMEGA), 9);
+    expect(line.right).toBeCloseTo(e.advance(f, 'A') + e.lineInk(d, OMEGA).right, 9);
+    const glyph = e.glyphInk(f, OMEGA);
+    const own = e.glyphInk(d, OMEGA);
+    expect([glyph.left, glyph.right]).toEqual([own.left, own.right]);
+
+    // An accent goes with its letter, though Comic Neue has the accent.
+    expect(e.missing(f, '́')).toEqual([]);
+    expect(e.advance(f, `A${OMEGA}́B`)).toBeCloseTo(e.advance(f, 'A') + e.advance(d, `${OMEGA}́`) + e.advance(f, 'B'), 9);
+
+    // The breaker tests the width the line will have.
+    const word = OMEGA.repeat(3);
+    const real = e.advance(f, word);
+    expect(e.wrapPlain(f, `${word} ${word}`, opts(real))).toEqual([word, word]);
+    expect(e.wrapPlain(f, `${word} ${word}`, opts(real - 0.05)).length).toBe(4);
+
+    // Text the face covers is untouched by the list.
+    expect(e.advance(f, 'WAIT!')).toBe(engine.advance(f, 'WAIT!'));
+    expect(e.lineInk(f, 'WAIT!')).toEqual(engine.lineInk(f, 'WAIT!'));
+
+    // The list empties, or its family leaves: the face's own empty box again.
+    e.removeFamily('DejaVu Sans');
+    expect(e.advance(f, `A${OMEGA}B`)).toBeCloseTo(notdef, 9);
+    expect(e.missing(f, `A${OMEGA}B`)).toEqual([0x3a9]);
+    e.addFace('DejaVu Sans', 'regular', fixtureFont('DejaVuSans.ttf'));
+    expect(e.advance(f, `A${OMEGA}B`)).toBeCloseTo(want, 9);
+    e.setFallbacks([]);
+    expect(e.advance(f, `A${OMEGA}B`)).toBeCloseTo(notdef, 9);
+    expect(() => e.setFallbacks('DejaVu Sans')).toThrow('fallbacks are a list of family names');
+  });
+
+  it('borrows the letter in the weight and slant that were asked', async () => {
+    const e = await rustEngine();
+    e.setFallbacks(['DejaVu Sans']);
+    const upright = e.advance(face('Comic Neue', 40), OMEGA);
+    expect(upright).toBe(e.advance(face('DejaVu Sans', 40), OMEGA));
+    // An italic line takes DejaVu's own oblique face, whose ink leans.
+    const lean = e.lineInk(face('Comic Neue', 40, false, true), OMEGA);
+    expect(lean).toEqual(e.lineInk(face('DejaVu Sans', 40, false, true), OMEGA));
+    expect(lean).not.toEqual(e.lineInk(face('Comic Neue', 40), OMEGA));
+    // A bold line has no bold DejaVu to take, so the borrowed letter is thickened.
+    const heavy = e.lineInk(face('Comic Neue', 40, true), OMEGA);
+    expect(heavy.right).toBeGreaterThan(e.lineInk(face('Comic Neue', 40), OMEGA).right);
+  });
+});

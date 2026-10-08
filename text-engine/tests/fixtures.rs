@@ -3,7 +3,9 @@
 //! These pin behaviour the app relies on. Agreement with HarfBuzz and Skia is
 //! checked from node (`parity/`), on the wasm build.
 
-use mt_text::{bold_outset, Engine, Face, FontBoxRule, FontId, Synth, WrapOptions, OBLIQUE_SKEW};
+use mt_text::{
+    bold_outset, BoldAdvance, Engine, Face, FontBoxRule, FontId, Synth, WrapOptions, OBLIQUE_SKEW,
+};
 
 fn load(engine: &mut Engine, name: &str) -> FontId {
     let path = format!("{}/../src/test/fonts/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -504,4 +506,326 @@ fn damaged_fonts_do_not_panic() {
     }
     // The test only means something if damaged files do get past the door.
     assert!(accepted > 30, "only {accepted} damaged files were accepted");
+}
+
+fn wrap(e: &mut Engine, f: Face, text: &str, width: f64, letter_spacing: f64) -> Vec<String> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    e.wrap_plain(
+        f,
+        text,
+        WrapOptions {
+            width,
+            letter_spacing,
+        },
+    )
+    .unwrap()
+    .iter()
+    .map(|l| String::from_utf16(&units[l.start as usize..l.end as usize]).unwrap())
+    .collect()
+}
+
+fn bold(f: Face) -> Face {
+    Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..f
+    }
+}
+
+#[test]
+fn the_browsers_font_box_is_hhea_in_whole_pixels() {
+    let mut e = Engine::new();
+    let [comic, bangers, dejavu, _] = all(&mut e);
+    let fb = |e: &Engine, font, size| {
+        let b = e.font_box(Face::new(font, size)).unwrap();
+        (b.ascent, b.descent)
+    };
+    // 900/250 of 1000 at 20 px, and 14.5 px rounds each value by itself.
+    assert_eq!(fb(&e, comic, 20.0), (18.0, 5.0));
+    assert_eq!(fb(&e, comic, 14.5), (13.0, 4.0));
+    // DejaVu's OS/2 typo numbers (1556/492) differ from hhea (1901/483):
+    // 18.56 and 4.72, so hhea it is.
+    assert_eq!(fb(&e, dejavu, 20.0), (19.0, 5.0));
+    // A TrueType font is scaled through 16.16 fixed point, which lands a hair
+    // under the exact product: 900/1000 becomes 58982/65536, so 4.5 and 13.5
+    // are 4.49997 and 13.49991 and round down where plain arithmetic rounds up.
+    assert_eq!(fb(&e, comic, 5.0), (4.0, 1.0));
+    assert_eq!(fb(&e, comic, 15.0), (13.0, 4.0));
+    assert_eq!(fb(&e, bangers, 500.0), (441.0, 90.0));
+    // The unrounded box is still there for what must not jump with size.
+    let u = e.font_box_unrounded(Face::new(comic, 15.0)).unwrap();
+    assert!(close(u.ascent, 13.5) && close(u.descent, 3.75));
+}
+
+#[test]
+fn webkits_synthetic_bold_adds_a_36th_of_the_size_per_glyph() {
+    let mut e = Engine::new();
+    let [comic, _, dejavu, _] = all(&mut e);
+    let size = 36.0;
+    let plain = Face::new(comic, size);
+    let w = e.advance(plain, "WAIT").unwrap();
+    assert_eq!(e.advance(bold(plain), "WAIT").unwrap(), w);
+
+    e.rules.bold_advance = BoldAdvance::WebKit;
+    assert!(close(e.advance(bold(plain), "WAIT").unwrap(), w + 4.0));
+    // A real face is left alone, and so is the unsynthesised request.
+    assert_eq!(e.advance(plain, "WAIT").unwrap(), w);
+    // A ligature is one glyph and is widened once: "office" is o, ffi, c, e.
+    let d = Face::new(dejavu, size);
+    let office = e.advance(d, "office").unwrap();
+    assert!(close(e.advance(bold(d), "office").unwrap(), office + 4.0));
+    // The ink follows the pen: the second letter sits one step further right.
+    let a = e.line_ink(bold(plain), "II").unwrap();
+    e.rules.bold_advance = BoldAdvance::Unchanged;
+    let b = e.line_ink(bold(plain), "II").unwrap();
+    assert!(close(a.width, b.width + 2.0));
+    assert!(close(a.right, b.right + 1.0));
+    assert!(close(a.left, b.left));
+}
+
+#[test]
+fn ascii_whitespace_is_measured_as_a_space() {
+    let mut e = Engine::new();
+    let [comic, bangers, dejavu, _] = all(&mut e);
+    for font in [comic, bangers, dejavu] {
+        let f = Face::new(font, 22.5);
+        let spaced = e.advance(f, "A B").unwrap();
+        for ws in ['\t', '\n', '\r', '\u{c}'] {
+            let text = format!("A{ws}B");
+            assert_eq!(e.advance(f, &text).unwrap(), spaced, "{ws:?}");
+            assert_eq!(e.line_ink(f, &text).unwrap(), e.line_ink(f, "A B").unwrap());
+            assert!(e.missing(font, &text).unwrap().is_empty());
+        }
+        // Other spaces are the font's own business.
+        assert_ne!(e.advance(f, "A\u{2003}B").unwrap(), spaced);
+    }
+    // The raw run still shows what the font does with the character itself.
+    let tab = e.shape(comic, "\t").unwrap()[0].id;
+    let space = e.shape(comic, " ").unwrap()[0].id;
+    assert_ne!(tab, space);
+}
+
+#[test]
+fn spaces_at_the_end_of_a_line_hang_and_a_long_word_moves_before_it_is_cut() {
+    let mut e = Engine::new();
+    let comic = load(&mut e, "ComicNeue-Regular.ttf");
+    let f = Face::new(comic, 20.0);
+    let ab = e.advance(f, "AB").unwrap();
+    // However many spaces follow, they are not counted against the width.
+    assert_eq!(wrap(&mut e, f, "AB      AB", ab, 0.0), ["AB      ", "AB"]);
+    assert_eq!(
+        wrap(&mut e, f, "AB AB", ab * 2.0 - 0.01, 0.0),
+        ["AB ", "AB"]
+    );
+    // A line that exactly fills the box fits.
+    let whole = e.advance(f, "AB AB").unwrap();
+    assert_eq!(wrap(&mut e, f, "AB AB", whole, 0.0), ["AB AB"]);
+    assert_eq!(wrap(&mut e, f, "AB AB", whole - 0.01, 0.0), ["AB ", "AB"]);
+    // A word wider than the line goes to a line of its own first; only then
+    // is it cut, after the last letter that fits.
+    let w = e.advance(f, "W").unwrap();
+    assert_eq!(
+        wrap(&mut e, f, "A WWWWW", w * 3.0 + 0.01, 0.0),
+        ["A ", "WWW", "WW"]
+    );
+    // Spaces alone never force an empty line.
+    assert_eq!(wrap(&mut e, f, "W W", 1.0, 0.0), ["W ", "W"]);
+}
+
+#[test]
+fn letter_spacing_follows_every_letter_and_switches_ligatures_off() {
+    let mut e = Engine::new();
+    let [comic, _, dejavu, _] = all(&mut e);
+    let f = Face::new(comic, 20.0);
+    let a = e.advance(f, "H").unwrap();
+    let s = 3.0;
+    // The last letter of a line carries its spacing too: four letters need
+    // four spacings.
+    assert_eq!(wrap(&mut e, f, "HHHH", 4.0 * a + 4.0 * s, s), ["HHHH"]);
+    assert_eq!(wrap(&mut e, f, "HHHH", 4.0 * a + 3.5 * s, s), ["HHH", "H"]);
+    // A hanging space takes none.
+    assert_eq!(
+        wrap(&mut e, f, "HH HH", 2.0 * a + 2.0 * s, s),
+        ["HH ", "HH"]
+    );
+    // A mark is not a letter of its own.
+    let accented = e.advance(f, "e\u{301}").unwrap();
+    assert_eq!(
+        wrap(&mut e, f, "e\u{301}e\u{301}", 2.0 * accented + 2.0 * s, s),
+        ["e\u{301}e\u{301}"]
+    );
+
+    // DejaVu draws "ff" as one glyph, narrower than two. Spaced out it is
+    // two letters again, and that is the width the breaker tests.
+    let d = Face::new(dejavu, 40.0);
+    let joined = e.advance(d, "ff").unwrap();
+    let apart = 2.0 * e.advance(d, "f").unwrap();
+    assert!(joined < apart - 0.5, "the fixture has no ff ligature");
+    assert_eq!(wrap(&mut e, d, "ff", apart + 2.0 * s, s), ["ff"]);
+    assert_eq!(wrap(&mut e, d, "ff", apart + 2.0 * s - 0.05, s), ["f", "f"]);
+    assert_eq!(wrap(&mut e, d, "ff", joined, 0.0), ["ff"]);
+}
+
+#[test]
+fn a_cut_never_parts_a_mark_from_its_letter_and_what_follows_is_shaped_again() {
+    let mut e = Engine::new();
+    let [comic, _, dejavu, _] = all(&mut e);
+    let f = Face::new(comic, 20.0);
+    assert_eq!(
+        wrap(&mut e, f, "e\u{301}e\u{301}", 1.0, 0.0),
+        ["e\u{301}", "e\u{301}"]
+    );
+    // A cut through DejaVu's ffi ligature: every piece is measured as it
+    // will be drawn, by itself, so none is wider than the box.
+    let d = Face::new(dejavu, 40.0);
+    let text = "ffiffiffiffi";
+    for width in [30.0, 41.0, 55.0, 64.0, 90.0] {
+        let lines = wrap(&mut e, d, text, width, 0.0);
+        assert_eq!(lines.concat(), text);
+        for line in &lines {
+            let w = e.advance(d, line).unwrap();
+            assert!(
+                w <= width + 1.0 / 128.0 || line.chars().count() == 1,
+                "{line:?} is {w} in {width}"
+            );
+        }
+    }
+}
+
+/// Comic Neue with a chain of the fonts named, most preferred first.
+fn with_chain(e: &mut Engine, font: FontId, chain: &[FontId], size: f64) -> Face {
+    let id = e.chain_new();
+    for &f in chain {
+        e.chain_push(id, f, Synth::NONE).unwrap();
+    }
+    Face {
+        chain: id,
+        ..Face::new(font, size)
+    }
+}
+
+#[test]
+fn a_letter_the_face_lacks_is_drawn_from_the_chain() {
+    let mut e = Engine::new();
+    let [comic, bangers, dejavu, _] = all(&mut e);
+    let size = 40.0;
+    let plain = Face::new(comic, size);
+    let d = Face::new(dejavu, size);
+    // Comic Neue has no Greek; DejaVu Sans has.
+    assert_eq!(e.missing(comic, "A\u{3a9}B").unwrap(), [1]);
+    let f = with_chain(&mut e, comic, &[dejavu], size);
+
+    let a = e.advance(plain, "A").unwrap();
+    let b = e.advance(plain, "B").unwrap();
+    let omega = e.advance(d, "\u{3a9}").unwrap();
+    assert!(close(e.advance(f, "A\u{3a9}B").unwrap(), a + omega + b));
+    let fonts: Vec<FontId> = e.parts().iter().map(|p| p.font).collect();
+    assert_eq!(fonts, [comic, dejavu, comic]);
+    assert!(e.missing_in(f, "A\u{3a9}B").unwrap().is_empty());
+
+    // The ink is the fallback glyph's own, at its place on the line.
+    let alone = e.line_ink(d, "\u{3a9}").unwrap();
+    let line = e.line_ink(f, "A\u{3a9}").unwrap();
+    assert!(close(line.width, a + omega));
+    assert!(close(line.right, a + alone.right));
+    assert!(close(
+        line.ascent,
+        alone.ascent.max(e.line_ink(plain, "A").unwrap().ascent)
+    ));
+    let glyph = e.glyph_ink(f, "\u{3a9}").unwrap();
+    let own = e.glyph_ink(d, "\u{3a9}").unwrap();
+    assert!(glyph.has_ink);
+    assert!(close(glyph.left, own.left) && close(glyph.right, own.right));
+
+    // Text the face covers is one part and not a bit different.
+    for text in ["WAIT!", "", "   ", "A V"] {
+        assert_eq!(e.advance(f, text).unwrap(), e.advance(plain, text).unwrap());
+        assert_eq!(e.parts().len(), 1);
+        assert_eq!(
+            e.line_ink(f, text).unwrap(),
+            e.line_ink(plain, text).unwrap()
+        );
+    }
+
+    // No chain, or an empty one: the face's own .notdef, as before.
+    let notdef = e.advance(plain, "A\u{3a9}B").unwrap();
+    assert!(!close(notdef, a + omega + b));
+    let empty = with_chain(&mut e, comic, &[], size);
+    assert_eq!(e.advance(empty, "A\u{3a9}B").unwrap(), notdef);
+    assert_eq!(e.missing_in(empty, "A\u{3a9}B").unwrap(), [1]);
+
+    // What no font of the chain has is still reported, and only that.
+    let both = with_chain(&mut e, comic, &[bangers, dejavu], size);
+    assert_eq!(
+        e.missing_in(both, "A\u{3a9}\u{d55c}B\u{d55c}").unwrap(),
+        [2, 4]
+    );
+    assert!(e.chain_free(both.chain));
+    assert!(!e.chain_free(both.chain));
+}
+
+#[test]
+fn a_run_stays_in_the_font_it_is_in_and_a_mark_stays_with_its_letter() {
+    let mut e = Engine::new();
+    let [comic, bangers, dejavu, _] = all(&mut e);
+    let size = 40.0;
+    // U+0126 is in Bangers and DejaVu, U+03A9 only in DejaVu, neither in
+    // Comic Neue.
+    let f = with_chain(&mut e, comic, &[bangers, dejavu], size);
+    let fonts = |e: &mut Engine, text: &str| -> Vec<FontId> {
+        e.advance(f, text).unwrap();
+        e.parts().iter().map(|p| p.font).collect()
+    };
+    // Taken by itself the letter comes from the first font that has it.
+    assert_eq!(fonts(&mut e, "\u{126}"), [bangers]);
+    // After a letter only DejaVu has, the run stays in DejaVu.
+    assert_eq!(fonts(&mut e, "\u{3a9}\u{126}"), [dejavu]);
+    assert_eq!(fonts(&mut e, "\u{126}\u{3a9}"), [bangers, dejavu]);
+    // The face itself is always preferred where it has the letter, a space
+    // included.
+    assert_eq!(
+        fonts(&mut e, "\u{3a9} \u{3a9}A"),
+        [dejavu, comic, dejavu, comic]
+    );
+
+    // Comic Neue has the acute accent, but an accent goes where its letter
+    // goes: the pair is one cluster in DejaVu.
+    assert!(e.missing(comic, "\u{301}").unwrap().is_empty());
+    assert_eq!(fonts(&mut e, "A\u{3a9}\u{301}B"), [comic, dejavu, comic]);
+    let d = Face::new(dejavu, size);
+    let plain = Face::new(comic, size);
+    let want = e.advance(plain, "A").unwrap()
+        + e.advance(d, "\u{3a9}\u{301}").unwrap()
+        + e.advance(plain, "B").unwrap();
+    assert!(close(e.advance(f, "A\u{3a9}\u{301}B").unwrap(), want));
+}
+
+#[test]
+fn the_breaker_measures_with_the_chain_too() {
+    let mut e = Engine::new();
+    let [comic, _, dejavu, _] = all(&mut e);
+    let size = 40.0;
+    let plain = Face::new(comic, size);
+    let f = with_chain(&mut e, comic, &[dejavu], size);
+    let word = "\u{3a9}\u{3a9}\u{3a9}";
+    let text = format!("{word} {word}");
+    let real = e.advance(f, word).unwrap();
+    let boxes = e.advance(plain, word).unwrap();
+    assert!((real - boxes).abs() > 1.0);
+    // The width that decides is the fallback font's, not the .notdef box's.
+    assert_eq!(
+        wrap(&mut e, f, &text, real, 0.0),
+        [format!("{word} "), word.into()]
+    );
+    assert_eq!(wrap(&mut e, f, &text, real - 0.05, 0.0).len(), 4);
+    let two = e.advance(f, &text).unwrap();
+    assert_eq!(wrap(&mut e, f, &text, two, 0.0), [text.as_str()]);
+    // A cut inside the fallback word is measured in the fallback font.
+    let one = e.advance(f, "\u{3a9}").unwrap();
+    assert_eq!(
+        wrap(&mut e, f, word, one * 2.0, 0.0),
+        ["\u{3a9}\u{3a9}", "\u{3a9}"]
+    );
 }
