@@ -1,10 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeRustEngine } from '../test/fake-rust-engine.js';
 
 // The `textEngine` preference: stored with the others, applied by the same
 // setter, and applied again at the next launch before anything measures.
 // Modules are loaded fresh for every case, as prefs.test.js does, because
 // prefs.svelte.js applies what it finds on import.
+
+// The first import of the store and everything under it is transformed here,
+// with room to be slow: on a busy machine it is seconds, and it used to be
+// charged to whichever case came first, against that case's own time limit.
+beforeAll(async () => {
+  await import('./engine-switch.svelte.js');
+}, 60_000);
 
 let storage;
 beforeEach(() => {
