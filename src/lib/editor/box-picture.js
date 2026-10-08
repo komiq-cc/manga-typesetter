@@ -104,16 +104,51 @@ export function paintPictureTexture(el, tex, box, maxPx = PICTURE_MAX_PX) {
  * moved to the nearest device pixel - at most half of one, a quarter of a CSS
  * px on a 2x display. Only for a box that is upright and unmirrored: a turned
  * picture is resampled whatever its corner does.
+ *
+ * `g.page` is where the page's own corner is on the screen (`pageCorner`),
+ * which is not a whole pixel either: a page centred in the viewport at 137%
+ * starts on a half. Without it the snap is to the page's grid, not the
+ * screen's.
  */
 export function pictureCss(g, z, dpr = 1, at = null) {
   let left = -g.ox * z;
   let top = -g.oy * z;
   if (at && dpr > 0) {
     const snap = (v) => Math.round(v * dpr) / dpr;
-    left = snap((at.x - g.ox) * z) - at.x * z;
-    top = snap((at.y - g.oy) * z) - at.y * z;
+    const px = g.page?.x ?? 0;
+    const py = g.page?.y ?? 0;
+    left = snap(px + (at.x - g.ox) * z) - px - at.x * z;
+    top = snap(py + (at.y - g.oy) * z) - py - at.y * z;
   }
   return `left:${left}px;top:${top}px;width:${g.cw * z}px;height:${g.ch * z}px;`;
+}
+
+// Where a page frame's content corner is in the viewport, CSS px. It is a
+// question to the layout, so it is asked once for all the boxes painted in
+// one flush and forgotten after it: thirty boxes repainting on a zoom force
+// one layout, not thirty. It is read when a picture is painted and not
+// watched: a pan and a scroll move the page by whole device pixels
+// (Canvas.svelte snaps the pan for its own reasons), and what does not - the
+// window resized, a panel opened - leaves the pictures up to half a device
+// pixel off until they are next painted.
+let corners = new WeakMap();
+let forgetting = false;
+export function pageCorner(frameEl) {
+  if (typeof frameEl?.getBoundingClientRect !== 'function') return null;
+  let c = corners.get(frameEl);
+  if (!c) {
+    const r = frameEl.getBoundingClientRect();
+    c = { x: r.left + (frameEl.clientLeft || 0), y: r.top + (frameEl.clientTop || 0) };
+    corners.set(frameEl, c);
+    if (!forgetting) {
+      forgetting = true;
+      queueMicrotask(() => {
+        corners = new WeakMap();
+        forgetting = false;
+      });
+    }
+  }
+  return c;
 }
 
 // What a repaint key says for a box that is to hold no pixels: on a hidden

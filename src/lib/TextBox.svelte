@@ -62,7 +62,7 @@
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
   import { engineSwitch } from './engine-switch.svelte.js';
-  import { PICTURE_MAX_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, paintBoxPicture, paintPictureTexture } from './editor/box-picture.js';
+  import { PICTURE_MAX_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
@@ -515,7 +515,7 @@
 
   function paintWarp(el, tips) {
     warpGeom = engineShown
-      ? paintBoxPicture(el, box, pg, pictureRes, tips)
+      ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
       : paintWarpedBox(el, box, pg, z, tips);
   }
 
@@ -553,7 +553,7 @@
       // deforms, and the effect below paints that first frame as it mounts.
       if (!warpTex || !warpLive) return;
       warpGeom = engineShown
-        ? paintPictureTexture(warpLive, warpTex, box)
+        ? { ...paintPictureTexture(warpLive, warpTex, box), page: warpGeom?.page }
         : paintWarpedTexture(warpLive, warpTex, box, z);
     },
     end() {

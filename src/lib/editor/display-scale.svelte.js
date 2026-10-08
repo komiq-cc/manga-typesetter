@@ -8,38 +8,49 @@
 // resolution - soft on the sharper one, wasted on the other - until something
 // else repainted it.
 //
-// Nothing here runs until `displayScale()` is first called, and only the Rust
-// engine's display path calls it: a session with the switch off never arms
-// the listener.
+// It is a subscription and not a piece of state: the first reader is a
+// `$derived`, and a derived may not write state, so there is nothing here to
+// write. Svelte's `createSubscriber` listens while some effect depends on the
+// value and stops when none does. Only the Rust engine's display path reads
+// it, so a session with the switch off never listens at all.
+import { createSubscriber } from 'svelte/reactivity';
+
 const read = () => (typeof window !== 'undefined' && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1);
 
-const display = $state({ dpr: 1 });
-let armed = false;
+// For the tests: a display of another density, without a browser to move.
+let forced = 0;
+let poke = null;
 
-// A `resolution` query matches one ratio, so it tells of ONE change and has to
-// be asked again for the next.
-function arm() {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-  const mq = window.matchMedia(`(resolution: ${read()}dppx)`);
-  const changed = () => {
-    display.dpr = read();
-    arm();
+const subscribe = createSubscriber((update) => {
+  let stop = () => {};
+  // A `resolution` query matches one ratio, so it tells of ONE change and has
+  // to be asked again for the next.
+  const listen = () => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia(`(resolution: ${read()}dppx)`);
+    if (typeof mq?.addEventListener !== 'function') return;
+    const changed = () => {
+      listen();
+      update();
+    };
+    mq.addEventListener('change', changed, { once: true });
+    stop = () => mq.removeEventListener('change', changed);
   };
-  if (typeof mq?.addEventListener === 'function') mq.addEventListener('change', changed, { once: true });
-}
+  listen();
+  poke = update;
+  return () => {
+    stop();
+    poke = null;
+  };
+});
 
 /** Device px per CSS px, read reactively. */
 export function displayScale() {
-  if (!armed) {
-    armed = true;
-    display.dpr = read();
-    arm();
-  }
-  return display.dpr;
+  subscribe();
+  return forced || read();
 }
 
-// For the tests: a display of another density, without a browser to move.
 export function _setDisplayScale(dpr) {
-  armed = true;
-  display.dpr = dpr;
+  forced = dpr;
+  poke?.();
 }
