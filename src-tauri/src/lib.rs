@@ -45,6 +45,7 @@ pub fn run() {
       memory::process_memory,
       screen_color::pick_screen_color,
       system_fonts::system_fonts,
+      system_fonts::system_font_face,
       durability::fsync_path
     ])
     .setup(|app| {
