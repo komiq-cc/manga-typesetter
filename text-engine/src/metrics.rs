@@ -1,10 +1,12 @@
 //! Metric queries: the numbers a canvas `TextMetrics` used to supply.
 //!
-//! Each rule here was fixed by measuring Skia (`parity/skia.mjs`,
-//! `parity/synth.mjs`); SPIKE.md records the measurements.
+//! The rules were first fixed by measuring Skia (`parity/skia.mjs`,
+//! `parity/synth.mjs`, recorded in SPIKE.md) and then set against captures of
+//! Chromium and WebKit on the user's fonts; RULES.md records what each
+//! reference does and which way every rule went.
 
-use crate::engine::{Engine, Face, Synth};
-use crate::font::{LineBox, VerticalMetrics};
+use crate::engine::{Engine, Face, FontBoxRule, ShapeMode, Synth};
+use crate::font::{FontInfo, LineBox, VerticalMetrics};
 use crate::Error;
 
 /// Line-box ascent and descent in pixels, both positive.
@@ -75,75 +77,152 @@ pub fn bold_outset(size: f64) -> f64 {
     size * k / 2.0
 }
 
+/// The ascender and descender a browser on macOS builds its line box from,
+/// in font units, before any scaling or rounding.
+///
+/// Always `hhea`: of the user's 108 faces, the six that set
+/// `USE_TYPO_METRICS` with typo values different from `hhea` are all reported
+/// from `hhea` by both browsers. The descender's sign is dropped (one face
+/// states it above the baseline and is reported with the same magnitude
+/// below it), and a descender of zero is replaced by the depth of the font's
+/// glyph box, `-head.yMin` (one face; both browsers do it). The mirror case,
+/// an ascender of zero, and a font whose `hhea` states nothing at all, were
+/// not seen: they fall back the same way and down the table ladder.
+pub fn browser_line_units(info: &FontInfo) -> (f64, f64) {
+    let v = &info.vertical;
+    let stated = |l: &LineBox| l.ascent != 0.0 || l.descent != 0.0;
+    let line = match v.hhea {
+        Some(h) if stated(&h) => h,
+        _ => line_box(v),
+    };
+    let (y_min, y_max) = info.bbox_y.unwrap_or((0, 0));
+    let ascent = if line.ascent == 0.0 && y_max > 0 {
+        f64::from(y_max)
+    } else {
+        line.ascent.abs()
+    };
+    let descent = if line.descent == 0.0 && y_min < 0 {
+        -f64::from(y_min)
+    } else {
+        line.descent.abs()
+    };
+    (ascent, descent)
+}
+
+/// Scales a vertical metric the way CoreText does, which is what both
+/// browsers then round.
+///
+/// For a CFF font it is the plain product. For a TrueType font the scale
+/// `units / unitsPerEm` goes through a 16.16 fixed-point number first, so a
+/// value that is exactly half a pixel in real arithmetic can land a hair
+/// under it and round the other way (Bebas Neue at 25 px: 22.5 becomes 22).
+/// On 2,049 face and size pairs (`parity/fontbox.mjs`) this split reproduces
+/// every one; plain arithmetic for both kinds misses 4, fixed point 31.
+fn coretext_scale(units: f64, info: &FontInfo, size: f64) -> f64 {
+    let upem = f64::from(info.units_per_em);
+    if info.truetype {
+        (units * 65536.0 / upem).round() / 65536.0 * size
+    } else {
+        units * size / upem
+    }
+}
+
 impl Engine {
-    /// The font's line-box ascent and descent at this size, unrounded.
+    /// The font's line-box ascent and descent at this size.
+    ///
+    /// Under the default rule both are whole pixels, each rounded by itself,
+    /// half up: what `fontBoundingBoxAscent`/`Descent` are in Chromium and in
+    /// WebKit, which agree on every face and size captured.
     pub fn font_box(&self, face: Face) -> Result<FontBox, Error> {
         let info = self.info(face.font)?;
-        let line = line_box(&info.vertical);
+        match self.rules.font_box {
+            FontBoxRule::Skia => self.font_box_unrounded(face),
+            FontBoxRule::Browser => {
+                let (a, d) = browser_line_units(info);
+                Ok(FontBox {
+                    ascent: (coretext_scale(a, info, face.size) + 0.5).floor(),
+                    descent: (coretext_scale(d, info, face.size) + 0.5).floor(),
+                })
+            }
+        }
+    }
+
+    /// The line box before any rounding: the same table values as
+    /// [`Engine::font_box`], scaled in plain arithmetic.
+    pub fn font_box_unrounded(&self, face: Face) -> Result<FontBox, Error> {
+        let info = self.info(face.font)?;
         let scale = face.size / f64::from(info.units_per_em);
+        let (a, d) = match self.rules.font_box {
+            FontBoxRule::Skia => {
+                let line = line_box(&info.vertical);
+                (line.ascent, line.descent)
+            }
+            FontBoxRule::Browser => browser_line_units(info),
+        };
         Ok(FontBox {
-            ascent: line.ascent * scale,
-            descent: line.descent * scale,
+            ascent: a * scale,
+            descent: d * scale,
         })
     }
 
     /// How far the canvas `middle` baseline sits above the alphabetic one:
-    /// half the line box below its top.
+    /// half the line box below its top, from the unrounded box.
     ///
-    /// Skia computes `ascent - round(ascent + descent) / 2`, the same thing
-    /// with the line height snapped to a whole pixel (verified exactly in
-    /// `parity/skia.mjs`). The snap is left out here because a rule that
-    /// rounds in pixels gives a different layout at every zoom level.
+    /// No two references agree here. Skia snaps the line height to a whole
+    /// pixel first, WebKit works in whole pixels and drops a half, Chromium
+    /// centres the font's em box instead of its line box (RULES.md). The
+    /// engine keeps the one that is linear in the size, so a glyph on a curve
+    /// sits at the same place at every zoom.
     pub fn middle_shift(&self, face: Face) -> Result<f64, Error> {
-        let b = self.font_box(face)?;
+        let b = self.font_box_unrounded(face)?;
         Ok((b.ascent - b.descent) / 2.0)
     }
 
-    /// Union of the outline boxes of the shaped run, pen starting at x = 0 on
-    /// the alphabetic baseline. Returns `(advance, x_min, y_min, x_max,
-    /// y_max)` in pixels with y up, or no box when nothing has ink.
+    /// Union of the outline boxes of the line, pen starting at x = 0 on the
+    /// alphabetic baseline. Returns `(advance, x_min, y_min, x_max, y_max)`
+    /// in pixels with y up, or no box when nothing has ink.
     fn run_extents(&mut self, face: Face, text: &str) -> Result<(f64, Option<Extent>), Error> {
-        self.shape(face.font, text)?;
-        let entry = self.font(face.font)?;
-        let scale = face.size / f64::from(entry.info.units_per_em);
-        let mut pen = 0i64;
+        self.measure_line(face, text, ShapeMode::MEASURE)?;
+        let mut origin = 0.0f64;
         let mut ext: Option<Extent> = None;
-        for g in self.last_run() {
-            if let Some(b) = entry.glyph_bounds(g.id, face.synth.oblique) {
-                let ox = (pen + i64::from(g.x_offset)) as f64;
-                let oy = f64::from(g.y_offset);
-                let cur = (
-                    ox + f64::from(b.x_min),
-                    oy + f64::from(b.y_min),
-                    ox + f64::from(b.x_max),
-                    oy + f64::from(b.y_max),
-                );
-                ext = Some(match ext {
-                    None => cur,
-                    Some(e) => (
-                        e.0.min(cur.0),
-                        e.1.min(cur.1),
-                        e.2.max(cur.2),
-                        e.3.max(cur.3),
-                    ),
-                });
+        for part in &self.parts {
+            let entry = self.font(part.font)?;
+            let scale = face.size / f64::from(entry.info.units_per_em);
+            let extra = self.bold_extra(part.synth, face.size);
+            let grow = if part.synth.bold {
+                bold_outset(face.size)
+            } else {
+                0.0
+            };
+            let mut pen = 0i64;
+            for (n, g) in self.line[part.glyphs.clone()].iter().enumerate() {
+                if let Some(b) = entry.glyph_bounds(g.id, part.synth.oblique) {
+                    let ox = (pen + i64::from(g.x_offset)) as f64;
+                    let oy = f64::from(g.y_offset);
+                    // `shift` is zero for a single part without the WebKit
+                    // bold rule, and adding 0.0 changes no bit of the result.
+                    let shift = origin + n as f64 * extra;
+                    let cur = (
+                        shift + (ox + f64::from(b.x_min)) * scale - grow,
+                        (oy + f64::from(b.y_min)) * scale - grow,
+                        shift + (ox + f64::from(b.x_max)) * scale + grow,
+                        (oy + f64::from(b.y_max)) * scale + grow,
+                    );
+                    ext = Some(match ext {
+                        None => cur,
+                        Some(e) => (
+                            e.0.min(cur.0),
+                            e.1.min(cur.1),
+                            e.2.max(cur.2),
+                            e.3.max(cur.3),
+                        ),
+                    });
+                }
+                pen += i64::from(g.x_advance);
             }
-            pen += i64::from(g.x_advance);
+            origin += pen as f64 * scale + part.glyphs.len() as f64 * extra;
         }
-        let grow = if face.synth.bold {
-            bold_outset(face.size)
-        } else {
-            0.0
-        };
-        let ext = ext.map(|e| {
-            (
-                e.0 * scale - grow,
-                e.1 * scale - grow,
-                e.2 * scale + grow,
-                e.3 * scale + grow,
-            )
-        });
-        Ok((pen as f64 * scale, ext))
+        Ok((self.line_advance(face.size)?, ext))
     }
 
     /// Ink extents of a line drawn left-aligned on the alphabetic baseline.

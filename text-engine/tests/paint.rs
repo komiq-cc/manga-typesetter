@@ -143,6 +143,7 @@ fn synthetic_styles_are_drawn_where_they_are_measured() {
             font,
             size: 40.0,
             synth,
+            chain: 0,
         };
         let ink = e.line_ink(face, "Hkx").unwrap();
         let (rgba, w) = paint(&mut e, face, "Hkx", 2.0, None);

@@ -13,7 +13,7 @@
 // raw run in font units. Text offsets are UTF-16 code units, i.e. JS string
 // indices.
 
-export const ABI_VERSION = 1
+export const ABI_VERSION = 2
 
 const RESULT_SLOTS = 16
 const GLYPH_FIELDS = 6
@@ -27,6 +27,14 @@ const STATUS = {
 
 export const SYNTH_BOLD = 1
 export const SYNTH_OBLIQUE = 2
+/** A face's `flags` hold the synthetic styles in the low byte and a fallback chain's handle above it. */
+export const CHAIN_SHIFT = 8
+
+/** The rules that are switches (`engine.setRule`), and their values. */
+export const RULES = {
+  boldAdvance: { id: 1, values: { unchanged: 0, webkit: 1 } },
+  fontBox: { id: 2, values: { browser: 0, skia: 1 } },
+}
 
 /**
  * @param {BufferSource | WebAssembly.Module} source the bytes of mt_text.wasm, or a compiled module
@@ -154,6 +162,8 @@ function wrap(instance) {
         }),
         facesInFile: r[3],
         byteLength: r[4],
+        /** TrueType outlines (`glyf`) rather than CFF. */
+        trueType: r[15] === 1,
         vertical: {
           useTypoMetrics: r[5] === 1,
           hhea: line(1, 7),
@@ -163,14 +173,45 @@ function wrap(instance) {
       }
     },
 
-    /** A font at a size. `bold`/`italic` ask for the synthesised style. */
-    face(font, size, { bold = false, italic = false } = {}) {
-      return Object.freeze({ font, size, flags: (bold ? SYNTH_BOLD : 0) | (italic ? SYNTH_OBLIQUE : 0) })
+    /**
+     * A font at a size. `bold`/`italic` ask for the synthesised style;
+     * `chain` (from `chainNew`) is where a letter the font lacks is looked for.
+     */
+    face(font, size, { bold = false, italic = false, chain = 0 } = {}) {
+      return Object.freeze({
+        font,
+        size,
+        flags: (bold ? SYNTH_BOLD : 0) | (italic ? SYNTH_OBLIQUE : 0) | (chain << CHAIN_SHIFT),
+      })
     },
 
-    /** Advance of `text` shaped as one run, no letter spacing. */
+    /**
+     * Sets one of the rules that are switches, e.g. `setRule('boldAdvance', 'webkit')`.
+     * Every number measured before the call may be stale after it.
+     */
+    setRule(name, value) {
+      const rule = RULES[name]
+      if (!rule || !(value in rule.values)) throw new Error(`mt-text: unknown rule ${name}=${value}`)
+      check(ex.mt_rule_set(rule.id, rule.values[value]), 'setRule')
+    },
+
+    /** An empty fallback chain; fonts pushed earlier are preferred. */
+    chainNew() {
+      return ex.mt_chain_new()
+    },
+    chainPush(chain, font, { bold = false, italic = false } = {}) {
+      check(ex.mt_chain_push(chain, font, (bold ? SYNTH_BOLD : 0) | (italic ? SYNTH_OBLIQUE : 0)), 'chainPush')
+    },
+    chainFree(chain) {
+      return ex.mt_chain_free(chain) === 1
+    },
+
+    /**
+     * Advance of `text`, no letter spacing. Tab, LF, FF and CR are measured
+     * as a space, as a canvas measures them.
+     */
     advance(face, text) {
-      const w = ex.mt_advance(face.font, face.size, putText(text))
+      const w = ex.mt_advance(face.font, face.size, face.flags, putText(text))
       if (w !== w) throw new Error('mt-text: advance failed (unknown font or shaping error)')
       return w
     },
@@ -248,9 +289,9 @@ function wrap(instance) {
       return lines
     },
 
-    /** UTF-16 offsets of the clusters the font has no glyph for. */
+    /** UTF-16 offsets of the clusters neither the font nor its fallback chain has a glyph for. */
     missing(face, text) {
-      const n = check(ex.mt_missing(face.font, putText(text)), 'missing')
+      const n = check(ex.mt_missing(face.font, face.flags, putText(text)), 'missing')
       return Array.from(outU32(n))
     },
 
