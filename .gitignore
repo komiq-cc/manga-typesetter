@@ -15,6 +15,10 @@ dist-ssr
 # Rust / Tauri build output
 src-tauri/target
 /target
+text-engine/target
+
+# Text engine wasm, rebuilt by `npm run build:engine`
+text-engine/js/generated
 
 # Python: untracked FLUX inpainting server, its venv and weight caches
 python/.venv
