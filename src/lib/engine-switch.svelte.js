@@ -256,7 +256,11 @@ export function lettersMissing(style, text) {
     rust.onFontsChange(() => lettersMemo.clear());
   }
   const face = faceFor(style, style.size > 0 ? style.size : 16);
-  const key = `${face.name}\n${face.bold ? 1 : 0}${face.italic ? 1 : 0}\n${text}`;
+  // Everything the answer is made from: the family and the face of it the
+  // engine picks (weight, slant), and the string as it is set - the same
+  // words in capitals are other letters (`applyCase`). Not the size: a glyph
+  // is there or not at every size.
+  const key = `${face.name}\n${face.bold ? 1 : 0}${face.italic ? 1 : 0}${style.uppercase ? 1 : 0}\n${text}`;
   let out = lettersMemo.get(key);
   if (!out) {
     out = rust.hasFamily(face.name) ? rust.missing(face, applyCase(text, style)) : [];

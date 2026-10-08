@@ -686,4 +686,31 @@ describe('letters no face has', () => {
       { pageIndex: 0, boxId: 'gone', letters: [0x306d] },
     ]);
   });
+
+  it('are asked of the text as it is set: the same words in capitals are another question', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    // 'ÿ' is a letter every stand-in face has; its capital 'Ÿ' is one none has.
+    const lower = styleFor('WildWords', { uppercase: false });
+    const upper = styleFor('WildWords', { uppercase: true });
+    expect(lettersMissing(lower, 'ÿ')).toEqual([]);
+    expect(lettersMissing(upper, 'ÿ')).toEqual([0x178]);
+    expect(lettersMissing(lower, 'ÿ')).toEqual([]);
+    // And in a box: turning capitals on is enough to list it.
+    loadProjectPages(doc([box('WildWords', { text: 'ÿ', style: { uppercase: false } })]));
+    expect(boxesMissingLetters()).toEqual([]);
+    page().boxes[0].style.uppercase = true;
+    expect(boxesMissingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', letters: [0x178] }]);
+  });
+
+  it('are asked once for a face and a string, however often the notice reads them', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    const missing = vi.spyOn(engine, 'missing');
+    for (let i = 0; i < 5; i++) lettersMissing(styleFor('WildWords', { size: 20 + i }), 'こ');
+    expect(missing).toHaveBeenCalledTimes(1);
+    // Bold is another face, and may have what the regular lacks.
+    lettersMissing(styleFor('WildWords', { bold: true }), 'こ');
+    expect(missing).toHaveBeenCalledTimes(2);
+  });
 });
