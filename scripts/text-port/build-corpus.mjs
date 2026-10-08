@@ -4,6 +4,7 @@ import { resolve, extname, basename } from 'node:path';
 import { buildCorpus, completeStyle } from '../../src/test/text-port/corpus.js';
 import { normalizeFit } from '../../src/lib/data.js';
 import { flags, root, sha256, dataDir, guardedPath, safeId } from './lib/common.mjs';
+import { coverage, covers } from './lib/cmap.mjs';
 
 const fixtures = [
   { family: 'Comic Neue', slot: 'regular', path: 'src/test/fonts/ComicNeue-Regular.ttf' },
@@ -73,6 +74,33 @@ function chapterCases(data, list, corpus, legacyMode) {
   }
   return { omitted, empty };
 }
+// Tag every case whose text has a letter its face has no glyph for. Such a
+// string is drawn from a fallback face the host picks, so it measures the host
+// and not the engine; the comparison judges those cases apart.
+function tagUncovered(corpus, faces) {
+  // The face CSS matching picks for a style: the slant first, then the weight.
+  const rangesFor = (family, bold, italic) => {
+    const f = faces.get(family);
+    const wanted = italic && (f.italic || f.boldItalic) ? [f.italic, f.boldItalic] : [f.regular, f.bold];
+    const [light, heavy] = wanted[0] || wanted[1] ? wanted : [f.italic, f.boldItalic];
+    return bold ? heavy ?? light : light ?? heavy;
+  };
+  let count = 0;
+  for (const value of Object.values(corpus)) {
+    for (const c of value.cases) {
+      const style = c.box?.style ?? c.solve?.style ?? c;
+      const raw = String(c.text ?? c.box?.text ?? c.solve?.text ?? '');
+      const text = style.uppercase ? raw.toUpperCase() : raw;
+      const ranges = rangesFor(style.font, !!style.bold, !!style.italic);
+      // A tab is set as a space, and a line break is not set at all.
+      const missing = [...text.replace(/\t/g, ' ').replace(/[\r\n]/g, '')].some((ch) => !covers(ranges, ch.codePointAt(0)));
+      if (!missing) continue;
+      c.tags = [...(c.tags ?? []), 'uncovered'];
+      count++;
+    }
+  }
+  return count;
+}
 try {
   const args = flags(['--data', '--fonts', '--legacy-mode']);
   const data = dataDir(args.data);
@@ -81,6 +109,7 @@ try {
   const extra = args.fonts ? JSON.parse(readFileSync(resolve(args.fonts), 'utf8')) : [];
   if (!Array.isArray(extra)) throw new Error('--fonts must contain an array of { family, slot, path }');
   const seen = new Set();
+  const faces = new Map();
   const fonts = [...fixtures, ...extra].map((f) => {
     if (!f.family || /['\\\r\n]/.test(f.family) || !['regular', 'bold', 'italic', 'boldItalic'].includes(f.slot)) throw new Error(`Invalid font entry: ${JSON.stringify(f)}`);
     const key = JSON.stringify([f.family, f.slot]);
@@ -93,11 +122,14 @@ try {
     if (!/^[a-z0-9]+$/.test(ext)) throw new Error(`Invalid font extension: ${source}`);
     const file = `${hash}.${ext}`;
     writeFileSync(guardedPath(data, `fonts/${file}`), bytes);
+    if (!faces.has(f.family)) faces.set(f.family, {});
+    faces.get(f.family)[f.slot] = coverage(bytes).ranges;
     return { family: f.family, slot: f.slot, file, sha256: hash, source };
   }).sort((a, b) => a.family < b.family ? -1 : a.family > b.family ? 1 : a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0);
   const list = { version: 1, fonts };
   const corpus = buildCorpus(list);
   const { omitted, empty } = chapterCases(data, list, corpus, args['legacy-mode']);
+  const uncovered = tagUncovered(corpus, faces);
   for (const [name, value] of Object.entries(corpus)) {
     const ids = new Set();
     for (const c of value.cases) {
@@ -113,6 +145,7 @@ try {
   console.log(`corpus: ${Object.entries(corpus).map(([k, v]) => `${k}=${v.cases.length}`).join(' ')} fonts=${fonts.length}`);
   for (const [font, count] of [...omitted].sort()) console.log(`omitted unknown font '${font}': ${count} boxes`);
   if (empty) console.log(`omitted empty chapter boxes: ${empty}`);
+  console.log(`cases with a letter their face lacks: ${uncovered}`);
   console.log(`data: ${data}`);
 } catch (error) {
   console.error(error.message);

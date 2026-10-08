@@ -13,7 +13,13 @@ const safeId = (s) => {
   return s;
 };
 const sha256 = async (bytes) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
-const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+// A pause the page takes even while nobody is looking at it: a hidden tab
+// stops its animation frames, and a capture must not wait for an audience.
+const channel = new MessageChannel();
+const nextFrame = () => new Promise((resolve) => {
+  channel.port1.onmessage = resolve;
+  channel.port2.postMessage(0);
+});
 async function capture() {
   const startedAt = new Date().toISOString();
   const query = new URLSearchParams(location.search);
@@ -79,7 +85,14 @@ async function capture() {
             canvas.height = result.imageData.height;
             canvas.getContext('2d').putImageData(result.imageData, 0, 0);
           }
-          const png = await new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Canvas PNG encoding returned null')), 'image/png'));
+          // `toDataURL`, not `toBlob`: Chromium encodes a blob in the page's
+          // idle time, and a page nobody is looking at has none, so every
+          // picture waited out a one-second timeout.
+          const url = canvas.toDataURL('image/png');
+          if (!url.startsWith('data:image/png;base64,')) throw new Error('Canvas PNG encoding returned no PNG');
+          const text = atob(url.slice(22));
+          const png = new Uint8Array(text.length);
+          for (let i = 0; i < text.length; i++) png[i] = text.charCodeAt(i);
           await put(record.png, png);
         } catch (error) {
           // Encoding is a case error; transport failure must abort the run.
@@ -120,6 +133,13 @@ async function capture() {
 }
 capture().catch((error) => {
   const message = error.message ?? String(error);
+  // The run directory says why it has no manifest: a host with no window to
+  // read (a webview, a background tab) fails where nobody can see the page.
+  const query = new URLSearchParams(location.search);
+  const base = (query.get('collector') || 'http://127.0.0.1:8787').replace(/\/$/, '');
+  if (/^[a-z0-9][a-z0-9._-]*$/.test(query.get('run') ?? '') && /^ref-(cr|wk)$/.test(query.get('engine') ?? 'ref-cr')) {
+    fetch(`${base}/runs/${query.get('engine') || 'ref-cr'}/${query.get('run')}/error.txt`, { method: 'PUT', body: `${message}\n${JSON.stringify(counts)}\n${error.stack ?? ''}\n` }).catch(() => {});
+  }
   progress.textContent = `CAPTURE FAILED\n${message}\n${JSON.stringify(counts)}`;
   window.__tp = { done: true, ok: false, counts, error: message };
   document.title = 'tp failed';
