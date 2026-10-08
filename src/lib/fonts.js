@@ -365,6 +365,7 @@ export function scanSystemFonts() {
       app.fonts.system = (Array.isArray(found) ? found : [])
         .filter((f) => f && typeof f.name === 'string' && f.name)
         .map(systemFontEntry);
+      faceWatcher?.scanned?.();
       // Boxes set in a system font were measured against the fallback until
       // now, if the chapter opened before the scan landed.
       noteFontsChanged();
@@ -372,6 +373,7 @@ export function scanSystemFonts() {
       toast(`Could not read the system fonts - ${e?.message || e}`);
     } finally {
       scanning = null;
+      scanSettled();
     }
     return app.fonts.system;
   })();
@@ -529,6 +531,73 @@ async function dbDelete(keys) {
   });
 }
 
+// ---- who else follows the user's faces ----
+// The browser is handed every face through `FontFace` below and needs nothing
+// more. The Rust text engine measures from the same bytes, and only while it
+// is switched on (engine-switch.svelte.js), so it watches instead of being
+// called by name: this module stays the one that knows what a font record is,
+// and with nobody watching - every session that leaves the switch off - not a
+// byte is kept or copied for it.
+//
+//   added(family, slot, bytes)  a face was registered, or replaced the one in
+//                               its slot; `bytes` is the file as dropped
+//   removed(family, slot)       one face was taken out
+//   removedFamily(family)       a family went, with every face it had
+//   scanned()                   the system list was replaced
+//
+// Each is called before `noteFontsChanged`, so the layout that follows already
+// measures with what changed.
+let faceWatcher = null;
+export function watchUserFaces(watcher) {
+  faceWatcher = watcher ?? null;
+}
+
+// Settled once the boot restore and the boot scan have each finished, however
+// they ended. A watcher that starts at launch waits for it, so it does not
+// take the half-restored library for the whole of it.
+let restoreSettled;
+let scanSettled;
+const firstRestore = new Promise((resolve) => (restoreSettled = resolve));
+const firstScan = new Promise((resolve) => (scanSettled = resolve));
+export const fontsBooted = () => Promise.all([firstRestore, firstScan]);
+
+// Faces loaded this session whose bytes never reached IndexedDB because the
+// save failed. They draw until the app closes, so `loadedFaceRecords` has to
+// be able to hand them over too; kept only for those, and dropped with the face.
+const unsavedFaces = new Map();
+
+// The bytes of every user face the session has loaded, as
+// [{ name, slot, file, data }]: what a watcher that starts mid-session reads to
+// catch up. Read back from IndexedDB rather than kept, for the reason above. A
+// record whose face is not the one loaded (replaced in another window, or a
+// name a built-in has since taken) is left out.
+export async function loadedFaceRecords() {
+  const found = new Map();
+  if (typeof indexedDB !== 'undefined') {
+    try {
+      for (const rec of await dbGetAll()) {
+        if (!rec?.name || !rec.data) continue;
+        const slot = FACE_SLOTS.includes(rec.slot) ? rec.slot : 'regular';
+        found.set(recordKey(rec.name, slot), { name: rec.name, slot, file: rec.file, data: rec.data });
+      }
+    } catch {
+      /* the library is unreadable: only what this session holds is known */
+    }
+  }
+  for (const [key, rec] of unsavedFaces) found.set(key, rec);
+  const out = [];
+  for (const rec of found.values()) {
+    const loaded = app.fonts.user.find((f) => f.name === rec.name)?.faces?.[rec.slot];
+    if (!loaded || loaded.file !== rec.file) continue;
+    try {
+      out.push({ ...rec, data: rec.data instanceof ArrayBuffer || ArrayBuffer.isView(rec.data) ? rec.data : await rec.data.arrayBuffer() });
+    } catch {
+      /* not bytes at all */
+    }
+  }
+  return out;
+}
+
 // ---- registration ----
 
 // Faces this session has handed to document.fonts, so a single one can be taken
@@ -557,6 +626,7 @@ export function _clearPostScriptNames() {
 function unregisterFace(family, slot) {
   const key = recordKey(family, slot);
   parsedPostScriptNames.delete(key);
+  unsavedFaces.delete(key);
   const face = registered.get(key);
   if (!face) return;
   try {
@@ -581,6 +651,9 @@ async function registerFace(family, data, slot) {
   }
   document.fonts.add(face);
   registered.set(recordKey(family, slot), face);
+  // After the browser has accepted it: a file the browser refused is in no
+  // list, and must not be measured by anyone.
+  faceWatcher?.added(family, slot, buf);
   return face;
 }
 
@@ -669,6 +742,7 @@ export async function installFontFace({ family, slot, file, data }) {
   try {
     await dbPut({ key: recordKey(family, slot), name: family, slot, file, data: buf });
   } catch (e) {
+    unsavedFaces.set(recordKey(family, slot), { name: family, slot, file, data: buf });
     toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return 'installed';
@@ -676,19 +750,23 @@ export async function installFontFace({ family, slot, file, data }) {
 
 // Restore persisted user fonts on startup.
 export async function restoreFonts() {
-  if (typeof indexedDB === 'undefined') return;
-  let records = [];
   try {
-    records = await dbGetAll();
-  } catch (e) {
-    // Said out loud rather than swallowed. The library coming up empty is
-    // indistinguishable from having no fonts, and the two reasons this throws -
-    // another window holding the database open, and an upgrade that aborted -
-    // are both things the user can act on once they know.
-    toast(`Font library unavailable - ${e?.message || e}`);
-    return;
+    if (typeof indexedDB === 'undefined') return;
+    let records = [];
+    try {
+      records = await dbGetAll();
+    } catch (e) {
+      // Said out loud rather than swallowed. The library coming up empty is
+      // indistinguishable from having no fonts, and the two reasons this throws -
+      // another window holding the database open, and an upgrade that aborted -
+      // are both things the user can act on once they know.
+      toast(`Font library unavailable - ${e?.message || e}`);
+      return;
+    }
+    await _restoreFontRecords(records);
+  } finally {
+    restoreSettled();
   }
-  await _restoreFontRecords(records);
 }
 
 // Add one file (.ttf/.otf/.woff2). Family and face are read off the filename
@@ -730,6 +808,7 @@ export async function addFontFile(file, target = null) {
     // that failed - so this is a warning and not a rejection. Reported
     // separately from the load failure above because the two ask the user for
     // completely different things.
+    unsavedFaces.set(recordKey(family, slot), { name: family, slot, file: file.name, data: buf });
     toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return { family, slot };
@@ -764,6 +843,7 @@ export async function removeFontFace(name, slot) {
   if (!g) return;
   if (g.faces) g.faces[slot] = null;
   unregisterFace(name, slot);
+  faceWatcher?.removed(name, slot);
   try {
     await dbDelete([recordKey(name, slot)]);
   } catch {
@@ -782,6 +862,7 @@ export async function removeFontFace(name, slot) {
 export async function removeUserFont(name) {
   app.fonts.user = app.fonts.user.filter((f) => f.name !== name);
   for (const slot of FACE_SLOTS) unregisterFace(name, slot);
+  faceWatcher?.removedFamily(name);
   noteFontsChanged(); // see removeFontFace
   try {
     await dbDelete(FACE_SLOTS.map((s) => recordKey(name, s)));
