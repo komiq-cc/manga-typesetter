@@ -7,7 +7,8 @@ import { makeFakeRuns } from './fixtures.js';
 const cache = path.resolve('node_modules/.cache/text-port-test');
 const run = (fixture, out, extra = []) => spawnSync(process.execPath, [
   'scripts/text-port/compare.mjs', fixture.before, fixture.pairs.pass,
-  '--corpus', fixture.corpus, '--out', out, ...extra
+  '--corpus', fixture.corpus, '--out', out,
+  ...(extra.includes('--gates') ? [] : ['--gates', 'src/test/text-port/compare/strict-gates.json']), ...extra
 ], { encoding: 'utf8', timeout: 60000 });
 
 async function rows(out, group) {

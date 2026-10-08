@@ -12,9 +12,13 @@ let root;
 let fixture;
 let gates;
 const cli = (script, args) => spawnSync(process.execPath, [`scripts/text-port/${script}.mjs`, ...args], { encoding: 'utf8', timeout: 30000 });
+// The tool's own tests judge with every gate enforced at its tightest. The
+// project's gates.json is calibrated from real captures and changes with them.
+const STRICT_GATES = 'src/test/text-port/compare/strict-gates.json';
 async function compare(name, extra = []) {
   const out = path.join(root, `report-${name}`);
-  const result = cli('compare', [fixture.before, fixture.pairs[name] ?? path.join(root, name), '--corpus', fixture.corpus, '--out', out, '--limit', '1', ...extra]);
+  const gateArgs = extra.includes('--gates') ? [] : ['--gates', STRICT_GATES];
+  const result = cli('compare', [fixture.before, fixture.pairs[name] ?? path.join(root, name), '--corpus', fixture.corpus, '--out', out, '--limit', '1', ...gateArgs, ...extra]);
   const report = result.status === 2 ? null : JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8'));
   const cases = report ? (await Promise.all(['metrics', 'layout', 'pixels'].map(async group => {
     const text = await readFile(path.join(out, 'cases', `${group}.jsonl`), 'utf8');
@@ -43,7 +47,7 @@ beforeAll(async () => {
   await mkdir(cache, { recursive: true });
   root = await mkdtemp(path.join(cache, 'unit-'));
   fixture = await makeFakeRuns(root);
-  gates = await readJson('scripts/text-port/gates.json');
+  gates = await readJson(STRICT_GATES);
 });
 afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
 
@@ -86,7 +90,7 @@ describe('complete CLI', () => {
   });
   it('respects a zero image limit even for gate failures', async () => {
     const out = path.join(root, 'zero-limit');
-    const result = cli('compare', [fixture.before, fixture.pairs.blob, '--corpus', fixture.corpus, '--out', out, '--limit', '0']);
+    const result = cli('compare', [fixture.before, fixture.pairs.blob, '--corpus', fixture.corpus, '--out', out, '--limit', '0', '--gates', STRICT_GATES]);
     expect(result.status, result.stderr).toBe(1);
     const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8'));
     expect(report.assets.pixelCases).toBe(0);
