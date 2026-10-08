@@ -33,6 +33,9 @@ pub struct Faces {
 pub struct SystemFont {
     pub name: String,
     pub faces: Faces,
+    /// Changes when anything about the files behind the family does; says
+    /// nothing else. See `stamp_of`.
+    pub stamp: String,
 }
 
 /// CSS `font-weight: bold` is 700, and the browser's bold matching picks the
@@ -84,6 +87,28 @@ pub struct FaceFile {
     pub index: u32,
     /// How far this face is from what was asked of the slot; see `rank`.
     rank: u32,
+    /// The file as the scan found it (`FileStat`), so a later read can tell it
+    /// is still that file.
+    stat: FileStat,
+}
+
+/// What can be known of a file without reading it: its length, and when it
+/// was last written, in nanoseconds since the epoch. Zeroes for a file that
+/// could not be asked, which no real font file matches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct FileStat {
+    size: u64,
+    modified: u128,
+}
+
+fn stat_of(path: &std::path::Path) -> std::io::Result<FileStat> {
+    let meta = std::fs::metadata(path)?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Ok(FileStat { size: meta.len(), modified })
 }
 
 /// One family's four slots, in `SLOTS` order.
@@ -146,7 +171,12 @@ fn fold_file(
     if !listed(family) {
         return;
     }
-    let found = FaceFile { path: path.to_path_buf(), index: face_index, rank: rank(weight, italic, oblique, stretch) };
+    let found = FaceFile {
+        path: path.to_path_buf(),
+        index: face_index,
+        rank: rank(weight, italic, oblique, stretch),
+        stat: FileStat::default(),
+    };
     let slot = &mut index.entry(family.to_string()).or_default()[slot_of(weight, italic)];
     let better = match slot {
         None => true,
@@ -183,7 +213,46 @@ fn scan_db(db: &fontdb::Database) -> (Vec<SystemFont>, FontIndex) {
             face.index,
         );
     }
-    (map.into_iter().map(|(name, faces)| SystemFont { name, faces }).collect(), index)
+    stat_files(&mut index);
+    let list = map
+        .into_iter()
+        .map(|(name, faces)| {
+            let stamp = index.get(&name).map(stamp_of).unwrap_or_default();
+            SystemFont { name, faces, stamp }
+        })
+        .collect();
+    (list, index)
+}
+
+/// A family's fingerprint for the frontend: sixteen hex digits that move when
+/// any of its four slots is now a different file, a different face of its
+/// file, or a file of a different length or date - and say nothing of where
+/// the files are.
+///
+/// The list the frontend holds is names and which faces exist. That cannot
+/// tell it that a bold was installed into a slot the engine had been
+/// synthesising, or that a font was updated in place: the names and the faces
+/// are the same before and after. The Rust text engine keeps the bytes it was
+/// given, so without this it would go on measuring the old file while the
+/// webview drew the new one. Compared only between two scans of one run of
+/// the app, so the hash need not be the same in the next build.
+fn stamp_of(files: &FaceFiles) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for file in files {
+        file.as_ref().map(|f| (&f.path, f.index, f.stat)).hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Notes every chosen file as it stands now. After the fold rather than in
+/// it: only the face a slot keeps needs asking about, and a collection is
+/// asked once however many slots and families it is behind.
+fn stat_files(index: &mut FontIndex) {
+    let mut seen: std::collections::HashMap<PathBuf, FileStat> = std::collections::HashMap::new();
+    for file in index.values_mut().flatten().flatten() {
+        file.stat = *seen.entry(file.path.clone()).or_insert_with(|| stat_of(&file.path).unwrap_or_default());
+    }
 }
 
 fn scan() -> (Vec<SystemFont>, FontIndex) {
@@ -216,19 +285,90 @@ pub async fn system_fonts() -> Vec<SystemFont> {
     tauri::async_runtime::spawn_blocking(rescan).await.unwrap_or_default()
 }
 
-/// Bytes before the file in `system_font_face`'s answer: one little-endian
-/// i32 per slot.
-pub const FACE_HEADER: usize = SLOTS.len() * 4;
+/// The version of `system_font_face`'s answer, its first four bytes. Raised
+/// whenever the layout below changes, so a frontend built against another one
+/// refuses the answer instead of reading a font at the wrong offset.
+pub const FACE_ANSWER_VERSION: u32 = 2;
+
+/// Bytes before the file in `system_font_face`'s answer. All numbers are
+/// little-endian:
+///
+/// ```text
+///  0  u32      FACE_ANSWER_VERSION
+///  4  i32 x 4  for each slot in `SLOTS` order, the index of that slot's face
+///              inside this file, or -1 when that slot's face is not in it
+/// 20  u8 x 8   the file's id (`file_id`), opaque
+/// 28  u64      the file's length in bytes
+/// 36  u32      flags; bit 0 set: the file's bytes follow, all of them
+/// 40  ...      the file, when bit 0 is set; nothing otherwise
+/// ```
+pub const FACE_HEADER: usize = 40;
+const FLAGS_AT: usize = 36;
+const FLAG_BYTES_FOLLOW: u32 = 1;
+
+/// A name for one font file as the scan found it, to tell the frontend that
+/// two families live in the same file without telling it where: a hash of
+/// the path, the length and the modification time. Helvetica and Helvetica
+/// Neue are one `.ttc` on a Mac, and so are most CJK families and their
+/// siblings; the frontend keeps one copy of a file per id, however many
+/// families it is behind. Like the stamp, it means something only within one
+/// run of the app.
+fn file_id(file: &FaceFile) -> [u8; 8] {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&file.path, file.stat).hash(&mut hasher);
+    hasher.finish().to_be_bytes()
+}
+
+/// The id as the frontend sends it back in `known`: its bytes in hex.
+fn id_text(id: [u8; 8]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The largest font file that is handed over: 128 MiB.
+///
+/// The file is read whole, crosses to the webview whole and is copied into
+/// the engine's memory whole, so there has to be a size nobody is surprised
+/// by. The large files an OS ships are its CJK collections, and the largest
+/// text collection on the Mac this was written on is 101 MB (Kaiti.ttc; the
+/// others - Xingkai, Hannotate, PingFang, Songti - are 64 to 85 MB), so this
+/// admits all of them. It does not admit Apple Color Emoji (183 MB), which is
+/// a bitmap font the engine could not use anyway. The same number bounds a
+/// decoded WOFF (font_decode.rs).
+pub const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The bytes of a font file with room for the answer's header in front of
+/// them, readable as the font alone: the file is checked by parsing it, and
+/// then sent, without a second copy of something this size being made.
+struct Answer(Vec<u8>);
+impl AsRef<[u8]> for Answer {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[FACE_HEADER..]
+    }
+}
 
 /// One face's file, as the frontend reads it (`readSystemFace` in
-/// src/lib/text-engine/font-sync.js): for each slot in `SLOTS` order the index
-/// of that slot's face inside this file, or -1 when that slot's face is not in
-/// this file, then the file's bytes untouched.
+/// src/lib/text-engine/font-sync.js): the header laid out at `FACE_HEADER`,
+/// then the file's bytes untouched - unless the frontend already has them.
 ///
 /// The header is why a collection crosses once. Helvetica Neue's four faces
 /// are one `.ttc`; asked for its regular, this says where the other three are
 /// in the same bytes, and the frontend registers all four from the one copy.
-fn face_answer(index: &FontIndex, family: &str, slot: &str) -> Result<Vec<u8>, String> {
+/// And the id in it is why it crosses once for every family in it: `known`
+/// is the ids of the files the frontend holds, and for one of those the
+/// answer is the header alone. The file is read and checked all the same, so
+/// "you have it" is never said of a file that is no longer the one listed.
+///
+/// The path and the indexes are the last scan's, and a scan can be minutes or
+/// hours old: a font updated, replaced or removed since then is a different
+/// file, or none, behind the same path. So nothing is sent on the scan's word
+/// alone. The file must be the length and age the scan found; it must be no
+/// larger than `MAX_FILE_BYTES`; and what was read must parse as a font that
+/// has a face at every index the header gives and, at one of them at least,
+/// a face of the family that was asked for. Anything else is an error for
+/// this family - which the frontend shows as a missing font and asks about
+/// again after the next scan - never some other font's bytes under its name.
+fn face_answer(index: &FontIndex, family: &str, slot: &str, known: &[String]) -> Result<Vec<u8>, String> {
     let Some(at) = SLOTS.iter().position(|s| *s == slot) else {
         return Err(format!("there is no face slot called '{slot}'"));
     };
@@ -238,23 +378,70 @@ fn face_answer(index: &FontIndex, family: &str, slot: &str) -> Result<Vec<u8>, S
     let Some(asked) = &files[at] else {
         return Err(format!("'{family}' has no {slot} face"));
     };
-    // The path stays out of the message: it is not the frontend's to know.
-    let bytes = std::fs::read(&asked.path).map_err(|e| format!("the file of '{family}' could not be read - {e}"))?;
-    let mut out = Vec::with_capacity(FACE_HEADER + bytes.len());
-    for file in files {
-        let here = file.as_ref().filter(|f| f.path == asked.path).map_or(-1, |f| f.index as i32);
-        out.extend_from_slice(&here.to_le_bytes());
+    // The path stays out of every message: it is not the frontend's to know.
+    let unread = |e: std::io::Error| format!("the file of '{family}' could not be read - {e}");
+    let changed = || format!("the file of '{family}' has changed since the fonts were listed");
+    let now = stat_of(&asked.path).map_err(unread)?;
+    if now != asked.stat {
+        return Err(changed());
     }
-    out.extend_from_slice(&bytes);
+    if now.size > MAX_FILE_BYTES {
+        return Err(format!(
+            "the file of '{family}' is too large to load ({} MB; the limit is {} MB)",
+            now.size / (1024 * 1024),
+            MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    let places: Vec<i32> =
+        files.iter().map(|file| file.as_ref().filter(|f| f.path == asked.path).map_or(-1, |f| f.index as i32)).collect();
+    let id = file_id(asked);
+    let mut out = Vec::with_capacity(FACE_HEADER + now.size as usize);
+    out.extend_from_slice(&FACE_ANSWER_VERSION.to_le_bytes());
+    for place in &places {
+        out.extend_from_slice(&place.to_le_bytes());
+    }
+    out.extend_from_slice(&id);
+    out.extend_from_slice(&now.size.to_le_bytes());
+    out.extend_from_slice(&FLAG_BYTES_FOLLOW.to_le_bytes());
+    debug_assert_eq!(out.len(), FACE_HEADER);
+    {
+        use std::io::Read;
+        // One more byte than expected is allowed through, so a file that grew
+        // between the two looks is seen to have grown.
+        let file = std::fs::File::open(&asked.path).map_err(unread)?;
+        file.take(now.size + 1).read_to_end(&mut out).map_err(unread)?;
+    }
+    if (out.len() - FACE_HEADER) as u64 != now.size {
+        return Err(changed());
+    }
+    let answer = Arc::new(Answer(out));
+    let listed = {
+        let mut db = fontdb::Database::new();
+        db.load_font_source(fontdb::Source::Binary(answer.clone()));
+        let face_at = |i: i32| db.faces().find(|f| f.index == i as u32);
+        let placed: Vec<_> = places.iter().filter(|i| **i >= 0).map(|i| face_at(*i)).collect();
+        placed.iter().all(Option::is_some)
+            && placed.iter().flatten().any(|f| f.families.first().is_some_and(|(name, _)| name == family))
+    };
+    if !listed {
+        return Err(format!("the file of '{family}' is no longer the font that was listed"));
+    }
+    // The database is gone, so this is the only holder.
+    let mut out = Arc::try_unwrap(answer).map(|a| a.0).map_err(|_| "the font file is still being read".to_string())?;
+    if known.contains(&id_text(id)) {
+        out.truncate(FACE_HEADER);
+        out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&0u32.to_le_bytes());
+    }
     Ok(out)
 }
 
 /// The file of one face of one installed family, as a raw binary response: a
 /// font as a JSON array of numbers would be several times its own size, and
-/// some of these are tens of megabytes.
+/// some of these are tens of megabytes. `known` is the ids of the files the
+/// caller already holds (see `face_answer`); left out, the file is always sent.
 #[tauri::command]
-pub async fn system_font_face(family: String, slot: String) -> Result<tauri::ipc::Response, String> {
-    tauri::async_runtime::spawn_blocking(move || face_answer(&index(), &family, &slot))
+pub async fn system_font_face(family: String, slot: String, known: Option<Vec<String>>) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || face_answer(&index(), &family, &slot, &known.unwrap_or_default()))
         .await
         .map_err(|e| e.to_string())?
         .map(tauri::ipc::Response::new)
@@ -363,53 +550,284 @@ mod tests {
         assert_eq!(file(&index, "F", 2).unwrap().0, "/a/italic.otf");
     }
 
-    /// A font file written for the test: a real `ttcf` header is not needed,
-    /// `face_answer` never parses what it hands over.
-    fn temp_font(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mt-system-fonts-{}", std::process::id()));
+    /// The fonts the JavaScript tests measure with, read from where they are
+    /// (src/test/fonts): the answer is checked by parsing it now, so it has to
+    /// be given real fonts, and no font is added for it.
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/test/fonts").join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+    const DEJAVU: &str = "DejaVuSans.ttf";
+    const OBLIQUE: &str = "DejaVuSans-Oblique.ttf";
+    const BANGERS: &str = "Bangers-Regular.ttf";
+
+    /// A `.ttc` of whole fonts laid end to end: each font's table directory
+    /// is its own, with every offset moved to where the font now starts.
+    fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
+        let header = 12 + 4 * fonts.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(b"ttcf");
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(fonts.len() as u32).to_be_bytes());
+        let mut at = header;
+        for font in fonts {
+            out.extend_from_slice(&(at as u32).to_be_bytes());
+            at += font.len().next_multiple_of(4);
+        }
+        for font in fonts {
+            let base = out.len() as u32;
+            let mut moved = font.clone();
+            let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+            for t in 0..tables {
+                let field = 12 + 16 * t + 8;
+                let offset = u32::from_be_bytes(font[field..field + 4].try_into().unwrap());
+                moved[field..field + 4].copy_from_slice(&(offset + base).to_be_bytes());
+            }
+            moved.resize(font.len().next_multiple_of(4), 0);
+            out.extend(moved);
+        }
+        out
+    }
+
+    /// A font file written for one test, in a directory of its own.
+    fn temp_font(test: &str, name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mt-system-fonts-{}-{test}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path
     }
 
+    /// The index a scan would have made of these faces, each file noted as it
+    /// stands now: `(family, weight, italic, path, face index)`.
+    fn scanned(faces: &[(&str, u16, bool, &Path, u32)]) -> FontIndex {
+        let mut index = FontIndex::new();
+        for (family, weight, italic, path, at) in faces {
+            fold_file(&mut index, family, *weight, *italic, false, 5, path, *at);
+        }
+        stat_files(&mut index);
+        index
+    }
+
+    // Where the header's other fields are; see `FACE_HEADER`.
+    const SLOTS_AT: usize = 4;
+    const ID_AT: usize = 20;
+    const SIZE_AT: usize = 28;
+
     fn header(answer: &[u8]) -> [i32; 4] {
         let mut out = [0i32; 4];
         for (i, slot) in out.iter_mut().enumerate() {
-            *slot = i32::from_le_bytes(answer[i * 4..i * 4 + 4].try_into().unwrap());
+            let at = SLOTS_AT + i * 4;
+            *slot = i32::from_le_bytes(answer[at..at + 4].try_into().unwrap());
         }
         out
     }
 
+    /// The id in an answer's header, as the frontend would send it back.
+    fn id_in(answer: &[u8]) -> String {
+        id_text(answer[ID_AT..ID_AT + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn the_answer_is_laid_out_as_the_frontend_reads_it() {
+        let font = fixture(DEJAVU);
+        let path = temp_font("layout", "font.ttf", &font);
+        let index = scanned(&[("DejaVu Sans", 700, true, &path, 0)]);
+        let answer = face_answer(&index, "DejaVu Sans", "boldItalic", &[]).unwrap();
+        assert_eq!(answer.len(), 40 + font.len());
+        // Version 2, then the four slots: only the bold italic is in this file.
+        assert_eq!(&answer[0..4], &[2, 0, 0, 0]);
+        assert_eq!(&answer[4..20], &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
+        assert_eq!(&answer[20..28], &file_id(index["DejaVu Sans"][3].as_ref().unwrap()));
+        assert_eq!(&answer[28..36], &(font.len() as u64).to_le_bytes());
+        assert_eq!(&answer[36..40], &[1, 0, 0, 0]);
+        assert_eq!(&answer[40..], &font[..]);
+    }
+
+    #[test]
+    fn two_families_in_one_file_are_told_so_and_the_second_is_not_sent_it_again() {
+        // One collection with a face of each of two families, as Helvetica
+        // and Helvetica Neue are on a Mac; and DejaVu's bold in a file of its own.
+        let both = collection(&[fixture(BANGERS), fixture(DEJAVU)]);
+        let ttc = temp_font("shared", "collection.ttc", &both);
+        let alone = temp_font("shared", "alone.ttf", &fixture(DEJAVU));
+        let index = scanned(&[("Bangers", 400, false, &ttc, 0), ("DejaVu Sans", 400, false, &ttc, 1), ("DejaVu Sans", 700, false, &alone, 0)]);
+
+        let first = face_answer(&index, "Bangers", "regular", &[]).unwrap();
+        assert_eq!(first.len(), FACE_HEADER + both.len());
+        assert_eq!(header(&first), [0, -1, -1, -1]);
+        let held = id_in(&first);
+        assert_eq!(held.len(), 16);
+
+        // The other family's face in the same file, asked for by a caller that
+        // holds the file: the header alone, saying where the face is and that
+        // no bytes follow.
+        let second = face_answer(&index, "DejaVu Sans", "regular", std::slice::from_ref(&held)).unwrap();
+        assert_eq!(second.len(), FACE_HEADER);
+        assert_eq!(id_in(&second), held);
+        assert_eq!(header(&second), [1, -1, -1, -1]);
+        assert_eq!(&second[SIZE_AT..SIZE_AT + 8], &(both.len() as u64).to_le_bytes());
+        assert_eq!(&second[FLAGS_AT..FLAGS_AT + 4], &[0, 0, 0, 0]);
+        // Asked without it, or with an id that is not this file's, it is sent.
+        for known in [vec![], vec!["0000000000000000".to_string()]] {
+            let sent = face_answer(&index, "DejaVu Sans", "regular", &known).unwrap();
+            assert_eq!(id_in(&sent), held);
+            assert_eq!(&sent[FACE_HEADER..], &both[..]);
+        }
+
+        // Another file is another id, and is sent whatever else is held.
+        let bold = face_answer(&index, "DejaVu Sans", "bold", std::slice::from_ref(&held)).unwrap();
+        assert_ne!(id_in(&bold), held);
+        assert_eq!(&bold[FACE_HEADER..], &fixture(DEJAVU)[..]);
+    }
+
+    #[test]
+    fn a_file_the_caller_holds_is_still_checked_and_its_id_moves_when_it_does() {
+        let font = temp_font("held", "font.ttf", &fixture(DEJAVU));
+        let index = scanned(&[("DejaVu Sans", 400, false, &font, 0)]);
+        let held = id_in(&face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap());
+        // Swapped behind the same length and date: "you have it" is not said.
+        swap_quietly(&font, &fixture(BANGERS));
+        assert_eq!(
+            face_answer(&index, "DejaVu Sans", "regular", std::slice::from_ref(&held)).unwrap_err(),
+            "the file of 'DejaVu Sans' is no longer the font that was listed"
+        );
+        // Written again and scanned again, the file has another id: what the
+        // caller holds under the old one is not taken for it.
+        std::fs::write(&font, fixture(OBLIQUE)).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&font).unwrap().set_modified(later).unwrap();
+        let index = scanned(&[("DejaVu Sans", 400, true, &font, 0)]);
+        let answer = face_answer(&index, "DejaVu Sans", "italic", std::slice::from_ref(&held)).unwrap();
+        assert_ne!(id_in(&answer), held);
+        assert_eq!(answer.len(), FACE_HEADER + fixture(OBLIQUE).len());
+    }
+
     #[test]
     fn answers_with_the_file_and_where_each_slot_is_in_it() {
-        let ttc = temp_font("collection.ttc", b"the collection");
-        let bold = temp_font("bold.ttf", b"the bold file");
-        let mut index = FontIndex::new();
-        fold_file(&mut index, "Coll", 400, false, false, 5, &ttc, 3);
-        fold_file(&mut index, "Coll", 400, true, false, 5, &ttc, 0);
-        fold_file(&mut index, "Coll", 700, false, false, 5, &bold, 0);
+        let both = collection(&[fixture(OBLIQUE), fixture(DEJAVU)]);
+        let ttc = temp_font("answers", "collection.ttc", &both);
+        let bold = temp_font("answers", "bold.ttf", &fixture(DEJAVU));
+        let index = scanned(&[("DejaVu Sans", 400, false, &ttc, 1), ("DejaVu Sans", 400, true, &ttc, 0), ("DejaVu Sans", 700, false, &bold, 0)]);
 
-        let regular = face_answer(&index, "Coll", "regular").unwrap();
+        let regular = face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap();
         // regular and italic are in this file, bold is in another, there is no bold italic.
-        assert_eq!(header(&regular), [3, -1, 0, -1]);
-        assert_eq!(&regular[FACE_HEADER..], b"the collection");
-        let other = face_answer(&index, "Coll", "bold").unwrap();
+        assert_eq!(header(&regular), [1, -1, 0, -1]);
+        assert_eq!(&regular[FACE_HEADER..], &both[..]);
+        let other = face_answer(&index, "DejaVu Sans", "bold", &[]).unwrap();
         assert_eq!(header(&other), [-1, 0, -1, -1]);
-        assert_eq!(&other[FACE_HEADER..], b"the bold file");
+        assert_eq!(&other[FACE_HEADER..], &fixture(DEJAVU)[..]);
+    }
+
+    /// `to` in place of the file at `path`, at the length and the age the
+    /// scan found there: only reading it can tell.
+    fn swap_quietly(path: &Path, to: &[u8]) {
+        let meta = std::fs::metadata(path).unwrap();
+        let mut bytes = to.to_vec();
+        assert!(bytes.len() as u64 <= meta.len(), "the stand-in has to fit in the file it replaces");
+        bytes.resize(meta.len() as usize, 0);
+        std::fs::write(path, bytes).unwrap();
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(meta.modified().unwrap()).unwrap();
+        assert_eq!(stat_of(path).unwrap().modified, meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    }
+
+    #[test]
+    fn a_file_that_went_or_changed_since_the_scan_is_an_error_for_its_family() {
+        let font = temp_font("changed", "font.ttf", &fixture(DEJAVU));
+        let index = scanned(&[("DejaVu Sans", 400, false, &font, 0)]);
+        assert!(face_answer(&index, "DejaVu Sans", "regular", &[]).is_ok());
+
+        // Another font written over it: a different length, a later date.
+        std::fs::write(&font, fixture(BANGERS)).unwrap();
+        assert_eq!(
+            face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap_err(),
+            "the file of 'DejaVu Sans' has changed since the fonts were listed"
+        );
+        // Uninstalled.
+        std::fs::remove_file(&font).unwrap();
+        let gone = face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap_err();
+        assert!(gone.starts_with("the file of 'DejaVu Sans' could not be read - "), "{gone}");
+        assert!(!gone.contains("mt-system-fonts"), "{gone}");
+    }
+
+    #[test]
+    fn a_file_swapped_behind_the_same_length_and_date_is_found_by_reading_it() {
+        // Another family's font where this family's was.
+        let font = temp_font("swapped", "font.ttf", &fixture(DEJAVU));
+        let index = scanned(&[("DejaVu Sans", 400, false, &font, 0)]);
+        swap_quietly(&font, &fixture(BANGERS));
+        assert_eq!(
+            face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap_err(),
+            "the file of 'DejaVu Sans' is no longer the font that was listed"
+        );
+        // Something that is not a font at all.
+        swap_quietly(&font, b"not a font, though it is the right length and age");
+        assert_eq!(
+            face_answer(&index, "DejaVu Sans", "regular", &[]).unwrap_err(),
+            "the file of 'DejaVu Sans' is no longer the font that was listed"
+        );
+
+        // A collection of two replaced by a font of one: the family is still
+        // in it, and the italic the header would place at index 1 is not.
+        let ttc = temp_font("swapped", "two.ttc", &collection(&[fixture(DEJAVU), fixture(OBLIQUE)]));
+        let index = scanned(&[("DejaVu Sans", 400, false, &ttc, 0), ("DejaVu Sans", 400, true, &ttc, 1)]);
+        assert!(face_answer(&index, "DejaVu Sans", "italic", &[]).is_ok());
+        swap_quietly(&ttc, &fixture(DEJAVU));
+        for slot in ["regular", "italic"] {
+            assert_eq!(
+                face_answer(&index, "DejaVu Sans", slot, &[]).unwrap_err(),
+                "the file of 'DejaVu Sans' is no longer the font that was listed",
+                "{slot}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_family_s_stamp_moves_when_its_files_do_and_only_then() {
+        let regular = temp_font("stamp", "regular.ttf", &fixture(DEJAVU));
+        let italic = temp_font("stamp", "italic.ttf", &fixture(OBLIQUE));
+        let other = temp_font("stamp", "other.ttf", &fixture(BANGERS));
+        let stamp = |faces: &[(&str, u16, bool, &Path, u32)]| stamp_of(&scanned(faces)["F"]);
+        let first = stamp(&[("F", 400, false, &regular, 0)]);
+        // The same scan again is the same stamp.
+        assert_eq!(first, stamp(&[("F", 400, false, &regular, 0)]));
+        // A face installed into a slot that was empty.
+        let with_italic = stamp(&[("F", 400, false, &regular, 0), ("F", 400, true, &italic, 0)]);
+        assert_ne!(first, with_italic);
+        // The same file behind another slot, another face of the file, another file.
+        assert_ne!(first, stamp(&[("F", 700, false, &regular, 0)]));
+        assert_ne!(first, stamp(&[("F", 400, false, &regular, 1)]));
+        assert_ne!(first, stamp(&[("F", 400, false, &other, 0)]));
+        // The file replaced where it is: the path and the face are the same, the bytes are not.
+        std::fs::write(&regular, fixture(BANGERS)).unwrap();
+        assert_ne!(first, stamp(&[("F", 400, false, &regular, 0)]));
+        // Sixteen hex digits, and nothing of a path.
+        assert_eq!(first.len(), 16);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()), "{first}");
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_refused_without_being_read() {
+        // A sparse file: the length is all there is of it.
+        let big = temp_font("large", "huge.ttc", b"");
+        std::fs::File::options().write(true).open(&big).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        let index = scanned(&[("Huge", 400, false, &big, 0)]);
+        assert_eq!(
+            face_answer(&index, "Huge", "regular", &[]).unwrap_err(),
+            "the file of 'Huge' is too large to load (128 MB; the limit is 128 MB)"
+        );
     }
 
     #[test]
     fn says_what_is_wrong_when_it_cannot_answer() {
-        let mut index = FontIndex::new();
-        fold_file(&mut index, "Arial", 400, false, false, 5, Path::new("/nowhere/at/all/Arial.ttf"), 0);
+        let index = scanned(&[("Arial", 400, false, Path::new("/nowhere/at/all/Arial.ttf"), 0)]);
         assert_eq!(
-            face_answer(&index, "No Such Font", "regular").unwrap_err(),
+            face_answer(&index, "No Such Font", "regular", &[]).unwrap_err(),
             "no font called 'No Such Font' is installed on this computer"
         );
-        assert_eq!(face_answer(&index, "Arial", "bold").unwrap_err(), "'Arial' has no bold face");
-        assert_eq!(face_answer(&index, "Arial", "heavy").unwrap_err(), "there is no face slot called 'heavy'");
-        let unread = face_answer(&index, "Arial", "regular").unwrap_err();
+        assert_eq!(face_answer(&index, "Arial", "bold", &[]).unwrap_err(), "'Arial' has no bold face");
+        assert_eq!(face_answer(&index, "Arial", "heavy", &[]).unwrap_err(), "there is no face slot called 'heavy'");
+        let unread = face_answer(&index, "Arial", "regular", &[]).unwrap_err();
         assert!(unread.starts_with("the file of 'Arial' could not be read - "), "{unread}");
         // The path is this machine's business.
         assert!(!unread.contains("nowhere"), "{unread}");
@@ -438,8 +856,13 @@ mod tests {
         // Nothing about a path or an index is in what the frontend receives.
         let sent = serde_json::to_value(&list[0]).unwrap();
         let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-        assert_eq!(keys(&sent), ["faces", "name"]);
+        assert_eq!(keys(&sent), ["faces", "name", "stamp"]);
         assert_eq!(keys(&sent["faces"]), ["bold", "boldItalic", "italic", "regular"]);
+        // The stamp is sixteen hex digits and holds no part of any path.
+        for font in &list {
+            assert_eq!(font.stamp.len(), 16, "{}", font.name);
+            assert!(font.stamp.chars().all(|c| c.is_ascii_hexdigit()), "{}", font.stamp);
+        }
 
         // The first face found: its answer is a font fontdb can parse, with a
         // face at the index the header gives.
@@ -448,7 +871,7 @@ mod tests {
             .iter()
             .position(|has| *has)
             .expect("a listed family has a face");
-        let answer = face_answer(&index, &first.name, SLOTS[slot]).expect("the first system face can be read");
+        let answer = face_answer(&index, &first.name, SLOTS[slot], &[]).expect("the first system face can be read");
         let at = header(&answer)[slot];
         assert!(at >= 0, "the header does not place the face that was asked for");
         let mut db = fontdb::Database::new();
@@ -459,7 +882,7 @@ mod tests {
         assert_eq!(face.families.first().map(|(name, _)| name.as_str()), Some(first.name.as_str()));
 
         assert_eq!(
-            face_answer(&index, "No Such Font \u{1F47B}", "regular").unwrap_err(),
+            face_answer(&index, "No Such Font \u{1F47B}", "regular", &[]).unwrap_err(),
             "no font called 'No Such Font \u{1F47B}' is installed on this computer"
         );
     }
@@ -476,7 +899,7 @@ mod tests {
             let Some(font) = list.iter().find(|f| f.name == name) else { continue };
             let has = [font.faces.regular, font.faces.bold, font.faces.italic, font.faces.bold_italic];
             for slot in (0..4).filter(|s| has[*s]) {
-                let answer = face_answer(&index, name, SLOTS[slot]).unwrap_or_else(|e| panic!("{name} / {}: {e}", SLOTS[slot]));
+                let answer = face_answer(&index, name, SLOTS[slot], &[]).unwrap_or_else(|e| panic!("{name} / {}: {e}", SLOTS[slot]));
                 let places = header(&answer);
                 let mut db = fontdb::Database::new();
                 db.load_font_data(answer[FACE_HEADER..].to_vec());

@@ -131,6 +131,29 @@ export async function createRustTextEngine(source, options = {}) {
     if (!FACE_SLOTS.includes(slot)) throw new Error(`text engine: unknown face slot '${slot}'`);
   }
 
+  // Which font file an engine font was read from, for the files that have a
+  // name (`addFaces`): file id -> the engine fonts that read its one copy, and
+  // back. The engine frees a file's bytes with the last font made from them,
+  // so the set is the count of who still needs the copy, and any member of it
+  // is a font a new face of the same file can be made beside.
+  const fileFonts = new Map();
+  const fontFile = new Map();
+  function noteFile(font, file) {
+    if (file == null) return;
+    fontFile.set(font, file);
+    if (!fileFonts.has(file)) fileFonts.set(file, new Set());
+    fileFonts.get(file).add(font);
+  }
+  function removeFont(font) {
+    low.removeFont(font);
+    const file = fontFile.get(font);
+    if (file === undefined) return;
+    fontFile.delete(font);
+    const fonts = fileFonts.get(file);
+    fonts.delete(font);
+    if (!fonts.size) fileFonts.delete(file);
+  }
+
   // `fonts` is `[[slot, engine font id], ...]`, already read by the engine.
   function put(family, fonts) {
     let fam = families.get(family);
@@ -145,7 +168,7 @@ export async function createRustTextEngine(source, options = {}) {
     }
     // Chains name fonts by id: drop them before the font they name goes.
     changed();
-    for (const font of old) low.removeFont(font);
+    for (const font of old) removeFont(font);
   }
 
   // What the caller of the DOM breaker always got (browser.js): a line loses
@@ -234,21 +257,41 @@ export async function createRustTextEngine(source, options = {}) {
      * `faces` is `[{ slot, index }]`. The bytes are copied into the engine
      * once and every face reads that copy, so a system collection of tens of
      * megabytes is held once however many of its faces the family uses.
+     *
+     * `file` names the file, when the caller has a name for it. A file the
+     * engine already holds under that name is not copied in again: the faces
+     * are made beside the ones it has, whichever family those belong to, and
+     * `bytes` may then be null. That is what keeps Helvetica and Helvetica
+     * Neue - two families, one `.ttc` - to one copy between them. The copy
+     * lives until the last face made from it is removed.
      */
-    addFaces(family, bytes, faces) {
+    addFaces(family, bytes, faces, file = null) {
       if (!Array.isArray(faces) || !faces.length) throw new Error('text engine: a collection needs at least one face');
       for (const f of faces) checkFace(family, f.slot);
+      let beside = file == null ? undefined : fileFonts.get(file)?.values().next().value;
+      if (beside === undefined && !bytes) throw new Error(`text engine: the file of ${family} is not held, and no bytes came with it`);
       const made = [];
       try {
-        const first = low.addFont(bytes, faces[0].index ?? 0);
-        made.push([faces[0].slot, first]);
-        for (const f of faces.slice(1)) made.push([f.slot, low.addSiblingFace(first, f.index ?? 0)]);
+        for (const f of faces) {
+          const font = beside === undefined ? low.addFont(bytes, f.index ?? 0) : low.addSiblingFace(beside, f.index ?? 0);
+          beside ??= font;
+          made.push([f.slot, font]);
+        }
       } catch (error) {
         // All or nothing: half a family would measure its bold as a smeared regular.
         for (const [, font] of made) low.removeFont(font);
         throw new Error(`text engine: cannot read ${family}: ${error.message}`);
       }
+      for (const [, font] of made) noteFile(font, file);
       put(family, made);
+    },
+    /** Whether a file given under this name (`addFaces`) is still held. */
+    hasFile(file) {
+      return fileFonts.has(file);
+    },
+    /** The names of the files held, for whoever can avoid sending one again. */
+    files() {
+      return [...fileFonts.keys()];
     },
     /** Takes one face back out; the family goes with its last face. False when there was none. */
     removeFace(family, slot) {
@@ -258,7 +301,7 @@ export async function createRustTextEngine(source, options = {}) {
       fam[slot] = 0;
       if (!present(fam).length) families.delete(family);
       changed();
-      low.removeFont(old);
+      removeFont(old);
       return true;
     },
     removeFamily(family) {
@@ -266,7 +309,7 @@ export async function createRustTextEngine(source, options = {}) {
       if (!fam) return false;
       families.delete(family);
       changed();
-      for (const slot of FACE_SLOTS) if (fam[slot]) low.removeFont(fam[slot]);
+      for (const slot of FACE_SLOTS) if (fam[slot]) removeFont(fam[slot]);
       return true;
     },
     hasFamily(family) {

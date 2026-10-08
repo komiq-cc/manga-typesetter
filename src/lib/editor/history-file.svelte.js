@@ -20,6 +20,7 @@ import {
   resetHistory,
   setHistorySink,
   setOffscreenSink,
+  setOffscreenAmender,
   MAX_STEPS,
 } from './history.svelte.js';
 
@@ -395,6 +396,23 @@ setOffscreenSink((pageId, entry) => {
   if (!dir || livePageId == null || pageId === livePageId) return false;
   doc = appendEntry(doc, pageId, entry);
   schedule();
+  return true;
+});
+
+// The off-screen correction: a fit that landed for a box on a page other than
+// the live one, whose edit is in that page's stored stack (see "a fit owed to
+// an entry" in history.svelte.js). Refused in the same two cases as the write
+// above, and for the same reasons; the live stack is then the caller's to
+// correct. The stored entries are not touched in place: the correction is made
+// on a copy of the list and merged like any other change.
+setOffscreenAmender((pageId, amend) => {
+  if (!dir || livePageId == null || pageId === livePageId) return false;
+  const cur = stackFrom(doc, pageId);
+  const undo = cur.undo.slice();
+  if (amend(undo)) {
+    doc = mergeStack(doc, pageId, { undo, redo: cur.redo });
+    schedule();
+  }
   return true;
 });
 

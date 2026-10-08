@@ -1,54 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import v8 from 'node:v8';
+import vm from 'node:vm';
+import { fakeIndexedDB } from '../test/fake-indexeddb.js';
 
 // What fonts.js offers whoever keeps a second copy of the user's faces in step
 // (the Rust text engine, through engine-switch.svelte.js): the watcher it
 // tells, the bytes of what is already loaded, and the promise that says the
-// boot restore and scan are over. IndexedDB is a small stand-in written below;
-// the module is loaded fresh for each case because it keeps its connection.
-
-// An IndexedDB that holds records in a Map: enough of the API for fonts.js -
-// one store keyed by `key`, put / getAll / delete inside a transaction.
-function fakeIndexedDB(rows = new Map()) {
-  const later = (fn) => queueMicrotask(fn);
-  const db = {
-    objectStoreNames: { contains: () => true },
-    close() {},
-    transaction() {
-      const tx = {};
-      const settle = () => later(() => tx.oncomplete?.());
-      tx.objectStore = () => ({
-        put(rec) {
-          rows.set(rec.key, rec);
-          settle();
-        },
-        delete(key) {
-          rows.delete(key);
-          settle();
-        },
-        getAll() {
-          const req = {};
-          later(() => {
-            req.result = [...rows.values()];
-            req.onsuccess?.();
-          });
-          return req;
-        },
-      });
-      return tx;
-    },
-  };
-  return {
-    rows,
-    open() {
-      const req = { result: db };
-      later(() => req.onsuccess?.());
-      return req;
-    },
-  };
-}
+// boot restore and scan are over. IndexedDB is a small stand-in
+// (src/test/fake-indexeddb.js); the module is loaded fresh for each case
+// because it keeps its connection.
 
 const SFNT = (fill) => Uint8Array.from([0, 1, 0, 0, fill, fill]).buffer;
 const fontFile = (name, buffer) => ({ name, arrayBuffer: async () => buffer });
+
+// "Nothing is kept" is a statement about memory, so it is asked of the
+// collector and not of the module: a file whose bytes are made when it is read
+// and that the test itself holds only weakly. `held()` is whether anything
+// still reaches them after a collection. The collector is switched on here,
+// for this file, the way Node allows it at run time.
+v8.setFlagsFromString('--expose-gc');
+const collect = vm.runInNewContext('gc');
+function weakFile(name, fill) {
+  let ref = null;
+  return {
+    name,
+    arrayBuffer: async () => {
+      const bytes = SFNT(fill);
+      ref = new WeakRef(bytes);
+      return bytes;
+    },
+    // A WeakRef keeps its target for the rest of the turn it was read in.
+    held: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      collect();
+      return ref?.deref() !== undefined;
+    },
+  };
+}
 
 let idb;
 let fonts;
@@ -113,9 +101,78 @@ describe('whoever watches the user’s faces', () => {
   it('is told nothing once it stops watching, and nothing is kept for it', async () => {
     const said = watcher();
     fonts.watchUserFaces(null);
-    await fonts.addFontFile(fontFile('WildWords.ttf', SFNT(1)));
+    const file = weakFile('WildWords.ttf', 1);
+    await fonts.addFontFile(file);
+    // The library has the bytes, which is where they belong...
+    expect(await file.held()).toBe(true);
+    // ...and it is the only place: with its copy gone, nobody has them.
+    idb.rows.clear();
+    expect(await file.held()).toBe(false);
     await fonts.removeUserFont('WildWords');
     expect(said).toEqual([]);
+  });
+
+  it('nor is anything kept with a watcher, when the library has the bytes', async () => {
+    watcher();
+    const file = weakFile('WildWords.ttf', 1);
+    await fonts.addFontFile(file);
+    idb.rows.clear();
+    expect(await file.held()).toBe(false);
+  });
+});
+
+describe('a face that loaded and could not be saved', () => {
+  const full = () => {
+    idb.open = () => {
+      throw new Error('quota');
+    };
+  };
+  const listed = async () => (await fonts.loadedFaceRecords()).map((r) => [r.name, r.slot, r.file, r.data && new Uint8Array(r.data)[4]]);
+
+  it('with nobody watching: the bytes are not kept, and the face is listed as one there are no bytes of', async () => {
+    full();
+    const file = weakFile('Unsaved.ttf', 5);
+    await fonts.addFontFile(file);
+    expect(store.app.toast.msg).toContain('could not be saved');
+    // Loaded, and drawn by the browser from its own copy.
+    expect(store.app.fonts.user.map((f) => f.name)).toEqual(['Unsaved']);
+    expect(await file.held()).toBe(false);
+    expect(await listed()).toEqual([['Unsaved', 'regular', 'Unsaved.ttf', null]]);
+    // A watcher that starts now is too late for it.
+    watcher();
+    expect(await listed()).toEqual([['Unsaved', 'regular', 'Unsaved.ttf', null]]);
+  });
+
+  it('with a watcher: the bytes are kept for as long as it watches, and given back when it stops', async () => {
+    full();
+    const said = watcher();
+    const file = weakFile('Unsaved.ttf', 5);
+    await fonts.addFontFile(file);
+    expect(said).toEqual([['added', 'Unsaved', 'regular', 5]]);
+    expect(await file.held()).toBe(true);
+    expect(await listed()).toEqual([['Unsaved', 'regular', 'Unsaved.ttf', 5]]);
+    fonts.watchUserFaces(null);
+    expect(await file.held()).toBe(false);
+    expect(await listed()).toEqual([['Unsaved', 'regular', 'Unsaved.ttf', null]]);
+  });
+
+  it('from a chapter package is the same case', async () => {
+    full();
+    expect(await fonts.installFontFace({ family: 'Packed', slot: 'bold', file: 'p.ttf', data: new Uint8Array(SFNT(3)) })).toBe('installed');
+    expect(await listed()).toEqual([['Packed', 'bold', 'p.ttf', null]]);
+  });
+
+  it('is forgotten with the face, and a file added again that does save is read back as any other', async () => {
+    full();
+    await fonts.addFontFile(fontFile('Unsaved.ttf', SFNT(5)));
+    await fonts.removeUserFont('Unsaved');
+    expect(await listed()).toEqual([]);
+    await fonts.addFontFile(fontFile('Unsaved.ttf', SFNT(5)));
+    delete idb.open;
+    idb.open = fakeIndexedDB(idb.rows).open;
+    // Replaced by a file the library takes: the note that it has no bytes goes.
+    await fonts.addFontFile(fontFile('Unsaved-v2.ttf', SFNT(6)), { family: 'Unsaved', slot: 'regular' });
+    expect(await listed()).toEqual([['Unsaved', 'regular', 'Unsaved-v2.ttf', 6]]);
   });
 });
 
@@ -136,17 +193,6 @@ describe('the bytes of what is already loaded', () => {
     // In the library but not in this session: never restored, or another file.
     idb.rows.set('Stranger::regular', { key: 'Stranger::regular', name: 'Stranger', slot: 'regular', file: 's.ttf', data: SFNT(8) });
     idb.rows.set('WildWords::regular', { key: 'WildWords::regular', name: 'WildWords', slot: 'regular', file: 'someone-elses.ttf', data: SFNT(9) });
-    expect(await fonts.loadedFaceRecords()).toEqual([]);
-  });
-
-  it('include a face that loaded and could not be saved, until it is removed', async () => {
-    idb.open = () => {
-      throw new Error('quota');
-    };
-    await fonts.addFontFile(fontFile('Unsaved.ttf', SFNT(5)));
-    expect(store.app.toast.msg).toContain('could not be saved');
-    expect((await fonts.loadedFaceRecords()).map((r) => [r.name, new Uint8Array(r.data)[4]])).toEqual([['Unsaved', 5]]);
-    await fonts.removeUserFont('Unsaved');
     expect(await fonts.loadedFaceRecords()).toEqual([]);
   });
 });

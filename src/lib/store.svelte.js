@@ -760,10 +760,7 @@ const lineBoxGeoms = (p, n) =>
 export function autoFitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
   if (faceArriving(b.style)) {
-    if (!fitsAwaitingFace.has(b)) {
-      fitsAwaitingFace.add(b);
-      fitsAwaited++;
-    }
+    holdFit(b);
     return false;
   }
   // Before the ladder can shrink it: a size the user has just typed or dragged
@@ -1207,10 +1204,14 @@ export function relayoutAll() {
   app.fontsVersion++;
   let n = 0;
   for (const p of app.pages) {
-    n += solvePending(p);
     // Counted so a session with nothing waiting never walks the boxes for it.
-    if (fitsAwaited > 0) n += fitAwaited(p);
+    const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
+    n += solvePending(p);
+    if (landing) n += fitLanding(p, landing);
     n += refitPage(p);
+    // Last, with the box as all three left it: the edit that asked for the fit
+    // was recorded before the fit could run, and its undo entry is owed this.
+    if (landing) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
   }
   if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
@@ -2926,7 +2927,11 @@ function bornBox(p, ln, imgX, imgY, measured) {
     // question: every metric is a stand-in there, which is fine for deciding a
     // line break in a test and not fine for a number written into the user's
     // document. Either way the block, or the old constants, stand.
-    const bal = solvable || !canMeasure() ? null : balancedBoxSize(text, style);
+    // And skipped while the face is on its way to the Rust engine, or the
+    // engine is: the balanced size would be measured in the stand-in, written
+    // into the box and into the `place` entry, and it is the solver's to give
+    // when the face lands (the box is 'pending', below).
+    const bal = solvable || !canMeasure() || faceArriving(style) ? null : balancedBoxSize(text, style);
     g = bal ? placementRect(p, null, at.x, at.y, bal.w, bal.h) : placementRect(p, rect, imgX, imgY);
   }
   const b = {
@@ -3071,15 +3076,73 @@ function faceArriving(style) {
 // replaced or a chapter closing dropped is simply not found again.
 const fitsAwaitingFace = new WeakSet();
 let fitsAwaited = 0;
-function fitAwaited(p) {
-  let n = 0;
+function holdFit(b) {
+  if (fitsAwaitingFace.has(b)) return;
+  fitsAwaitingFace.add(b);
+  fitsAwaited++;
+}
+// The held boxes of a page whose face is in by now, each with the geometry it
+// stood at before anything fits it, and no longer held.
+function heldFitsLanding(p) {
+  const out = [];
   for (const b of p.boxes) {
     if (!fitsAwaitingFace.has(b) || faceArriving(b.style)) continue;
     fitsAwaitingFace.delete(b);
-    // One placed while it waited is the solver's (`solvePending`), not the ladder's.
-    if (b.auto?.status !== 'pending' && autoFitBox(b, p)) n++;
+    out.push({ b, was: fitGeom(b), pending: b.auto?.status === 'pending' });
+  }
+  return out;
+}
+// Their fits, after `solvePending` has had the page. One placed while it
+// waited is the solver's and was solved there - unless it was edited since,
+// which hands it to the ladder (its status is then gone), or its solve is
+// still to come (still 'pending').
+function fitLanding(p, landing) {
+  let n = 0;
+  for (const { b, pending } of landing) {
+    if (pending && b.auto?.status != null) continue;
+    if (autoFitBox(b, p)) n++;
   }
   return n;
+}
+
+// ---------- a fit that lands after its edit was recorded ----------
+// An edit's fit is part of the edit: its history entry carries the box's
+// geometry on both sides (`geomBefore` / `geomAfter`). A held fit breaks that -
+// the entry was recorded with the box as the edit left it, unfitted, and the
+// fit ran when the face landed, in no entry at all: undo then redo put back
+// the unfitted rectangle. The history keeps its own entries right (see "a fit
+// owed to an entry" in history.svelte.js); these are what it needs of the
+// store, which knows which boxes are held and how to fit one.
+//
+// Whether a fit of this box is being held for its face.
+export const fitHeld = (b) => fitsAwaited > 0 && fitsAwaitingFace.has(b);
+export const anyFitHeld = () => fitsAwaited > 0;
+// The box is no longer owed one: a step through the history put it back to a
+// state nobody edited their way to.
+export function dropHeldFit(b) {
+  fitsAwaitingFace.delete(b);
+}
+// The box is owed one - a step through the history put it back as an edit left
+// it before its fit could run. Held again while the face is still on its way
+// (null); fitted now otherwise, and the geometry on either side handed back
+// for the entry.
+export function payHeldFit(b, p) {
+  if (!b?.style || !canMeasure()) return null;
+  if (faceArriving(b.style)) {
+    holdFit(b);
+    return null;
+  }
+  fitsAwaitingFace.delete(b);
+  const was = fitGeom(b);
+  if (b.auto?.status === 'pending') solvePending(p, [b]);
+  else autoFitBox(b, p);
+  return { was, now: fitGeom(b) };
+}
+// Told of every held fit as it lands: the page, the box, and its geometry
+// before and after. A seam, like the recorder, so the store knows no history.
+const fitLanders = seam();
+export function setFitLander(fn) {
+  return fitLanders.subscribe(fn);
 }
 
 // `target` is the page the click landed on. It defaults to the current one,
@@ -4134,6 +4197,9 @@ export function resizeBox(pageId, boxId, geom, base = null) {
   if (widened && b.auto?.on) b.auto.locks.width = true;
   if (widened && !Number.isFinite(geom.size) && b.auto?.on && isAutoBox(b)) {
     if (resolveBox(b, p, boxText(b, p), true) != null) return b;
+    // The face is on its way, so the text was not re-set in the new width:
+    // owed for when it lands, as an edit's fit is (`autoFitBox`).
+    if (faceArriving(b.style)) holdFit(b);
   }
   // Any other drag is the user choosing the box, so it never runs the ladder -
   // but the flag has to describe the box they chose. A height-only drag changes

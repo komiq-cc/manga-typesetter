@@ -6,6 +6,7 @@ import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text
 import { addFontFile, removeUserFont, watchUserFaces } from './fonts.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
 import { fakeRustEngine, SFNT } from '../test/fake-rust-engine.js';
+import { fakeIndexedDB } from '../test/fake-indexeddb.js';
 
 // ===========================================================================
 // Who draws glyphs, as the textEngine switch decides it
@@ -21,6 +22,9 @@ import { fakeRustEngine, SFNT } from '../test/fake-rust-engine.js';
 const fontFile = (name, bytes = SFNT()) => ({ name, arrayBuffer: async () => bytes.buffer });
 const original = { engine: textEngine(), painter: glyphPainter(), typeset: typesetEnabled(), system: app.fonts.system };
 const browser = { id: 'browser', advance: () => 0, fontBox: () => ({ ascent: 0, descent: 0 }), lineInk: () => ({}), glyphInk: () => ({}), loading: () => false, onFontsChange: () => () => {}, faceReady: () => true };
+// The user's font library: the switch reads a font's bytes back from it when
+// it goes on.
+const library = fakeIndexedDB();
 let engine;
 let createEngine;
 
@@ -50,6 +54,7 @@ beforeEach(() => {
     }
   });
   vi.stubGlobal('document', { fonts: { add() {}, delete() {} } });
+  vi.stubGlobal('indexedDB', library);
   initHistory();
   resetHistory();
   app.chapterRef = null;
@@ -65,6 +70,8 @@ afterEach(async () => {
   _setEngineSwitchDeps(null);
   watchUserFaces(null);
   for (const f of [...app.fonts.user]) await removeUserFont(f.name);
+  library.rows.clear();
+  library.full = false;
   app.fonts.system = original.system;
   loadProjectPages([]);
   setTextEngine(original.engine);
@@ -109,6 +116,8 @@ describe('the glyph painter follows the switch', () => {
 
   it('is made anew each time the switch goes on, and not kept while it is off', async () => {
     const made = [];
+    const engines = [];
+    createEngine.mockImplementation(async () => (engines.push(fakeRustEngine()), engines.at(-1)));
     deps({ createPainter: (e) => (made.push({ id: 'rust', engine: e, paint() {} }), made.at(-1)) });
     await addFontFile(fontFile('WildWords.ttf'));
     await useTextEngine('rust');
@@ -118,8 +127,11 @@ describe('the glyph painter follows the switch', () => {
     await useTextEngine('rust');
     expect(made).toHaveLength(2);
     expect(glyphPainter()).toBe(made[1]);
-    // One engine all along: the wasm is loaded once, the painter is not.
-    expect(createEngine).toHaveBeenCalledTimes(1);
+    // Off drops the engine, and on makes a new one: the painter that goes in
+    // is made from the new one, never from the one that was let go.
+    expect(engines).toHaveLength(2);
+    expect(made[0].engine).toBe(engines[0]);
+    expect(made[1].engine).toBe(engines[1]);
   });
 
   it('is not installed a second time by the fonts that arrive while it is on', async () => {

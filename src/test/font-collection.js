@@ -39,12 +39,34 @@ export function buildCollection(fonts) {
   return out;
 }
 
-/** `system_font_face`'s answer for a file: where each slot's face is in it (`{ slot: index }`), then the bytes. */
-export function systemFaceAnswer(slots, bytes) {
+// The id the stand-in native side gives a file: one per bytes object, as the
+// real one gives one per file on disk. Two families whose entries hold the
+// SAME bytes object are two families in one file.
+const ids = new WeakMap();
+let lastId = 0;
+/** The id of a file, as sixteen hex digits - what the frontend sends back in `known`. */
+export function fileIdOf(bytes) {
+  if (!ids.has(bytes)) ids.set(bytes, (++lastId).toString(16).padStart(16, '0'));
+  return ids.get(bytes);
+}
+
+/**
+ * `system_font_face`'s answer for a file (src-tauri/src/system_fonts.rs,
+ * `FACE_HEADER`): version 2, where each slot's face is in the file
+ * (`{ slot: index }`), the file's id and length, and then the bytes - unless
+ * the id is one of `known`, the files the caller says it holds.
+ */
+export function systemFaceAnswer(slots, bytes, { known = [] } = {}) {
   const order = ['regular', 'bold', 'italic', 'boldItalic'];
-  const out = new Uint8Array(16 + bytes.byteLength);
+  const id = fileIdOf(bytes);
+  const send = !(known ?? []).includes(id);
+  const out = new Uint8Array(40 + (send ? bytes.byteLength : 0));
   const view = new DataView(out.buffer);
-  order.forEach((slot, i) => view.setInt32(i * 4, slots[slot] ?? -1, true));
-  out.set(bytes, 16);
+  view.setUint32(0, 2, true);
+  order.forEach((slot, i) => view.setInt32(4 + i * 4, slots[slot] ?? -1, true));
+  for (let i = 0; i < 8; i++) out[20 + i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
+  view.setBigUint64(28, BigInt(bytes.byteLength), true);
+  view.setUint32(36, send ? 1 : 0, true);
+  if (send) out.set(bytes, 40);
   return out.buffer;
 }

@@ -16,7 +16,8 @@
 //      size or a height into the document: a box placed now is 'pending', a
 //      fit asked for now is done when the engine is in. What is on screen
 //      meanwhile is the browser's layout, written nowhere.
-//   2. the wasm, once per session however often the switch is flipped.
+//   2. the wasm: compiled once per session however often the switch is
+//      flipped, and an instance made of it for this turn of the switch.
 //   3. the app's own font lists: at launch the user's library is still being
 //      read out of IndexedDB and the system scan is still running, and half a
 //      library is not the library (`fontsBooted`).
@@ -57,7 +58,8 @@ async function tauriInvoke() {
 // wasm, the native side and the font library without a browser.
 const REAL = {
   available: () => !!engineWasmUrl,
-  createEngine: async () => createRustTextEngine(await fetchEngineWasm()),
+  compile: async () => WebAssembly.compile(await fetchEngineWasm()),
+  createEngine: (module) => createRustTextEngine(module),
   createPainter: (engine) => createRustGlyphPainter(engine),
   invoke: tauriInvoke,
   booted: fontsBooted,
@@ -87,7 +89,10 @@ export const engineSwitch = $state({
 });
 
 let generation = 0;
-let enginePromise = null;
+// The compiled wasm, kept for the session: code, no memory of its own. The
+// instance (`rust`) is what holds the engine's heap, and that lives only while
+// the switch is on.
+let modulePromise = null;
 let rust = null;
 let sync = null;
 // What was measuring before, to put back.
@@ -136,6 +141,7 @@ function leave(phase, error = '') {
   setFontSource(null);
   sync?.dispose();
   sync = null;
+  dispose();
   const was = engineSwitch.phase;
   engineSwitch.phase = phase;
   engineSwitch.error = error;
@@ -144,6 +150,17 @@ function leave(phase, error = '') {
   paintWith(null);
   // Also from 'starting': the fits the gate held back are owed.
   if (was === 'on' || was === 'starting') noteFontsChanged();
+}
+
+// Lets go of the wasm instance and of everything that would keep it reachable.
+// A wasm memory never shrinks, so emptying the engine of its fonts gives
+// nothing back: the heap it grew to stays for as long as the instance does.
+// Off therefore drops the instance, and the next on makes a new one out of the
+// compiled module.
+function dispose() {
+  rust = null;
+  lettersMemoFor = null;
+  lettersMemo.clear();
 }
 
 async function start() {
@@ -182,14 +199,18 @@ async function start() {
     scanned: () => tell((s) => s.refresh()),
   });
   try {
+    let made;
     try {
-      rust = await (enginePromise ??= deps.createEngine());
+      made = await deps.createEngine(await (modulePromise ??= deps.compile()));
     } catch (error) {
       // Not remembered: turning the switch off and on is how the user retries.
-      enginePromise = null;
+      modulePromise = null;
       throw error;
     }
+    // Turned off meanwhile: the instance just made is nobody's, and is left
+    // to the collector rather than kept for a turn that may never come.
     if (stale()) return;
+    rust = made;
     await deps.booted();
     if (stale()) return;
     const invoke = await deps.invoke();
@@ -199,7 +220,7 @@ async function start() {
       engine: rust,
       fonts: app.fonts,
       os: deps.os(),
-      systemFace: invoke ? (family, slot) => invoke('system_font_face', { family, slot }) : null,
+      systemFace: invoke ? (family, slot, known) => invoke('system_font_face', { family, slot, known }) : null,
       // The bytes go as the raw body of the call and come back the same way: a
       // font as a JSON array of numbers is several times its own size.
       toSfnt: invoke ? (bytes) => invoke('font_to_sfnt', bytes) : null,
@@ -239,13 +260,25 @@ export function useTextEngine(mode) {
 
 /**
  * Why the Rust engine counts `name` as missing, for the notice that lists it:
- * 'compressed', 'unreadable' or 'absent'; null when it is not the one
+ * 'compressed', 'unsaved', 'unreadable' or 'absent'; null when it is not the one
  * measuring or the name is not missing.
  */
 export function whyFontMissing(name) {
   if (engineSwitch.phase !== 'on' || !sync) return null;
   app.fontsVersion;
   return sync.whyMissing(name);
+}
+
+/**
+ * Whether the switch is on with nothing to measure in. No font ships with the
+ * app, so the engine measures only in fonts the machine brought; with none it
+ * can read - a plain browser and no font of the user's, or only WOFF files
+ * there - no engine is installed (`apply`), and `phase` is still 'on' because
+ * the switch is: it starts by itself when a font arrives. Whoever words the
+ * state asks this, so "on" is not read as "measuring".
+ */
+export function engineHasNoFont() {
+  return engineSwitch.phase === 'on' && !engineSwitch.lastResort;
 }
 
 // ---- letters no face has ----
@@ -271,7 +304,11 @@ export function lettersMissing(style, text) {
     rust.onFontsChange(() => lettersMemo.clear());
   }
   const face = faceFor(style, style.size > 0 ? style.size : 16);
-  const key = `${face.name}\n${face.bold ? 1 : 0}${face.italic ? 1 : 0}\n${text}`;
+  // Everything the answer is made from: the family and the face of it the
+  // engine picks (weight, slant), and the string as it is set - the same
+  // words in capitals are other letters (`applyCase`). Not the size: a glyph
+  // is there or not at every size.
+  const key = `${face.name}\n${face.bold ? 1 : 0}${face.italic ? 1 : 0}${style.uppercase ? 1 : 0}\n${text}`;
   let out = lettersMemo.get(key);
   if (!out) {
     out = rust.hasFamily(face.name) ? rust.missing(face, applyCase(text, style)) : [];
@@ -298,7 +335,8 @@ export function boxesMissingLetters(pages = app.pages) {
 // For the tests: stand-ins for the wasm, the native side and the library, and
 // a clean slate between cases.
 export function _setEngineSwitchDeps(next) {
-  deps = next ? { ...REAL, ...next } : REAL;
+  // A stand-in for the engine is not made out of a module, so needs none compiled.
+  deps = next ? { ...REAL, compile: async () => null, ...next } : REAL;
   engineSwitch.available = deps.available();
 }
 export function _resetEngineSwitch() {
@@ -307,7 +345,7 @@ export function _resetEngineSwitch() {
   engineSwitch.mode = 'browser';
   engineSwitch.phase = 'off';
   engineSwitch.error = '';
-  enginePromise = null;
+  modulePromise = null;
   rust = null;
 }
 export const _engineSwitchSync = () => sync;
