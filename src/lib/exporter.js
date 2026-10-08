@@ -1,6 +1,7 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { familyFor, fontShorthand, lineWidth, textInset, contentWidth } from './measure.js';
+import { faceFor, lineWidth, textInset, contentWidth } from './measure.js';
+import { glyphPainter } from './text-engine/index.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import {
   strokeBands,
@@ -8,7 +9,6 @@ import {
   gradientEndpoints,
   radialEndpoints,
   patternTilePx,
-  patternTileCanvas,
   fillKind,
   stopColor,
   ensureNoisePhase,
@@ -21,7 +21,6 @@ import {
   inkReach,
   shadowExtent,
   drawInk,
-  TILE_SS,
 } from './text-paint.js';
 import { warpActive } from './warp.js';
 import { warpBoxCanvas } from './warp-paint.js';
@@ -347,53 +346,101 @@ function fillRect(box, L, line = -1) {
 // into the run's space rather than the rect being re-measured per glyph - which
 // is what keeps one gradient running across curved text instead of restarting on
 // every letter.
-function setFill(ctx, s, rect, local) {
+function runFill(s, rect, local) {
   const kind = fillKind(s);
   if (kind === 'gradient') {
-    let grad;
+    let fill;
+    const stops = s.gradient.stops.map((st) => ({ pos: Math.min(1, Math.max(0, st.pos)), color: stopColor(st) }));
     if (s.gradient.kind === 'radial') {
       // `local` is a rigid transform (the curved path rotates and translates a
       // glyph, it does not scale), so the centre moves with it and the radius
       // is carried over unchanged.
       const c = radialEndpoints(s.gradient, rect.x, rect.y, rect.w, rect.h);
       const [cx, cy] = local ? local(c.cx, c.cy) : [c.cx, c.cy];
-      grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, c.r);
+      fill = { kind: 'radial', cx, cy, r: c.r, stops };
     } else {
       const g = gradientEndpoints(s.gradient.angle, rect.x, rect.y, rect.w, rect.h);
       const p = local ? [local(g.x0, g.y0), local(g.x1, g.y1)] : [[g.x0, g.y0], [g.x1, g.y1]];
-      grad = ctx.createLinearGradient(p[0][0], p[0][1], p[1][0], p[1][1]);
+      fill = { kind: 'linear', x0: p[0][0], y0: p[0][1], x1: p[1][0], y1: p[1][1], stops };
     }
     // `stopColor` is the same answer the editor's CSS gets for the same stop,
     // per-stop alpha included, so the two ramps are the one ramp.
-    for (const st of s.gradient.stops) grad.addColorStop(Math.min(1, Math.max(0, st.pos)), stopColor(st));
-    ctx.fillStyle = grad;
-    return;
+    return fill;
   }
   if (kind === 'pattern') {
-    const tile = patternTileCanvas(s, TILE_SS);
-    const pat = tile && ctx.createPattern(tile, 'repeat');
-    if (pat) {
-      // The tile is drawn at TILE_SS so it survives the supersampled canvas, and
-      // its origin is the fill rect's corner - the same corner CSS anchors
-      // `background-repeat` to in the editor.
-      //
-      // Curved text is drawn one glyph at a time under its own transform, and
-      // this used to anchor the tile at each glyph's own origin - so the grid
-      // restarted on every letter and the tone jumped phase across a word. The
-      // editor does no such thing: it hands each glyph's span the SAME
-      // background origin, the box's corner, expressed in that span's own
-      // coordinates. So the corner is mapped through `local` exactly as a
-      // gradient's endpoints are, and the grid runs on across the letters.
-      const px = patternTilePx(s);
-      if (pat.setTransform && typeof DOMMatrix !== 'undefined') {
-        const [ax, ay] = local ? local(rect.x, rect.y) : [rect.x, rect.y];
-        pat.setTransform(new DOMMatrix([px / tile.width, 0, 0, px / tile.height, ax, ay]));
-      }
-      ctx.fillStyle = pat;
-      return;
-    }
+    // The tile is drawn at TILE_SS so it survives the supersampled canvas, and
+    // its origin is the fill rect's corner - the same corner CSS anchors
+    // `background-repeat` to in the editor.
+    //
+    // Curved text is drawn one glyph at a time under its own transform, and
+    // this used to anchor the tile at each glyph's own origin - so the grid
+    // restarted on every letter and the tone jumped phase across a word. The
+    // editor does no such thing: it hands each glyph's span the SAME
+    // background origin, the box's corner, expressed in that span's own
+    // coordinates. So the corner is mapped through `local` exactly as a
+    // gradient's endpoints are, and the grid runs on across the letters.
+    const px = patternTilePx(s);
+    const [ax, ay] = local ? local(rect.x, rect.y) : [rect.x, rect.y];
+    return { kind: 'pattern', style: { size: s.size, color: s.color, pattern: { ...s.pattern } }, px, ax, ay };
   }
-  ctx.fillStyle = s.color;
+  return { kind: 'solid', color: s.color };
+}
+
+// Describe the glyphs in the caller's user space, without creating paint objects.
+export function glyphJob(box, L) {
+  const s = L.s;
+  const job = {
+    face: faceFor(s, s.size),
+    curved: !!L.isCurve,
+    align: s.align,
+    letterSpacing: s.letterSpacing,
+    bands: strokeBands(s.strokes).map(({ color, opacity, line }) => ({ color, opacity, line })),
+    silhouette: L.silhouette || null,
+    fill: null,
+    runs: [],
+  };
+  if (L.isCurve) {
+    const cx = L.ox + box.w / 2;
+    const cy = L.oy + box.h / 2;
+    // A curved box has no wrapped lines, so its gradient spans the box - which
+    // is what 'box' scope means and the only scope the curved path has.
+    const rect = { x: L.ox, y: L.oy, w: box.w, h: box.h };
+    job.runs = L.layout.map((g) => {
+      const x = cx + g.x;
+      const y = cy + g.y;
+      const run = { text: g.ch, x, y, rot: g.rot };
+      // Move the fill's frame onto this glyph - and only move it. The editor
+      // paints the fill as the glyph span's own background, and a background
+      // is laid out in the element's own box and then carried through its
+      // transform: it slides to the glyph AND turns with it. So the mapping is
+      // the translation alone. Inverse-rotating the endpoints as well (which
+      // is what stood here) cancelled the glyph's rotation and held the ramp
+      // fixed in box space - a different picture from the one the canvas
+      // shows, and most visible on the letters furthest around the arc.
+      // The silhouette pass wants one flat colour, not the real fill.
+      if (!L.silhouette) run.fill = runFill(s, rect, (px, py) => [px - x, py - y]);
+      return run;
+    });
+  } else {
+    // Both from `layoutBox`, which is where the padding is applied and the only
+    // place it should be. `textAlign` decides which edge of the line its x
+    // names, so the padded content box's own edge is the anchor - its left for
+    // left-aligned text, its right for right-aligned, and the box's centre for
+    // centred text, which the symmetric padding leaves where it was - moved in,
+    // for a flush line in a balloon, to its row's edge. The x is `placeBlock`'s
+    // `lineX`, the one the containment check measured the ink from.
+    const startY = L.oy + L.blockY;
+    // Gradient scope 'line' restarts the gradient on every wrapped line, so the
+    // fill style is chosen per line rather than once for the block.
+    const perLine = !L.silhouette && s.gradient?.on && s.gradient.scope === 'line';
+    if (!L.silhouette && !perLine) job.fill = runFill(s, fillRect(box, L));
+    job.runs = L.lines.map((ln, i) => {
+      const run = { text: ln, x: L.ox + L.lineX[i], y: startY + i * L.lineH + L.baseY };
+      if (perLine) run.fill = runFill(s, fillRect(box, L, i));
+      return run;
+    });
+  }
+  return job;
 }
 
 // Paint a laid-out box's strokes and fill (L from layoutBox) onto `ctx`, with
@@ -405,112 +452,7 @@ function setFill(ctx, s, rect, local) {
 // against an axis-aligned raster, and `paintBoxOnPage` sends any box that has
 // one down that path.
 function paintBox(ctx, box, L) {
-  const s = L.s;
-  ctx.font = fontShorthand(s, s.size, familyFor(s));
-  // Alphabetic, at the offset `baselineInLine` measured, rather than 'top' at
-  // half the leading: 'top' is the em square, and the browser does not centre
-  // the em square in a line box, it centres the font's ascent-plus-descent.
-  ctx.textBaseline = 'alphabetic';
-  ctx.lineJoin = 'round';
-  ctx.miterLimit = 2;
-
-  // Outermost stroke first, each one twice its own outer edge wide, so the next
-  // one in covers the half of it that fell inside the glyph - see text-paint.js.
-  const strokeFill = (drawFns) => {
-    for (const band of strokeBands(s.strokes)) {
-      ctx.save();
-      ctx.globalAlpha = band.opacity;
-      ctx.strokeStyle = band.color;
-      ctx.lineWidth = band.line;
-      drawFns.stroke();
-      ctx.restore();
-    }
-    drawFns.fill();
-  };
-
-  // The silhouette a shadow is cast from: the glyphs plus every stroke, as one
-  // solid shape in one colour. Drawn as the outermost stroke and then the fill,
-  // both opaque, so no two passes overlap and darken each other.
-  const silhouette = (color, drawFns) => {
-    const bands = strokeBands(s.strokes);
-    if (bands.length) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = bands[0].line;
-      drawFns.stroke();
-    }
-    ctx.fillStyle = color;
-    drawFns.fill();
-  };
-
-  const paint = L.silhouette ? (fns) => silhouette(L.silhouette, fns) : strokeFill;
-
-  if (L.isCurve) {
-    const cx = L.ox + box.w / 2;
-    const cy = L.oy + box.h / 2;
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-    // A curved box has no wrapped lines, so its gradient spans the box - which
-    // is what 'box' scope means and the only scope the curved path has.
-    const rect = { x: L.ox, y: L.oy, w: box.w, h: box.h };
-    const place = (cb, setPer) => {
-      for (const g of L.layout) {
-        ctx.save();
-        ctx.translate(cx + g.x, cy + g.y);
-        ctx.rotate(g.rot);
-        // Move the fill's frame onto this glyph - and only move it. The editor
-        // paints the fill as the glyph span's own background, and a background
-        // is laid out in the element's own box and then carried through its
-        // transform: it slides to the glyph AND turns with it. So the mapping is
-        // the translation alone. Inverse-rotating the endpoints as well (which
-        // is what stood here) cancelled the glyph's rotation and held the ramp
-        // fixed in box space - a different picture from the one the canvas
-        // shows, and most visible on the letters furthest around the arc.
-        if (setPer) {
-          const gx = cx + g.x;
-          const gy = cy + g.y;
-          setPer((x, y) => [x - gx, y - gy]);
-        }
-        cb(g.ch, 0, 0);
-        ctx.restore();
-      }
-    };
-    paint({
-      stroke: () => place((c, x, y) => ctx.strokeText(c, x, y)),
-      fill: () =>
-        place(
-          (c, x, y) => ctx.fillText(c, x, y),
-          // The silhouette pass wants one flat colour, not the real fill.
-          L.silhouette ? null : (local) => setFill(ctx, s, rect, local),
-        ),
-    });
-  } else {
-    if ('letterSpacing' in ctx) ctx.letterSpacing = `${s.letterSpacing}px`;
-    // Both from `layoutBox`, which is where the padding is applied and the only
-    // place it should be. `textAlign` decides which edge of the line its x
-    // names, so the padded content box's own edge is the anchor - its left for
-    // left-aligned text, its right for right-aligned, and the box's centre for
-    // centred text, which the symmetric padding leaves where it was - moved in,
-    // for a flush line in a balloon, to its row's edge. The x is `placeBlock`'s
-    // `lineX`, the one the containment check measured the ink from.
-    const startY = L.oy + L.blockY;
-    ctx.textAlign = s.align;
-    const drawAll = (fn) => {
-      L.lines.forEach((ln, i) => fn(ln, L.ox + L.lineX[i], startY + i * L.lineH + L.baseY));
-    };
-    // Gradient scope 'line' restarts the gradient on every wrapped line, so the
-    // fill style is chosen per line rather than once for the block.
-    const perLine = !L.silhouette && s.gradient?.on && s.gradient.scope === 'line';
-    paint({
-      stroke: () => drawAll((ln, x, y) => ctx.strokeText(ln, x, y)),
-      fill: () => {
-        if (!L.silhouette && !perLine) setFill(ctx, s, fillRect(box, L));
-        L.lines.forEach((ln, i) => {
-          if (perLine) setFill(ctx, s, fillRect(box, L, i));
-          ctx.fillText(ln, L.ox + L.lineX[i], startY + i * L.lineH + L.baseY);
-        });
-      },
-    });
-  }
+  glyphPainter().paint(ctx, glyphJob(box, L));
 }
 
 // The shadows a box casts, painted under it. Each one is the box's own

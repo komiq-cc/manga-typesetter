@@ -4,16 +4,20 @@ import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS, ovalP
 import { interiorLineWidths, safetyInset } from './balloon.js';
 import { normalizeFit } from './data.js';
 import { strokeExtent } from './text-paint.js';
+import { textEngine, setTextEngine, onTextEngineChange } from './text-engine/index.js';
+import { createBrowserTextEngine, browserPlainBreaker } from './text-engine/browser.js';
 
-const _c = typeof document !== 'undefined' ? document.createElement('canvas') : null;
-const _ctx = _c ? _c.getContext('2d') : null;
+// Keep creation at the old canvas's import-time boundary: tests install their
+// browser before importing this module, or hand the painter a context later.
+setTextEngine(createBrowserTextEngine());
+let engine = textEngine();
 
 // Whether this environment can actually measure text. Node cannot, and every
 // function below falls back to a stand-in metric there so nothing throws - but a
 // stand-in is fine for laying out a line and not fine for writing a number into
 // the user's document, so the auto-height path asks this first.
 export function canMeasure() {
-  return _ctx != null;
+  return engine != null;
 }
 
 // The bare padding a text box lays out inside, on every edge, before its
@@ -110,14 +114,14 @@ export function blockYFor(style, boxH, blockH, inkShift = 0) {
 export function fontMetrics(style, sizePx) {
   const size = sizePx > 0 ? sizePx : 0;
   const fallback = { ascent: size * 0.8, descent: size * 0.2 };
-  if (!_ctx || !(size > 0)) return fallback;
-  const font = fontShorthand(style, size, familyFor(style));
+  if (!engine || !(size > 0)) return fallback;
+  const css = familyFor(style);
+  const font = fontShorthand(style, size, css);
   const kept = keptFor(font);
   if (kept?.box) return kept.box;
-  _ctx.font = font;
-  const m = _ctx.measureText('Hg');
-  const a = m.fontBoundingBoxAscent;
-  const d = m.fontBoundingBoxDescent;
+  const m = engine.fontBox(faceFor(style, size, css, font));
+  const a = m.ascent;
+  const d = m.descent;
   const box = a >= 0 && d >= 0 ? { ascent: a, descent: d } : fallback;
   if (kept) kept.box = box;
   return box;
@@ -172,7 +176,7 @@ export function inkShiftY(lines, style, sizePx) {
 export function blockInk(lines, style, sizePx) {
   const list = Array.isArray(lines) ? lines : [];
   const inks = list.map((ln) => lineInk(ln, style, sizePx));
-  if (!_ctx || list.length === 0 || !(sizePx > 0)) return { inks, shift: 0 };
+  if (!engine || list.length === 0 || !(sizePx > 0)) return { inks, shift: 0 };
   const lineH = sizePx * (style?.lineHeight > 0 ? style.lineHeight : 1);
   const base = baselineInLine(style, sizePx);
   let top = Infinity;
@@ -213,6 +217,12 @@ export function fontShorthand(style, sizePx, family) {
   return `${i}${w} ${sizePx}px ${family}`;
 }
 
+// Build the face only when an engine is actually asked. In particular an
+// advance memo hit must not allocate an object for a measurement it skips.
+export function faceFor(style, sizePx, css = familyFor(style), key = fontShorthand(style, sizePx, css)) {
+  return { key, name: style.font, bold: !!style.bold, italic: !!style.italic, size: sizePx, css };
+}
+
 // The CSS family list a style's font name resolves to: the store's answer
 // (`fontCssFor`), which reads the font lists through their reactive proxies -
 // microseconds a call, and a solve asks thousands of times, once for every line
@@ -246,9 +256,9 @@ export function applyCase(text, style) {
 // Per-character advances (width incl. letterSpacing is added by caller).
 export function charWidths(text, style, sizePx) {
   if (!text || sizePx <= 0) return [];
-  if (!_ctx) return [...text].map(() => sizePx * 0.55);
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
-  return [...text].map((ch) => _ctx.measureText(ch).width);
+  if (!engine) return [...text].map(() => sizePx * 0.55);
+  const face = faceFor(style, sizePx);
+  return [...text].map((ch) => engine.advance(face, ch));
 }
 
 // Lay out characters along a circular arc. Returns positions relative to the
@@ -550,14 +560,14 @@ export function pathLayout(text, style, sizePx, boxW, boxH) {
 export function wrapLines(text, style, sizePx, maxWidth) {
   if (!text) return [''];
   if (sizePx <= 0) return text.split('\n').map((l) => l.replace(/\s+$/, ''));
-  if (!_ctx) return text.split('\n').map((l) => l.replace(/\s+$/, ''));
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
+  if (!engine) return text.split('\n').map((l) => l.replace(/\s+$/, ''));
+  const face = faceFor(style, sizePx);
   const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0); // scale ls to this size
   const out = [];
   for (const para of text.split('\n')) {
     const words = para.split(/(\s+)/); // keep spaces
     let line = '';
-    const widthOf = (s) => _ctx.measureText(s).width + Math.max(0, [...s].length - 1) * ls;
+    const widthOf = (s) => engine.advance(face, s) + Math.max(0, [...s].length - 1) * ls;
     for (const word of words) {
       const trial = line + word;
       if (line && widthOf(trial) > maxWidth) {
@@ -581,57 +591,12 @@ export function wrapLines(text, style, sizePx, maxWidth) {
 // padding) so breaks land where the editor puts them. `text` should already be
 // case-applied; this sets text-transform:none.
 export function wrapLinesDOM(text, style, sizePx, contentWidthPx) {
-  if (typeof document === 'undefined') return wrapLines(text, style, sizePx, contentWidthPx);
+  const wrap = engine?.wrapPlain ?? browserPlainBreaker();
+  if (!wrap) return wrapLines(text, style, sizePx, contentWidthPx);
   const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0);
-  const el = document.createElement('div');
-  el.style.cssText =
-    'position:absolute;left:-99999px;top:0;visibility:hidden;white-space:pre-wrap;' +
-    'word-break:break-word;overflow-wrap:break-word;box-sizing:content-box;padding:0;margin:0;border:0;' +
-    `width:${Math.max(1, contentWidthPx)}px;` +
-    `font-family:${familyFor(style)};font-weight:${style.bold ? 700 : 400};` +
-    `font-style:${style.italic ? 'italic' : 'normal'};font-size:${sizePx}px;` +
-    `line-height:${style.lineHeight};letter-spacing:${ls}px;text-transform:none;text-align:${style.align};`;
-  document.body.appendChild(el);
-  const out = [];
-  try {
-    for (const para of text.split('\n')) {
-      if (para === '') {
-        out.push('');
-        continue;
-      }
-      el.textContent = para;
-      const node = el.firstChild;
-      const range = document.createRange();
-      let curTop = null;
-      let start = 0;
-      for (let i = 0; i < para.length;) {
-        const cp = para.codePointAt(i);
-        const charLen = cp > 0xffff ? 2 : 1;
-        range.setStart(node, i);
-        range.setEnd(node, i + charLen);
-        const rects = range.getClientRects();
-        const rect = rects[rects.length - 1];
-        if (!rect) {
-          i += charLen;
-          continue;
-        }
-        const top = Math.round(rect.top);
-        if (curTop === null) curTop = top;
-        else if (Math.abs(top - curTop) > 1) {
-          const raw = para.slice(start, i).replace(/\s+$/, '');
-          out.push(start === 0 ? raw : raw.replace(/^\s+/, ''));
-          start = i;
-          curTop = top;
-        }
-        i += charLen;
-      }
-      const raw = para.slice(start).replace(/\s+$/, '');
-      out.push(start === 0 ? raw : raw.replace(/^\s+/, ''));
-    }
-  } finally {
-    el.remove();
-  }
-  return out.length ? out : [''];
+  return wrap.call(engine, faceFor(style, sizePx), text, {
+    width: contentWidthPx, lineHeight: style.lineHeight, letterSpacing: ls, align: style.align,
+  });
 }
 
 // ===== where one line's ink actually lands =====
@@ -684,7 +649,7 @@ export function lineInk(line, style, sizePx) {
   const spread = Math.max(0, n - 1) * ls;
   // Where the pen starts relative to the anchor, given the run's whole advance.
   const start = (advance) => (align === 'left' ? 0 : align === 'right' ? -advance : -advance / 2);
-  if (!_ctx) {
+  if (!engine) {
     const cw = sizePx * 0.55;
     const lead = [...str].length - [...str.trimStart()].length;
     const inked = [...str.trim()].length;
@@ -692,12 +657,13 @@ export function lineInk(line, style, sizePx) {
     const { ascent, descent } = fontMetrics(style, sizePx);
     return { left: x0, right: x0 + inked * cw + Math.max(0, inked - 1) * ls, ascent, descent };
   }
-  const m = inkMetrics(str, fontShorthand(style, sizePx, familyFor(style)));
+  const css = familyFor(style);
+  const m = inkMetrics(str, style, sizePx, css, fontShorthand(style, sizePx, css));
   const x0 = start(m.width + n * ls);
-  const L = m.actualBoundingBoxLeft;
-  const R = m.actualBoundingBoxRight;
-  const A = m.actualBoundingBoxAscent;
-  const D = m.actualBoundingBoxDescent;
+  const L = m.left;
+  const R = m.right;
+  const A = m.ascent;
+  const D = m.descent;
   if ([L, R, A, D].every(Number.isFinite)) {
     return { left: x0 - L + Math.min(0, spread), right: x0 + R + Math.max(0, spread), ascent: A, descent: D };
   }
@@ -722,20 +688,15 @@ export function lineInk(line, style, sizePx) {
 export function glyphInk(ch, style, sizePx) {
   const str = String(ch ?? '');
   if (!/\S/.test(str) || !(sizePx > 0) || !style) return null;
-  if (!_ctx) {
+  if (!engine) {
     const hw = [...str].length * sizePx * 0.275;
     return { left: -hw, right: hw, ascent: sizePx / 2, descent: sizePx / 2 };
   }
-  _ctx.font = fontShorthand(style, sizePx, familyFor(style));
-  _ctx.textAlign = 'center';
-  _ctx.textBaseline = 'middle';
-  const m = _ctx.measureText(str);
-  _ctx.textAlign = 'left';
-  _ctx.textBaseline = 'alphabetic';
-  const L = m.actualBoundingBoxLeft;
-  const R = m.actualBoundingBoxRight;
-  const A = m.actualBoundingBoxAscent;
-  const D = m.actualBoundingBoxDescent;
+  const m = engine.glyphInk(faceFor(style, sizePx), str);
+  const L = m.left;
+  const R = m.right;
+  const A = m.ascent;
+  const D = m.descent;
   if ([L, R, A, D].every(Number.isFinite)) return { left: -L, right: R, ascent: A, descent: D };
   const hw = (m.width || sizePx * 0.55) / 2;
   return { left: -hw, right: hw, ascent: sizePx / 2, descent: sizePx / 2 };
@@ -747,10 +708,15 @@ export function glyphInk(ch, style, sizePx) {
 export function lineWidth(line, style, sizePx) {
   if (!line || sizePx <= 0) return 0;
   const s = trimEnd(line);
-  if (!_ctx) return s.length * sizePx * 0.55;
-  const font = fontShorthand(style, sizePx, familyFor(style));
+  if (!engine) return s.length * sizePx * 0.55;
+  const css = familyFor(style);
+  const font = fontShorthand(style, sizePx, css);
   const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0);
-  return advance(s, font, advancesIn(font)) + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
+  const memo = advancesIn(font);
+  // A hit needs neither a face nor the arguments used to build one.
+  let width = memo?.get(s);
+  if (width === undefined) width = advance(s, style, sizePx, css, font, memo);
+  return width + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
 }
 
 // `lineWidth` for one style at one size, as the breaker asks it: thousands of
@@ -762,8 +728,9 @@ export function lineWidth(line, style, sizePx) {
 // breaker may keep what it measured with it from one layout to the next
 // (`spansFor` in typeset.js). A face changing drops it with the advances.
 function lineWidthIn(style, sizePx) {
-  if (!_ctx || !(sizePx > 0)) return (line) => lineWidth(line, style, sizePx);
-  const font = fontShorthand(style, sizePx, familyFor(style));
+  if (!engine || !(sizePx > 0)) return (line) => lineWidth(line, style, sizePx);
+  const css = familyFor(style);
+  const font = fontShorthand(style, sizePx, css);
   const ls = (Number(style?.letterSpacing) || 0) * (style?.size > 0 ? sizePx / style.size : 0);
   const kept = keptFor(font);
   const held = kept?.fns.get(ls);
@@ -772,7 +739,9 @@ function lineWidthIn(style, sizePx) {
   const fn = (line) => {
     if (!line) return 0;
     const s = trimEnd(line);
-    return advance(s, font, memo) + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
+    let width = memo?.get(s);
+    if (width === undefined) width = advance(s, style, sizePx, css, font, memo);
+    return width + (ls ? Math.max(0, [...s].length - 1) * ls : 0);
   };
   if (kept) {
     fn.stable = true;
@@ -822,18 +791,31 @@ const MEASURE_MEMO_MAX = 40000;
 // font -> { adv: Map(string -> advance), ink: Map(string -> metrics), fns: Map(spacing -> `lineWidthIn`) }
 const measureMemo = new Map();
 let measureMemoSize = 0;
-const _fontSet = typeof document !== 'undefined' ? document.fonts : null;
 function clearMeasureMemo() {
   measureMemo.clear();
   measureMemoSize = 0;
 }
-if (typeof _fontSet?.addEventListener === 'function') {
-  for (const ev of ['loading', 'loadingdone', 'loadingerror']) _fontSet.addEventListener(ev, clearMeasureMemo);
+let unwatchFonts;
+function watchEngine(e) {
+  unwatchFonts?.();
+  // The measurements only, as the font set's events always did. The layouts
+  // made from them are the store's to drop (`relayoutAll`), which hears of a
+  // face on its own path.
+  unwatchFonts = e?.onFontsChange(() => {
+    // An old engine may not offer an unsubscribe; it must not invalidate the new one.
+    if (engine === e) clearMeasureMemo();
+  });
 }
+onTextEngineChange((e) => {
+  engine = e;
+  clearLayoutMemo();
+  watchEngine(e);
+});
+watchEngine(engine);
 
 // What is kept for `font`, or null when nothing may be kept or read now.
 function keptFor(font) {
-  if (_fontSet?.status === 'loading') return null;
+  if (engine?.loading()) return null;
   let k = measureMemo.get(font);
   if (k) measureMemo.delete(font);
   else k = { adv: new Map(), ink: new Map(), fns: new Map() };
@@ -848,11 +830,10 @@ function keep(map, key, v) {
   if (++measureMemoSize > MEASURE_MEMO_MAX) trimMeasureMemo();
 }
 
-function advance(s, font, memo) {
+function advance(s, style, sizePx, css, font, memo) {
   let v = memo?.get(s);
   if (v === undefined) {
-    _ctx.font = font;
-    v = _ctx.measureText(s).width;
+    v = engine.advance(faceFor(style, sizePx, css, font), s);
     if (memo) keep(memo, s, v);
   }
   return v;
@@ -860,21 +841,11 @@ function advance(s, font, memo) {
 
 // `measureText`'s answer for a line drawn from the left on the alphabetic
 // baseline, as `lineInk` reads it: the advance and the ink box.
-function inkMetrics(str, font) {
+function inkMetrics(str, style, sizePx, css, font) {
   const memo = keptFor(font)?.ink ?? null;
   let v = memo?.get(str);
   if (v === undefined) {
-    _ctx.font = font;
-    _ctx.textAlign = 'left';
-    _ctx.textBaseline = 'alphabetic';
-    const m = _ctx.measureText(str);
-    v = {
-      width: m.width,
-      actualBoundingBoxLeft: m.actualBoundingBoxLeft,
-      actualBoundingBoxRight: m.actualBoundingBoxRight,
-      actualBoundingBoxAscent: m.actualBoundingBoxAscent,
-      actualBoundingBoxDescent: m.actualBoundingBoxDescent,
-    };
+    v = engine.lineInk(faceFor(style, sizePx, css, font), str);
     if (memo) keep(memo, str, v);
   }
   return v;
