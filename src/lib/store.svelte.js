@@ -759,6 +759,13 @@ const lineBoxGeoms = (p, n) =>
 // count.
 export function autoFitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
+  if (faceArriving(b.style)) {
+    if (!fitsAwaitingFace.has(b)) {
+      fitsAwaitingFace.add(b);
+      fitsAwaited++;
+    }
+    return false;
+  }
   // Before the ladder can shrink it: a size the user has just typed or dragged
   // is their reference size, and the answer below is only what fits.
   noteSizeEdit(b, p);
@@ -939,7 +946,7 @@ const solveStands = (b, text) => !!b.auto?.stamp && b.auto.stamp === solveStamp(
 // `place` is for a caller that has just placed the block for the box exactly as
 // it stands (`placeBlock`), so the lines are not measured twice.
 export function reviewBox(b, p = page(), place) {
-  if (!b?.style || !canMeasure()) return;
+  if (!b?.style || !canMeasure() || faceArriving(b.style)) return;
   const cand = boxCandidate(b, boxText(b, p));
   const v = containBox(cand, place ?? placeBlock(cand));
   if (v.fits) {
@@ -955,7 +962,7 @@ export function reviewBox(b, p = page(), place) {
 // recorded no geometry: neither is an edit, so neither may resize anything but
 // the height, and that only upward.
 export function refitBox(b, p = page()) {
-  if (!b?.style || !canMeasure()) return false;
+  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
   const cand = boxCandidate(b, boxText(b, p));
   const place = placeBlock(cand);
   // Text on a curve has no lines to count, and is never an auto box.
@@ -984,7 +991,7 @@ export function refitBox(b, p = page()) {
 // so does the height (OVF-8, below). Placing it is the layout memo's hit on the
 // lines the component has just broken, not a second break.
 export function autoFitBoxTo(b, lineCount, p = page()) {
-  if (!b?.style || !canMeasure()) return false;
+  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
   const cand = boxCandidate(b, boxText(b, p));
   return growAndReview(b, p, cand, placeBlock(cand), lineCount);
 }
@@ -1079,7 +1086,7 @@ export const fitGeom = (b) => ({
 // One undo entry, and none when nothing moved.
 export function fitBoxNow(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
-  if (!b?.style || !canMeasure()) return false;
+  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
   settleEdits();
   const before = cloneStyle(b.style);
   const geomBefore = fitGeom(b);
@@ -1199,7 +1206,13 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  for (const p of app.pages) n += solvePending(p) + refitPage(p);
+  for (const p of app.pages) {
+    n += solvePending(p);
+    // Counted so a session with nothing waiting never walks the boxes for it.
+    if (fitsAwaited > 0) n += fitAwaited(p);
+    n += refitPage(p);
+  }
+  if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
@@ -3034,9 +3047,39 @@ function resolveBox(b, p, text, stay = !!b.auto.stamp) {
 // no font set to ask (node, the realfont lane), and for a font string the set
 // cannot parse, which measures as the fallback on either path.
 function faceReady(style) {
+  if (faceArriving(style)) return false;
   const engine = textEngine();
   const face = faceFor(style, style.size);
   return engine ? engine.faceReady(face) : browserFaceReady(face);
+}
+
+// With the Rust engine switched on: the face this style names is on its way to
+// it, or the engine itself is. Whatever measures the box meanwhile is a
+// stand-in for what will, so the fits below leave the box alone until the news
+// arrives (`relayoutAll`) - a height grown for the stand-in would be a number
+// in the document nobody chose, and growing is never undone. Asking is also
+// what sends for a system family's bytes the first time a box uses it. Always
+// false with no font source, which is the browser measuring as it always has.
+function faceArriving(style) {
+  return !!fontSource && !fontSource.ready(style.font);
+}
+
+// The boxes an edit tried to fit while their face was arriving. An edit runs
+// the whole ladder and a font arriving runs only the grow-only refit, so
+// without this the first box ever set in a system family would wait for its
+// next edit to be fitted. Held by identity and weakly: a box that an undo
+// replaced or a chapter closing dropped is simply not found again.
+const fitsAwaitingFace = new WeakSet();
+let fitsAwaited = 0;
+function fitAwaited(p) {
+  let n = 0;
+  for (const b of p.boxes) {
+    if (!fitsAwaitingFace.has(b) || faceArriving(b.style)) continue;
+    fitsAwaitingFace.delete(b);
+    // One placed while it waited is the solver's (`solvePending`), not the ladder's.
+    if (b.auto?.status !== 'pending' && autoFitBox(b, p)) n++;
+  }
+  return n;
 }
 
 // `target` is the page the click landed on. It defaults to the current one,
@@ -4977,8 +5020,78 @@ export function fontByName(name) {
   return fontIndex.get(name) ?? null;
 }
 
+// Who answers for a font name when the lists above are not the whole story.
+// The Rust text engine measures only faces whose bytes it was handed, so with
+// it switched on (engine-switch.svelte.js) a family in the lists may still be
+// on its way - a system face is read from disk the first time a box uses it -
+// or may be one the machine has no bytes for at all, a built-in included. The
+// switch installs this while it is on, and takes it out again when it is off:
+//
+//   nameFor(name)  the family that is measured and drawn for `name` right now,
+//                  or null to leave the answer to the lists. Absent while the
+//                  engine is still starting.
+//   ready(name)    false while that answer is temporary: the face is on its
+//                  way, and nothing may be written into the document from a
+//                  measurement of what stands in for it.
+//   missing(name)  whether the machine has no usable face for `name` at all.
+//
+// Null, which is every session that never turns the switch on, leaves every
+// function below answering exactly as it did before there was a switch.
+let fontSource = null;
+export function setFontSource(source) {
+  fontSource = source ?? null;
+}
+
 export function fontNameFor(name) {
+  if (fontSource?.nameFor) {
+    // What a name resolves to here changes with no list changing - the bytes
+    // of a system face landing is not an edit to `app.fonts` - so a reactive
+    // caller subscribes to the one signal that is raised for it.
+    app.fontsVersion;
+    const family = fontSource.nameFor(name);
+    if (family) return family;
+  }
   return fontByName(name) ? name : FALLBACK_FONT;
+}
+
+// The family a measuring engine is asked for when a style names `name`. With
+// no font source that is the name itself, as it always was: the browser reads
+// the CSS list and never looks at it. With one it is the family the source
+// resolved the name to, which is also the family `fontCssFor` hands the memo
+// in measure.js its key from - so the Rust engine, which finds a family by
+// this name, is never asked for one it does not have, and no measurement is
+// kept under one family's key that was made in another.
+export function measuredFontFor(name) {
+  return fontSource?.nameFor?.(name) || name;
+}
+
+// Whether the document names a font this machine cannot draw `name` in, so it
+// is drawn in something else. With the browser measuring that is a name no
+// list has; with the Rust engine it is a family there are no bytes for.
+export function fontMissing(name) {
+  if (fontSource?.missing) {
+    app.fontsVersion;
+    return fontSource.missing(name);
+  }
+  return !fontByName(name);
+}
+
+// The open chapter's missing families, each with how many boxes are set in it,
+// most boxes first. One answer for the whole chapter, so nobody has to open
+// every box to find out a font did not come with the file.
+export function missingFonts(pages = app.pages) {
+  const count = new Map();
+  for (const p of pages ?? []) {
+    for (const b of p.boxes ?? []) {
+      const name = b.style?.font;
+      if (typeof name !== 'string' || !name) continue;
+      count.set(name, (count.get(name) ?? 0) + 1);
+    }
+  }
+  return [...count]
+    .filter(([name]) => fontMissing(name))
+    .map(([name, boxes]) => ({ name, boxes }))
+    .sort((a, b) => b.boxes - a.boxes || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export function fontCssFor(name) {
