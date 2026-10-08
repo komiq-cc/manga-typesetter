@@ -17,7 +17,7 @@
     placeDetectedInChapter,
     cancelChapterPlace,
   } from './store.svelte.js';
-  import { fontGroups, isFontOffered } from './font-menu.js';
+  import { fontGroups, fontCaveat } from './font-menu.js';
   import { untrack } from 'svelte';
   import {
     knownTags,
@@ -43,6 +43,7 @@
   } from './editor/field-undo.svelte.js';
   import { modKey } from './format.js';
   import ReviewList from './ReviewList.svelte';
+  import FontNotice from './FontNotice.svelte';
   import ColorPicker from './ColorPicker.svelte';
 
   const p = $derived(page());
@@ -283,6 +284,7 @@
     </div>
   {/if}
   <ReviewList />
+  <FontNotice />
   {#if p.lines.length === 0}
     <div class="qhint">
       No lines yet.<br />{translate
@@ -382,8 +384,8 @@
                   <label class="qtf-lbl" for="qtf-font-{line.n}">Font</label>
                   <select id="qtf-font-{line.n}" value={form.font} onchange={(e) => (form.font = e.currentTarget.value)}>
                     <option value="">-</option>
-                    {#if form.font && !isFontOffered(form.font)}
-                      <option value={form.font}>{form.font} (not in menus)</option>
+                    {#if fontCaveat(form.font)}
+                      <option value={form.font}>{form.font} ({fontCaveat(form.font)})</option>
                     {/if}
                     {#each fontGroups() as g (g.key)}
                       <optgroup label={g.label}>

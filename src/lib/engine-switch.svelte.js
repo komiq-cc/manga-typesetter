@@ -195,6 +195,17 @@ export function useTextEngine(mode) {
   return Promise.resolve();
 }
 
+/**
+ * Why the Rust engine counts `name` as missing, for the notice that lists it:
+ * 'compressed', 'unreadable' or 'absent'; null when it is not the one
+ * measuring or the name is not missing.
+ */
+export function whyFontMissing(name) {
+  if (engineSwitch.phase !== 'on' || !sync) return null;
+  app.fontsVersion;
+  return sync.whyMissing(name);
+}
+
 // ---- letters no face has ----
 // With the Rust engine measuring, a letter the box's face lacks is looked for
 // in the fallback chain, and one nothing in the chain has is measured as the
