@@ -7,6 +7,7 @@
 // family has its own width per letter (set from its name), so a measurement
 // made in the wrong family is a different number, not a coincidence.
 import { FACE_SLOTS } from '../lib/data.js';
+import { systemFaceAnswer } from './font-collection.js';
 
 // Bytes that say what kind of file they are; nothing reads past the tag.
 const tagged = (tag, fill = 7) => Uint8Array.from([...tag, fill, fill, fill, fill]);
@@ -25,8 +26,17 @@ export function widthOf(family) {
 }
 
 export function fakeRustEngine() {
-  // family -> { slot: { index, file } }, `file` being the bytes object handed in
+  // family -> { slot: { index, file, id } }, `file` being the bytes object
+  // handed in and `id` the name it was given under, if any
   const families = new Map();
+  // file id -> { bytes, faces }: the files held under a name, and how many
+  // faces read each. `copied` is every file that was taken in, in order.
+  const files = new Map();
+  const copied = [];
+  const release = (face) => {
+    const held = face?.id == null ? null : files.get(face.id);
+    if (held && --held.faces === 0) files.delete(face.id);
+  };
   const listeners = new Set();
   let fallbacks = [];
   const asked = [];
@@ -47,7 +57,9 @@ export function fakeRustEngine() {
   };
   const put = (family, slot, face) => {
     if (!families.has(family)) families.set(family, {});
+    const old = families.get(family)[slot];
     families.get(family)[slot] = face;
+    release(old);
   };
   return {
     id: 'rust',
@@ -68,24 +80,42 @@ export function fakeRustEngine() {
     },
     addFace(family, slot, bytes, index = 0) {
       refuse(family, bytes);
+      copied.push(bytes);
       put(family, slot, { index, file: bytes });
       changed();
     },
-    addFaces(family, bytes, faces) {
-      refuse(family, bytes);
-      for (const f of faces) put(family, f.slot, { index: f.index, file: bytes });
+    // As the adapter: a file held under `id` is not taken in again, and the
+    // faces read the copy that is there.
+    addFaces(family, bytes, faces, id = null) {
+      let held = id == null ? undefined : files.get(id);
+      if (!held && !bytes) throw new Error(`text engine: the file of ${family} is not held, and no bytes came with it`);
+      if (!held) {
+        refuse(family, bytes);
+        copied.push(bytes);
+        held = { bytes, faces: 0 };
+        if (id != null) files.set(id, held);
+      }
+      for (const f of faces) {
+        held.faces++;
+        put(family, f.slot, { index: f.index, file: held.bytes, id });
+      }
       changed();
     },
+    hasFile: (id) => files.has(id),
+    files: () => [...files.keys()],
     removeFace(family, slot) {
       const f = families.get(family);
       if (!f?.[slot]) return false;
+      release(f[slot]);
       delete f[slot];
       if (!Object.keys(f).length) families.delete(family);
       changed();
       return true;
     },
     removeFamily(family) {
+      const f = families.get(family);
       if (!families.delete(family)) return false;
+      for (const face of Object.values(f)) release(face);
       changed();
       return true;
     },
@@ -99,6 +129,8 @@ export function fakeRustEngine() {
 
     // For the assertions.
     families,
+    /** Every file whose bytes were taken in, in order: one entry per copy made. */
+    copied,
     /** Every family name a measurement was asked in, in order. */
     asked,
     registered: () => Object.fromEntries([...families].map(([name, f]) => [name, FACE_SLOTS.filter((s) => f[s])])),
@@ -113,6 +145,8 @@ export function fakeRustEngine() {
  */
 export function fakeNative(files = {}, { hold = false } = {}) {
   const calls = [];
+  // Every `system_font_face` answer, in order: a header alone is 40 bytes.
+  const answers = [];
   const waiting = [];
   const gate = () => (hold ? new Promise((resolve) => waiting.push(resolve)) : Promise.resolve());
   const invoke = async (cmd, args) => {
@@ -121,11 +155,9 @@ export function fakeNative(files = {}, { hold = false } = {}) {
     if (cmd === 'system_font_face') {
       const file = (files[args.family] ?? []).find((f) => args.slot in f.slots);
       if (!file) throw new Error(`no system font '${args.family}'`);
-      const out = new Uint8Array(16 + file.bytes.length);
-      const view = new DataView(out.buffer);
-      FACE_SLOTS.forEach((slot, i) => view.setInt32(i * 4, file.slots[slot] ?? -1, true));
-      out.set(file.bytes, 16);
-      return out.buffer;
+      const answer = systemFaceAnswer(file.slots, file.bytes, { known: args.known });
+      answers.push(answer);
+      return answer;
     }
     if (cmd === 'font_to_sfnt') {
       if (args[4] === 0xff) throw new Error('not a WOFF file');
@@ -134,6 +166,7 @@ export function fakeNative(files = {}, { hold = false } = {}) {
     throw new Error(`unknown command ${cmd}`);
   };
   invoke.calls = calls;
+  invoke.answers = answers;
   invoke.release = () => {
     for (const resolve of waiting.splice(0)) resolve();
   };

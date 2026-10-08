@@ -507,7 +507,7 @@ describe('system faces', () => {
     app.fonts.system = installed();
     await useTextEngine('rust');
     expect(engineSwitch).toMatchObject({ phase: 'on', lastResort: 'Helvetica Neue' });
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular' }]]);
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular', known: [] }]]);
     expect(engine.registered()).toEqual({ 'Helvetica Neue': ['regular', 'bold', 'italic', 'boldItalic'] });
     expect(new Set(Object.values(engine.families.get('Helvetica Neue')).map((f) => f.file)).size).toBe(1);
   });
@@ -522,7 +522,8 @@ describe('system faces', () => {
     // A chapter set in a system font opens: nothing of it is in the engine yet.
     loadProjectPages(doc([box('Zapfino')]));
     const b = page().boxes[0];
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular' }]]);
+    // The question says which file the engine holds already: the last resort's.
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular', known: [expect.stringMatching(/^[0-9a-f]{16}$/)] }]]);
     // Not measured into the document as the last resort: the height on file stands.
     expect(b.h).toBe(20);
     expect(fontNameFor('Zapfino')).toBe('Helvetica Neue');

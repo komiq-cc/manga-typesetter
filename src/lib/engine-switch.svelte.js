@@ -184,7 +184,7 @@ async function start() {
       engine: rust,
       fonts: app.fonts,
       os: deps.os(),
-      systemFace: invoke ? (family, slot) => invoke('system_font_face', { family, slot }) : null,
+      systemFace: invoke ? (family, slot, known) => invoke('system_font_face', { family, slot, known }) : null,
       // The bytes go as the raw body of the call and come back the same way: a
       // font as a JSON array of numbers is several times its own size.
       toSfnt: invoke ? (bytes) => invoke('font_to_sfnt', bytes) : null,

@@ -47,13 +47,17 @@ beforeEach(async () => {
 // The native side, serving the fixtures as this machine's installed fonts.
 function native(files) {
   const calls = [];
-  const systemFace = async (family, slot) => {
+  // How many bytes each answer was: a header alone is 40.
+  const sent = [];
+  const systemFace = async (family, slot, known) => {
     calls.push(`${family}/${slot}`);
     const file = (files[family] ?? []).find((f) => slot in f.slots);
     if (!file) throw new Error(`no font called '${family}' is installed on this computer`);
-    return systemFaceAnswer(file.slots, file.bytes);
+    const answer = systemFaceAnswer(file.slots, file.bytes, { known });
+    sent.push(answer.byteLength);
+    return answer;
   };
-  return { calls, systemFace };
+  return { calls, sent, systemFace };
 }
 
 describe('the adapter’s collection faces', () => {
@@ -87,6 +91,43 @@ describe('the adapter’s collection faces', () => {
     expect(shared).toBeGreaterThan(ttc.byteLength);
     expect(shared).toBeLessThan(ttc.byteLength * 1.5);
     expect(apart).toBeGreaterThan(ttc.byteLength * 2.9);
+  });
+
+  it('makes a second family’s faces beside the first’s when both name the file, with or without the bytes', () => {
+    const ttc = buildCollection([comic, bangers, dejavu]);
+    const held = () => engine.low.heapLive();
+    const empty = held();
+    engine.addFaces('One', ttc, [{ slot: 'regular', index: 0 }], 'file-a');
+    const once = held() - empty;
+    // Named and held: the bytes handed in again are not taken in again.
+    engine.addFaces('Two', ttc, [{ slot: 'regular', index: 1 }], 'file-a');
+    engine.addFaces('Three', null, [{ slot: 'regular', index: 2 }], 'file-a');
+    expect(held() - empty - once).toBeLessThan(ttc.byteLength / 4);
+    expect(engine.advance(face('One'), 'WAVE')).toBe(alone.comic);
+    expect(engine.advance(face('Two'), 'WAVE')).toBe(alone.bangers);
+    expect(engine.advance(face('Three'), 'WAVE')).toBe(alone.dejavu);
+    expect(engine.files()).toEqual(['file-a']);
+    // A face that is not in the file leaves nothing behind.
+    expect(() => engine.addFaces('Four', null, [{ slot: 'regular', index: 3 }], 'file-a')).toThrow('cannot read Four');
+    expect(engine.hasFamily('Four')).toBe(false);
+    // No bytes and no such file held: said, not guessed.
+    expect(() => engine.addFaces('Five', null, [{ slot: 'regular', index: 0 }], 'file-b')).toThrow('is not held');
+    // The same bytes under no name are a copy of their own, as before.
+    engine.addFaces('Six', ttc, [{ slot: 'regular', index: 0 }]);
+    expect(held() - empty - once).toBeGreaterThan(ttc.byteLength);
+    engine.removeFamily('Six');
+
+    // The file outlives the family it came with, and goes with the last face.
+    engine.removeFamily('One');
+    expect(engine.hasFile('file-a')).toBe(true);
+    expect(engine.advance(face('Three'), 'WAVE')).toBe(alone.dejavu);
+    engine.removeFace('Two', 'regular');
+    // Replacing a face counts as removing the one it replaced.
+    engine.addFace('Three', 'regular', comic);
+    expect(engine.hasFile('file-a')).toBe(false);
+    expect(engine.files()).toEqual([]);
+    engine.removeFamily('Three');
+    expect(held() - empty).toBeLessThan(ttc.byteLength / 4);
   });
 
   it('registers none of a collection when one index is out of range', () => {
@@ -166,6 +207,57 @@ describe('the sync, on real fonts', () => {
     // Two faces of one collection, each the right one.
     expect(measured(sync, 'Comic Bangers')).toBe(alone.comic);
     expect(measured(sync, 'Comic Bangers', { bold: true })).toBe(alone.bangers);
+  });
+
+  // Three families, one collection - as Helvetica and Helvetica Neue are one
+  // `.ttc` on a Mac. What the engine holds is read off its heap.
+  it('holds a collection once for every family in it, and until the last of them goes', async () => {
+    const ttc = buildCollection([comic, bangers, dejavu]);
+    const files = {
+      'DejaVu Sans': [{ slots: { regular: 2 }, bytes: ttc }],
+      'Comic Neue': [{ slots: { regular: 0 }, bytes: ttc }],
+      Bangers: [{ slots: { regular: 1 }, bytes: ttc }],
+    };
+    const fonts = { user: [], system: [sysEntry('Bangers', ['regular']), sysEntry('Comic Neue', ['regular']), sysEntry('DejaVu Sans', ['regular'])] };
+    const n = native(files);
+    const sync = createFontSync({ engine, fonts, os: 'linux', systemFace: n.systemFace });
+    const held = () => engine.low.heapLive();
+    const empty = held();
+
+    sync.refresh();
+    await sync.settled();
+    expect(sync.lastResort()).toBe('DejaVu Sans');
+    const once = held() - empty;
+    expect(once).toBeGreaterThan(ttc.byteLength);
+
+    sync.ready('Comic Neue');
+    sync.ready('Bangers');
+    await sync.settled();
+    // The file crossed once; the other two were told the engine has it.
+    expect(n.calls).toEqual(['DejaVu Sans/regular', 'Comic Neue/regular', 'Bangers/regular']);
+    expect(n.sent).toEqual([40 + ttc.byteLength, 40, 40]);
+    // Each family measures as its own face of the file...
+    expect(measured(sync, 'DejaVu Sans')).toBe(alone.dejavu);
+    expect(measured(sync, 'Comic Neue')).toBe(alone.comic);
+    expect(measured(sync, 'Bangers')).toBe(alone.bangers);
+    // ...and the three of them together hold little more than the first did.
+    expect(held() - empty - once).toBeLessThan(ttc.byteLength / 4);
+    expect(engine.files()).toHaveLength(1);
+
+    // The family the file came for is uninstalled: the others still read it.
+    fonts.system = fonts.system.filter((f) => f.name !== 'DejaVu Sans');
+    sync.refresh();
+    expect(engine.hasFamily('DejaVu Sans')).toBe(false);
+    expect(engine.advance(face('Comic Neue'), 'WAVE')).toBe(alone.comic);
+    expect(engine.advance(face('Bangers'), 'WAVE')).toBe(alone.bangers);
+    expect(held() - empty).toBeGreaterThan(ttc.byteLength);
+    expect(engine.files()).toHaveLength(1);
+
+    // The last of them goes, and the file with it.
+    fonts.system = [];
+    sync.refresh();
+    expect(engine.files()).toEqual([]);
+    expect(held() - empty).toBeLessThan(ttc.byteLength / 4);
   });
 
   it('looks for a letter the face lacks in the last resort, and reports what nothing has', async () => {

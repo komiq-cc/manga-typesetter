@@ -48,22 +48,44 @@ export function fontKind(bytes) {
 const asBytes = (data) =>
   data instanceof Uint8Array ? data : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
 
-// What `systemFace` answers with: four little-endian int32, one per slot in
-// FACE_SLOTS order, then the file. A slot's number is the index of its face
-// inside THIS file, or -1 when that slot's face is not in it. A collection
-// (Helvetica Neue.ttc holds all four) therefore crosses once, and the engine
-// keeps one copy of it for every face it gives.
-export const SYSTEM_FACE_HEADER = FACE_SLOTS.length * 4;
+// What `systemFace` answers with (src-tauri/src/system_fonts.rs, `FACE_HEADER`),
+// every number little-endian:
+//
+//    0  u32      the version of this layout, SYSTEM_FACE_VERSION
+//    4  i32 x 4  one per slot in FACE_SLOTS order: the index of that slot's
+//                face inside THIS file, or -1 when its face is not in it
+//   20  u8 x 8   the file's id, opaque
+//   28  u64      the file's length in bytes
+//   36  u32      flags; bit 0: the file follows
+//   40  ...      the file, when bit 0 is set
+//
+// The slots are why a collection crosses once for a family: Helvetica Neue.ttc
+// holds all four of its faces, and the engine keeps one copy for all of them.
+// The id is why it crosses once for every family in it: the question carries
+// the ids of the files the engine holds (`known`), and the answer for one of
+// those is the header alone.
+export const SYSTEM_FACE_VERSION = 2;
+export const SYSTEM_FACE_HEADER = 40;
 export function readSystemFace(buffer) {
-  const bytes = asBytes(buffer);
-  if (bytes.byteLength <= SYSTEM_FACE_HEADER) throw new Error('system font: empty answer');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const all = asBytes(buffer);
+  if (all.byteLength < 4) throw new Error('system font: empty answer');
+  const view = new DataView(all.buffer, all.byteOffset, all.byteLength);
+  const version = view.getUint32(0, true);
+  // Another layout is not guessed at: a font read at the wrong offset is a
+  // font that fails to parse at best.
+  if (version !== SYSTEM_FACE_VERSION) throw new Error(`system font: answer of version ${version}, and this reads version ${SYSTEM_FACE_VERSION}`);
+  if (all.byteLength < SYSTEM_FACE_HEADER) throw new Error('system font: empty answer');
   const faces = [];
   FACE_SLOTS.forEach((slot, i) => {
-    const index = view.getInt32(i * 4, true);
+    const index = view.getInt32(4 + i * 4, true);
     if (index >= 0) faces.push({ slot, index });
   });
-  return { faces, bytes: bytes.subarray(SYSTEM_FACE_HEADER) };
+  const file = [...all.subarray(20, 28)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const size = Number(view.getBigUint64(28, true));
+  if (!(view.getUint32(36, true) & 1)) return { faces, file, size, bytes: null };
+  const bytes = all.subarray(SYSTEM_FACE_HEADER);
+  if (!bytes.byteLength || bytes.byteLength !== size) throw new Error('system font: the answer does not hold the file it says it does');
+  return { faces, file, size, bytes };
 }
 
 /**
@@ -71,9 +93,10 @@ export function readSystemFace(buffer) {
  * @param {object} with.engine the Rust adapter (rust.js)
  * @param {{ user: object[], system: object[] }} with.fonts the app's lists, read live
  * @param {string | null} with.os 'macos' | 'windows' | 'linux' | null (last-resort.js)
- * @param {((family: string, slot: string) => Promise<ArrayBuffer>) | null} [with.systemFace]
- *   bytes of one system face, as `readSystemFace` reads them; null where there
- *   are no system fonts to ask for (a plain browser)
+ * @param {((family: string, slot: string, known: string[]) => Promise<ArrayBuffer>) | null} [with.systemFace]
+ *   the file of one system face, as `readSystemFace` reads it; `known` is the
+ *   ids of the files the engine holds, which need not be sent again. Null
+ *   where there are no system fonts to ask for (a plain browser)
  * @param {((bytes: Uint8Array) => Promise<ArrayBuffer | Uint8Array>) | null} [with.toSfnt]
  *   WOFF / WOFF2 to a plain font; null where nothing can decode one
  * @param {(family: string) => void} [with.onArrival] bytes that were on their
@@ -246,18 +269,35 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     const got = new Set();
     for (const slot of want) {
       if (got.has(slot)) continue;
-      const { faces, bytes } = readSystemFace(await systemFace(name, slot));
-      const mine = faces.filter((f) => want.includes(f.slot) && !got.has(f.slot));
+      const answer = readSystemFace(await systemFace(name, slot, engine.files()));
+      const mine = answer.faces.filter((f) => want.includes(f.slot) && !got.has(f.slot));
       if (!mine.some((f) => f.slot === slot)) throw new Error(`the answer for ${slot} does not hold it`);
       for (const f of mine) got.add(f.slot);
-      files.push({ bytes, faces: mine });
+      files.push({ slot, file: answer.file, bytes: answer.bytes, faces: mine });
+    }
+    // A file that was not sent because the engine held it has to be held
+    // still: the family it was held for may have gone while the others were
+    // on their way. Asked for again, this time saying nothing is known, so it
+    // comes; each round turns at least one such file into bytes, so it ends.
+    for (;;) {
+      const gone = files.filter((f) => !f.bytes && !engine.hasFile(f.file));
+      if (!gone.length) break;
+      for (const f of gone) {
+        const answer = readSystemFace(await systemFace(name, f.slot, []));
+        if (!answer.bytes) throw new Error(`the file for ${f.slot} was not sent`);
+        f.file = answer.file;
+        f.bytes = answer.bytes;
+      }
     }
     // The user's own font took the name while these were on the way.
     if (system.get(name) !== rec || disposed) return false;
-    // What the engine had of it from before its files moved goes now, whole:
-    // a slot the family no longer has must not outlive the file it came from.
-    if (stale.delete(name)) engine.removeFamily(name);
-    for (const file of files) engine.addFaces(name, file.bytes, file.faces);
+    // New faces in first, then what is left of the old: a file the family had
+    // before its files moved, and still has, is held through the change by
+    // the faces being replaced, so it is not sent for a second time.
+    const before = stale.delete(name) ? engine.facesOf(name) : [];
+    for (const f of files) engine.addFaces(name, f.bytes, f.faces, f.file);
+    // A slot the family no longer has must not outlive the file it came from.
+    for (const slot of before) if (!got.has(slot)) engine.removeFace(name, slot);
     return true;
   }
 

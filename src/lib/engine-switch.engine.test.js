@@ -56,7 +56,7 @@ function fakeInvoke() {
     if (cmd !== 'system_font_face') throw new Error(`unexpected command ${cmd}`);
     const file = (FILES[args.family] ?? []).find((f) => args.slot in f.slots);
     if (!file) throw new Error(`no font called '${args.family}' is installed on this computer`);
-    return systemFaceAnswer(file.slots, file.bytes);
+    return systemFaceAnswer(file.slots, file.bytes, { known: args.known });
   };
   invoke.calls = calls;
   return invoke;

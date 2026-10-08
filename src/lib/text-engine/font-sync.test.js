@@ -17,7 +17,7 @@ function setup({ system = [], files = {}, os = 'macos', native = true, hold = fa
     engine,
     fonts,
     os,
-    systemFace: native ? (family, slot) => invoke('system_font_face', { family, slot }) : null,
+    systemFace: native ? (family, slot, known) => invoke('system_font_face', { family, slot, known }) : null,
     toSfnt: native ? (bytes) => invoke('font_to_sfnt', bytes) : null,
     onArrival,
   });
@@ -38,17 +38,45 @@ describe('what a font file is', () => {
 });
 
 describe('the answer of the system face command', () => {
-  it('is four face indexes, one per slot, then the file', () => {
-    const buf = new Uint8Array(16 + 3);
+  // Written out byte by byte, as system_fonts.rs writes it.
+  const answer = ({ version = 2, slots = [2, -1, 0, -1], id = [0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 0xff], size = 3, flags = 1, file = [9, 8, 7] } = {}) => {
+    const buf = new Uint8Array(40 + file.length);
     const view = new DataView(buf.buffer);
-    [2, -1, 0, -1].forEach((n, i) => view.setInt32(i * 4, n, true));
-    buf.set([9, 8, 7], 16);
-    const { faces, bytes } = readSystemFace(buf.buffer);
+    view.setUint32(0, version, true);
+    slots.forEach((n, i) => view.setInt32(4 + i * 4, n, true));
+    buf.set(id, 20);
+    view.setBigUint64(28, BigInt(size), true);
+    view.setUint32(36, flags, true);
+    buf.set(file, 40);
+    return buf.buffer;
+  };
+
+  it('is a version, four face indexes, the file’s id and length, a flag, then the file', () => {
+    const { faces, file, size, bytes } = readSystemFace(answer());
     expect(faces).toEqual([{ slot: 'regular', index: 2 }, { slot: 'italic', index: 0 }]);
+    expect(file).toBe('deadbeef000102ff');
+    expect(size).toBe(3);
     expect([...bytes]).toEqual([9, 8, 7]);
   });
-  it('refuses an answer with no file in it', () => {
-    expect(() => readSystemFace(new ArrayBuffer(16))).toThrow('empty answer');
+  it('is the header alone for a file the engine was said to hold', () => {
+    const { faces, file, size, bytes } = readSystemFace(answer({ flags: 0, size: 70_000_000, file: [] }));
+    expect(faces).toEqual([{ slot: 'regular', index: 2 }, { slot: 'italic', index: 0 }]);
+    expect(file).toBe('deadbeef000102ff');
+    expect(size).toBe(70_000_000);
+    expect(bytes).toBe(null);
+  });
+  it('refuses a layout it does not know, the one before this included', () => {
+    // Version 1 had no version: its first four bytes were the regular's index.
+    const v1 = new Uint8Array(16 + 3);
+    new DataView(v1.buffer).setInt32(4, -1, true);
+    expect(() => readSystemFace(v1.buffer)).toThrow('answer of version 0, and this reads version 2');
+    expect(() => readSystemFace(answer({ version: 3 }))).toThrow('answer of version 3');
+  });
+  it('refuses an answer that says a file follows and holds none, or not all of it', () => {
+    expect(() => readSystemFace(new ArrayBuffer(0))).toThrow('empty answer');
+    expect(() => readSystemFace(answer().slice(0, 30))).toThrow('empty answer');
+    expect(() => readSystemFace(answer({ file: [] }))).toThrow('does not hold the file');
+    expect(() => readSystemFace(answer({ size: 4 }))).toThrow('does not hold the file');
   });
 });
 
@@ -239,7 +267,7 @@ describe('system faces', () => {
     });
     sync.refresh();
     await sync.settled();
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica', slot: 'regular' }]]);
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica', slot: 'regular', known: [] }]]);
   });
 
   it('are sent for on the first question, and the family is not ready until they are in', async () => {
@@ -253,7 +281,7 @@ describe('system faces', () => {
     // Asked again, by every box set in it: one request.
     sync.ready('Zapfino');
     sync.nameFor('Zapfino');
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular' }]]);
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular', known: [] }]]);
     expect(engine.registered()).toEqual({});
     invoke.release();
     await sync.settled();
@@ -268,7 +296,7 @@ describe('system faces', () => {
     const { engine, invoke, sync } = setup({ system: [sysEntry('Helvetica Neue', ['regular', 'bold', 'italic', 'boldItalic'])], files: helvetica() });
     sync.ready('Helvetica Neue');
     await sync.settled();
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular' }]]);
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular', known: [] }]]);
     const fam = engine.families.get('Helvetica Neue');
     expect(Object.fromEntries(Object.entries(fam).map(([slot, f]) => [slot, f.index]))).toEqual({ regular: 0, bold: 1, italic: 2, boldItalic: 4 });
     expect(new Set(Object.values(fam).map((f) => f.file)).size).toBe(1);
@@ -321,6 +349,145 @@ describe('system faces', () => {
     await sync.settled();
     expect(sync.nameFor('Ghost')).toBe('Ghost');
     expect(invoke.calls.filter((c) => c[1].family === 'Ghost')).toHaveLength(2);
+  });
+
+  // Helvetica and Helvetica Neue are one `.ttc` on a Mac, and so are most CJK
+  // families and their siblings. The native side names the file in each
+  // answer, and the sync says which files the engine holds when it asks.
+  describe('two families in one file', () => {
+    const shared = () => {
+      const ttc = TTC();
+      return {
+        'Helvetica Neue': [{ slots: { regular: 0, bold: 1 }, bytes: ttc }],
+        Helvetica: [{ slots: { regular: 2 }, bytes: ttc }, { slots: { bold: 0 }, bytes: OTF() }],
+      };
+    };
+    const both = () => [sysEntry('Helvetica', ['regular', 'bold']), sysEntry('Helvetica Neue', ['regular', 'bold'])];
+    const sizes = (invoke) => invoke.answers.map((a) => a.byteLength);
+    const known = (invoke) => invoke.calls.map(([, args]) => `${args.family}/${args.slot} knowing ${args.known.length}`);
+
+    it('cross once: the second family is told the file is held, and reads the copy that is there', async () => {
+      const { engine, invoke, sync } = setup({ system: both(), files: shared() });
+      sync.refresh();
+      await sync.settled();
+      expect(sync.lastResort()).toBe('Helvetica Neue');
+      expect(engine.copied).toHaveLength(1);
+      sync.ready('Helvetica');
+      await sync.settled();
+      expect(known(invoke)).toEqual(['Helvetica Neue/regular knowing 0', 'Helvetica/regular knowing 1', 'Helvetica/bold knowing 1']);
+      // The collection came once; the second answer about it is a header.
+      expect(sizes(invoke)).toEqual([40 + 8, 40, 40 + 8]);
+      expect(engine.copied).toHaveLength(2);
+      expect(engine.registered()).toEqual({ 'Helvetica Neue': ['regular', 'bold'], Helvetica: ['regular', 'bold'] });
+      const neue = engine.families.get('Helvetica Neue');
+      const plain = engine.families.get('Helvetica');
+      expect(plain.regular.file).toBe(neue.regular.file);
+      expect(plain.regular.index).toBe(2);
+      expect(plain.bold.file).not.toBe(neue.regular.file);
+      expect(sync.ready('Helvetica')).toBe(true);
+    });
+
+    it('keep the file until the last of them is gone', async () => {
+      const t = setup({ system: both(), files: shared() });
+      t.sync.refresh();
+      t.sync.ready('Helvetica');
+      await t.sync.settled();
+      const [ttc] = t.engine.files();
+      expect(t.engine.files()).toHaveLength(2);
+      t.fonts.system = [sysEntry('Helvetica', ['regular', 'bold'])];
+      t.sync.refresh();
+      expect(t.engine.registered()).toEqual({ Helvetica: ['regular', 'bold'] });
+      expect(t.engine.hasFile(ttc)).toBe(true);
+      t.fonts.system = [];
+      t.sync.refresh();
+      expect(t.engine.files()).toEqual([]);
+    });
+
+    it('asked for at the same moment both get the file, and the engine keeps one copy', async () => {
+      const { engine, invoke, sync } = setup({ system: both(), files: shared(), hold: true });
+      sync.refresh();
+      sync.ready('Helvetica');
+      await vi.waitFor(() => expect(invoke.calls).toHaveLength(2));
+      invoke.release();
+      await vi.waitFor(() => expect(invoke.calls).toHaveLength(3));
+      invoke.release();
+      await sync.settled();
+      expect(sizes(invoke)).toEqual([40 + 8, 40 + 8, 40 + 8]);
+      // Three files crossed, two were taken in: the collection once.
+      expect(engine.copied).toHaveLength(2);
+      expect(engine.files()).toHaveLength(2);
+      expect(engine.families.get('Helvetica').regular.file).toBe(engine.families.get('Helvetica Neue').regular.file);
+    });
+
+    it('send for the file after all when the family it was held for went meanwhile', async () => {
+      const t = setup({ system: both(), files: shared(), hold: true });
+      t.sync.refresh();
+      await vi.waitFor(() => expect(t.invoke.calls).toHaveLength(1));
+      t.invoke.release();
+      await t.sync.settled();
+      t.invoke.calls.length = 0;
+      t.invoke.answers.length = 0;
+
+      t.sync.ready('Helvetica');
+      await vi.waitFor(() => expect(t.invoke.calls).toHaveLength(1));
+      // Helvetica Neue is uninstalled while Helvetica's answer is on its way.
+      t.fonts.system = [sysEntry('Helvetica', ['regular', 'bold'])];
+      t.sync.refresh();
+      expect(t.engine.files()).toEqual([]);
+      for (const calls of [2, 3]) {
+        t.invoke.release();
+        await vi.waitFor(() => expect(t.invoke.calls).toHaveLength(calls));
+      }
+      t.invoke.release();
+      await t.sync.settled();
+      expect(known(t.invoke)).toEqual(['Helvetica/regular knowing 1', 'Helvetica/bold knowing 0', 'Helvetica/regular knowing 0']);
+      expect(sizes(t.invoke)).toEqual([40, 40 + 8, 40 + 8]);
+      expect(t.engine.registered()).toEqual({ Helvetica: ['regular', 'bold'] });
+      expect(t.sync.ready('Helvetica')).toBe(true);
+      expect(t.sync.missing('Helvetica')).toBe(false);
+    });
+
+    it('read again after one of its files moved, a family is not sent the file that did not', async () => {
+      const files = shared();
+      const stamped = (stamp) => [{ ...sysEntry('Helvetica', ['regular', 'bold']), stamp }, { ...sysEntry('Helvetica Neue', ['regular', 'bold']), stamp: 'same' }];
+      const t = setup({ system: stamped('one'), files });
+      t.sync.refresh();
+      t.sync.ready('Helvetica');
+      await t.sync.settled();
+      t.invoke.calls.length = 0;
+      t.invoke.answers.length = 0;
+      // Helvetica's bold, the file of its own, was updated.
+      files.Helvetica[1] = { slots: { bold: 0 }, bytes: OTF() };
+      t.fonts.system = stamped('two');
+      t.sync.refresh();
+      t.sync.ready('Helvetica');
+      await t.sync.settled();
+      expect(known(t.invoke)).toEqual(['Helvetica/regular knowing 2', 'Helvetica/bold knowing 2']);
+      expect(sizes(t.invoke)).toEqual([40, 40 + 8]);
+      expect(t.engine.registered().Helvetica).toEqual(['regular', 'bold']);
+      // The collection, the old bold, the new bold.
+      expect(t.engine.copied).toHaveLength(3);
+      expect(t.engine.files()).toHaveLength(2);
+    });
+
+    it('read again, a family keeps its own file through the change though nobody else holds it', async () => {
+      // The file is held by nobody else: the family's own old faces keep it
+      // while the new ones are made beside them.
+      const ttc = TTC();
+      const files = { Zapfino: [{ slots: { regular: 0 }, bytes: ttc }] };
+      const t = setup({ system: [{ ...sysEntry('Zapfino'), stamp: 'one' }], files });
+      t.sync.ready('Zapfino');
+      await t.sync.settled();
+      files.Zapfino = [{ slots: { regular: 0, bold: 1 }, bytes: ttc }];
+      t.fonts.system = [{ ...sysEntry('Zapfino', ['regular', 'bold']), stamp: 'one' }];
+      t.sync.refresh();
+      t.sync.ready('Zapfino');
+      await t.sync.settled();
+      expect(sizes(t.invoke)).toEqual([40 + 8, 40]);
+      expect(t.engine.copied).toHaveLength(1);
+      expect(t.engine.registered().Zapfino).toEqual(['regular', 'bold']);
+      expect(t.engine.files()).toHaveLength(1);
+    });
   });
 
   describe('after another scan', () => {
