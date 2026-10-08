@@ -2,9 +2,12 @@
 // The `textEngine` preference, applied: 'browser' is the canvas and the DOM,
 // as the app has always measured; 'rust' is the Rust text engine
 // (text-engine/, WebAssembly) measuring from the bytes of the user's own
-// fonts and the machine's. Only measurement moves. The exporter and the
-// editor still draw with the browser, so every font stays registered with it
-// exactly as before, and with the switch off nothing in here runs at all.
+// fonts and the machine's. The engine that measures also draws: its glyph
+// painter is installed with it and taken out with it (`paintWith`), so the
+// export, the PSD's rasters and the editor's pictures of a box are painted
+// from the same outlines the lines were broken with. Typing is still the
+// browser's, so every font stays registered with it exactly as before, and
+// with the switch off nothing in here runs at all.
 //
 // Turning it on, in order - each step waits for the one before:
 //
@@ -20,16 +23,17 @@
 //   4. every user face the session has loaded, handed to the engine, and from
 //      here every add, replace and removal as fonts.js reports it.
 //   5. the last-resort family (text-engine/last-resort.js), sent for and in.
-//   6. the engine is installed, the store is told how names resolve, and
-//      everything is laid out again, once (`noteFontsChanged`).
+//   6. the engine is installed and its painter with it, the store is told
+//      how names resolve, and everything is laid out again, once
+//      (`noteFontsChanged`).
 //
 // A system family is not part of that: its bytes are sent for the first time
 // a box uses it (text-engine/font-sync.js), and its boxes wait as in step 1.
 //
 // With no last resort there is no family the engine can answer for - a plain
-// browser with no user fonts - and then no engine is installed at all:
-// measurement is the stand-in it is wherever there is no engine, and nothing
-// is written from it.
+// browser with no user fonts - and then no engine is installed at all, and no
+// painter: measurement is the stand-in it is wherever there is no engine,
+// nothing is written from it, and what is drawn is drawn by the browser.
 //
 // Not imported by anything on the measuring path (store, measure.js,
 // fonts.js): prefs.svelte.js applies the preference through here, and the UI
@@ -37,8 +41,9 @@
 import { app, setFontSource, noteFontsChanged, toast, boxText } from './store.svelte.js';
 import { watchUserFaces, fontsBooted, loadedFaceRecords } from './fonts.js';
 import { faceFor, applyCase } from './measure.js';
-import { textEngine, setTextEngine } from './text-engine/index.js';
+import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { createRustTextEngine } from './text-engine/rust.js';
+import { createRustGlyphPainter } from './text-engine/rust-painter.js';
 import { createFontSync } from './text-engine/font-sync.js';
 import { osOf } from './text-engine/last-resort.js';
 import { engineWasmUrl, fetchEngineWasm } from './text-engine/wasm.js';
@@ -53,6 +58,7 @@ async function tauriInvoke() {
 const REAL = {
   available: () => !!engineWasmUrl,
   createEngine: async () => createRustTextEngine(await fetchEngineWasm()),
+  createPainter: (engine) => createRustGlyphPainter(engine),
   invoke: tauriInvoke,
   booted: fontsBooted,
   records: loadedFaceRecords,
@@ -72,6 +78,12 @@ export const engineSwitch = $state({
   error: '',
   // The family a missing font is measured in, for Settings to name.
   lastResort: null,
+  // Whether the Rust engine is the one drawing glyphs right now: it is
+  // installed for measuring and its painter is the glyph painter. Written only
+  // by `paintWith`, in the same breath as the painter itself, so it cannot say
+  // one thing while the painter is another. The editor shows a box as the
+  // engine's picture exactly while this is true (TextBox.svelte).
+  painting: false,
 });
 
 let generation = 0;
@@ -80,12 +92,35 @@ let rust = null;
 let sync = null;
 // What was measuring before, to put back.
 let before = null;
+// The Rust painter while it is the one installed, and what was drawing before
+// it, to put back.
+let painter = null;
+let painterBefore = null;
+
+// The painter follows the engine: in when `engine` is the one measuring, out
+// when nothing of ours is. A new one each time it goes in, and the reference
+// dropped when it comes out, so the scratch canvas and the pattern tiles it
+// keeps are not held by a session that turned the switch off.
+function paintWith(engine) {
+  if (engine && !painter) {
+    painterBefore = glyphPainter();
+    painter = deps.createPainter(engine);
+    setGlyphPainter(painter);
+  } else if (!engine && painter) {
+    // Only our own: a painter somebody installed since is theirs to remove.
+    if (glyphPainter() === painter) setGlyphPainter(painterBefore);
+    painter = null;
+    painterBefore = null;
+  }
+  engineSwitch.painting = !!painter && glyphPainter() === painter;
+}
 
 function apply() {
   const resort = sync.lastResort();
   engineSwitch.lastResort = resort;
   const want = resort ? rust : null;
   if (textEngine() !== want) setTextEngine(want);
+  paintWith(want);
 }
 
 // Bytes that were on their way have landed, or will not.
@@ -106,6 +141,7 @@ function leave(phase, error = '') {
   engineSwitch.error = error;
   engineSwitch.lastResort = null;
   if (was === 'on') setTextEngine(before);
+  paintWith(null);
   // Also from 'starting': the fits the gate held back are owed.
   if (was === 'on' || was === 'starting') noteFontsChanged();
 }
