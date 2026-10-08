@@ -70,6 +70,13 @@ export function createRustGlyphPainter(rust, options = {}) {
     // still apply to it as they would to drawn text.
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // Pixel for pixel means unfiltered. The exporter's canvases ask for
+    // `imageSmoothingQuality = 'high'`, and Skia then resamples even a
+    // one-to-one copy with a cubic that reaches one pixel to each side: every
+    // edge is softened, and the column beside the copied rectangle, which in
+    // a reused scratch holds an earlier job's pixels, leaks into the last
+    // column drawn as a faint line.
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(cnv, 0, 0, width, height, x, y, width, height);
     ctx.restore();
     if (keep) scratch = cnv;

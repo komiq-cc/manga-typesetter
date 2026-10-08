@@ -136,6 +136,30 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     expect(blue).toBeGreaterThan(200);
   });
 
+  it('lands pixel for pixel on a canvas that smooths, with nothing of an earlier job beside it', () => {
+    // The exporter's canvases set the smoothing quality to high. A wide job
+    // with a band first, so the kept scratch holds ink to the right of where
+    // the narrow job's raster ends.
+    const wide = job({ bands: [{ color: '#ffffff', opacity: 1, line: 6 }], runs: [{ text: 'WAIT WHAT', x: 20, y: 60 }] });
+    const narrow = job({ runs: [{ text: 'WAIT', x: 20, y: 60 }] });
+    const pixels = (painter, prepare) => {
+      const { canvas } = drawn(painter, narrow, { prepare });
+      return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    };
+    const used = createRustGlyphPainter(rust);
+    drawn(used, wide);
+    const smoothed = pixels(used, (c) => {
+      c.imageSmoothingEnabled = true;
+      c.imageSmoothingQuality = 'high';
+    });
+    const plain = pixels(createRustGlyphPainter(rust), (c) => {
+      c.imageSmoothingEnabled = false;
+    });
+    let differing = 0;
+    for (let i = 0; i < plain.length; i++) if (plain[i] !== smoothed[i]) differing++;
+    expect(differing).toBe(0);
+  });
+
   it('draws a synthesised bold the way the engine measured it', () => {
     const bold = job({ face: face('Bangers', 40, true), runs: [{ text: 'IIII', x: 20, y: 60 }] });
     const width = (c) => {
