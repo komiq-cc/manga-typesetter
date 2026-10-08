@@ -180,6 +180,11 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     }
   });
 
+  it('is refused a job buffer no job could need, and paints the next job', () => {
+    expect(rust.low.exports.mt_paint_job_reserve(0xffffffff)).toBe(0);
+    expect(ink(drawn(createRustGlyphPainter(rust), job()).canvas)).not.toBe(null);
+  });
+
   it('refuses a job whose font the engine does not have', () => {
     expect(() => drawn(createRustGlyphPainter(rust), job({ face: face('Nobody Sans', 40) }))).toThrow(/not registered/);
   });

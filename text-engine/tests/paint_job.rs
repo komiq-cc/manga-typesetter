@@ -195,6 +195,42 @@ fn letter_spacing_moves_each_glyph_and_counts_after_the_last_one() {
     let mid = f64::from(centre.0 + centre.2) / 2.0;
     let want = 200.0 + (ink.right - ink.left - ink.width) / 2.0 - 5.0;
     assert!((mid - want).abs() < 0.75, "{mid} vs {want}");
+
+    // Every glyph, not only the ends: the boxes above would be the same if
+    // the middle H had stayed where it is without spacing. An H is one run
+    // of inked columns (its bar joins its stems), so the picture has three,
+    // each the same width and a glyph's advance plus the gap after the last.
+    let raster = paint(&mut e, &request(spaced(Align::Left), face));
+    let inked_column = |x: u32| {
+        (0..raster.height).any(|y| raster.data[((y * raster.width + x) * 4 + 3) as usize] >= 128)
+    };
+    let mut letters: Vec<(u32, u32)> = Vec::new();
+    for x in 0..raster.width {
+        match (inked_column(x), letters.last_mut()) {
+            (true, Some(last)) if last.1 == x => last.1 = x + 1,
+            (true, _) => letters.push((x, x + 1)),
+            _ => {}
+        }
+    }
+    assert_eq!(letters.len(), 3, "{letters:?}");
+    let pitch = ink.width / 3.0 + 10.0;
+    let one = e.line_ink(face, "H").unwrap();
+    for (k, &(from, to)) in letters.iter().enumerate() {
+        let left = 200.0 - one.left + k as f64 * pitch;
+        let got = f64::from(raster.x) + f64::from(from);
+        assert!(
+            (got - left).abs() <= 1.0,
+            "letter {k} starts at {got}, not {left}"
+        );
+        let width = f64::from(to - from);
+        assert!(
+            (width - (one.left + one.right)).abs() <= 1.5,
+            "letter {k} is {width} wide"
+        );
+    }
+    // The same line unspaced has its middle letter a gap further left.
+    let plain = paint(&mut e, &request(job(vec![run("HHH", 200.0, 100.0)]), face));
+    assert_eq!(plain.width + 20, raster.width);
 }
 
 #[test]
@@ -251,6 +287,30 @@ fn a_surface_beyond_the_guard_is_refused() {
     r.transform = Affine([8.0, 0.0, 0.0, 8.0, 0.0, 0.0]);
     let ok = paint(&mut e, &r);
     assert!(ok.width <= MAX_SIDE && ok.height <= MAX_SIDE);
+}
+
+#[test]
+fn a_scene_and_a_job_buffer_beyond_the_guards_are_refused() {
+    use mt_text::abi_paint::{mt_paint_job, mt_paint_job_reserve, MAX_JOB_BYTES};
+    use mt_text::paint::Scene;
+    // A scene's surface passes the guard a job's does: each side, and the
+    // pixels. 16384 x 16384 has sides that pass and a gigabyte of pixels.
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    assert!(Scene::new(16384, 16384, identity).is_err());
+    assert!(Scene::new(16385, 1, identity).is_err());
+    assert!(Scene::new(8192, 8192, identity).is_ok());
+
+    // A job buffer larger than any job is refused with a null pointer, and
+    // the next call is served as if nothing had happened.
+    assert!(mt_paint_job_reserve(usize::MAX).is_null());
+    assert!(mt_paint_job_reserve(MAX_JOB_BYTES + 1).is_null());
+    let bytes = wire(77, "abc");
+    let ptr = mt_paint_job_reserve(bytes.len());
+    assert!(!ptr.is_null());
+    // SAFETY: `ptr` is the engine's job buffer, at least `bytes.len()` long.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
+    // Font 77 was never added: the job is read and refused for that, -2.
+    assert_eq!(mt_paint_job(bytes.len()), -2);
 }
 
 #[test]

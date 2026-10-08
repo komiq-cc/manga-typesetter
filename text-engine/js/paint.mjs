@@ -272,6 +272,7 @@ export function paintJob(engine, request) {
   }
   const bytes = encodeJob(request)
   const ptr = ex.mt_paint_job_reserve(bytes.length)
+  if (!ptr) throw new Error(`mt-text: paintJob: the engine refused a job of ${bytes.length} bytes`)
   // Views over wasm memory are made after the last call that can grow it.
   new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes)
   const code = ex.mt_paint_job(bytes.length)

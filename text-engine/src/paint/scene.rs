@@ -12,7 +12,7 @@ use super::outline::FLATTEN_TOLERANCE;
 use super::raster::Exact;
 use super::shade::Shader;
 use super::shape::shape_run;
-use super::{finish, plan, BoldDraw, Glyphs, Planned, MAX_SIDE};
+use super::{finish, plan, BoldDraw, Glyphs, Planned, MAX_PIXELS, MAX_SIDE};
 use crate::engine::{Engine, Face};
 use crate::Error;
 
@@ -36,7 +36,13 @@ impl Scene {
     /// A transparent surface of `width` x `height` device pixels. `matrix` is
     /// the canvas `setTransform(a, b, c, d, e, f)` that maps user space to it.
     pub fn new(width: u32, height: u32, matrix: [f32; 6]) -> Result<Self, Error> {
-        if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+        // The same guard a job's surface passes: a side, and the pixels.
+        if width == 0
+            || height == 0
+            || width > MAX_SIDE
+            || height > MAX_SIDE
+            || width as usize * height as usize > MAX_PIXELS
+        {
             return Err(Error::BadSpec);
         }
         if matrix.iter().any(|v| !v.is_finite()) {
