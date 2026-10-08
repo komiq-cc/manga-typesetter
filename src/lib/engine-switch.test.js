@@ -164,14 +164,45 @@ describe('the switch', () => {
     expect(engine.registered()).toEqual({});
   });
 
-  it('loads the wasm once however often it is flipped', async () => {
+  it('compiles the wasm once however often it is flipped, and makes a new engine of it each time it goes on', async () => {
+    const MODULE = { compiled: true };
+    const compile = vi.fn(async () => MODULE);
+    const made = [];
+    createEngine.mockImplementation(async () => {
+      made.push(fakeRustEngine());
+      return made.at(-1);
+    });
+    deps({ compile });
     await addFontFile(fontFile('WildWords.ttf'));
     await useTextEngine('rust');
+    expect(textEngine()).toBe(made[0]);
     await useTextEngine('browser');
     await useTextEngine('rust');
-    expect(createEngine).toHaveBeenCalledTimes(1);
-    expect(textEngine()).toBe(engine);
-    expect(engine.registered()).toEqual({ WildWords: ['regular'] });
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(createEngine.mock.calls).toEqual([[MODULE], [MODULE]]);
+    expect(made).toHaveLength(2);
+    expect(textEngine()).toBe(made[1]);
+    expect(made[1].registered()).toEqual({ WildWords: ['regular'] });
+    // The first one is finished with: nothing was put into it again.
+    expect(made[0].registered()).toEqual({});
+    // And the letters it was asked about are asked of the new one.
+    expect(lettersMissing(styleFor('WildWords'), 'あ')).toEqual([0x3042]);
+    expect(made[1].asked).toContain('WildWords');
+    expect(made[0].asked).not.toContain('WildWords');
+  });
+
+  it('compiles again after a compile that failed', async () => {
+    const compile = vi.fn(async () => ({}));
+    compile.mockRejectedValueOnce(new Error('the text engine could not be read (404)'));
+    deps({ compile });
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    expect(engineSwitch).toMatchObject({ phase: 'failed', error: 'the text engine could not be read (404)' });
+    expect(createEngine).not.toHaveBeenCalled();
+    await useTextEngine('browser');
+    await useTextEngine('rust');
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(engineSwitch.phase).toBe('on');
   });
 
   it('says so when the engine cannot start, keeps the browser, and tries again when asked again', async () => {

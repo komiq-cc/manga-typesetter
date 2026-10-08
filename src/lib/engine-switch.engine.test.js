@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { rustEngine, fixtureFont } from '../test/rust-engine.js';
+import v8 from 'node:v8';
+import vm from 'node:vm';
+import { rustEngine, fixtureFont, engineWasm } from '../test/rust-engine.js';
 import { buildCollection, systemFaceAnswer } from '../test/font-collection.js';
 import {
   app, loadProjectPages, page, autoFitBox, fontNameFor, fontCssFor, fontMissing, missingFonts, placeActiveAt, boxEdited, recordEdit, fitGeom, cloneStyle,
@@ -7,6 +9,7 @@ import {
 import { initHistory, resetHistory, undo, redo, peekStack } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, boxesMissingLetters, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
+import { createRustTextEngine } from './text-engine/rust.js';
 import { addFontFile, removeUserFont, systemFontEntry, watchUserFaces } from './fonts.js';
 import {
   canMeasure, lineWidth, fontMetrics, faceFor, layoutLines, applyCase, contentWidth, textInset, setTypesetEnabled, typesetEnabled, clearLayoutMemo,
@@ -219,6 +222,54 @@ describe('switched on, the app measures with the engine and the fonts it was han
     expect(held - engine.low.heapLive()).toBeGreaterThan(bangers.byteLength + dejavu.byteLength);
     expect(fontNameFor('No Such Font')).toBe('Comic Neue');
     expect(fontMissing('Bangers')).toBe(false);
+  });
+
+  // The instance is the engine's heap, and a wasm memory never shrinks: only
+  // letting go of the instance gives it back. Asked of the collector, through
+  // the memory each instance exports, held weakly.
+  it('switched off, the instance itself goes; on again is a new one made of the same compiled module', async () => {
+    v8.setFlagsFromString('--expose-gc');
+    const collect = vm.runInNewContext('gc');
+    const alive = async (ref) => {
+      // A WeakRef keeps its target for the rest of the turn it was read in.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      collect();
+      return ref.deref() !== undefined;
+    };
+    const compile = vi.fn(() => WebAssembly.compile(engineWasm()));
+    const modules = [];
+    const memories = [];
+    _setEngineSwitchDeps({
+      available: () => true,
+      compile,
+      createEngine: async (module) => {
+        modules.push(module);
+        const made = await createRustTextEngine(module);
+        memories.push(new WeakRef(made.low.exports.memory));
+        return made;
+      },
+      invoke: async () => invoke,
+      booted: async () => {},
+      os: () => 'linux',
+    });
+    await addFontFile(fontFile('MyBangers.ttf', bangers));
+    await useTextEngine('rust');
+    expect(lineWidth('WAVE', styleFor('MyBangers'), SIZE)).toBe(alone.bangers);
+    expect(await alive(memories[0])).toBe(true);
+
+    await useTextEngine('browser');
+    expect(await alive(memories[0])).toBe(false);
+
+    await useTextEngine('rust');
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(modules).toHaveLength(2);
+    expect(modules[0]).toBeInstanceOf(WebAssembly.Module);
+    expect(modules[1]).toBe(modules[0]);
+    expect(memories).toHaveLength(2);
+    expect(await alive(memories[1])).toBe(true);
+    // The new instance has the fonts and measures as the first did.
+    expect(lineWidth('WAVE', styleFor('MyBangers'), SIZE)).toBe(alone.bangers);
+    expect(fontNameFor('No Such Font')).toBe('DejaVu Sans');
   });
 });
 

@@ -13,7 +13,8 @@
 //      size or a height into the document: a box placed now is 'pending', a
 //      fit asked for now is done when the engine is in. What is on screen
 //      meanwhile is the browser's layout, written nowhere.
-//   2. the wasm, once per session however often the switch is flipped.
+//   2. the wasm: compiled once per session however often the switch is
+//      flipped, and an instance made of it for this turn of the switch.
 //   3. the app's own font lists: at launch the user's library is still being
 //      read out of IndexedDB and the system scan is still running, and half a
 //      library is not the library (`fontsBooted`).
@@ -52,7 +53,8 @@ async function tauriInvoke() {
 // wasm, the native side and the font library without a browser.
 const REAL = {
   available: () => !!engineWasmUrl,
-  createEngine: async () => createRustTextEngine(await fetchEngineWasm()),
+  compile: async () => WebAssembly.compile(await fetchEngineWasm()),
+  createEngine: (module) => createRustTextEngine(module),
   invoke: tauriInvoke,
   booted: fontsBooted,
   records: loadedFaceRecords,
@@ -75,7 +77,10 @@ export const engineSwitch = $state({
 });
 
 let generation = 0;
-let enginePromise = null;
+// The compiled wasm, kept for the session: code, no memory of its own. The
+// instance (`rust`) is what holds the engine's heap, and that lives only while
+// the switch is on.
+let modulePromise = null;
 let rust = null;
 let sync = null;
 // What was measuring before, to put back.
@@ -101,6 +106,7 @@ function leave(phase, error = '') {
   setFontSource(null);
   sync?.dispose();
   sync = null;
+  dispose();
   const was = engineSwitch.phase;
   engineSwitch.phase = phase;
   engineSwitch.error = error;
@@ -108,6 +114,17 @@ function leave(phase, error = '') {
   if (was === 'on') setTextEngine(before);
   // Also from 'starting': the fits the gate held back are owed.
   if (was === 'on' || was === 'starting') noteFontsChanged();
+}
+
+// Lets go of the wasm instance and of everything that would keep it reachable.
+// A wasm memory never shrinks, so emptying the engine of its fonts gives
+// nothing back: the heap it grew to stays for as long as the instance does.
+// Off therefore drops the instance, and the next on makes a new one out of the
+// compiled module.
+function dispose() {
+  rust = null;
+  lettersMemoFor = null;
+  lettersMemo.clear();
 }
 
 async function start() {
@@ -146,14 +163,18 @@ async function start() {
     scanned: () => tell((s) => s.refresh()),
   });
   try {
+    let made;
     try {
-      rust = await (enginePromise ??= deps.createEngine());
+      made = await deps.createEngine(await (modulePromise ??= deps.compile()));
     } catch (error) {
       // Not remembered: turning the switch off and on is how the user retries.
-      enginePromise = null;
+      modulePromise = null;
       throw error;
     }
+    // Turned off meanwhile: the instance just made is nobody's, and is left
+    // to the collector rather than kept for a turn that may never come.
     if (stale()) return;
+    rust = made;
     await deps.booted();
     if (stale()) return;
     const invoke = await deps.invoke();
@@ -262,7 +283,8 @@ export function boxesMissingLetters(pages = app.pages) {
 // For the tests: stand-ins for the wasm, the native side and the library, and
 // a clean slate between cases.
 export function _setEngineSwitchDeps(next) {
-  deps = next ? { ...REAL, ...next } : REAL;
+  // A stand-in for the engine is not made out of a module, so needs none compiled.
+  deps = next ? { ...REAL, compile: async () => null, ...next } : REAL;
   engineSwitch.available = deps.available();
 }
 export function _resetEngineSwitch() {
@@ -271,7 +293,7 @@ export function _resetEngineSwitch() {
   engineSwitch.mode = 'browser';
   engineSwitch.phase = 'off';
   engineSwitch.error = '';
-  enginePromise = null;
+  modulePromise = null;
   rust = null;
 }
 export const _engineSwitchSync = () => sync;
