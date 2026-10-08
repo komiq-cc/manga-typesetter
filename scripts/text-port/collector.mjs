@@ -20,9 +20,17 @@ export function requestPath(data, method, raw) {
   }
   throw new Error('Unsupported route');
 }
-export function createCollector(data, { metadata = gitInfo(), log = console.log } = {}) {
+// `origin` is the one page allowed to talk to the collector. It serves the
+// user's own fonts and chapter text, and a browser lets any open web page ask
+// a local port, so "any origin" would hand both to whatever site is open.
+export function createCollector(data, { metadata = gitInfo(), log = console.log, origin = 'http://localhost:5173' } = {}) {
   return createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.headers.origin && req.headers.origin !== origin) {
+      res.writeHead(403).end(`Origin ${req.headers.origin} is not the capture page (${origin})`);
+      return;
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
@@ -60,13 +68,15 @@ export function createCollector(data, { metadata = gitInfo(), log = console.log 
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const args = flags(['--data', '--port']);
+    const args = flags(['--data', '--port', '--origin']);
     const data = dataDir(args.data);
     const port = Number(args.port || 8787);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
-    const server = createCollector(data);
+    const origin = args.origin || 'http://localhost:5173';
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) throw new Error('--origin must be a local http origin');
+    const server = createCollector(data, { origin });
     server.on('error', (error) => { console.error(error.message); process.exitCode = 1; });
-    server.listen(port, '127.0.0.1', () => console.log(`text-port collector: http://127.0.0.1:${port} data=${data}`));
+    server.listen(port, '127.0.0.1', () => console.log(`text-port collector: http://127.0.0.1:${port} data=${data} origin=${origin}`));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

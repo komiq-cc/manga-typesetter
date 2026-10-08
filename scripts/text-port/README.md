@@ -212,10 +212,14 @@ in device pixels, right and bottom exclusive, or `null` for an empty texture.
 
 ```
 node scripts/text-port/capture-node.mjs [--data <dir>] [--run <id>]          # ref-sk
-node scripts/text-port/collector.mjs   [--data <dir>] [--port 8787]          # for the browser hosts
+node scripts/text-port/collector.mjs   [--data <dir>] [--port 8787] [--origin http://localhost:5173]
 # then, with the dev server running, open in the browser under test:
 #   /capture.html?engine=ref-cr|ref-wk&run=<id>&collector=http://127.0.0.1:<port>
 ```
+
+The collector serves the fonts and the corpus (the user's own fonts and chapter
+text) to the one page origin it is given and refuses every other; stop it when
+the captures are done.
 
 The page sets its title to `tp done` or `tp failed` and `window.__tp` to the
 result; a run that failed leaves `error.txt` in its folder and no manifest. The
