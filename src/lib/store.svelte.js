@@ -63,9 +63,10 @@ import {
   balancedBoxSize,
   clearLayoutMemo,
   setTypesetEnabled,
-  fontShorthand,
-  familyFor,
+  faceFor,
 } from './measure.js';
+import { textEngine } from './text-engine/index.js';
+import { browserFaceReady } from './text-engine/browser.js';
 import { solveLayout } from './auto-layout.js';
 // Containment - whether a box's text stays inside the box, and the ladder that
 // makes it. Pure, and it joins the lazy store <-> measure cycle above on the
@@ -3033,16 +3034,9 @@ function resolveBox(b, p, text, stay = !!b.auto.stamp) {
 // no font set to ask (node, the realfont lane), and for a font string the set
 // cannot parse, which measures as the fallback on either path.
 function faceReady(style) {
-  const set = typeof document === 'undefined' ? null : document.fonts;
-  if (typeof set?.check !== 'function') return true;
-  const font = fontShorthand(style, style.size, familyFor(style));
-  try {
-    if (set.check(font)) return true;
-    set.load?.(font)?.catch?.(() => {});
-    return false;
-  } catch {
-    return true;
-  }
+  const engine = textEngine();
+  const face = faceFor(style, style.size);
+  return engine ? engine.faceReady(face) : browserFaceReady(face);
 }
 
 // `target` is the page the click landed on. It defaults to the current one,
