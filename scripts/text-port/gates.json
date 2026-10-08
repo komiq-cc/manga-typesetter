@@ -1,0 +1,274 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "id": "capture.errors",
+      "rule": "integrity",
+      "kind": "errors",
+      "enforce": true,
+      "why": "An engine error is a broken capture."
+    },
+    {
+      "id": "capture.missing",
+      "rule": "integrity",
+      "kind": "missing",
+      "enforce": true,
+      "why": "A missing record means the capture is incomplete."
+    },
+    {
+      "id": "capture.hashes",
+      "rule": "integrity",
+      "kind": "hashes",
+      "enforce": true,
+      "why": "Only identical fonts and corpora are comparable."
+    },
+    {
+      "id": "numbers.valid",
+      "group": "metrics",
+      "rule": "integrity",
+      "kind": "invalid",
+      "enforce": true,
+      "why": "Missing metric numbers and array elements must never disappear from statistics."
+    },
+    {
+      "id": "metrics.advance",
+      "group": "metrics",
+      "fields": [
+        "adv",
+        "chars"
+      ],
+      "rule": "number",
+      "abs": 0.02,
+      "rel": 0.0005,
+      "atLeast": 0.995,
+      "enforce": true,
+      "why": "Advances within 0.02 px or 0.05% of the reference in 99.5% of covered cases. Against WebKit with its synthetic-bold rule the engine reaches 99.93%; Chromium against WebKit is 60.6%, all of it synthetic bold.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "metrics.advance.uncovered",
+      "group": "metrics",
+      "fields": [
+        "adv",
+        "chars"
+      ],
+      "rule": "number",
+      "abs": 0.02,
+      "rel": 0.0005,
+      "atLeast": 0.999,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "metrics.font",
+      "group": "metrics",
+      "fields": [
+        "font.ascent",
+        "font.descent"
+      ],
+      "rule": "number",
+      "abs": 0.001,
+      "enforce": true,
+      "why": "The line box sets the vertical position of every line. Chromium and WebKit report identical ascent and descent, so the engine must too. (Node Skia does not; this gate is for the browser references.)",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "metrics.font.uncovered",
+      "group": "metrics",
+      "fields": [
+        "font.ascent",
+        "font.descent"
+      ],
+      "rule": "number",
+      "abs": 0.5,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "metrics.ink",
+      "group": "metrics",
+      "fields": [
+        "ink.*",
+        "glyphs.*"
+      ],
+      "rule": "number",
+      "abs": 1,
+      "enforce": false,
+      "why": "Reported, not enforced: WebKit reports the advance box horizontally and Skia whole pixels of a hinted raster, so the references are 1 px apart at the median and 20 px at p99. Judge ink against Chromium.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "metrics.ink.uncovered",
+      "group": "metrics",
+      "fields": [
+        "ink.*",
+        "glyphs.*"
+      ],
+      "rule": "number",
+      "abs": 1,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "layout.smart-lines",
+      "group": "layout",
+      "mode": "smart",
+      "rule": "identical-lines",
+      "atLeast": 0.999,
+      "enforce": true,
+      "why": "Smart-mode layouts must choose the same lines as the reference in 99.9% of covered cases. Chromium against WebKit is 99.37%.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "layout.smart-lines.uncovered",
+      "group": "layout",
+      "mode": "smart",
+      "rule": "identical-lines",
+      "atLeast": 0.99,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "layout.plain-lines",
+      "group": "layout",
+      "mode": "plain",
+      "rule": "identical-lines",
+      "atLeast": 0.978,
+      "enforce": true,
+      "why": "Plain-mode lines came from each browser's own CSS breaker, and the two browsers agree on 97.8% of covered cases. The engine must agree with the reference at least that often.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "layout.plain-lines.uncovered",
+      "group": "layout",
+      "mode": "plain",
+      "rule": "identical-lines",
+      "atLeast": 1,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "layout.verdict",
+      "group": "layout",
+      "rule": "unchanged",
+      "property": "verdictChanged",
+      "enforce": false,
+      "why": "List every case whose fits / does-not-fit decision changed. Not enforced: the decision follows the ink box, where the references themselves differ."
+    },
+    {
+      "id": "layout.curve",
+      "group": "layout",
+      "rule": "unchanged",
+      "property": "curveChanged",
+      "enforce": true,
+      "why": "Curved text must set the same glyphs in the same order. Where they sit is reported as numbers."
+    },
+    {
+      "id": "layout.solve",
+      "group": "layout",
+      "rule": "unchanged",
+      "property": "solveChanged",
+      "enforce": true,
+      "why": "The solver must choose the same size and lines, with its box within a hundredth of a pixel."
+    },
+    {
+      "id": "pixels.bbox",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "bboxDelta",
+      "max": 2,
+      "enforce": false,
+      "why": "Not enforced until the engine paints (P5). Ink bounds within 2 device px; the two browsers are 1 px apart at the median and 13 px at p99.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "pixels.bbox.uncovered",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "bboxDelta",
+      "max": 1,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "pixels.thick",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "thick",
+      "max": 3,
+      "enforce": false,
+      "why": "Not enforced until the engine paints (P5). A disagreement region one device pixel wide measures 2 and is antialiasing; the two browsers are at 2 at the median. Above 3 a stroke or a glyph is in a different place.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "pixels.thick.uncovered",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "thick",
+      "max": 1.5,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "pixels.iou",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "iou",
+      "min": 0.95,
+      "minSize": 16,
+      "enforce": false,
+      "why": "Not enforced until the engine paints (P5). At size 16 and above; the two browsers overlap 97% at the median.",
+      "excludeTags": [
+        "uncovered"
+      ]
+    },
+    {
+      "id": "pixels.iou.uncovered",
+      "group": "pixels",
+      "rule": "image",
+      "metric": "iou",
+      "min": 0.97,
+      "minSize": 16,
+      "enforce": false,
+      "why": "Fallback glyphs measure the host; report separately.",
+      "onlyTags": [
+        "uncovered"
+      ]
+    }
+  ]
+}
