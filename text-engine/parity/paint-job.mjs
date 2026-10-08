@@ -411,6 +411,8 @@ const CASES = [
   ['letter spacing, +4 px', base({ letterSpacing: 4, strokes: [red(2)] }), { w: 320 }],
   ['letter spacing, -1.5 px', base({ letterSpacing: -1.5 })],
   ['letter spacing, +4 px, right', base({ letterSpacing: 4, align: 'right' }), { w: 320 }],
+  // DejaVu Sans has fi, ffi and ffl ligatures, and the text has all three.
+  ['letter spacing, +3 px, a font with ligatures', base({ font: 'DejaVu Sans', size: 22, letterSpacing: 3 }), { w: 320 }],
   ['align left', base({ align: 'left' })],
   ['align center', base({ align: 'center' })],
   ['align right', base({ align: 'right' })],
