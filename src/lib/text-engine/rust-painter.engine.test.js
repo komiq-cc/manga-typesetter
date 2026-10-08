@@ -142,17 +142,18 @@ describe('the Rust engine behind the glyph-painter seam', () => {
       const b = ink(c);
       return b.x1 - b.x0;
     };
-    const outset = width(drawn(createRustGlyphPainter(rust), bold).canvas);
-    rust.setRules({ boldAdvance: 'webkit' });
+    // WebKit's rule is the default: the smear, on advances a step wider.
+    const smear = width(drawn(createRustGlyphPainter(rust), bold).canvas);
+    const forced = width(drawn(createRustGlyphPainter(rust, { boldDraw: 'outset' }), bold).canvas);
+    expect(forced).not.toBe(smear);
+    rust.setRules({ boldAdvance: 'unchanged' });
     try {
-      const smear = width(drawn(createRustGlyphPainter(rust), bold).canvas);
-      const forced = width(drawn(createRustGlyphPainter(rust, { boldDraw: 'outset' }), bold).canvas);
+      const outset = width(drawn(createRustGlyphPainter(rust), bold).canvas);
       // Three more advances of 40/36 px, at 2x, whichever way the bold is drawn.
       expect(smear - outset).toBeGreaterThanOrEqual(5);
       expect(smear - outset).toBeLessThanOrEqual(8);
-      expect(forced).not.toBe(smear);
     } finally {
-      rust.setRules({ boldAdvance: 'unchanged' });
+      rust.setRules({ boldAdvance: 'webkit' });
     }
   });
 

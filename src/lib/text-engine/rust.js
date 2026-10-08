@@ -21,8 +21,9 @@ const BOLD_SLOTS = new Set(['bold', 'boldItalic']);
 const HANDLES_MAX = 4096;
 
 // The rule choices that are switches (text-engine/RULES.md), and the value
-// each has unless a caller says otherwise.
-export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'unchanged', fontBox: 'browser', inkBaseline: 'include' });
+// each has unless a caller says otherwise. `boldAdvance` is the user's choice
+// (2026-10-08): a synthesised bold is as wide as macOS has always set it.
+export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'webkit', fontBox: 'browser', inkBaseline: 'include' });
 // Rules the adapter applies itself, to what the engine answered.
 const ADAPTER_RULES = { inkBaseline: ['exact', 'include'] };
 
@@ -76,7 +77,8 @@ export async function createRustTextEngine(source, options = {}) {
       rules[name] = value;
     }
   }
-  applyRules(options.rules);
+  // The defaults too: the engine's own are not all the app's.
+  applyRules({ ...DEFAULT_RULES, ...options.rules });
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
