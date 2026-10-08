@@ -230,6 +230,17 @@ window.__ec = {
     return { byBlur: ended, editing: app.editingId };
   },
 
+  // A box brought to the middle of the viewport, so that it is one of those
+  // that hold a picture however deep the zoom.
+  async reveal(id) {
+    boxEl(id)?.scrollIntoView({ block: 'center', inline: 'center' });
+    await settle(3);
+  },
+  // The box of the page in front with the largest area.
+  largest() {
+    return String(page().boxes.reduce((a, b) => (b.w * b.h > a.w * a.h ? b : a)).id);
+  },
+
   // Where every box of the page in front is, and what it is made of.
   rects() {
     const frameEl = document.querySelector('.page-frame:not(.page-off)');
@@ -385,11 +396,11 @@ window.__ec = {
         gotoPage(target);
         flushSync();
         document.body.getBoundingClientRect();
-        if (target === to) sync.push(performance.now() - t0);
+        sync.push(performance.now() - t0);
       }
     }
     await settle();
-    return { sync: stats(sync), boxes: app.pages[to].boxes.length };
+    return { sync: stats(sync), boxes: [app.pages[to].boxes.length, app.pages[from].boxes.length] };
   },
   // A resize drag: the box one page px wider per frame, as the handle writes it.
   async timeResize(id, n = 30) {

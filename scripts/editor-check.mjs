@@ -452,28 +452,39 @@ if (ONLY.has('edit')) {
   sheet(`edit-100-${DSF}x.png`, pairs, `switch ON, zoom 100%, ${DSF}x display: at rest (engine canvas) left, being typed into (contenteditable) right`);
 }
 
+// What a user waits for, with the switch off and on, in a 1600 x 1000 window.
+// The DOM path's figures are its script and layout only: the browser rasters
+// its text afterwards, off the main thread, where a page cannot time it. The
+// canvas path's figures are the whole of it.
 async function costs(label, resizeId) {
   const out = {};
+  const ms = (st) => `${st.median.toFixed(1)} (${st.min.toFixed(1)}-${st.max.toFixed(1)})`;
   for (const mode of ['browser', 'rust']) {
     await ec('engine', mode);
-    const m = {};
-    for (const z of [0.6, 1, 3]) {
-      await viewport(1600, 1000);
-      await ec('zoom', z);
-      await sleep(300);
-      m[`held@${z * 100}%`] = await ec('held');
-    }
     await viewport(1600, 1000);
+    const m = { held: {}, resize: {} };
+    for (const z of [0.6, 1, 3]) {
+      await ec('zoom', z);
+      await ec('reveal', resizeId);
+      await sleep(300);
+      m.held[`${z * 100}%`] = await ec('held');
+      if (z !== 0.6) m.resize[`${z * 100}%`] = await ec('timeResize', resizeId, 30);
+    }
     await ec('zoom', 1);
-    m.mount = await ec('timeMount', 5);
+    m.mount = await ec('timeMount', 6);
     m.repaintAll = await ec('timeRepaintAll', 6);
-    m.resize = await ec('timeResize', resizeId, 30);
     m.zoomGesture = await ec('timeZoomGesture', 0.8, 1.6, 12);
-    m.turn = await ec('timeTurn', 4);
+    m.zoomGestureDeep = await ec('timeZoomGesture', 2, 3, 12);
+    await ec('zoom', 1);
+    m.turn = await ec('timeTurn', 5);
     await ec('zoom', 1);
     out[mode] = m;
-    log(`${label} / ${mode}: mount ${JSON.stringify(m.mount.sync)} repaint-all ${JSON.stringify(m.repaintAll.sync)} resize ${JSON.stringify(m.resize)} zoom tick ${JSON.stringify(m.zoomGesture.tick)} settle ${m.zoomGesture.settle.toFixed(1)}`);
-    log(`   turn ${JSON.stringify(m.turn)} held ${Object.entries(m).filter(([k]) => k.startsWith('held')).map(([k, v]) => `${k}: ${(v.bytes / 1048576).toFixed(1)} MB in ${v.withPixels}/${v.canvases} canvases, ${v.boxElements} elements`).join(' | ')}`);
+    log(`${label} / switch ${mode === 'rust' ? 'ON' : 'OFF'}, ms as median (min-max):`);
+    log(`   mount ${ms(m.mount.sync)}, to the second frame ${ms(m.mount.toSecondFrame)}; every box repainted ${ms(m.repaintAll.sync)}`);
+    log(`   resize, a frame: ${Object.entries(m.resize).map(([k, v]) => `at ${k} ${ms(v)} for ${(v.canvasPx / 1e6).toFixed(2)} MP`).join('; ')}`);
+    log(`   zoom gesture 80-160%: a tick ${ms(m.zoomGesture.tick)}, the settle ${m.zoomGesture.settle.toFixed(1)}; 200-300%: a tick ${ms(m.zoomGestureDeep.tick)}, the settle ${m.zoomGestureDeep.settle.toFixed(1)}`);
+    if (m.turn) log(`   page turn (${m.turn.boxes.join(' and ')} boxes) ${ms(m.turn.sync)}`);
+    log(`   held: ${Object.entries(m.held).map(([k, v]) => `${k}: ${(v.bytes / 1048576).toFixed(1)} MB in ${v.withPixels} of ${v.canvases} canvases (largest ${(v.largest / 1048576).toFixed(1)} MB, on hidden pages ${(v.onHiddenPages.bytes / 1048576).toFixed(1)} MB), ${v.boxElements} elements in ${v.boxes} boxes`).join(' | ')}`);
   }
   return out;
 }
@@ -504,7 +515,7 @@ if (ONLY.has('real') && DATA) {
     report.real.bytes.push({ zoom: z, dpr: DSF, boxes: rows.length, identical: rows.length - bad.length, different: bad });
     log(`  zoom ${z} dpr ${DSF}: ${rows.length - bad.length}/${rows.length} canvases byte-identical to renderBoxTexture`);
   }
-  report.real.cost = await costs('real page', String(chapter.pages[busiest].boxes[0].id));
+  report.real.cost = await costs('real page', await ec('largest'));
   // To look at: the page with the switch off and on. Written beside the
   // report, which is outside the repository, because it is the user's text.
   for (const mode of ['browser', 'rust']) {
