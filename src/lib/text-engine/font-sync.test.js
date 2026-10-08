@@ -80,6 +80,27 @@ describe('the answer of the system face command', () => {
   });
 });
 
+describe('what a name resolved to', () => {
+  it('is remembered for a bounded number of names, and answered the same once forgotten', async () => {
+    const { engine, invoke, sync } = setup({ system: [sysEntry('Zapfino')], files: { Zapfino: [{ slots: { regular: 0 }, bytes: SFNT() }] } });
+    sync.setUserFace('Anchor', 'regular', SFNT());
+    sync.ready('Zapfino');
+    await sync.settled();
+    expect(invoke.calls).toHaveLength(1);
+    // Every chapter opened brings its own font names, and most are of fonts
+    // this machine has not got. A session sees a great many.
+    for (let i = 0; i < 5000; i++) expect(sync.nameFor(`Font Of Chapter ${i}`)).toBe('Anchor');
+    expect(sync.snapshot().resolved).toBeLessThanOrEqual(256);
+    // Forgotten is not changed: the same answers, and nothing sent for twice.
+    expect(sync.nameFor('Zapfino')).toBe('Zapfino');
+    expect(sync.ready('Zapfino')).toBe(true);
+    expect(sync.nameFor('Font Of Chapter 0')).toBe('Anchor');
+    expect(sync.missing('Font Of Chapter 0')).toBe(true);
+    expect(invoke.calls).toHaveLength(1);
+    expect(engine.registered()).toEqual({ Anchor: ['regular'], Zapfino: ['regular'] });
+  });
+});
+
 describe('user faces', () => {
   it('takes a face there are no bytes of as the user’s and unusable, and says which kind of unusable', () => {
     const { engine, sync } = setup({ system: [sysEntry('Wild Words')], files: { 'Wild Words': [{ slots: { regular: 0 }, bytes: SFNT() }] } });

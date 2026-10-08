@@ -45,6 +45,10 @@ export function fontKind(bytes) {
   return 'unknown';
 }
 
+// How many names `resolve` keeps an answer for. A chapter names a handful of
+// fonts; this is room for many chapters' worth before anything is forgotten.
+const RESOLVED_MAX = 256;
+
 const asBytes = (data) =>
   data instanceof Uint8Array ? data : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
 
@@ -110,7 +114,12 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
   // System families the engine still holds as they were before a scan found
   // their files moved, and that have no record above any more (`followSystemList`).
   const stale = new Set();
-  // name -> { family, state }: what `resolve` last answered, until anything changes
+  // name -> { family, state }: what `resolve` last answered, until anything
+  // changes. The names are whatever the documents say, a new set with every
+  // chapter opened, and nothing here hears of a chapter closing: so it is
+  // kept to RESOLVED_MAX names and emptied when it reaches them. An answer is
+  // cheap to work out again and working it out twice changes nothing - what
+  // was sent for is remembered in `system`, not here.
   const cache = new Map();
   const flights = new Set();
   let systemSeen = null;
@@ -242,6 +251,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     // which is nearer the truth than the last resort; nothing is written from
     // either (`ready`).
     r = { family: measurable(name) ? name : resort, state };
+    if (cache.size >= RESOLVED_MAX) cache.clear();
     cache.set(name, r);
     return r;
   }
@@ -477,6 +487,8 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
         lastResort: resort,
         user: Object.fromEntries([...user].map(([name, fam]) => [name, Object.fromEntries([...fam].map(([slot, f]) => [slot, f.state]))])),
         system: Object.fromEntries([...system].map(([name, rec]) => [name, rec.state])),
+        // How many names have an answer kept for them.
+        resolved: cache.size,
       };
     },
   };
