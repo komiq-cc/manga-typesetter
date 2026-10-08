@@ -4,7 +4,7 @@
 // this one reads the preferences, and prefs.svelte.js imports the layout engine
 // to apply the typesetting switch - so a module on the measuring path (psd.js
 // imports fonts.js) must not import it back, or the two load half-built.
-import { app } from './store.svelte.js';
+import { app, fontMissing } from './store.svelte.js';
 import { prefs, setPref } from './prefs.svelte.js';
 
 // The user's own fonts first: they were put there on purpose, for this work,
@@ -28,6 +28,18 @@ export function fontGroups() {
 // Whether the menus currently offer `name`. A menu bound to a box set in a
 // family that is not offered still has to show that family as its value.
 export const isFontOffered = (name) => fontGroups().some((g) => g.fonts.some((f) => f.name === name));
+
+// What a font select says beside the family a box is set in, when that family
+// needs a word. Two different things used to read "(not in menus)": a family
+// the user hid, which draws as itself, and a family this machine has not got,
+// which draws as something else. The second is the one that changes the page,
+// so it is asked first - a missing family says so even while a menu still
+// lists it, as every built-in does once the Rust engine measures.
+export function fontCaveat(name) {
+  if (!name) return null;
+  if (fontMissing(name)) return 'font missing';
+  return isFontOffered(name) ? null : 'not in menus';
+}
 
 const without = (list, name) => list.filter((n) => n !== name);
 export const isBuiltinHidden = (name) => prefs.hiddenBuiltinFonts.includes(name);

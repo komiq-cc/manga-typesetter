@@ -8,6 +8,7 @@
   import { resetPanels } from './editor/panels.svelte.js';
   import { processMemory, ROLE_LABELS } from './memory.js';
   import { prefs, setPref } from './prefs.svelte.js';
+  import { engineSwitch } from './engine-switch.svelte.js';
   import { OCR_MODEL_OPTIONS } from './ocr-models.js';
   import {
     shortcutGroups,
@@ -565,6 +566,51 @@
         <div class="qhint">
           Applies to new text boxes · per-box via Bulk style. Boxes already on a
           page keep whatever they were given.
+        </div>
+      </div>
+
+      <!-- Who measures text. Here with the rest of typesetting and not in the
+           Inspector: it is one setting for the whole machine, and no box has a
+           say in it. Disabled, and saying why, in a build made without the
+           engine - the wasm is its own build step. -->
+      <div class="settings-section">
+        <div class="settings-title">TEXT ENGINE <span class="beta-badge">Experimental</span></div>
+        <div class="field">
+          <span>Measure text with the Rust engine</span>
+          {@render toggle(
+            'textEngine',
+            'Measure text with the Rust engine',
+            engineSwitch.available && prefs.textEngine === 'rust',
+            !engineSwitch.available,
+            (on) => setPref('textEngine', on ? 'rust' : 'browser'),
+          )}
+        </div>
+        <div class="qhint">
+          {#if !engineSwitch.available}
+            Not in this build. The engine is built separately
+            (<code>npm run build:engine</code>) and this copy of the app was made
+            without it, so text is measured by the browser.
+          {:else if engineSwitch.phase === 'starting'}
+            Starting: loading the engine and your fonts. Text is laid out again
+            once it is in.
+          {:else if engineSwitch.phase === 'failed'}
+            Could not start - {engineSwitch.error}. Text is measured by the
+            browser. Turn the switch off and on to try again.
+          {:else if engineSwitch.phase === 'on' && engineSwitch.lastResort}
+            On. Line breaks and box sizes are measured from your font files and
+            this computer's fonts, the same on every system. A font this
+            computer does not have, the built-in web fonts included, is set in
+            {engineSwitch.lastResort} and listed as missing in the Text Queue.
+          {:else if engineSwitch.phase === 'on'}
+            On, but there is no font to measure with: add one in the Font
+            Library. Until then text is laid out by estimate and nothing is
+            resized.
+          {:else}
+            Off: text is measured by the browser, as before. On, line breaks
+            and box sizes are measured from your font files and this computer's
+            fonts instead. Drawing is unchanged. This computer only; chapters
+            are not marked.
+          {/if}
         </div>
       </div>
 

@@ -21,7 +21,7 @@
   } from './store.svelte.js';
 
   import { record } from './editor/history.svelte.js';
-  import { fontGroups, isFontOffered } from './font-menu.js';
+  import { fontGroups, fontCaveat } from './font-menu.js';
   import { modKey } from './format.js';
   import {
     PATTERN_KINDS,
@@ -877,10 +877,11 @@
           <!-- Each option carries its own family, so the menu is the specimen
                sheet: you pick a lettering face by looking at it. -->
           <select id="insp-font" bind:value={s.font} onchange={touch} style="font-family:{fontCssFor(s.font)}">
-            {#if s.font && !isFontOffered(s.font)}
-              <!-- The box is set in a family the menus no longer offer - hidden,
-                   or from a machine that had it. The select still has to say so. -->
-              <option value={s.font} style="font-family:{fontCssFor(s.font)}">{s.font} (not in menus)</option>
+            {#if fontCaveat(s.font)}
+              <!-- The box is set in a family the menus do not offer, or one this
+                   machine has not got. The select still has to show it, and to
+                   say which of the two it is. -->
+              <option value={s.font} style="font-family:{fontCssFor(s.font)}">{s.font} ({fontCaveat(s.font)})</option>
             {/if}
             {#each fontGroups() as g (g.key)}
               <optgroup label={g.label}>

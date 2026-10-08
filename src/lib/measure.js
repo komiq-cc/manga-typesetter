@@ -1,5 +1,5 @@
 // Shared text measurement + line wrapping (used by curved rendering and export).
-import { fontCssFor } from './store.svelte.js';
+import { fontCssFor, measuredFontFor } from './store.svelte.js';
 import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS, ovalProfile } from './typeset.js';
 import { interiorLineWidths, safetyInset } from './balloon.js';
 import { normalizeFit } from './data.js';
@@ -219,8 +219,15 @@ export function fontShorthand(style, sizePx, family) {
 
 // Build the face only when an engine is actually asked. In particular an
 // advance memo hit must not allocate an object for a measurement it skips.
+//
+// `name` is the family that is really measured (`measuredFontFor`), which is
+// the document's own name for it until the Rust engine is switched on. From
+// then a name this machine has no bytes for is measured as another family, and
+// `css` - what the memo below is keyed by - names that same family: an engine
+// that finds a family by name is never asked for one it does not have, and a
+// kept measurement is never one family's number filed under another's key.
 export function faceFor(style, sizePx, css = familyFor(style), key = fontShorthand(style, sizePx, css)) {
-  return { key, name: style.font, bold: !!style.bold, italic: !!style.italic, size: sizePx, css };
+  return { key, name: familyNameFor(style), bold: !!style.bold, italic: !!style.italic, size: sizePx, css };
 }
 
 // The CSS family list a style's font name resolves to: the store's answer
@@ -230,6 +237,7 @@ export function faceFor(style, sizePx, css = familyFor(style), key = fontShortha
 // arrive or leave, may hold the answers for as long as it runs
 // (`withFamiliesHeld`).
 let heldFamilies = null;
+let heldNames = null;
 export function familyFor(style) {
   if (!heldFamilies) return fontCssFor(style.font);
   let f = heldFamilies.get(style.font);
@@ -239,13 +247,25 @@ export function familyFor(style) {
   }
   return f;
 }
+// The family an engine is asked for by name (`measuredFontFor`), held with it.
+function familyNameFor(style) {
+  if (!heldNames) return measuredFontFor(style.font);
+  let n = heldNames.get(style.font);
+  if (n === undefined) {
+    n = measuredFontFor(style.font);
+    heldNames.set(style.font, n);
+  }
+  return n;
+}
 export function withFamiliesHeld(fn) {
   if (heldFamilies) return fn();
   heldFamilies = new Map();
+  heldNames = new Map();
   try {
     return fn();
   } finally {
     heldFamilies = null;
+    heldNames = null;
   }
 }
 
