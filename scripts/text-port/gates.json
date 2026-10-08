@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "gates": [
+    { "id": "capture.errors", "rule": "integrity", "kind": "errors", "enforce": true, "why": "An engine error is a broken capture." },
+    { "id": "capture.missing", "rule": "integrity", "kind": "missing", "enforce": true, "why": "A missing record means the capture is incomplete." },
+    { "id": "capture.hashes", "rule": "integrity", "kind": "hashes", "enforce": true, "why": "Only identical fonts and corpora are comparable." },
+    { "id": "numbers.valid", "group": "metrics", "rule": "integrity", "kind": "invalid", "enforce": true, "why": "Missing metric numbers and array elements must never disappear from statistics." },
+    { "id": "metrics.advance", "group": "metrics", "fields": ["adv", "chars"], "rule": "number", "abs": 0.02, "rel": 0.0005, "atLeast": 0.999, "enforce": true, "why": "Advances must stay within 0.02 px or 0.05%, in 99.9% of cases." },
+    { "id": "metrics.font", "group": "metrics", "fields": ["font.ascent", "font.descent"], "rule": "number", "abs": 0.5, "enforce": true, "why": "Font vertical metrics may differ by at most half a pixel." },
+    { "id": "metrics.ink", "group": "metrics", "fields": ["ink.*", "glyphs.*"], "rule": "number", "abs": 1, "enforce": true, "why": "Line and glyph ink extents may differ by at most one pixel." },
+    { "id": "layout.smart-lines", "group": "layout", "mode": "smart", "rule": "identical-lines", "atLeast": 0.99, "enforce": true, "why": "At least 99% of smart layouts must choose identical lines." },
+    { "id": "layout.plain-lines", "group": "layout", "mode": "plain", "rule": "identical-lines", "atLeast": 1, "enforce": false, "why": "Track plain line breaks while its tolerance is being established." },
+    { "id": "layout.verdict", "group": "layout", "rule": "unchanged", "property": "verdictChanged", "enforce": false, "why": "List every changed containment verdict for review." },
+    { "id": "layout.curve", "group": "layout", "rule": "unchanged", "property": "curveChanged", "enforce": false, "why": "List changed curve glyph records; no tolerance is established yet." },
+    { "id": "layout.solve", "group": "layout", "rule": "unchanged", "property": "solveChanged", "enforce": false, "why": "List every changed solver answer for review." },
+    { "id": "pixels.bbox", "group": "pixels", "rule": "image", "metric": "bboxDelta", "max": 1, "enforce": true, "why": "Aligned ink bounds may move by at most one device pixel." },
+    { "id": "pixels.thick", "group": "pixels", "rule": "image", "metric": "thick", "max": 1.5, "enforce": true, "why": "Thick mask disagreement indicates a changed glyph or stroke." },
+    { "id": "pixels.iou", "group": "pixels", "rule": "image", "metric": "iou", "min": 0.97, "minSize": 16, "enforce": true, "why": "At size 16 and above, at least 97% of thresholded ink must overlap." }
+  ]
+}
