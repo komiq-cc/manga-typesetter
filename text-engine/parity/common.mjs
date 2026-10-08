@@ -98,6 +98,9 @@ export function sha256File(path) {
 
 export async function loadEngine() {
   const engine = await createEngine(readFileSync(wasmPath))
+  // The scripts that share this loader set the engine against Skia (the
+  // spike's reference), so they ask for Skia's line box and not the browsers'.
+  engine.setRule('fontBox', 'skia')
   const fonts = FONTS.map((f) => {
     const bytes = readFileSync(f.path)
     const id = engine.addFont(bytes)

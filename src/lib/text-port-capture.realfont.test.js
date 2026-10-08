@@ -35,7 +35,12 @@ if (process.env.TP_CAPTURE !== '1') {
     if (existsSync(dir)) throw new Error(`Run already exists: ${dir}`);
     if (!['ref-sk', 'new'].includes(engine)) throw new Error(`The node host captures ref-sk or new, not '${engine}'`);
     const wasm = engine === 'new' ? readEngineWasm() : null;
-    const rust = wasm ? await (await import('./text-engine/rust.js')).createRustTextEngine(wasm) : null;
+    // `boldAdvance=webkit,fontBox=browser`: the engine's rule switches.
+    const rules = Object.fromEntries((process.env.TP_RULES || '').split(',').filter(Boolean).map((pair) => pair.split('=')));
+    if (!wasm && Object.keys(rules).length) throw new Error('Rules are switches of the Rust engine: use --engine new');
+    const rust = wasm ? await (await import('./text-engine/rust.js')).createRustTextEngine(wasm, { rules }) : null;
+    const kinds = (process.env.TP_ONLY || 'metrics,layout,pixels').split(',');
+    if (!kinds.length || kinds.some((k) => !['metrics', 'layout', 'pixels'].includes(k))) throw new Error('--only takes metrics, layout, pixels, comma separated');
     const fontBytes = readFileSync(guardedPath(data, 'fonts/fonts.json'));
     const list = JSON.parse(fontBytes);
     for (const f of list.fonts) {
@@ -73,7 +78,7 @@ if (process.env.TP_CAPTURE !== '1') {
     mkdirSync(guardedPath(dir, 'png'), { recursive: true });
     const counts = { metrics: 0, layout: 0, pixels: 0, skipped: 0, errors: 0 };
     const errors = [];
-    for (const name of ['metrics', 'layout', 'pixels']) {
+    for (const name of ['metrics', 'layout', 'pixels'].filter((k) => kinds.includes(k))) {
       const file = guardedPath(dir, `${name}.jsonl`);
       writeFileSync(file, '');
       for (const result of probe(modules, name, corpus[name], { families, plain })) {
@@ -105,6 +110,7 @@ if (process.env.TP_CAPTURE !== '1') {
     const manifest = {
       engine, runId, ...gitInfo(), host: { userAgent: `node ${process.version}; @napi-rs/canvas${wasm ? `; mt-text wasm ${sha256(wasm)}` : ''}`, platform: process.platform, dpr: 1 },
       corpus: hashes, fonts: sha256(fontBytes), counts, startedAt, finishedAt: new Date().toISOString(),
+      ...(rust ? { rules: rust.rules() } : {}), ...(kinds.length < 3 ? { only: kinds } : {}),
     };
     writeFileSync(guardedPath(dir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
     console.log(`text-port run: ${dir}\ncounts: ${JSON.stringify(counts)}`);

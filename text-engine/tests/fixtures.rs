@@ -3,7 +3,7 @@
 //! These pin behaviour the app relies on. Agreement with HarfBuzz and Skia is
 //! checked from node (`parity/`), on the wasm build.
 
-use mt_text::{bold_outset, Engine, Face, FontId, Synth, WrapOptions, OBLIQUE_SKEW};
+use mt_text::{bold_outset, Engine, Face, FontBoxRule, FontId, Synth, WrapOptions, OBLIQUE_SKEW};
 
 fn load(engine: &mut Engine, name: &str) -> FontId {
     let path = format!("{}/../src/test/fonts/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -144,8 +144,9 @@ fn missing_reports_code_points_without_a_glyph() {
 }
 
 #[test]
-fn font_box_follows_the_table_rule() {
+fn skias_font_box_follows_the_table_rule() {
     let mut e = Engine::new();
+    e.rules.font_box = FontBoxRule::Skia;
     let [comic, bangers, dejavu, _] = all(&mut e);
     // DejaVu: hhea 1901/483 differs from OS/2 typo 1556/492 and
     // USE_TYPO_METRICS is off, so hhea must win.
@@ -236,7 +237,7 @@ fn glyph_ink_is_line_ink_moved_to_the_centre_and_the_middle_baseline() {
     for font in all(&mut e) {
         for size in [8.0, 14.5, 22.5, 96.0] {
             let f = Face::new(font, size);
-            let b = e.font_box(f).unwrap();
+            let b = e.font_box_unrounded(f).unwrap();
             let mid = (b.ascent - b.descent) / 2.0;
             assert!(close(e.middle_shift(f).unwrap(), mid));
             for ch in ["A", "g", "W", "i", "."] {
@@ -327,6 +328,7 @@ fn synthetic_styles_keep_the_advance_and_grow_the_ink() {
             bold: false,
             oblique: true,
         },
+        chain: 0,
     };
     let sl = e.line_ink(slant(dejavu), "H").unwrap();
     assert!((sl.right - (up.right + f64::from(OBLIQUE_SKEW) * up.ascent)).abs() < 1e-6);

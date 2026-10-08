@@ -8,7 +8,8 @@ use std::sync::Arc;
 use harfrust::{Direction, Script, ShapePlan};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::prelude::{LocationRef, Size};
-use skrifa::raw::types::NameId;
+use skrifa::raw::types::{NameId, Tag};
+use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 
 use crate::Error;
@@ -63,6 +64,12 @@ pub struct FontInfo {
     pub glyph_count: u32,
     pub axes: Vec<AxisInfo>,
     pub vertical: VerticalMetrics,
+    /// TrueType outlines (a `glyf` table) rather than CFF. CoreText scales the
+    /// two kinds of font with different arithmetic, which shows in the line
+    /// box (see `metrics.rs`).
+    pub truetype: bool,
+    /// `head.yMin` and `head.yMax`, the box of all glyphs, in font units.
+    pub bbox_y: Option<(i16, i16)>,
     /// Number of faces in the file this face came from (more than 1 for TTC).
     pub faces_in_file: u32,
     pub byte_len: usize,
@@ -107,6 +114,7 @@ type GlyphMap<V> = HashMap<u32, V, BuildHasherDefault<GlyphHasher>>;
 pub(crate) struct PlanSlot {
     pub script: Option<Script>,
     pub direction: Direction,
+    pub no_ligatures: bool,
     pub plan: ShapePlan,
 }
 
@@ -246,6 +254,8 @@ fn read_info(font: &FontRef<'_>, hb: &harfrust::Font, bytes: &[u8]) -> FontInfo 
         glyph_count: metrics.num_glyphs,
         axes,
         vertical,
+        truetype: font.table_data(Tag::new(b"glyf")).is_some(),
+        bbox_y: font.head().ok().map(|h| (h.y_min(), h.y_max())),
         faces_in_file,
         byte_len: bytes.len(),
     }
