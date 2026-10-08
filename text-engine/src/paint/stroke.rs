@@ -44,57 +44,17 @@ impl Side {
 /// The cross product of two unit directions: about a millionth of a degree.
 const STRAIGHT: f64 = 1e-10;
 
-/// The region within `radius` of the contours of `src` (canvas `stroke()`
-/// with `lineWidth = 2 * radius` on closed paths), as a difference of two
-/// shapes: everything inside `outer` (non-zero rule) that is not inside
-/// `inner`.
+/// The contours of `src` moved `radius` to `side`, appended to `out`, each
+/// as one loop that winds the way its contour did.
 ///
-/// `away` is the side of the contours that faces away from the ink. `outer`
-/// gets the contours moved `radius` that way: the ink grown by `radius`.
-/// `inner` gets them moved `radius` into the ink. Both are turned to wind
-/// +1 round what they hold (in the sense in which a contour with positive
-/// [`Polys::area2`] winds +1): for `inner` that is the part of the ink more
-/// than `radius` from its edge, and everywhere else it winds zero or less. Where the ink is thinner than `2 * radius`
-/// the inward offset turns inside out and winds the other way, which is how
+/// For a contour with ink on its left, moved to the right is the ink grown by
+/// `radius` and moved to the left is what is left of the ink more than
+/// `radius` from its edge. Where the ink is thinner than `2 * radius` the
+/// inward loop turns inside out and winds the other way, which is how
 /// "nothing is left of it" comes out of the arithmetic without a special
-/// case.
-///
-/// Why two shapes: as one shape the two sides of a thin stem are two
-/// overlapping bands, and a rasteriser that sums signed areas counts their
-/// overlap twice. Each of these two is a single curve round its region.
-pub fn stroke_sides(
-    src: &Polys,
-    radius: f64,
-    away: Side,
-    join: Join,
-    tol: f64,
-    outer: &mut Polys,
-    inner: &mut Polys,
-) {
-    if !positive(radius) {
-        return;
-    }
-    for c in src.contours() {
-        let (o, i) = (outer.pts.len(), inner.pts.len());
-        match away {
-            // Ink on the left: the contours already wind +1 round it.
-            Side::Right => {
-                offset_loop(c, radius, Side::Right, join, tol, outer);
-                offset_loop(c, radius, Side::Left, join, tol, inner);
-            }
-            Side::Left => {
-                offset_loop(c, radius, Side::Left, join, tol, outer);
-                offset_loop(c, radius, Side::Right, join, tol, inner);
-                outer.pts[o..].reverse();
-                inner.pts[i..].reverse();
-            }
-        }
-    }
-}
-
-/// The contours of `src` moved `radius` to `side`, appended to `out`. With
-/// the side that faces away from the ink this is the outline grown by
-/// `radius`: the fill and its stroke as one shape.
+/// case. Which side is out is not decided here, nor does the caller have to
+/// know: the rasteriser is given both loops and reads grown and shrunk off
+/// the signs of what they wind (`raster.rs`).
 pub fn grow(src: &Polys, radius: f64, side: Side, join: Join, tol: f64, out: &mut Polys) {
     if !positive(radius) {
         out.append(src);
@@ -117,6 +77,11 @@ pub fn grow(src: &Polys, radius: f64, side: Side, join: Join, tol: f64, out: &mu
 /// and turns inside out), and its winding number is the number of stretches
 /// of ink, each lengthened by `v`, that hold the point, so it is positive
 /// exactly on the sweep.
+///
+/// With `away` the side the ink is on, the same rule shortens each stretch
+/// by `v` from its start instead: the part of the ink that is still ink
+/// `v` back. The painter sweeps a glyph both ways, as it grows one both
+/// ways, and lets the rasteriser tell which is which.
 pub fn sweep(src: &Polys, v: Pt, away: Side, out: &mut Polys) {
     for c in src.contours() {
         let n = c.len();
@@ -340,19 +305,17 @@ mod tests {
         p
     }
 
+    /// A shape moved both ways: (to its right, to its left).
+    fn both(src: &Polys, radius: f64, tol: f64) -> (Polys, Polys) {
+        let (mut right, mut left) = (Polys::default(), Polys::default());
+        grow(src, radius, Side::Right, Join::Round, tol, &mut right);
+        grow(src, radius, Side::Left, Join::Round, tol, &mut left);
+        (right, left)
+    }
+
     #[test]
     fn a_round_stroke_reaches_exactly_one_radius_from_the_outline() {
-        let (mut out, mut inner) = (Polys::default(), Polys::default());
-        let sq = square(10.0);
-        stroke_sides(
-            &sq,
-            3.0,
-            Side::Right,
-            Join::Round,
-            0.001,
-            &mut out,
-            &mut inner,
-        );
+        let (out, inner) = both(&square(10.0), 3.0, 0.001);
         let (x0, y0, x1, y1) = out.bounds().unwrap();
         for (got, want) in [(x0, -3.0), (y0, -3.0), (x1, 13.0), (y1, 13.0)] {
             assert!((got - want).abs() < 1e-9, "{got} vs {want}");
@@ -421,68 +384,32 @@ mod tests {
     }
 
     #[test]
-    fn the_two_sides_of_a_stroke_are_the_shape_grown_and_the_shape_shrunk() {
-        let (mut outer, mut inner) = (Polys::default(), Polys::default());
-        // Ink on the left of this square, so away from it is the right.
-        stroke_sides(
-            &square(10.0),
-            3.0,
-            Side::Right,
-            Join::Round,
-            1e-5,
-            &mut outer,
-            &mut inner,
-        );
+    fn moved_both_ways_a_shape_is_grown_one_way_and_shrunk_the_other() {
+        // Ink on the left of this square, so to its right is away from it.
+        let (right, left) = both(&square(10.0), 3.0, 1e-5);
         let grown = 100.0 + 120.0 + core::f64::consts::PI * 9.0;
-        assert!((outer.area2() / 2.0 - grown).abs() < 1e-2);
-        // What is left more than 3 from the edge: a 4 x 4 square, wound +1.
-        assert!((inner.area2() / 2.0 - 16.0).abs() < 1e-9);
+        assert!((right.area2() / 2.0 - grown).abs() < 1e-2);
+        // What is left more than 3 from the edge: a 4 x 4 square.
+        assert!((left.area2() / 2.0 - 16.0).abs() < 1e-9);
 
-        // The same square walked the other way round: ink on the right. The
-        // inner shape is turned so that it still winds +1.
+        // The same square walked the other way round: ink on the right, and
+        // the two loops change places. Each still winds the way the square
+        // does, which is now negative.
         let mut cw = square(10.0);
         cw.pts.reverse();
-        let (mut outer, mut inner) = (Polys::default(), Polys::default());
-        stroke_sides(
-            &cw,
-            3.0,
-            Side::Left,
-            Join::Round,
-            1e-5,
-            &mut outer,
-            &mut inner,
-        );
-        assert!((outer.area2() / 2.0 - grown).abs() < 1e-2);
-        assert!((inner.area2() / 2.0 - 16.0).abs() < 1e-9);
+        let (right, left) = both(&cw, 3.0, 1e-5);
+        assert!((left.area2() / 2.0 + grown).abs() < 1e-2);
+        assert!((right.area2() / 2.0 + 16.0).abs() < 1e-9);
 
-        // Thinner than the pen: the inward offset turns inside out, so its
-        // area is negative and nothing is taken out of the stroke.
-        let (mut outer, mut inner) = (Polys::default(), Polys::default());
-        stroke_sides(
-            &square(4.0),
-            3.0,
-            Side::Right,
-            Join::Round,
-            1e-5,
-            &mut outer,
-            &mut inner,
-        );
-        assert!(inner.area2() <= 0.0, "{}", inner.area2());
+        // Thinner than the pen: the inward offset turns inside out, so it
+        // winds against the square and holds nothing of it.
+        let (_, left) = both(&square(4.0), 3.0, 1e-5);
+        assert!(left.area2() <= 0.0, "{}", left.area2());
     }
 
     #[test]
     fn a_radius_larger_than_the_shape_still_yields_a_closed_loop() {
-        let (mut out, mut inner) = (Polys::default(), Polys::default());
-        let sq = square(1.0);
-        stroke_sides(
-            &sq,
-            5.0,
-            Side::Right,
-            Join::Round,
-            0.01,
-            &mut out,
-            &mut inner,
-        );
+        let (out, inner) = both(&square(1.0), 5.0, 0.01);
         assert_eq!((out.ends.len(), inner.ends.len()), (1, 1));
         assert!(inner.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
         assert!(out.pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()));

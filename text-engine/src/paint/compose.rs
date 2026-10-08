@@ -143,7 +143,7 @@ fn store(px: &[f32], out: &mut [u8]) {
 mod tests {
     use super::*;
     use crate::paint::geom::{Polys, Pt};
-    use crate::paint::raster::{Exact, Rasterizer};
+    use crate::paint::raster::{Exact, Part, Rasterizer};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Polys {
         let mut p = Polys::default();
@@ -157,7 +157,7 @@ mod tests {
     fn layer(polys: &Polys, bx: IBox, rgba: [f32; 4], alpha: f32) -> Layer<'static> {
         Layer {
             bx,
-            cov: Exact.prepare(polys, bx),
+            cov: Exact.prepare(&[Part::plain(polys.clone())], bx),
             shader: Shader::Solid(rgba),
             alpha,
         }

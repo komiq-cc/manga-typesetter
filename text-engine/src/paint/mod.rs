@@ -44,7 +44,7 @@ pub use job::{
     decode, Align, Band, Fill, Job, Request, Rgba, Run, Stop, Tile, MAGIC, WIRE_VERSION,
 };
 pub use outline::FLATTEN_TOLERANCE;
-pub use raster::{Coverage, Exact, Rasterizer, STRIP_ROWS};
+pub use raster::{Coverage, Exact, Part, Rasterizer, STRIP_ROWS};
 pub use scene::Scene;
 pub use shape::{align_offset, curved_origin, shape_run, Placed, ShapedRun};
 pub use stroke::{Join, Side};
@@ -106,14 +106,13 @@ pub struct Raster {
     pub data: Vec<u8>,
 }
 
-/// One glyph's outline in job space, and which way is out.
+/// One glyph's outline in job space, and what a synthesised bold does to it.
 struct GlyphPolys {
     polys: Polys,
-    /// The side of its contours that faces away from the ink.
-    out: Side,
-    /// Half the pen a synthesised bold adds, in job units; 0 for none, and
-    /// for a bold that is drawn as a smear (it is in `polys` already).
+    /// Half the pen an outset bold adds, in job units; 0 for none.
     bold: f64,
+    /// The step a smeared bold is drawn over, in job space.
+    smear: Option<Pt>,
 }
 
 /// The outlines of a job's glyphs, and the shapes made from them.
@@ -147,30 +146,18 @@ impl Glyphs {
             if polys.is_empty() {
                 continue;
             }
-            // Ink lies to the left of a contour walked anticlockwise in the
-            // sense of `(-dy, dx)`, which is when the area is positive.
-            // Holes run the other way round and get the same answer, which
-            // is right: away from the ink is into the hole.
-            let out = if polys.area2() > 0.0 {
-                Side::Right
-            } else {
-                Side::Left
-            };
-            let bold = match (g.synth.bold, bold_draw) {
-                (false, _) => 0.0,
-                (true, BoldDraw::Outset) => bold_outset(g.size),
+            let (bold, smear) = match (g.synth.bold, bold_draw) {
+                (false, _) => (0.0, None),
+                (true, BoldDraw::Outset) => (bold_outset(g.size), None),
                 (true, BoldDraw::Smear) => {
                     // To the right in the run's own frame, wherever the
                     // frame has turned that to.
                     let m = &frame.0;
                     let by = g.size * WEBKIT_BOLD_ADVANCE;
-                    let mut swept = Polys::default();
-                    stroke::sweep(&polys, Pt::new(m[0] * by, m[1] * by), out, &mut swept);
-                    polys = swept;
-                    0.0
+                    (0.0, Some(Pt::new(m[0] * by, m[1] * by)))
                 }
             };
-            self.items.push(GlyphPolys { polys, out, bold });
+            self.items.push(GlyphPolys { polys, bold, smear });
         }
         Ok(())
     }
@@ -179,85 +166,78 @@ impl Glyphs {
         self.items.len()
     }
 
-    /// The glyphs `range` as they are filled: the outline, grown by the
-    /// bold pen and by `extra` more. `extra` grows with a round join, which
-    /// is what a canvas stroke with `lineJoin = "round"` adds.
-    fn solid(&self, range: core::ops::Range<usize>, extra: f64, tol: f64) -> Polys {
-        let mut out = Polys::default();
-        for g in &self.items[range] {
-            if g.bold > 0.0 && extra > 0.0 && BOLD_JOIN != Join::Round {
-                // Two different joins: grow once for the bold, then again.
-                let mut bold = Polys::default();
-                stroke::grow(&g.polys, g.bold, g.out, BOLD_JOIN, tol, &mut bold);
-                stroke::grow(&bold, extra, g.out, Join::Round, tol, &mut out);
-            } else {
-                let join = if extra > 0.0 { Join::Round } else { BOLD_JOIN };
-                stroke::grow(&g.polys, g.bold + extra, g.out, join, tol, &mut out);
-            }
-        }
-        out
-    }
-
-    /// The ring a band of canvas `lineWidth = line` covers around the glyphs
-    /// `range`: everything within half of it of the outline, on both sides.
-    /// Returned as the two shapes of `stroke::stroke_sides`.
+    /// One glyph's contours moved to `side`: by the bold pen and `extra`
+    /// more, then along the smear. `extra` grows with a round join, which is
+    /// what a canvas stroke with `lineJoin = "round"` adds.
     ///
     /// A synthesised bold is itself a pen run round the outline, and with a
-    /// round join two round pens add up to one wider pen, so the band of a
-    /// bold glyph is one stroke of the plain outline.
-    fn band(&self, range: core::ops::Range<usize>, line: f64, tol: f64) -> (Polys, Polys) {
-        let (mut outer, mut inner) = (Polys::default(), Polys::default());
-        for g in &self.items[range] {
-            let radius = line / 2.0 + g.bold;
-            stroke::stroke_sides(
-                &g.polys,
-                radius,
-                g.out,
-                Join::Round,
-                tol,
-                &mut outer,
-                &mut inner,
-            );
+    /// round join two round pens add up to one wider pen, so a bold glyph
+    /// grown by `extra` is the plain outline grown once by both.
+    fn moved(g: &GlyphPolys, extra: f64, side: Side, tol: f64) -> Polys {
+        let mut out = Polys::default();
+        if g.bold > 0.0 && extra > 0.0 && BOLD_JOIN != Join::Round {
+            // Two different joins: grow once for the bold, then again.
+            let mut bold = Polys::default();
+            stroke::grow(&g.polys, g.bold, side, BOLD_JOIN, tol, &mut bold);
+            stroke::grow(&bold, extra, side, Join::Round, tol, &mut out);
+        } else {
+            let join = if extra > 0.0 { Join::Round } else { BOLD_JOIN };
+            stroke::grow(&g.polys, g.bold + extra, side, join, tol, &mut out);
         }
-        (outer, inner)
+        match g.smear {
+            Some(v) => {
+                let mut swept = Polys::default();
+                stroke::sweep(&out, v, side, &mut swept);
+                swept
+            }
+            None => out,
+        }
+    }
+
+    /// One part per glyph of `range`, in device pixels: the glyph as it is
+    /// filled, grown by `extra` job units, or with `ring` the band within
+    /// `extra` of that shape's edge (canvas `lineWidth = 2 * extra`).
+    ///
+    /// Nothing here asks which way a contour runs. Each glyph is handed to
+    /// the rasteriser moved both ways and the rasteriser tells grown from
+    /// shrunk by the sign of what it sums (`raster.rs`).
+    fn parts(
+        &self,
+        range: core::ops::Range<usize>,
+        extra: f64,
+        ring: bool,
+        transform: &Affine,
+        tol: f64,
+    ) -> Vec<Part> {
+        self.items[range]
+            .iter()
+            .filter_map(|g| {
+                let extra = extra.max(0.0);
+                if g.bold + extra <= 0.0 && g.smear.is_none() {
+                    // Nothing moves the outline: no band, and the fill as
+                    // the font drew it.
+                    return (!ring).then(|| Part::plain(g.polys.map(transform)));
+                }
+                Some(Part {
+                    right: Self::moved(g, extra, Side::Right, tol).map(transform),
+                    left: Some(Self::moved(g, extra, Side::Left, tol).map(transform)),
+                    ring,
+                })
+            })
+            .collect()
     }
 }
 
-/// The whole-pixel box that holds `polys`, or `None` if they hold nothing.
-fn pixel_box(polys: &Polys) -> Option<IBox> {
-    let (x0, y0, x1, y1) = polys.bounds()?;
-    // Far outside any surface the guard would accept; also what a
-    // non-finite coordinate would fail.
-    let limit = 1e9;
-    if !(x0 > -limit && y0 > -limit && x1 < limit && y1 < limit) {
-        return None;
-    }
-    let bx = IBox {
-        x0: x0.floor() as i32,
-        y0: y0.floor() as i32,
-        x1: x1.ceil() as i32,
-        y1: y1.ceil() as i32,
-    };
-    (!bx.is_empty()).then_some(bx)
-}
-
-/// A layer before its coverage is prepared: a shape in device pixels and
-/// what to paint it with.
+/// A layer before its coverage is prepared: its parts in device pixels and
+/// what to paint them with.
 struct Planned<'a> {
-    polys: Polys,
-    /// For a stroke: its inner shape, to be taken out of `polys`.
-    minus: Option<Polys>,
+    parts: Vec<Part>,
     bx: IBox,
     shader: Shader<'a>,
     alpha: f32,
 }
 
-fn plan<'a>(
-    shape: &Polys,
-    transform: &Affine,
-    shader: Shader<'a>,
-    alpha: f64,
-) -> Option<Planned<'a>> {
+fn plan<'a>(parts: Vec<Part>, shader: Shader<'a>, alpha: f64) -> Option<Planned<'a>> {
     if !positive(alpha) {
         return None;
     }
@@ -266,28 +246,16 @@ fn plan<'a>(
             return None;
         }
     }
-    let polys = shape.map(transform);
-    let bx = pixel_box(&polys)?;
+    let bx = parts
+        .iter()
+        .filter_map(Part::pixel_box)
+        .reduce(|a, b| a.union(&b))?;
     Some(Planned {
-        polys,
-        minus: None,
+        parts,
         bx,
         shader,
         alpha: alpha.min(1.0) as f32,
     })
-}
-
-/// [`plan`] for a stroke given as its outer and inner shapes.
-fn plan_ring<'a>(
-    outer: &Polys,
-    inner: &Polys,
-    transform: &Affine,
-    shader: Shader<'a>,
-    alpha: f64,
-) -> Option<Planned<'a>> {
-    let mut planned = plan(outer, transform, shader, alpha)?;
-    planned.minus = Some(inner.map(transform));
-    Some(planned)
 }
 
 fn finish(planned: Vec<Planned<'_>>, surface: IBox, rasterizer: &dyn Rasterizer) -> Vec<u8> {
@@ -297,10 +265,7 @@ fn finish(planned: Vec<Planned<'_>>, surface: IBox, rasterizer: &dyn Rasterizer)
             let bx = p.bx.intersect(&surface);
             (!bx.is_empty()).then(|| Layer {
                 bx,
-                cov: match &p.minus {
-                    Some(inner) => rasterizer.prepare_ring(&p.polys, inner, bx),
-                    None => rasterizer.prepare(&p.polys, bx),
-                },
+                cov: rasterizer.prepare(&p.parts, bx),
                 shader: p.shader,
                 alpha: p.alpha,
             })
@@ -372,18 +337,17 @@ pub fn paint_job_with(
         // The glyphs and their widest band as one solid shape: grown by
         // half that band's pen, not a stroke laid over a fill.
         let extra = job.bands.first().map_or(0.0, |b| (b.line / 2.0).max(0.0));
-        let shape = glyphs.solid(all.clone(), extra, tol);
+        let parts = glyphs.parts(all.clone(), extra, false, transform, tol);
         let shader = Shader::new(&Fill::Solid(color), transform, tiles);
-        planned.extend(shader.and_then(|s| plan(&shape, transform, s, 1.0)));
+        planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
     } else {
         for band in &job.bands {
             if !positive(band.line) {
                 continue;
             }
-            let (outer, inner) = glyphs.band(all.clone(), band.line, tol);
+            let parts = glyphs.parts(all.clone(), band.line / 2.0, true, transform, tol);
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
-            planned
-                .extend(shader.and_then(|s| plan_ring(&outer, &inner, transform, s, band.opacity)));
+            planned.extend(shader.and_then(|s| plan(parts, s, band.opacity)));
         }
         // One fill layer per run of glyphs that share a fill. A job-wide
         // fill is one layer; per-line and per-glyph fills are one each,
@@ -411,9 +375,9 @@ pub fn paint_job_with(
             if range.is_empty() {
                 continue;
             }
-            let shape = glyphs.solid(range, 0.0, tol);
+            let parts = glyphs.parts(range, 0.0, false, transform, tol);
             let shader = Shader::new(fill, &transform.after(&frame), tiles);
-            planned.extend(shader.and_then(|s| plan(&shape, transform, s, 1.0)));
+            planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
         }
     }
 

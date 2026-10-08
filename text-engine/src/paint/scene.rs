@@ -12,7 +12,7 @@ use super::outline::FLATTEN_TOLERANCE;
 use super::raster::Exact;
 use super::shade::Shader;
 use super::shape::shape_run;
-use super::{finish, plan, plan_ring, BoldDraw, Glyphs, Planned, MAX_SIDE};
+use super::{finish, plan, BoldDraw, Glyphs, Planned, MAX_SIDE};
 use crate::engine::{Engine, Face};
 use crate::Error;
 
@@ -113,14 +113,15 @@ impl Scene {
                 let shader = |color| Shader::new(&Fill::Solid(color), &self.transform, &[]);
                 planned.extend(match *op {
                     Op::Stroke(n, line, color) if line > 0.0 => {
-                        let (outer, inner) = self.glyphs.band(0..n, line, tol);
-                        shader(color)
-                            .and_then(|s| plan_ring(&outer, &inner, &self.transform, s, 1.0))
+                        let parts = self
+                            .glyphs
+                            .parts(0..n, line / 2.0, true, &self.transform, tol);
+                        shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                     Op::Stroke(..) => None,
                     Op::Fill(n, color) => {
-                        let shape = self.glyphs.solid(0..n, 0.0, tol);
-                        shader(color).and_then(|s| plan(&shape, &self.transform, s, 1.0))
+                        let parts = self.glyphs.parts(0..n, 0.0, false, &self.transform, tol);
+                        shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                 });
             }
