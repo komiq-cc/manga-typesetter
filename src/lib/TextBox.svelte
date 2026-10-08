@@ -61,6 +61,10 @@
   } from './text-paint.js';
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
+  import { engineSwitch } from './engine-switch.svelte.js';
+  import { PICTURE_MAX_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture } from './editor/box-picture.js';
+  import { displayScale } from './editor/display-scale.svelte.js';
+  import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
   import { inspectorTab, effectsSubTab } from './inspector-tabs.svelte.js';
   import WarpGizmo from './editor/WarpGizmo.svelte';
@@ -76,11 +80,58 @@
   import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
-  let { box, pageFrameEl, pg = page() } = $props();
+  // `shown` and `lazy` are read only while the Rust engine draws (see "the
+  // engine's picture" below): `shown` is false for a box on a page the paged
+  // view keeps mounted but hidden, and `lazy` is set where most mounted boxes
+  // are off screen (the longstrip), so a box waits to be told it is near the
+  // viewport before it paints rather than painting and then letting go.
+  let { box, pageFrameEl, pg = page(), shown = true, lazy = false } = $props();
 
   const z = $derived(app.zoom);
   const selected = $derived(app.selectedId === box.id);
   const editing = $derived(app.editingId === box.id);
+
+  // ---- the engine's picture ----
+  //
+  // With the Rust engine drawing (`engineSwitch.painting`: it is installed for
+  // measuring AND its painter is the glyph painter - the one flag, written
+  // where the painter is installed), a box at rest is shown as one canvas
+  // painted by the exporter, the way a warped box always was: see "the mesh
+  // warp" below, which is that path, now the general one. While the engine is
+  // starting, has failed, or has no font to measure in, the flag is false and
+  // the box is the DOM it always was.
+  //
+  // THE SEAM FOR TYPING: a box being typed into is still the browser's - the
+  // contenteditable below, exactly as it is with the switch off - so the
+  // picture stands down for it here, in `!editing`, and nowhere else. The task
+  // that draws the caret and the selection on the engine's glyphs removes
+  // those two words; everything downstream reads `engineShown`.
+  const enginePaints = $derived(engineSwitch.painting);
+  const engineShown = $derived(enginePaints && !editing);
+  // Device px per page px the picture is painted at: one texture pixel per
+  // device pixel at this zoom on this display (less for a box over the pixel
+  // budget - `PICTURE_MAX_PX`).
+  const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
+  // Whether the box is near the viewport: null until the observer has said.
+  let rootEl = $state(null);
+  let near = $state(null);
+  $effect(() => {
+    if (!enginePaints || !shown || !rootEl) {
+      near = null;
+      return;
+    }
+    // Asked again each time the page comes back on screen: an observer tells
+    // of changes, and "still off screen" after a page turn is not one.
+    near = null;
+    return watchNear(rootEl, (v) => {
+      near = v;
+    });
+  });
+  // Whether the picture may hold pixels at all. Not on a hidden page, and not
+  // far off screen; until the observer has spoken a box on the page in front
+  // of the user paints (a page turn must not show a frame without its text)
+  // and a lazy one waits.
+  const pictureOn = $derived(shown && (lazy ? near === true : near !== false));
   const bulkOn = $derived(app.bulk.active);
   const bulkTarget = $derived(isBulkTarget(box.id));
   const s = $derived(box.style);
@@ -169,7 +220,10 @@
     maskH = h;
   };
   $effect(() => {
-    if (!clipActive(s.clip)) {
+    // Not while the box is the engine's picture: the mask is in those pixels
+    // (as it is in a warped box's), and an image nobody applies is megabytes
+    // held for nothing. It is built again when the box is typed into.
+    if (!clipActive(s.clip) || engineShown) {
       maskKey = '';
       maskSeq++;
       setMask('', 0, 0);
@@ -409,7 +463,14 @@
   // cannot re-render, and it costs the same things: no caret and no selection.
   // See `onDblClick` below. The mask tools still work: `maskShapePoint` carries
   // the pointer back through the mesh.
+  //
+  // With the Rust engine drawing, this is how EVERY box at rest is shown
+  // (`engineShown`): the same canvas, the same effect, the same release. Two
+  // things differ, both in `paintWarp` and the key: the picture is painted at
+  // the display's scale rather than at 2 and stretched, and it is not painted
+  // at all for a box nobody can see (`pictureOn`).
   const warped = $derived(warpActive(s, box.w, box.h));
+  const pictured = $derived(warped || engineShown);
   let warpEl = $state(null);
   let warpGeom = $state(null);
   // Everything the picture is drawn from - the whole style, because a warped
@@ -421,11 +482,31 @@
   // and `inkKey` above already states exactly that block for the layer this one
   // replaces - it is computed either way, so folding it in costs nothing and
   // says the same thing. Anything the ink can change, it changes there.
+  //
+  // The engine's picture has a key of its own (`pictureKey`): it leaves out
+  // what CSS applies to the finished picture - the turn, the flip, the opacity
+  // - so turning a box repaints nothing, and it states the LINES, so a change
+  // to how the text breaks repaints whatever caused it and a move, which
+  // re-derives the same lines, does not.
   const warpKey = $derived(
-    warped
-      ? JSON.stringify({ ...s, ink: 0 }) +
+    engineShown
+      ? pictureOn
+        ? pictureKey({
+            style: s,
+            inkKey,
+            text,
+            w: box.w,
+            h: box.h,
+            lines: shaped,
+            indents,
+            scale: pictureRes,
+            fonts: app.fontsVersion,
+          })
+        : PICTURE_OFF
+      : warped
+        ? JSON.stringify({ ...s, ink: 0 }) +
           `|${inkKey}|${text}|${box.w}|${box.h}|${z}|${app.fontsVersion}`
-      : '',
+        : '',
   );
   let warpDrawn = '';
   let warpLive = null; // non-reactive twin of warpEl: what the pixel release acts on
@@ -433,7 +514,9 @@
   let warpSeq = 0;
 
   function paintWarp(el, tips) {
-    warpGeom = paintWarpedBox(el, box, pg, z, tips);
+    warpGeom = engineShown
+      ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
+      : paintWarpedBox(el, box, pg, z, tips);
   }
 
   // ---- the gizmo's live drag ----
@@ -459,7 +542,9 @@
   const warpPainter = {
     begin() {
       releaseWarpTex();
-      warpTex = renderBoxTexture(box, pg, warpTips);
+      warpTex = engineShown
+        ? renderBoxTexture(box, pg, warpTips, pictureRes, PICTURE_MAX_PX)
+        : renderBoxTexture(box, pg, warpTips);
       warpDragging = true;
     },
     frame() {
@@ -467,7 +552,9 @@
       // the pointer went down: the box only becomes a picture once the mesh
       // deforms, and the effect below paints that first frame as it mounts.
       if (!warpTex || !warpLive) return;
-      warpGeom = paintWarpedTexture(warpLive, warpTex, box, z);
+      warpGeom = engineShown
+        ? { ...paintPictureTexture(warpLive, warpTex, box), page: warpGeom?.page }
+        : paintWarpedTexture(warpLive, warpTex, box, z);
     },
     end() {
       releaseWarpTex();
@@ -512,9 +599,22 @@
     // through the mesh. The key is NOT banked here, unlike the gizmo drag above:
     // nothing else is painting this canvas, so the settle has to find the key
     // still stale and repaint.
-    if (app.zoomLive && warpDrawn) return;
+    // Only a canvas that HOLDS a picture is left to be stretched: one that was
+    // let go for being off screen has nothing to stretch, and zooming out is
+    // exactly what brings it back into view.
+    if (app.zoomLive && warpDrawn && warpDrawn !== PICTURE_OFF) return;
     if (key === warpDrawn) return;
     warpDrawn = key;
+    if (key === PICTURE_OFF) {
+      // The box is on a hidden page or far off screen: the element stays, its
+      // pixels do not, and a settle still in flight must not paint them back.
+      el.width = 0;
+      el.height = 0;
+      warpGeom = null;
+      warpTips = null;
+      warpSeq++;
+      return;
+    }
     paintWarp(el, warpTips);
     const ids = inkTipIds(s.ink);
     const wantNoise = s.roughen.on && !noiseSettled;
@@ -1731,10 +1831,11 @@
   class:flagged={!!review}
   data-id={box.id}
   style={boxStyle}
+  bind:this={rootEl}
   onpointerdown={onBoxPointerDown}
   ondblclick={onDblClick}
 >
-  {#if s.roughen.on}
+  {#if s.roughen.on && !engineShown}
     <svg class="rough-def" width="0" height="0" aria-hidden="true">
       <!-- The filter runs in CSS px, which are ZOOMED px, so both of its numbers
            have to be turned back into the page's own units or the roughening is
@@ -1756,7 +1857,7 @@
     </svg>
   {/if}
 
-  {#if mbTaps.length}
+  {#if !engineShown && mbTaps.length}
     <svg class="rough-def" width="0" height="0" aria-hidden="true">
       <!-- The directional smear, as the exporter's tap list stated in SVG:
            every tap is shifted off the source and added into a running sum
@@ -1807,9 +1908,9 @@
        flip, over the mask, as the export does (`wrapMirror`). -->
   <div
     class="clipwrap"
-    style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{warped ? '' : maskCss}{wrapMirror}"
+    style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{pictured ? '' : maskCss}{wrapMirror}"
   >
-  {#if warped}
+  {#if pictured}
     <!-- The whole box as one picture: type, ink and every filter, carried
          through the mesh by the exporter's painter. Placed off the box's own
          top-left by however far the deformed mesh reached past it, which is
@@ -1820,12 +1921,20 @@
          would crop the warped picture against the unwarped shape.
          The mirror IS applied, by the wrapper, for the opposite reason: the
          export flips the finished bitmap around the box's centre rather than
-         baking the flip into it (see paintBoxOnPage). -->
+         baking the flip into it (see paintBoxOnPage).
+         The engine's picture of an unwarped box is the same canvas for the
+         same reasons - `renderBoxTexture` has the mask in it and neither the
+         flip, the turn nor the opacity, which stay CSS on the wrapper and on
+         the box - set on whole device pixels where that keeps it sharp
+         (`pictureCss`). -->
     <canvas
       class="warpl"
       bind:this={warpEl}
+      data-painter={engineShown ? 'engine' : undefined}
       style={warpGeom
-        ? `left:${-warpGeom.ox * z}px;top:${-warpGeom.oy * z}px;width:${warpGeom.cw * z}px;height:${warpGeom.ch * z}px;`
+        ? engineShown
+          ? pictureCss(warpGeom, z, displayScale(), s.rotation || mirror ? null : box)
+          : `left:${-warpGeom.ox * z}px;top:${-warpGeom.oy * z}px;width:${warpGeom.cw * z}px;height:${warpGeom.ch * z}px;`
         : 'left:0;top:0;width:0;height:0'}
       aria-hidden="true"
     ></canvas>
@@ -1895,7 +2004,7 @@
       </div>
     {/if}
   {/if}
-    {#if !warped && inkActive(s.ink)}
+    {#if !pictured && inkActive(s.ink)}
       <!-- Inside the clip wrapper so the visibility mask hides ink the same way
            it hides letters; positioned off the box's own top-left, offset by the
            overhang the canvas was grown by. -->

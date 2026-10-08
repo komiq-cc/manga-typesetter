@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>editor check</title>
+    <style>
+      /* The page is compared with the export, which paints on white: the
+         paper tint and the frame's shadow are the app's chrome, not the
+         picture, and a blinking caret is not ink. */
+      html, body, #app { margin: 0; height: 100%; }
+      .page-frame, .strip { background: #fff !important; box-shadow: none !important; }
+      .tbox .txt.editable { caret-color: transparent !important; }
+      /* Nor is the "does not fit" flag: several boxes here overflow on purpose. */
+      .review-badge { display: none !important; }
+      .tbox.flagged { outline: none !important; }
+      /* The selection's frame and handles in a colour no type here is set in,
+         so the driver can tell the two apart in a screenshot. */
+      html[data-theme] { --tintline: #ff00ff !important; --tint: #ff00ff !important; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/test/editor-check/host.js"></script>
+  </body>
+</html>
