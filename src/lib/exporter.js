@@ -471,8 +471,9 @@ function paintShadows(ctx, box, L, SS) {
   const s = L.s;
   if (!(s.shadows ?? []).length) return;
   const sil = document.createElement('canvas');
-  sil.width = L.cw * SS;
-  sil.height = L.ch * SS;
+  // The texture's own size (see `renderBoxTexture`): whole pixels at any scale.
+  sil.width = Math.ceil(L.cw * SS);
+  sil.height = Math.ceil(L.ch * SS);
   const sctx = sil.getContext('2d');
   for (let i = s.shadows.length - 1; i >= 0; i--) {
     const sh = s.shadows[i];
@@ -490,6 +491,21 @@ function paintShadows(ctx, box, L, SS) {
     ctx.drawImage(sil, sh.x * SS, sh.y * SS);
     ctx.restore();
   }
+  // Handed back now rather than whenever it is collected: the editor paints a
+  // box per frame of a resize, and a footprint-sized scratch per frame is the
+  // shape that filled the webview before.
+  sil.width = 0;
+  sil.height = 0;
+}
+
+// How many device px per page px a box's texture is painted at: the scale asked
+// for, lowered - for this box only - until its footprint holds no more than
+// `maxPx` pixels. Resolution gives way, the geometry does not: the footprint is
+// the same page px either way. With no budget the scale asked for is the answer,
+// untouched.
+export function textureScale(cw, ch, scale, maxPx = Infinity) {
+  const area = cw * ch * scale * scale;
+  return area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
 }
 
 // Render a box to its own supersampled offscreen canvas. Used for un-rotated
@@ -522,13 +538,26 @@ export function renderBox(box, p, tips) {
 // runs only `warpTexture` after). The pass order and the pixels are exactly
 // what they were when this was one function - `renderBox` is the same two
 // steps in the same order, and every other caller sees no change at all.
-export function renderBoxTexture(box, p, tips) {
+//
+// `scale` is the supersample, device px per page px, and it is 2 for the
+// export and for everyone who does not say: the downscale-on-composite is what
+// makes the file's edges crisp. The editor names its own - the zoom times the
+// display's pixel ratio - because a picture painted at 2 and stretched is soft
+// above 200% and wasted below, and `maxPx` is the most pixels it will hold for
+// one box (`textureScale`). Everything below is stated in page px and applied
+// at `SS`, so the picture is the same picture at any scale and only its
+// resolution moves. The scale that was really used comes back as `ss`.
+export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity) {
   const L = layoutBox(box, p);
   const s = L.s;
-  const SS = 2;
+  const SS = textureScale(L.cw, L.ch, scale, maxPx);
   const cnv = document.createElement('canvas');
-  cnv.width = L.cw * SS;
-  cnv.height = L.ch * SS;
+  // Whole pixels, outwards: at a scale that is not a whole number the footprint
+  // does not land on one, and a canvas cut short would lose its last row.
+  const pw = Math.ceil(L.cw * SS);
+  const ph = Math.ceil(L.ch * SS);
+  cnv.width = pw;
+  cnv.height = ph;
   const ctx = cnv.getContext('2d');
   ctx.scale(SS, SS); // all drawing stays in native units; SS handled here
   ctx.imageSmoothingQuality = 'high';
@@ -575,8 +604,14 @@ export function renderBoxTexture(box, p, tips) {
     octx.globalCompositeOperation = s.clip.mode === 'include' ? 'destination-in' : 'destination-out';
     octx.drawImage(m, 0, 0);
     octx.restore();
+    m.width = 0;
+    m.height = 0;
   }
-  return { canvas: out, ox: L.ox, oy: L.oy, cw: L.cw, ch: L.ch, ss: SS };
+  // The page px the bitmap spans, which is the footprint exactly wherever it
+  // lands on whole pixels - at 2 always - and a fraction of a pixel more where
+  // the size above was rounded up, so a caller that places or stretches the
+  // bitmap by these numbers maps one texture pixel to `1 / SS` page px.
+  return { canvas: out, ox: L.ox, oy: L.oy, cw: pw / SS, ch: ph / SS, ss: SS };
 }
 
 // The mesh warp, over everything: the box is a finished picture by now - type
