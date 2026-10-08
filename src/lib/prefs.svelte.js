@@ -17,6 +17,7 @@
 import { setBoxDefaults, setTypesetDefault, setLegacyTypeset } from './data.js';
 import { app, setTool, setBrushToolAllowed, setMinFontSize, setInheritBoxStyle } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
+import { useTextEngine } from './engine-switch.svelte.js';
 
 const KEY = 'mt.prefs';
 
@@ -88,6 +89,12 @@ export const prefs = $state({
   // Recognition quality/size is a preference of this installation, separate
   // for each project language. Project files continue to store only language.
   ocrModels: normalizeOcrModels(null),
+  // Who measures text: 'browser', as the app always has, or 'rust', the Rust
+  // text engine on the user's own font files (engine-switch.svelte.js). Off by
+  // default while the port is being checked against the browser. A machine
+  // preference like the rest: it says how this computer measures, and a
+  // chapter carries nothing of it.
+  textEngine: 'browser',
 });
 
 // The two font lists are string arrays; anything else in them is dropped.
@@ -99,7 +106,7 @@ const cleanNames = (v) =>
 // setter's validation and the loader's validation cannot drift apart.
 const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool', 'inheritBoxStyle'];
 const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
-const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'] };
+const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'], textEngine: ['browser', 'rust'] };
 
 // Push the box defaults to where a box is actually born. The store seeds a new
 // box's style through `applyBoxDefaults` in data.js, and data.js is a leaf - it
@@ -138,6 +145,7 @@ function persist() {
         hiddenBuiltinFonts: $state.snapshot(prefs.hiddenBuiltinFonts),
         shownSystemFonts: $state.snapshot(prefs.shownSystemFonts),
         ocrModels: $state.snapshot(prefs.ocrModels),
+        textEngine: prefs.textEngine,
         legacyTypeset,
       }),
     );
@@ -188,6 +196,9 @@ export function setPref(key, value) {
   // on the page.
   if (key === 'minFontSize') setMinFontSize(value);
   if (key === 'inheritBoxStyle') setInheritBoxStyle(value);
+  // The one preference that re-measures everything, and it does so itself:
+  // the engine is swapped and every box laid out again once it is in.
+  if (key === 'textEngine') useTextEngine(value);
   // No relayout for these: they are what the NEXT box is born with, and boxes
   // already on the page keep the flags they carry. Re-measuring here would be
   // re-measuring nothing.
@@ -257,6 +268,10 @@ function load() {
   setMinFontSize(prefs.minFontSize);
   setBrushToolAllowed(prefs.brushTool);
   setInheritBoxStyle(prefs.inheritBoxStyle);
+  // Here and not at first use: a chapter can open before anything asks, and
+  // the engine has to be standing in the way of its first fit by then. A
+  // no-op for 'browser', which is every install that never touched the switch.
+  useTextEngine(prefs.textEngine);
 }
 
 load();

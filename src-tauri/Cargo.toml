@@ -6,7 +6,8 @@ authors = ["k-omiq"]
 license = "MIT"
 repository = "https://github.com/komiq-cc/manga-typesetter"
 edition = "2021"
-rust-version = "1.77.2"
+# 1.85 since `wuff` (WOFF decoding, see below), an edition-2024 crate.
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -90,6 +91,11 @@ tauri-plugin-process = "2"
 # font directories itself (reading fontconfig's XML on Linux) and parses only
 # the naming tables, so nothing is linked and no font bytes cross to the webview.
 fontdb = "0.24"
+# WOFF and WOFF2 to a plain font (src/font_decode.rs), for the Rust text engine
+# in the webview, which reads sfnt only. Pure Rust, MIT; its Brotli and zlib
+# decoders are crates the tree already had. Decoded here rather than in the
+# engine so the wasm does not carry a Brotli decoder.
+wuff = "0.2.9"
 
 # Execution providers are per-OS `ort` features: each one selects a different
 # prebuilt onnxruntime, and a provider the target cannot have (CoreML off a

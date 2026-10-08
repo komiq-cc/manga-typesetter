@@ -16,7 +16,7 @@ import {
 } from './store.svelte.js';
   import { tagsInUse, boxesWithTag } from './tags.svelte.js';
   import { modKey } from './format.js';
-  import { fontGroups, isFontOffered } from './font-menu.js';
+  import { fontGroups, fontCaveat } from './font-menu.js';
   import { PATTERN_KINDS, GRADIENT_MAX_STOPS } from './data.js';
   import ColorPicker from './ColorPicker.svelte';
 
@@ -437,8 +437,8 @@ import {
               {@render tick('font')}
               <span class="lbl">Font</span>
               <select value={s.font} onchange={(e) => set('font', e.target.value)}>
-                {#if s.font && !isFontOffered(s.font)}
-                  <option value={s.font}>{s.font} (not in menus)</option>
+                {#if fontCaveat(s.font)}
+                  <option value={s.font}>{s.font} ({fontCaveat(s.font)})</option>
                 {/if}
                 {#each fontGroups() as g (g.key)}
                   <optgroup label={g.label}>

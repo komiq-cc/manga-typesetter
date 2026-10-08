@@ -27,7 +27,7 @@ Two rules are switches (`engine.setRules`, `--rules` on the capture):
 
 | switch | values | default |
 |---|---|---|
-| `boldAdvance` | `unchanged`, `webkit` | `unchanged` (not decided, see rule 7) |
+| `boldAdvance` | `unchanged`, `webkit` | the engine's own is `unchanged`; the app's adapter sets `webkit` (the user's decision, 2026-10-08, see rule 7) |
 | `fontBox` | `browser`, `skia` | `browser` |
 | `inkBaseline` | `include`, `exact` | `include` (rule 4; applied by the adapter, `src/lib/text-engine/rust.js`) |
 
@@ -235,10 +235,15 @@ Where the alphabetic baseline sits when a glyph is asked for with
   0.02 px of `ref-wk`, and what is left is the no-break space of rule 8;
   without it 0.96%.]
 - **Engine:** a named switch, `boldAdvance`, so that both can be captured.
-  `unchanged` is Chromium's rule and the default; `webkit` adds `size / 36`
-  per glyph to the advance, moves the ink of later glyphs with the pen, and is
-  honoured by the breaker and by fallback parts.
-- **Not decided here, on purpose.** What each choice does to real chapters
+  `unchanged` is Chromium's rule and the engine's own default; `webkit` adds
+  `size / 36` per glyph to the advance, moves the ink of later glyphs with the
+  pen, and is honoured by the breaker and by fallback parts.
+- **Decided by the user on 2026-10-08: `webkit`.** The app's adapter
+  (`DEFAULT_RULES` in `src/lib/text-engine/rust.js`) sets it on every engine
+  it makes, and the painter draws the bold to match (the glyph and a second
+  one `size / 36` to its right, as WebKit does). A document then keeps the
+  line breaks it has on macOS today; on Windows the six kinds of box below
+  move to where macOS always set them. What each choice does to real chapters
   (every lettered box of 11 chapters, 2,298 boxes) [M]:
 
   | boxes that break their lines differently from `ref-wk` | count |

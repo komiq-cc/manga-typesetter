@@ -192,26 +192,30 @@ describe('the rules a browser canvas follows', () => {
     expect([padded.ascent, padded.descent]).toEqual([g.ascent, g.descent]);
   });
 
-  it('keeps a synthesised bold on the regular advances unless told to widen them as WebKit does', async () => {
+  it('widens a synthesised bold as WebKit does unless told to keep the regular advances', async () => {
     const e = await rustEngine();
     const heard = vi.fn();
     e.onFontsChange(heard);
     const regular = face('Comic Neue', 36);
     const bold = face('Comic Neue', 36, true);
     const w = e.advance(regular, 'WAIT');
-    expect(e.rules()).toEqual({ boldAdvance: 'unchanged', fontBox: 'browser', inkBaseline: 'include' });
-    expect(e.advance(bold, 'WAIT')).toBe(w);
-    expect(e.lineInk(bold, 'WAIT').right).toBeGreaterThan(e.lineInk(regular, 'WAIT').right);
-
-    e.setRules({ boldAdvance: 'webkit' });
-    // Numbers measured under the old rule are stale, and the listeners hear it.
-    expect(heard).toHaveBeenCalledTimes(1);
+    expect(e.rules()).toEqual({ boldAdvance: 'webkit', fontBox: 'browser', inkBaseline: 'include' });
+    // size / 36 a glyph: four glyphs at 36 px.
     expect(e.advance(bold, 'WAIT')).toBeCloseTo(w + 4, 9);
     expect(e.advance(regular, 'WAIT')).toBe(w);
     // A real face is never widened: DejaVu's italic is a file, its bold is not.
     const oblique = e.advance(face('DejaVu Sans', 36, false, true), 'WAIT');
     expect(e.advance(face('DejaVu Sans', 36, true, true), 'WAIT')).toBeCloseTo(oblique + 4, 9);
 
+    e.setRules({ boldAdvance: 'unchanged' });
+    // Numbers measured under the old rule are stale, and the listeners hear it.
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(e.advance(bold, 'WAIT')).toBe(w);
+    expect(e.lineInk(bold, 'WAIT').right).toBeGreaterThan(e.lineInk(regular, 'WAIT').right);
+    // A second engine starts from the app's defaults, not from the first one's switches.
+    expect((await rustEngine()).advance(bold, 'WAIT')).toBeCloseTo(w + 4, 9);
+
+    e.setRules({ boldAdvance: 'webkit' });
     e.setRules({ fontBox: 'skia' });
     expect(e.fontBox(face('Comic Neue', 14.5)).ascent).toBeCloseTo(13.05, 9);
     expect(e.rules()).toEqual({ boldAdvance: 'webkit', fontBox: 'skia', inkBaseline: 'include' });

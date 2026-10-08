@@ -21,8 +21,9 @@ const BOLD_SLOTS = new Set(['bold', 'boldItalic']);
 const HANDLES_MAX = 4096;
 
 // The rule choices that are switches (text-engine/RULES.md), and the value
-// each has unless a caller says otherwise.
-export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'unchanged', fontBox: 'browser', inkBaseline: 'include' });
+// each has unless a caller says otherwise. `boldAdvance` is the user's choice
+// (2026-10-08): a synthesised bold is as wide as macOS has always set it.
+export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'webkit', fontBox: 'browser', inkBaseline: 'include' });
 // Rules the adapter applies itself, to what the engine answered.
 const ADAPTER_RULES = { inkBaseline: ['exact', 'include'] };
 
@@ -76,7 +77,8 @@ export async function createRustTextEngine(source, options = {}) {
       rules[name] = value;
     }
   }
-  applyRules(options.rules);
+  // The defaults too: the engine's own are not all the app's.
+  applyRules({ ...DEFAULT_RULES, ...options.rules });
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
@@ -122,6 +124,28 @@ export async function createRustTextEngine(source, options = {}) {
     if (handles.size >= HANDLES_MAX) handles.clear();
     handles.set(face.key, h);
     return h;
+  }
+
+  function checkFace(family, slot) {
+    if (typeof family !== 'string' || !family) throw new Error('text engine: a face needs a family name');
+    if (!FACE_SLOTS.includes(slot)) throw new Error(`text engine: unknown face slot '${slot}'`);
+  }
+
+  // `fonts` is `[[slot, engine font id], ...]`, already read by the engine.
+  function put(family, fonts) {
+    let fam = families.get(family);
+    if (!fam) {
+      fam = Object.fromEntries(FACE_SLOTS.map((s) => [s, 0]));
+      families.set(family, fam);
+    }
+    const old = [];
+    for (const [slot, font] of fonts) {
+      if (fam[slot]) old.push(fam[slot]);
+      fam[slot] = font;
+    }
+    // Chains name fonts by id: drop them before the font they name goes.
+    changed();
+    for (const font of old) low.removeFont(font);
   }
 
   // What the caller of the DOM breaker always got (browser.js): a line loses
@@ -192,26 +216,50 @@ export async function createRustTextEngine(source, options = {}) {
     /**
      * Registers one face of a family; `family` is the name a box's
      * `style.font` uses. A second face for the same slot replaces the first.
+     * `index` picks the face inside a collection (`.ttc`); a plain font file
+     * has only face 0.
      */
-    addFace(family, slot, bytes) {
-      if (typeof family !== 'string' || !family) throw new Error('text engine: a face needs a family name');
-      if (!FACE_SLOTS.includes(slot)) throw new Error(`text engine: unknown face slot '${slot}'`);
+    addFace(family, slot, bytes, index = 0) {
+      checkFace(family, slot);
       let font;
       try {
-        font = low.addFont(bytes);
+        font = low.addFont(bytes, index);
       } catch (error) {
         throw new Error(`text engine: cannot read ${family}/${slot}: ${error.message}`);
       }
-      let fam = families.get(family);
-      if (!fam) {
-        fam = Object.fromEntries(FACE_SLOTS.map((s) => [s, 0]));
-        families.set(family, fam);
+      put(family, [[slot, font]]);
+    },
+    /**
+     * Registers several faces of a family out of ONE file, a collection:
+     * `faces` is `[{ slot, index }]`. The bytes are copied into the engine
+     * once and every face reads that copy, so a system collection of tens of
+     * megabytes is held once however many of its faces the family uses.
+     */
+    addFaces(family, bytes, faces) {
+      if (!Array.isArray(faces) || !faces.length) throw new Error('text engine: a collection needs at least one face');
+      for (const f of faces) checkFace(family, f.slot);
+      const made = [];
+      try {
+        const first = low.addFont(bytes, faces[0].index ?? 0);
+        made.push([faces[0].slot, first]);
+        for (const f of faces.slice(1)) made.push([f.slot, low.addSiblingFace(first, f.index ?? 0)]);
+      } catch (error) {
+        // All or nothing: half a family would measure its bold as a smeared regular.
+        for (const [, font] of made) low.removeFont(font);
+        throw new Error(`text engine: cannot read ${family}: ${error.message}`);
       }
-      const old = fam[slot];
-      fam[slot] = font;
-      // Chains name fonts by id: drop them before the font they name goes.
+      put(family, made);
+    },
+    /** Takes one face back out; the family goes with its last face. False when there was none. */
+    removeFace(family, slot) {
+      const fam = families.get(family);
+      const old = fam?.[slot];
+      if (!old) return false;
+      fam[slot] = 0;
+      if (!present(fam).length) families.delete(family);
       changed();
-      if (old) low.removeFont(old);
+      low.removeFont(old);
+      return true;
     },
     removeFamily(family) {
       const fam = families.get(family);
@@ -223,6 +271,11 @@ export async function createRustTextEngine(source, options = {}) {
     },
     hasFamily(family) {
       return families.has(family);
+    },
+    /** The slots a family has a real face in, in the app's slot order; empty for an unregistered family. */
+    facesOf(family) {
+      const fam = families.get(family);
+      return fam ? present(fam) : [];
     },
 
     /**
