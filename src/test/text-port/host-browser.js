@@ -3,8 +3,9 @@ import * as measure from '../../lib/measure.js';
 import * as contain from '../../lib/contain.js';
 import * as exporter from '../../lib/exporter.js';
 import * as solver from '../../lib/auto-layout.js';
-import { textEngine, setTextEngine } from '../../lib/text-engine/index.js';
+import { textEngine, setTextEngine, setGlyphPainter } from '../../lib/text-engine/index.js';
 import { createRustTextEngine } from '../../lib/text-engine/rust.js';
+import { createRustGlyphPainter } from '../../lib/text-engine/rust-painter.js';
 import { probe } from './probe.js';
 import { prepareFonts } from './fonts.js';
 
@@ -29,8 +30,8 @@ async function capture() {
   if (!['ref-cr', 'ref-wk', 'new'].includes(engine)) throw new Error(`Invalid browser engine '${engine}'`);
   // `new` measures with the Rust engine inside this browser. Its numbers must
   // be the node host's numbers, byte for byte: that is the check that the
-  // wasm gives one answer on every machine. The pictures are still painted by
-  // this browser's canvas.
+  // wasm gives one answer on every machine. The pictures are the engine's too,
+  // unless `painter=browser` asks for this browser's canvas.
   let rust = null;
   let wasmHash = null;
   if (engine === 'new') {
@@ -40,7 +41,9 @@ async function capture() {
     wasmHash = await sha256(wasm);
     const rules = Object.fromEntries((query.get('rules') || '').split(',').filter(Boolean).map((pair) => pair.split('=')));
     rust = await createRustTextEngine(wasm, { rules });
-  } else if (query.has('rules')) throw new Error('rules are switches of the Rust engine: use engine=new');
+  } else if (query.has('rules') || query.has('painter')) throw new Error('rules and painter are switches of the Rust engine: use engine=new');
+  const painter = rust ? query.get('painter') || 'rust' : 'browser';
+  if (!['rust', 'browser'].includes(painter)) throw new Error(`painter is rust or browser, not '${painter}'`);
   const collector = (query.get('collector') || 'http://127.0.0.1:8787').replace(/\/$/, '');
   const runId = safeId(query.get('run') || startedAt.replace(/[-:]/g, '').replace('T', '-').slice(0, 15));
   const selected = query.has('only') ? query.get('only').split(',') : ['metrics', 'layout', 'pixels'];
@@ -79,6 +82,7 @@ async function capture() {
   // measure.js installed the browser engine as it loaded; the Rust engine
   // replaces it here, before anything has been measured.
   if (rust) setTextEngine(rust);
+  if (painter === 'rust') setGlyphPainter(createRustGlyphPainter(rust));
   if (textEngine()?.id !== (rust ? 'rust' : 'browser')) throw new Error(`Wrong measuring engine installed: ${textEngine()?.id}`);
   measure.clearLayoutMemo();
   const corpus = {}, hashes = {};
@@ -143,7 +147,7 @@ async function capture() {
   const manifest = {
     engine, runId, commit: metadata.commit, dirty: metadata.dirty,
     host: { userAgent: `${navigator.userAgent}${wasmHash ? `; mt-text wasm ${wasmHash}` : ''}`, platform: navigator.platform, dpr: devicePixelRatio },
-    ...(rust ? { rules: rust.rules() } : {}),
+    ...(rust ? { rules: rust.rules(), painter } : {}),
     corpus: hashes, fonts: await sha256(fontBytes), counts, startedAt, finishedAt: new Date().toISOString(),
   };
   await put('manifest.json', JSON.stringify(manifest, null, 2) + '\n');

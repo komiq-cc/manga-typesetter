@@ -4,11 +4,12 @@ import { flags, root, dataDir, safeId, runIdNow } from './lib/common.mjs';
 
 try {
   // --rules boldAdvance=webkit,...  rule switches of the Rust engine (`new` only)
+  // --painter rust|browser        who paints the pictures of a `new` run (default rust; browser = this host's canvas)
   // --only layout,...             a partial run for looking at one kind; not a capture to compare gates on
-  const args = flags(['--data', '--engine', '--run', '--rules', '--only']);
+  const args = flags(['--data', '--engine', '--run', '--rules', '--painter', '--only']);
   const env = {
     ...process.env, TP_CAPTURE: '1', TP_DATA: dataDir(args.data), TP_ENGINE: safeId(args.engine || 'ref-sk'), TP_RUN_ID: safeId(args.run || runIdNow()),
-    TP_RULES: args.rules ?? '', TP_ONLY: args.only ?? '',
+    TP_RULES: args.rules ?? '', TP_PAINTER: args.painter ?? '', TP_ONLY: args.only ?? '',
   };
   const run = spawnSync(
     `${root}node_modules/.bin/vitest`,

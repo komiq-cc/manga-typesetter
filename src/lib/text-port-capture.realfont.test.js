@@ -39,6 +39,9 @@ if (process.env.TP_CAPTURE !== '1') {
     const rules = Object.fromEntries((process.env.TP_RULES || '').split(',').filter(Boolean).map((pair) => pair.split('=')));
     if (!wasm && Object.keys(rules).length) throw new Error('Rules are switches of the Rust engine: use --engine new');
     const rust = wasm ? await (await import('./text-engine/rust.js')).createRustTextEngine(wasm, { rules }) : null;
+    // The pictures of a `new` run are the engine's own unless the run asks for this host's canvas.
+    const painter = process.env.TP_PAINTER || (rust ? 'rust' : 'browser');
+    if (!['rust', 'browser'].includes(painter) || (painter === 'rust' && !rust)) throw new Error(`--painter is rust or browser, and rust needs --engine new; got '${painter}'`);
     const kinds = (process.env.TP_ONLY || 'metrics,layout,pixels').split(',');
     if (!kinds.length || kinds.some((k) => !['metrics', 'layout', 'pixels'].includes(k))) throw new Error('--only takes metrics, layout, pixels, comma separated');
     const fontBytes = readFileSync(guardedPath(data, 'fonts/fonts.json'));
@@ -58,6 +61,7 @@ if (process.env.TP_CAPTURE !== '1') {
     // replaces it here, before anything has been measured.
     const seam = await import('./text-engine/index.js');
     if (rust) seam.setTextEngine(rust);
+    if (painter === 'rust') seam.setGlyphPainter((await import('./text-engine/rust-painter.js')).createRustGlyphPainter(rust));
     if (seam.textEngine()?.id !== (rust ? 'rust' : 'browser')) throw new Error(`Wrong measuring engine installed: ${seam.textEngine()?.id}`);
     const contain = await import('./contain.js');
     const exporter = await import('./exporter.js');
@@ -110,7 +114,7 @@ if (process.env.TP_CAPTURE !== '1') {
     const manifest = {
       engine, runId, ...gitInfo(), host: { userAgent: `node ${process.version}; @napi-rs/canvas${wasm ? `; mt-text wasm ${sha256(wasm)}` : ''}`, platform: process.platform, dpr: 1 },
       corpus: hashes, fonts: sha256(fontBytes), counts, startedAt, finishedAt: new Date().toISOString(),
-      ...(rust ? { rules: rust.rules() } : {}), ...(kinds.length < 3 ? { only: kinds } : {}),
+      ...(rust ? { rules: rust.rules(), painter } : {}), ...(kinds.length < 3 ? { only: kinds } : {}),
     };
     writeFileSync(guardedPath(dir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
     console.log(`text-port run: ${dir}\ncounts: ${JSON.stringify(counts)}`);

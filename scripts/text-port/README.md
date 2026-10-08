@@ -215,8 +215,16 @@ node scripts/text-port/capture-node.mjs [--data <dir>] [--run <id>]          # r
 node scripts/text-port/capture-node.mjs [--data <dir>] [--run <id>] --engine new   # the Rust engine; needs `npm run build:engine`
 node scripts/text-port/collector.mjs   [--data <dir>] [--port 8787] [--origin http://localhost:5173]
 # then, with the dev server running, open in the browser under test:
-#   /capture.html?engine=ref-cr|ref-wk&run=<id>&collector=http://127.0.0.1:<port>
+#   /capture.html?engine=ref-cr|ref-wk|new&run=<id>&collector=http://127.0.0.1:<port>
 ```
+
+A `new` run takes two switches, on the command line (`--rules`, `--painter`)
+and in the page's query (`rules=`, `painter=`); both go into its manifest.
+`rules` are the engine's rule switches (`boldAdvance=webkit`, see
+`text-engine/RULES.md`). `painter` says who paints the pictures: `rust` (the
+default: the engine's own painter, the same bytes on every host) or `browser`
+(the host's canvas over Rust-measured layout, which is what a `new` run was
+before the painter existed).
 
 The collector serves the fonts and the corpus (the user's own fonts and chapter
 text) to the one page origin it is given and refuses every other; stop it when
