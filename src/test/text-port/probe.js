@@ -15,14 +15,17 @@ export function pixelStats(image) {
   }
   return { bbox: alphaSum ? [l, t, r, b] : null, alphaSum };
 }
-export function* probe(app, kind, cases, { families, browser = true } = {}) {
+// `plain` says whether the installed measuring engine can break plain text
+// here. A host without a DOM and without an engine breaker passes false (or
+// the older `browser: false`), and those cases are written as skips.
+export function* probe(app, kind, cases, { families, browser = true, plain = browser } = {}) {
   const known = new Set(families);
   for (const c of cases) {
     try {
       const family = c.font ?? c.box?.style.font ?? c.solve?.style.font;
       if (!known.has(family) || !app.fontByName(family)) throw new Error(`Font '${family}' is not registered in fonts.json and the store`);
       const style = c.box?.style ?? c.solve?.style;
-      if (!browser && (c.mode === 'plain' || (kind !== 'metrics' && style?.shape === 'off'))) {
+      if (!plain && (c.mode === 'plain' || (kind !== 'metrics' && style?.shape === 'off'))) {
         const why = c.mode === 'plain' ? 'plain mode' : "shape: 'off'";
         yield { record: { id: c.id, skip: `${why} needs a browser DOM line breaker; node has only canvas` } };
         continue;
