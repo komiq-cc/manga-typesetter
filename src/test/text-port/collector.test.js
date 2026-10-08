@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardedPath, requestPath, createCollector } from '../../../scripts/text-port/collector.mjs';
@@ -49,6 +49,38 @@ describe('collector origin', () => {
       expect(other.headers.get('access-control-allow-origin')).toBeNull();
       // A local tool sends no Origin header and is not a web page.
       expect((await fetch(url)).status).toBe(200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(data, { recursive: true, force: true });
+    }
+  });
+});
+
+// A capture page left open in a browser runs again whenever the dev server
+// reloads it. It once wrote a third of a run over a finished reference.
+describe('collector runs are written once', () => {
+  it('refuses to overwrite data and refuses anything after the manifest', async () => {
+    const data = mkdtempSync(join(tmpdir(), 'tp-once-'));
+    const server = createCollector(data, { metadata: { commit: 'x', dirty: false }, log: () => {} });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}/runs/ref-cr/a`;
+    const put = (path, body) => fetch(`${base}/${path}`, { method: 'PUT', body });
+    try {
+      // The page starts each file empty, then appends.
+      expect((await put('metrics.jsonl', '')).status).toBe(204);
+      expect((await put('metrics.jsonl?append=1', '{"id":"m.a"}\n')).status).toBe(204);
+      expect((await put('png/p.a.png', 'png')).status).toBe(204);
+      // A second page starting the same run would empty the file: refused.
+      const again = await put('metrics.jsonl', '');
+      expect(again.status).toBe(409);
+      expect(await again.text()).toMatch(/already has metrics\.jsonl/);
+      expect((await put('png/p.a.png', 'other')).status).toBe(409);
+      expect(readFileSync(join(data, 'runs/ref-cr/a/metrics.jsonl'), 'utf8')).toBe('{"id":"m.a"}\n');
+      expect((await put('manifest.json', '{"engine":"ref-cr","runId":"a"}')).status).toBe(204);
+      // Finished: nothing more, not even an append.
+      expect((await put('metrics.jsonl?append=1', '{"id":"m.b"}\n')).status).toBe(409);
+      expect((await put('layout.jsonl', '')).status).toBe(409);
+      expect(readFileSync(join(data, 'runs/ref-cr/a/metrics.jsonl'), 'utf8')).toBe('{"id":"m.a"}\n');
     } finally {
       await new Promise((resolve) => server.close(resolve));
       rmSync(data, { recursive: true, force: true });

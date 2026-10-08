@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
-import { createReadStream, createWriteStream, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
@@ -23,6 +23,13 @@ export function requestPath(data, method, raw) {
 // `origin` is the one page allowed to talk to the collector. It serves the
 // user's own fonts and chapter text, and a browser lets any open web page ask
 // a local port, so "any origin" would hand both to whatever site is open.
+// Why a PUT may not be written, or null when it may.
+export function writeRefusal(data, raw, target, append) {
+  const [, engine, runId] = decodeURIComponent(raw.split('?')[0]).slice(1).split('/');
+  if (existsSync(guardedPath(data, `runs/${engine}/${runId}/manifest.json`))) return `Run ${engine}/${runId} is finished and is not written again`;
+  if (!append && existsSync(target) && statSync(target).size > 0) return `Run ${engine}/${runId} already has ${target.slice(target.lastIndexOf('/') + 1)}; use a new run id`;
+  return null;
+}
 export function createCollector(data, { metadata = gitInfo(), log = console.log, origin = 'http://localhost:5173' } = {}) {
   return createServer(async (req, res) => {
     if (req.headers.origin && req.headers.origin !== origin) {
@@ -54,6 +61,16 @@ export function createCollector(data, { metadata = gitInfo(), log = console.log,
       }
       const append = new URL(req.url, 'http://127.0.0.1').searchParams.get('append') === '1';
       if (target.endsWith('/manifest.json') && append) throw new Error('Cannot append manifest');
+      // A run is written once. A capture page left open runs again when the
+      // dev server reloads it, and it would write over a finished run with a
+      // half-finished one; that has happened. To redo a run, delete its
+      // folder or give it a new id.
+      const refusal = writeRefusal(data, req.url, target, append);
+      if (refusal) {
+        req.resume();
+        res.writeHead(409).end(refusal);
+        return;
+      }
       mkdirSync(dirname(target), { recursive: true });
       await pipeline(req, createWriteStream(target, { flags: append ? 'a' : 'w' }));
       if (target.endsWith('/manifest.json')) {

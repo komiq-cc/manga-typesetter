@@ -221,6 +221,10 @@ node scripts/text-port/collector.mjs   [--data <dir>] [--port 8787] [--origin ht
 The collector serves the fonts and the corpus (the user's own fonts and chapter
 text) to the one page origin it is given and refuses every other; stop it when
 the captures are done.
+A run is written once: the collector refuses to overwrite a file of a run and
+refuses any write to a run that has its manifest. A capture page left open
+runs again when the dev server reloads it, so close the page when its run is
+done. To redo a run, delete its folder or give it a new id.
 
 The page sets its title to `tp done` or `tp failed` and `window.__tp` to the
 result; a run that failed leaves `error.txt` in its folder and no manifest. A
