@@ -132,17 +132,30 @@ pub(crate) struct ShapeMode {
     /// `liga` and `clig` off: what both browsers do to text that has letter
     /// spacing.
     pub no_ligatures: bool,
+    /// `rand` off. HarfBuzz applies a font's random alternates by default,
+    /// from a sequence that restarts with every buffer, so the width of a
+    /// line is not the sum of its words and a breaker that tries many lines
+    /// ends up choosing by the dice. WebKit does not apply the feature at
+    /// all, and measured text here does not either (RULES.md).
+    pub no_random: bool,
 }
 
 impl ShapeMode {
     pub const RAW: Self = Self {
         canvas_space: false,
         no_ligatures: false,
+        no_random: false,
     };
     pub const MEASURE: Self = Self {
         canvas_space: true,
         no_ligatures: false,
+        no_random: true,
     };
+
+    /// Identifies the feature set, for the plan cache.
+    pub(crate) fn feature_bits(self) -> u8 {
+        u8::from(self.no_ligatures) | u8::from(self.no_random) << 1
+    }
 }
 
 /// The characters a canvas replaces with U+0020 before measuring ("ASCII
@@ -273,13 +286,21 @@ impl Engine {
         let (script, direction) = (buffer.script(), buffer.direction());
         let mut plans = entry.plans.borrow_mut();
         let off = [
+            Feature::new(Tag::new(b"rand"), 0, ..),
             Feature::new(Tag::new(b"liga"), 0, ..),
             Feature::new(Tag::new(b"clig"), 0, ..),
         ];
-        let features: &[Feature] = if mode.no_ligatures { &off } else { &[] };
-        let at = match plans.iter().position(|p| {
-            p.script == script && p.direction == direction && p.no_ligatures == mode.no_ligatures
-        }) {
+        let features: &[Feature] = match (mode.no_random, mode.no_ligatures) {
+            (false, false) => &[],
+            (true, false) => &off[..1],
+            (false, true) => &off[1..],
+            (true, true) => &off,
+        };
+        let bits = mode.feature_bits();
+        let at = match plans
+            .iter()
+            .position(|p| p.script == script && p.direction == direction && p.features == bits)
+        {
             Some(i) => i,
             None => {
                 let dir = if direction == Direction::Invalid {
@@ -290,7 +311,7 @@ impl Engine {
                 plans.push(PlanSlot {
                     script,
                     direction,
-                    no_ligatures: mode.no_ligatures,
+                    features: bits,
                     plan: ShapePlan::new(&entry.hb, dir, script, None, features),
                 });
                 plans.len() - 1

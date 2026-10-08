@@ -114,7 +114,9 @@ type GlyphMap<V> = HashMap<u32, V, BuildHasherDefault<GlyphHasher>>;
 pub(crate) struct PlanSlot {
     pub script: Option<Script>,
     pub direction: Direction,
-    pub no_ligatures: bool,
+    /// Which optional features the plan was built without
+    /// (`ShapeMode::feature_bits`).
+    pub features: u8,
     pub plan: ShapePlan,
 }
 

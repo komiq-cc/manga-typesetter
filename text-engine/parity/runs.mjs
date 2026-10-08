@@ -1,6 +1,6 @@
 // Reads text-port captures (scripts/text-port/README.md) for the comparison
 // scripts beside this file. Nothing here writes, and nothing prints case text.
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 export const dataDir = () => resolve(process.env.TP_DATA ?? 'node_modules/.cache/text-port')
@@ -12,10 +12,15 @@ export function readCorpus(data, kind) {
   return JSON.parse(readFileSync(resolve(data, `corpus/${kind}.json`), 'utf8')).cases
 }
 
-/** id -> record */
+/** id -> record; an empty map for a kind a partial run (`--only`) did not capture */
 export function readRun(data, run, kind) {
   const out = new Map()
-  const text = readFileSync(resolve(runDir(data, run), `${kind}.jsonl`), 'utf8')
+  const file = resolve(runDir(data, run), `${kind}.jsonl`)
+  if (!existsSync(file)) {
+    if (!existsSync(runDir(data, run))) throw new Error(`No such run: ${runDir(data, run)}`)
+    return out
+  }
+  const text = readFileSync(file, 'utf8')
   let at = 0
   while (at < text.length) {
     let end = text.indexOf('\n', at)

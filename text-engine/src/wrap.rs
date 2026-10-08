@@ -64,6 +64,93 @@ struct Unit {
     mark: bool,
 }
 
+/// One paragraph being broken: its code points, and the running sums the
+/// width of any stretch is read from.
+struct Para<'a> {
+    text: &'a str,
+    units: Vec<Unit>,
+    /// `adv[i]` is the advance of units `0..i`.
+    adv: Vec<f64>,
+    /// `letters[i]` is how many of units `0..i` take letter spacing.
+    letters: Vec<u32>,
+    spacing: f64,
+}
+
+impl Para<'_> {
+    fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    fn byte(&self, unit: usize) -> usize {
+        self.units.get(unit).map_or(self.text.len(), |u| u.byte)
+    }
+
+    /// The end of `from..to` once the spaces that would hang are left off.
+    fn trimmed(&self, from: usize, to: usize) -> usize {
+        let mut end = to;
+        while end > from && self.units[end - 1].is_space {
+            end -= 1;
+        }
+        end
+    }
+
+    fn letters_in(&self, from: usize, to: usize) -> f64 {
+        f64::from(self.letters[to] - self.letters[from])
+    }
+
+    /// Width of `from..to` as a line: hanging spaces left off, letter spacing
+    /// after every letter that stays.
+    fn width(&self, from: usize, to: usize) -> f64 {
+        let end = self.trimmed(from, to);
+        self.adv[end] - self.adv[from] + self.letters_in(from, end) * self.spacing
+    }
+
+    /// Whether a line may start at `unit`: not in the middle of a letter and
+    /// its marks.
+    fn boundary(&self, unit: usize) -> bool {
+        unit >= self.len() || !self.units[unit].mark
+    }
+
+    /// The next place after `unit` a word may be cut, no further than `last`.
+    fn next_boundary(&self, unit: usize, last: usize) -> usize {
+        let mut i = unit + 1;
+        while i < last && !self.boundary(i) {
+            i += 1;
+        }
+        i.min(last)
+    }
+
+    /// Takes the advances of units `from..` from the engine's measured line,
+    /// which must be the text from `from` to the end of the paragraph.
+    fn take_advances(&mut self, engine: &Engine, face: Face, from: usize) -> Result<(), Error> {
+        for u in &mut self.units[from..] {
+            u.advance = 0.0;
+        }
+        let base = self.units.get(from).map_or(0, |u| u.utf16);
+        for part in &engine.parts {
+            let upem = f64::from(engine.font(part.font)?.info.units_per_em);
+            let extra = engine.bold_extra(part.synth, face.size);
+            for g in &engine.line[part.glyphs.clone()] {
+                // The unit this cluster starts at: the last one at or before
+                // the cluster's offset.
+                let at = self.units.partition_point(|u| u.utf16 <= base + g.cluster);
+                let unit = &mut self.units[at.saturating_sub(1).max(from)];
+                unit.advance += f64::from(g.x_advance) * face.size / upem + extra;
+            }
+        }
+        self.adv.truncate(from + 1);
+        self.letters.truncate(from + 1);
+        let (mut a, mut l) = (self.adv[from], self.letters[from]);
+        for u in &self.units[from..] {
+            a += u.advance;
+            l += u32::from(!u.mark);
+            self.adv.push(a);
+            self.letters.push(l);
+        }
+        Ok(())
+    }
+}
+
 /// A width that fits by less than this is taken to fit. Line widths here are
 /// sums of `f64`; the browsers' are 32-bit sums snapped to 1/64 px, so a line
 /// that exactly fills its box must not fall out over the last bit.
@@ -84,7 +171,8 @@ impl Engine {
     /// A paragraph is shaped once and its lines are measured from the
     /// advances of that one run, the way a browser does it, so a line's
     /// width here can differ from `advance(line)` by the kerning across the
-    /// break.
+    /// break. Where a word is cut the rest is shaped again from the cut, as
+    /// a browser does, because the cut may have gone through a ligature.
     pub fn wrap_plain(
         &mut self,
         face: Face,
@@ -131,8 +219,8 @@ impl Engine {
             0.0
         };
         let mode = ShapeMode {
-            canvas_space: true,
             no_ligatures: spacing != 0.0,
+            ..ShapeMode::MEASURE
         };
         let mut units: Vec<Unit> = Vec::with_capacity(para.len());
         let mut byte_to_unit = vec![usize::MAX; para.len() + 1];
@@ -160,52 +248,18 @@ impl Engine {
             let after = para[byte..].chars().next().unwrap_or(' ');
             units[u].can_break = tailor(before, after);
         }
-
+        let mut p = Para {
+            text: para,
+            units,
+            adv: vec![0.0],
+            letters: vec![0],
+            spacing,
+        };
         self.measure_line(face, para, mode)?;
-        for part in &self.parts {
-            let upem = f64::from(self.font(part.font)?.info.units_per_em);
-            let extra = self.bold_extra(part.synth, face.size);
-            for g in &self.line[part.glyphs.clone()] {
-                // The unit this cluster starts at: the last one at or before
-                // the cluster's offset.
-                let at = units.partition_point(|u| u.utf16 <= g.cluster);
-                let unit = &mut units[at.saturating_sub(1)];
-                unit.advance += f64::from(g.x_advance) * face.size / upem + extra;
-            }
-        }
+        p.take_advances(self, face, 0)?;
 
-        // Prefix sums: `adv[i]` is the advance of units `0..i`, `letters[i]`
-        // how many of them take letter spacing.
-        let mut adv = Vec::with_capacity(n + 1);
-        let mut letters = Vec::with_capacity(n + 1);
-        let (mut a, mut l) = (0.0f64, 0u32);
-        adv.push(a);
-        letters.push(l);
-        for u in &units {
-            a += u.advance;
-            l += u32::from(!u.mark);
-            adv.push(a);
-            letters.push(l);
-        }
-        // The end of `from..to` once the spaces that would hang are left off.
-        let trimmed = |from: usize, to: usize| -> usize {
-            let mut end = to;
-            while end > from && units[end - 1].is_space {
-                end -= 1;
-            }
-            end
-        };
-        let width_of = |from: usize, to: usize| -> f64 {
-            let end = trimmed(from, to);
-            adv[end] - adv[from] + f64::from(letters[end] - letters[from]) * spacing
-        };
-        let off = |u: usize| -> u32 {
-            if u < n {
-                base + units[u].utf16
-            } else {
-                base + at16
-            }
-        };
+        let off =
+            |p: &Para<'_>, u: usize| -> u32 { base + p.units.get(u).map_or(at16, |u| u.utf16) };
         let limit = opts.width + FIT_SLACK;
 
         let mut start = 0usize;
@@ -214,8 +268,8 @@ impl Engine {
             // does not.
             let mut best: Option<usize> = None;
             let mut over: Option<usize> = None;
-            for i in (start + 1..=n).filter(|&i| i == n || units[i].can_break) {
-                if width_of(start, i) <= limit {
+            for i in (start + 1..=n).filter(|&i| i == n || p.units[i].can_break) {
+                if p.width(start, i) <= limit {
                     best = Some(i);
                 } else {
                     over = Some(i);
@@ -230,37 +284,29 @@ impl Engine {
                     // that fits, measured as the piece will be drawn: shaped
                     // by itself, so a ligature or a kerning pair across the
                     // cut is not counted as if it were still whole.
-                    let last = trimmed(start, word_end);
-                    let boundary = |i: usize| i >= last || !units[i].mark;
-                    let next = |mut i: usize| {
-                        i += 1;
-                        while !boundary(i) {
-                            i += 1;
-                        }
-                        i.min(last)
-                    };
-                    let first = next(start);
-                    let piece = |engine: &mut Engine, to: usize| -> Result<f64, Error> {
-                        let to_byte = if to < n { units[to].byte } else { para.len() };
-                        engine.measure_line(face, &para[units[start].byte..to_byte], mode)?;
-                        Ok(engine.line_advance(face.size)?
-                            + f64::from(letters[to] - letters[start]) * spacing)
-                    };
+                    let last = p.trimmed(start, word_end);
+                    let first = p.next_boundary(start, last);
+                    let piece =
+                        |engine: &mut Engine, p: &Para<'_>, to: usize| -> Result<f64, Error> {
+                            engine.measure_line(face, &p.text[p.byte(start)..p.byte(to)], mode)?;
+                            Ok(engine.line_advance(face.size)?
+                                + p.letters_in(start, to) * p.spacing)
+                        };
                     // Start from the paragraph's own advances, then correct.
                     let mut cut = first;
-                    while cut < last && width_of(start, next(cut)) <= limit {
-                        cut = next(cut);
+                    while cut < last && p.width(start, p.next_boundary(cut, last)) <= limit {
+                        cut = p.next_boundary(cut, last);
                     }
-                    while cut > first && piece(self, cut)? > limit {
+                    while cut > first && piece(self, &p, cut)? > limit {
                         let mut back = cut - 1;
-                        while back > first && !boundary(back) {
+                        while back > first && !p.boundary(back) {
                             back -= 1;
                         }
                         cut = back;
                     }
                     while cut < last {
-                        let further = next(cut);
-                        if further == cut || piece(self, further)? > limit {
+                        let further = p.next_boundary(cut, last);
+                        if further == cut || piece(self, &p, further)? > limit {
                             break;
                         }
                         cut = further;
@@ -268,13 +314,18 @@ impl Engine {
                     if cut >= last {
                         word_end
                     } else {
+                        // What follows the cut is a new run: whatever the
+                        // shaper did across it (a ligature, a kerning pair,
+                        // a contextual form) is gone.
+                        self.measure_line(face, &p.text[p.byte(cut)..], mode)?;
+                        p.take_advances(self, face, cut)?;
                         cut
                     }
                 }
             };
             lines.push(LineRange {
-                start: off(start),
-                end: off(end),
+                start: off(&p, start),
+                end: off(&p, end),
             });
             start = end;
         }
