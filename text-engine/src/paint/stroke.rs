@@ -105,6 +105,56 @@ pub fn grow(src: &Polys, radius: f64, side: Side, join: Join, tol: f64, out: &mu
     }
 }
 
+/// The contours of `src` swept along `v`, appended to `out`: every point of
+/// the ink and every point up to `v` further on, which is the ink drawn at
+/// its place and again at `v` with everything between filled in.
+///
+/// `away` is the side of the contours that faces away from the ink. An edge
+/// whose away side looks along `v` is the leading edge of the sweep and
+/// moves by `v`; an edge that looks back stays; where one kind follows the
+/// other the loop runs along `v` between them. Like an offset this is weakly
+/// correct: the loop may cross itself (a hole narrower than `v` closes up
+/// and turns inside out), and its winding number is the number of stretches
+/// of ink, each lengthened by `v`, that hold the point, so it is positive
+/// exactly on the sweep.
+pub fn sweep(src: &Polys, v: Pt, away: Side, out: &mut Polys) {
+    for c in src.contours() {
+        let n = c.len();
+        // Per edge: does it lead (moves by `v`), trail (stays), or run along
+        // `v` and do neither.
+        let leads: Vec<Option<bool>> = (0..n)
+            .map(|i| {
+                let s = away.sign() * c[(i + 1) % n].minus(c[i]).cross(v);
+                (s != 0.0).then_some(s > 0.0)
+            })
+            .collect();
+        // An edge along `v` starts where the edge before it left off and
+        // ends where the edge after it begins, so it is lengthened or
+        // shortened and never doubled back on. `before[i]` is the last edge
+        // at or before `i` that decides, `after[i]` the first at or after.
+        let decided = |order: &mut dyn Iterator<Item = usize>| -> Vec<bool> {
+            let order: Vec<usize> = order.collect();
+            let mut state = order.iter().rev().find_map(|&i| leads[i]).unwrap_or(false);
+            let mut out = vec![false; n];
+            for i in order {
+                state = leads[i].unwrap_or(state);
+                out[i] = state;
+            }
+            out
+        };
+        let before = decided(&mut (0..n));
+        let after = decided(&mut (0..n).rev());
+        let by = |moved: bool| if moved { v } else { Pt::new(0.0, 0.0) };
+        for i in 0..n {
+            // Where the edge into this point ends, then where the edge out
+            // of it starts; `push` drops the second when they are the same.
+            out.push(c[i].plus(by(after[(i + n - 1) % n])));
+            out.push(c[i].plus(by(before[i])));
+        }
+        out.close();
+    }
+}
+
 fn unit(v: Pt) -> Option<(Pt, f64)> {
     let len = v.len();
     (len > 0.0 && len.is_finite()).then(|| (v.scale(1.0 / len), len))
@@ -220,6 +270,66 @@ fn offset_loop(pts: &[Pt], radius: f64, side: Side, join: Join, tol: f64, out: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(p: &mut Polys, x0: f64, y0: f64, x1: f64, y1: f64, reversed: bool) {
+        let mut c = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        if reversed {
+            c.reverse();
+        }
+        for (x, y) in c {
+            p.push(Pt::new(x, y));
+        }
+        p.close();
+    }
+
+    /// The side that faces away from the ink, as the painter decides it.
+    fn away(p: &Polys) -> Side {
+        if p.area2() > 0.0 {
+            Side::Right
+        } else {
+            Side::Left
+        }
+    }
+
+    #[test]
+    fn a_sweep_lengthens_the_ink_along_its_vector_and_shrinks_a_hole() {
+        for reversed in [false, true] {
+            // A 10 x 10 square swept 3 to the right is 13 x 10.
+            let mut square = Polys::default();
+            rect(&mut square, 0.0, 0.0, 10.0, 10.0, reversed);
+            let mut out = Polys::default();
+            sweep(&square, Pt::new(3.0, 0.0), away(&square), &mut out);
+            assert_eq!(out.area2().abs(), 260.0);
+            assert_eq!(out.bounds(), Some((0.0, 0.0, 13.0, 10.0)));
+            // Swept upward and to the left it grows on those sides instead.
+            let mut out = Polys::default();
+            sweep(&square, Pt::new(-2.0, -1.0), away(&square), &mut out);
+            assert_eq!(out.bounds(), Some((-2.0, -1.0, 10.0, 10.0)));
+            // 100 for the square, 10 x 2 and 10 x 1 for the two sides it
+            // leaves behind.
+            assert_eq!(out.area2().abs(), 2.0 * (100.0 + 20.0 + 10.0));
+
+            // A hole 5 wide loses 3 of its width from its left.
+            let mut holed = Polys::default();
+            rect(&mut holed, 0.0, 0.0, 10.0, 10.0, reversed);
+            rect(&mut holed, 3.0, 3.0, 8.0, 7.0, !reversed);
+            let side = away(&holed);
+            let mut out = Polys::default();
+            sweep(&holed, Pt::new(3.0, 0.0), side, &mut out);
+            assert_eq!(out.area2().abs(), 2.0 * (130.0 - 2.0 * 4.0));
+            let hole: Vec<Pt> = out.contours().nth(1).unwrap().to_vec();
+            assert!(hole.iter().all(|p| (6.0..=8.0).contains(&p.x)));
+
+            // A hole 2 wide closes: its loop turns inside out and winds the
+            // same way as the ink, so nothing is left open.
+            let mut narrow = Polys::default();
+            rect(&mut narrow, 0.0, 0.0, 10.0, 10.0, reversed);
+            rect(&mut narrow, 4.0, 3.0, 6.0, 7.0, !reversed);
+            let mut out = Polys::default();
+            sweep(&narrow, Pt::new(3.0, 0.0), away(&narrow), &mut out);
+            assert_eq!(out.area2().abs(), 2.0 * (130.0 + 1.0 * 4.0));
+        }
+    }
 
     fn square(side: f64) -> Polys {
         let mut p = Polys::default();
