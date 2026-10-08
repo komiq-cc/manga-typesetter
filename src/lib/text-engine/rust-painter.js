@@ -25,7 +25,8 @@ const KEEP_PX = 2048 * 2048;
  * @param {{ boldDraw?: 'outset' | 'smear', weight?: number }} [options]
  *   `boldDraw` names a drawing outright, against the rule above, for looking at the other one.
  *   `weight` grows every filled glyph shape by that many device pixels on every side before it
- *   is painted (bands lie round the heavier shape); 0, the default, paints the font's outline.
+ *   is painted (bands stay strokes of the font's own outline); 0, the default, paints the
+ *   font's outline.
  */
 export function createRustGlyphPainter(rust, options = {}) {
   // One tile's pixels per pattern, so a job that fills every line with the

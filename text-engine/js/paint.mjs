@@ -192,8 +192,9 @@ function faceFlags(synth) {
  *   lacks is drawn from; defaults to the one in `synth` when that is a face's flags, else none
  * @param {'rule' | 'outset' | 'smear'} [request.boldDraw] how a synthesised bold is drawn, see `BOLD_DRAW`
  * @param {number} [request.weight] extra weight in device pixels, 0 to `MAX_WEIGHT`: every
- *   filled glyph shape is grown by that much on every side before it is painted, and bands
- *   lie round the grown shape. Default 0: the outline as the font has it.
+ *   filled glyph shape is grown by that much on every side before it is painted. Bands stay
+ *   where they are (strokes of the font's own outline), so the heavier fill covers that much
+ *   more of them. Default 0: the outline as the font has it.
  * @param {number[]} [request.transform] `[a, b, c, d, e, f]`, job space to device pixels;
  *   the canvas's current transform. Defaults to the identity.
  * @param {(fill: object) => ({width: number, height: number, data: ArrayLike<number>} | null)} [request.tiles]

@@ -155,8 +155,15 @@ pub struct Request {
     /// the engine's `boldAdvance` rule ([`BoldDraw::for_rule`]).
     pub bold_draw: Option<BoldDraw>,
     /// Extra weight: every filled glyph shape is grown by this many device
-    /// pixels on every side before it is painted, and bands lie round the
-    /// grown shape. Zero paints the outline as the font has it.
+    /// pixels on every side before it is painted. Zero paints the outline
+    /// as the font has it.
+    ///
+    /// A band is not moved by it: it stays a stroke of the outline the font
+    /// has, so the heavier fill covers that much more of it. That is what
+    /// was measured: Safari on a Mac draws filled text heavier than its
+    /// outline and stroked text exactly on it (P5B-REPORT.md). The
+    /// silhouette, which is the fill and the widest band as one shape, is
+    /// as wide as the wider of the two.
     pub weight: f64,
     pub transform: Affine,
     pub tiles: Vec<Tile>,

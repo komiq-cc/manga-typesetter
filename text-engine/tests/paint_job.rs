@@ -366,7 +366,8 @@ fn glyphs_that_overlap_are_one_shape_and_weight_grows_it() {
     }
 
     // Weight: every edge of the fill moves out by that many device pixels,
-    // here 2 at a scale of 2, and a band lies round the heavier shape.
+    // here 2 at a scale of 2. The band stays where it was, so the heavier
+    // fill covers 2 px more of it, and the ink is no larger for it.
     let mut j = job(vec![run("H", 100.0, 100.0)]);
     j.bands = vec![Band {
         color: BLUE,
@@ -386,16 +387,36 @@ fn glyphs_that_overlap_are_one_shape_and_weight_grows_it() {
     };
     let black = [0, 0, 0, 255];
     assert_eq!(left(&plain, black) - left(&r, black), 2, "the fill");
-    assert_eq!(left(&plain, BLUE.0) - left(&r, BLUE.0), 2, "the band");
+    assert_eq!(left(&plain, BLUE.0), left(&r, BLUE.0), "the band");
+    assert_eq!(inked(&plain), inked(&r));
     assert_box(
         inked(&r),
         (
-            2.0 * (100.0 - one.left - 2.0) - 2.0,
-            2.0 * (100.0 - one.ascent - 2.0) - 2.0,
-            2.0 * (100.0 + one.right + 2.0) + 2.0,
-            2.0 * (100.0 + one.descent + 2.0) + 2.0,
+            2.0 * (100.0 - one.left - 2.0),
+            2.0 * (100.0 - one.ascent - 2.0),
+            2.0 * (100.0 + one.right + 2.0),
+            2.0 * (100.0 + one.descent + 2.0),
         ),
     );
+    // With no band the ink grows by the weight, and a silhouette is as wide
+    // as the wider of the heavier fill and the band: here the weight, 3
+    // device px against the band's 2 job units at a scale of 1.
+    let mut bare = request(job(vec![run("H", 100.0, 100.0)]), face);
+    bare.weight = 3.0;
+    let grown = (
+        100.0 - one.left - 3.0,
+        100.0 - one.ascent - 3.0,
+        100.0 + one.right + 3.0,
+        100.0 + one.descent + 3.0,
+    );
+    assert_box(inked(&paint(&mut e, &bare)), grown);
+    bare.job.bands = vec![Band {
+        color: BLUE,
+        opacity: 1.0,
+        line: 4.0,
+    }];
+    bare.job.silhouette = Some(RED);
+    assert_box(inked(&paint(&mut e, &bare)), grown);
 }
 
 #[test]
@@ -471,6 +492,102 @@ fn bands_are_painted_widest_first_under_the_fill() {
         corner[3], 0,
         "a round join leaves the corner of the box empty"
     );
+}
+
+/// The stretches of ink along device row `y`, each from where it starts to
+/// where it ends in fractions of a pixel. Right for upright edges, which is
+/// what a stem has: a pixel's coverage is then how far the ink reaches
+/// into it.
+fn stretches(r: &Raster, y: i32) -> Vec<(f64, f64)> {
+    let cov = |x: i32| f64::from(px(r, x, y)[3]) / 255.0;
+    let mut out = Vec::new();
+    let mut x = r.x;
+    let end = r.x + r.width as i32;
+    while x < end {
+        if cov(x) == 0.0 {
+            x += 1;
+            continue;
+        }
+        let first = x;
+        while x < end && cov(x) > 0.0 {
+            x += 1;
+        }
+        out.push((
+            f64::from(first + 1) - cov(first),
+            f64::from(x - 1) + cov(x - 1),
+        ));
+    }
+    out
+}
+
+/// A band round a synthesised bold is the stroke the reference that draws
+/// the bold that way makes: the font's outline stroked with a pen wider by
+/// the bold's own (an outset, Skia), or stroked at its place and at the end
+/// of the smear with everything between (WebKit). The weight does not move
+/// it. Seen with no fill over it, across the stem of an "I", which is a
+/// rectangle.
+#[test]
+fn a_band_round_a_bold_glyph_is_the_outlines_stroke_made_bold() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let size = 200.0;
+    let regular = Face::new(font, size);
+    let bold = Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..regular
+    };
+    let ink = e.line_ink(regular, "I").unwrap();
+    let (x, y) = (100.0, 300.0);
+    let (x0, x1) = (x - ink.left, x + ink.right);
+    let o = bold_outset(size);
+    let v = size * WEBKIT_BOLD_ADVANCE;
+    // Wide enough that every band below leaves the middle of the stem bare.
+    assert!(x1 - x0 > 6.0 + (2.0 * o).max(v) + 2.0, "{}", x1 - x0);
+    let row = (y - ink.ascent / 2.0) as i32;
+    let unchanged = BoldAdvance::Unchanged;
+    let webkit = BoldAdvance::WebKit;
+    // The rule, the face, the weight, the pen (half the band's line), and
+    // how far the band reaches to the left and to the right of each edge
+    // of the stem.
+    for (rule, face, weight, pen, reach) in [
+        (unchanged, regular, 0.0, 3.0, (3.0, 3.0)),
+        (unchanged, bold, 0.0, 3.0, (3.0 + o, 3.0 + o)),
+        (unchanged, bold, 0.0, 0.5, (0.5 + o, 0.5 + o)),
+        (unchanged, regular, 2.25, 3.0, (3.0, 3.0)),
+        (unchanged, bold, 1.5, 3.0, (3.0 + o, 3.0 + o)),
+        (webkit, bold, 0.0, 3.0, (3.0, 3.0 + v)),
+        (webkit, bold, 1.5, 3.0, (3.0, 3.0 + v)),
+        // A pen thinner than the smear is long: still one band at each
+        // edge, not two lines.
+        (webkit, bold, 0.0, v / 4.0, (v / 4.0, v / 4.0 + v)),
+    ] {
+        e.rules.bold_advance = rule;
+        let mut j = job(vec![run("I", x, y)]);
+        j.fill = None;
+        j.bands = vec![Band {
+            color: RED,
+            opacity: 1.0,
+            line: pen * 2.0,
+        }];
+        let mut r = request(j, face);
+        r.weight = weight;
+        let got = stretches(&paint(&mut e, &r), row);
+        let want = [(x0 - reach.0, x0 + reach.1), (x1 - reach.0, x1 + reach.1)];
+        let what = format!(
+            "{rule:?}, bold {}, weight {weight}, pen {pen}",
+            face.synth.bold
+        );
+        assert_eq!(got.len(), 2, "{what}: {got:?}, wanted {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g.0 - w.0).abs() < 0.06 && (g.1 - w.1).abs() < 0.06,
+                "{what}: {got:?}, wanted {want:?}"
+            );
+        }
+    }
 }
 
 #[test]

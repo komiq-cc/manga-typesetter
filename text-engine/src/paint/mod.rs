@@ -184,6 +184,15 @@ impl Glyphs {
     /// A synthesised bold is itself a pen run round the outline, and with a
     /// round join two round pens add up to one wider pen, so a bold glyph
     /// grown by `extra` is the plain outline grown once by both.
+    ///
+    /// The same holds inwards, and that is a choice: a band round a bold
+    /// glyph reaches the bold pen and its own into the outline the font
+    /// has, not its own pen into the bolder shape. It is what each
+    /// reference does. Skia strokes the font's outline with a pen wider by
+    /// the bold's (measured), and WebKit strokes it once at its place and
+    /// once a step on, which is the band of the plain glyph smeared. Only a
+    /// band seen through a fill that is not opaque shows the difference
+    /// (`parity/band-shape.mjs` measures both and draws them).
     fn moved(g: &GlyphPolys, extra: f64, side: Side, tol: f64) -> Polys {
         let mut out = Polys::default();
         if g.bold > 0.0 && extra > 0.0 && BOLD_JOIN != Join::Round {
@@ -364,9 +373,11 @@ pub fn paint_job_with(
     let mut planned: Vec<Planned<'_>> = Vec::new();
     if let Some(color) = job.silhouette {
         // The glyphs and their widest band as one solid shape: grown by
-        // half that band's pen, not a stroke laid over a fill.
+        // half that band's pen, not a stroke laid over a fill. A band is
+        // not moved by the weight, so the shape is as wide as the wider of
+        // the heavier fill and the band.
         let extra = job.bands.first().map_or(0.0, |b| (b.line / 2.0).max(0.0));
-        let parts = glyphs.parts(all.clone(), extra + weight, false, transform, tol);
+        let parts = glyphs.parts(all.clone(), extra.max(weight), false, transform, tol);
         let shader = Shader::new(&Fill::Solid(color), transform, tiles);
         planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
     } else {
@@ -374,8 +385,10 @@ pub fn paint_job_with(
             if !positive(band.line) {
                 continue;
             }
-            // The band lies round the glyph as it is filled, heavier or not.
-            let reach = band.line / 2.0 + weight;
+            // The weight is not in it: Safari, whose heavier fills the
+            // weight is there to follow, strokes a glyph exactly on its
+            // outline (P5B-REPORT.md).
+            let reach = band.line / 2.0;
             let parts = glyphs.parts(all.clone(), reach, true, transform, tol);
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
             planned.extend(shader.and_then(|s| plan(parts, s, band.opacity)));
