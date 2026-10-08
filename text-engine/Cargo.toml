@@ -33,6 +33,10 @@ unicode-linebreak = "0.1.5"
 vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline"], optional = true }
 zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"], optional = true }
 
+[[example]]
+name = "paint_hash"
+required-features = ["paint"]
+
 [profile.release]
 panic = "abort"
 opt-level = 3
