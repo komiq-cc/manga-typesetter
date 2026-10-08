@@ -125,12 +125,12 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       system: systemFace ? fonts.system.map((f) => f.name).filter((n) => !failed(n) || user.has(n)) : [],
       user: [...user].filter(([, fam]) => usable(fam)).map(([name]) => name),
     });
-    if (pick && engine.hasFamily(pick.name) && stateOf(pick.name) === 'ready') {
+    if (pick && engine.hasFamily(pick.name) && measurable(pick.name)) {
       setResort(pick.name);
       return;
     }
     if (pick?.source === 'system' && !system.has(pick.name)) startSystem(pick.name);
-    if (resort && (!engine.hasFamily(resort) || stateOf(resort) !== 'ready')) setResort(null);
+    if (resort && (!engine.hasFamily(resort) || !measurable(resort))) setResort(null);
   }
 
   // The system list is replaced wholesale by a scan. A family it no longer
@@ -151,11 +151,20 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     return true;
   }
 
+  // Ready is a statement about the whole family, not about one face of it: a
+  // user family is arriving for as long as ANY of its faces is still being
+  // decoded, however many are already in. The engine synthesises a bold from
+  // the regular, so with the regular in and the bold on its way a bold box
+  // would be measured, and written, as that smear - and the fits only grow, so
+  // the excess stays when the real bold lands. Asked per family rather than
+  // per style on purpose: which face a style gets is the engine's rule (slant
+  // first, then weight), and a second copy of it here could disagree with it,
+  // where "nothing of this family is still on its way" cannot write early.
   function stateOf(name) {
     const mine = user.get(name);
     if (mine) {
-      if (usable(mine)) return 'ready';
-      return [...mine.values()].some((f) => f.state === 'decoding') ? 'arriving' : 'missing';
+      if ([...mine.values()].some((f) => f.state === 'decoding')) return 'arriving';
+      return usable(mine) ? 'ready' : 'missing';
     }
     if (systemFace && systemByName.has(name)) {
       const rec = system.get(name);
@@ -165,6 +174,13 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     return 'missing';
   }
 
+  // Whether the engine can measure `name` as itself at this moment, ready or
+  // not: a user family with one face in while another is decoded can.
+  function measurable(name) {
+    const mine = user.get(name);
+    return mine ? usable(mine) : stateOf(name) === 'ready';
+  }
+
   function resolve(name) {
     followSystemList();
     let r = cache.get(name);
@@ -172,7 +188,10 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     const state = stateOf(name);
     // The first question about a system family is what sends for it.
     if (state === 'arriving' && !user.has(name) && !system.has(name)) startSystem(name);
-    r = { family: state === 'ready' ? name : resort, state };
+    // What is shown while a family arrives is its own face when it has one,
+    // which is nearer the truth than the last resort; nothing is written from
+    // either (`ready`).
+    r = { family: measurable(name) ? name : resort, state };
     cache.set(name, r);
     return r;
   }

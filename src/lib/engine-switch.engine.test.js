@@ -212,3 +212,59 @@ describe('switched on, the app measures with the engine and the fonts it was han
     expect(fontMissing('Bangers')).toBe(false);
   });
 });
+
+// ===========================================================================
+// Nothing is written early, and what is written late can be undone
+// ===========================================================================
+// A face can be on its way for a while: a WOFF2 being decoded, a system file
+// being read. These are the three ways a number measured meanwhile used to get
+// into the document, on the real engine, where the numbers are real.
+
+// A file that says it is WOFF2; what is "decoded" from it is handed back by
+// the stand-in for the native side, when the test lets it.
+const woff2 = () => Uint8Array.from([0x77, 0x4f, 0x46, 0x32, 0, 1, 0, 0, 0, 0, 0, 0]);
+
+// The native side with a decode that waits: `land(bytes)` answers it.
+function slowDecode() {
+  let land;
+  const decoded = new Promise((resolve) => (land = resolve));
+  const native = async (cmd, args) => (cmd === 'font_to_sfnt' ? copy(await decoded) : invoke(cmd, args));
+  _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => native, booted: async () => {}, os: () => 'linux' });
+  return (bytes) => land(bytes);
+}
+
+describe('a family with one face in and another still being decoded', () => {
+  it('writes nothing into a bold box until the bold is in, and then what the real bold needs', async () => {
+    const land = slowDecode();
+    await addFontFile(fontFile('Mixed.ttf', comic));
+    await useTextEngine('rust');
+    await addFontFile({ name: 'Mixed-Bold.woff2', arrayBuffer: async () => woff2().buffer });
+    expect(_engineSwitchSync().snapshot().user).toEqual({ Mixed: { regular: 'ready', bold: 'decoding' } });
+
+    // A chapter opened now: the regular is in the engine and would be smeared
+    // into a bold, wider than the real one, and the box grown for that.
+    const bold = () => box('Mixed', { style: { bold: true } });
+    loadProjectPages(doc([bold()]));
+    const b = page().boxes[0];
+    expect(b.h).toBe(20);
+    expect(autoFitBox(b, page())).toBe(false);
+    expect(b).toMatchObject({ w: 150, h: 20 });
+    expect(b.style.size).toBe(SIZE);
+
+    land(bangers);
+    await _engineSwitchSync().settled();
+    expect(_engineSwitchSync().snapshot().user).toEqual({ Mixed: { regular: 'ready', bold: 'ready' } });
+    expect(lineWidth('WAVE', b.style, SIZE)).toBe(alone.bangers);
+    const lines = layoutLines(applyCase(b.text, b.style), b.style, b.style.size, contentWidth(b.w, b.style));
+    expect(b.h).toBeGreaterThan(20);
+    // The same box opened with both faces already in is the same box: nothing
+    // of the stand-in's height was kept.
+    const settled = { w: b.w, h: b.h, size: b.style.size };
+    loadProjectPages(doc([bold()]));
+    autoFitBox(page().boxes[0], page());
+    const fresh = page().boxes[0];
+    expect(settled).toEqual({ w: fresh.w, h: fresh.h, size: fresh.style.size });
+    expect(lines.length).toBeGreaterThan(0);
+  });
+});
+

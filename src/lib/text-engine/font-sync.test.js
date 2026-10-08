@@ -121,6 +121,55 @@ describe('user faces', () => {
     expect(onArrival).toHaveBeenCalledWith('Webby');
   });
 
+  it('is not ready while any face of the family is still being decoded, though another is in', async () => {
+    const { engine, sync, invoke, onArrival } = setup({ hold: true });
+    sync.setUserFace('Webby', 'regular', SFNT());
+    expect(sync.ready('Webby')).toBe(true);
+    sync.setUserFace('Webby', 'bold', WOFF2());
+    // The regular is in the engine and a bold box would be measured from it,
+    // smeared: that is a stand-in for the face on its way, so nothing may be
+    // written from it.
+    expect(engine.registered()).toEqual({ Webby: ['regular'] });
+    expect(sync.ready('Webby')).toBe(false);
+    expect(sync.missing('Webby')).toBe(false);
+    // Shown as itself meanwhile, not as the last resort: its own regular is nearer.
+    expect(sync.nameFor('Webby')).toBe('Webby');
+    invoke.release();
+    await sync.settled();
+    expect(engine.registered()).toEqual({ Webby: ['regular', 'bold'] });
+    expect(sync.ready('Webby')).toBe(true);
+    expect(onArrival).toHaveBeenCalledWith('Webby');
+  });
+
+  it('is ready again when the face that was on its way turns out unreadable', async () => {
+    const { sync, invoke } = setup({ hold: true });
+    sync.setUserFace('Webby', 'regular', SFNT());
+    const bad = WOFF2();
+    bad[4] = 0xff;
+    sync.setUserFace('Webby', 'bold', bad);
+    expect(sync.ready('Webby')).toBe(false);
+    invoke.release();
+    await sync.settled();
+    // Finally failed is an answer too: the regular is all the family has.
+    expect(sync.ready('Webby')).toBe(true);
+    expect(sync.missing('Webby')).toBe(false);
+    expect(sync.nameFor('Webby')).toBe('Webby');
+  });
+
+  it('keeps a user family as the last resort while another of its faces is decoded', async () => {
+    const { engine, sync, invoke } = setup({ hold: true, native: true });
+    sync.setUserFace('Anchor', 'regular', SFNT());
+    expect(sync.lastResort()).toBe('Anchor');
+    sync.setUserFace('Anchor', 'bold', WOFF2());
+    // Still the family every missing name is measured in: it has a face.
+    expect(sync.lastResort()).toBe('Anchor');
+    expect(sync.nameFor('Nowhere')).toBe('Anchor');
+    expect(engine.fallbacks()).toEqual(['Anchor']);
+    invoke.release();
+    await sync.settled();
+    expect(sync.lastResort()).toBe('Anchor');
+  });
+
   it('reports a compressed face as missing where nothing can decode it', async () => {
     const { engine, sync, invoke } = setup({ native: false });
     sync.setUserFace('Webby', 'regular', WOFF2());
