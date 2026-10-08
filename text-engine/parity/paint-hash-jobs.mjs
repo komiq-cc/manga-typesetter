@@ -87,6 +87,12 @@ const JOBS = [
   ['bold, smeared', straight({ bands: BANDS }), FONT.comic, 28, 1, [2, 0, 0, 2, 0, 0], { boldDraw: 'smear' }],
   ['bold italic, smeared, rotated', straight({}), FONT.bangers, 30, 3, [1.9126095119260709, 0.5847434094454735, -0.5847434094454735, 1.9126095119260709, 120.5, 10.25], { boldDraw: 'smear' }],
   ['curved, bold, smeared', curved({}), FONT.dejavu, 26, 1, [2, 0, 0, 2, 0, 0], { boldDraw: 'smear' }],
+  ['bold, outset named', straight({ bands: BANDS }), FONT.comic, 28, 1, [2, 0, 0, 2, 0, 0], { boldDraw: 'outset' }],
+  // Letters pulled over each other, in a fill that shows what is laid twice.
+  ['overlapping letters', straight({ letterSpacing: -9.5, fill: { kind: 'solid', color: 'rgba(230,57,70,0.5)' }, bands: [{ color: '#1d3557', opacity: 0.5, line: 5 }] }), FONT.bangers, 34, 0, [2, 0, 0, 2, 0, 0]],
+  ['weight 0.4', straight({ bands: BANDS }), FONT.comic, 28, 0, [2, 0, 0, 2, 0, 0], { weight: 0.4 }],
+  ['weight 0.4, small, rotated', straight({}), FONT.dejavu, 11.5, 2, [0.9563047559630354, 0.2923717047227367, -0.2923717047227367, 0.9563047559630354, 30.5, 2.25], { weight: 0.4 }],
+  ['weight 1.25, silhouette, bold', straight({ bands: BANDS, silhouette: '#444444', fill: null }), FONT.comic, 28, 1, [2, 0, 0, 2, 6, 6], { weight: 1.25 }],
 ]
 
 
@@ -101,7 +107,9 @@ export function fixedRequests(fontIds, chain) {
       font: fontIds[font],
       synth,
       chain: extra.chain ? chain : 0,
-      boldDraw: extra.boldDraw ?? 'outset',
+      // Not named: drawn the way the bold-advance rule in force has it.
+      boldDraw: extra.boldDraw,
+      weight: extra.weight ?? 0,
       transform,
       tiles: () => TILE,
     },

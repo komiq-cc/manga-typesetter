@@ -576,13 +576,28 @@ fn webkits_synthetic_bold_adds_a_36th_of_the_size_per_glyph() {
     let d = Face::new(dejavu, size);
     let office = e.advance(d, "office").unwrap();
     assert!(close(e.advance(bold(d), "office").unwrap(), office + 4.0));
-    // The ink follows the pen: the second letter sits one step further right.
+    // The ink follows the pen and the way the bold is drawn. Under WebKit's
+    // rule the second letter sits one step further right and each letter is
+    // drawn again one step to the right, so the right edge is two steps out
+    // and no other edge moves. With the advance unchanged the outline is
+    // grown by the same amount on every side.
+    let regular = e.line_ink(plain, "II").unwrap();
     let a = e.line_ink(bold(plain), "II").unwrap();
     e.rules.bold_advance = BoldAdvance::Unchanged;
     let b = e.line_ink(bold(plain), "II").unwrap();
     assert!(close(a.width, b.width + 2.0));
-    assert!(close(a.right, b.right + 1.0));
-    assert!(close(a.left, b.left));
+    assert!(close(a.right, regular.right + 2.0));
+    assert!(close(a.left, regular.left));
+    assert!(close(a.ascent, regular.ascent) && close(a.descent, regular.descent));
+    let grown = b.left - regular.left;
+    assert!(grown > 0.0);
+    for (got, plain) in [
+        (b.right, regular.right),
+        (b.ascent, regular.ascent),
+        (b.descent, regular.descent),
+    ] {
+        assert!(close(got, plain + grown));
+    }
 }
 
 #[test]

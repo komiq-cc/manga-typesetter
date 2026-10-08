@@ -180,6 +180,33 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     }
   });
 
+  it('measures the ink of a synthesised bold for the drawing the rule gives it', () => {
+    const bold = job({ face: face('Bangers', 40, true), align: 'left', runs: [{ text: 'IIII', x: 20, y: 60 }] });
+    for (const boldAdvance of ['unchanged', 'webkit']) {
+      rust.setRules({ boldAdvance });
+      try {
+        const m = rust.lineInk(bold.face, 'IIII');
+        const b = ink(drawn(createRustGlyphPainter(rust), bold).canvas);
+        // At 2x: the painted box is the measured one, to a device pixel.
+        expect(Math.abs(b.x0 - 2 * (20 - m.left)), `${boldAdvance} left`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.x1 + 1 - 2 * (20 + m.right)), `${boldAdvance} right`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.y0 - 2 * (60 - m.ascent)), `${boldAdvance} top`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.y1 + 1 - 2 * (60 + m.descent)), `${boldAdvance} bottom`).toBeLessThanOrEqual(1);
+      } finally {
+        rust.setRules({ boldAdvance: 'unchanged' });
+      }
+    }
+  });
+
+  it('paints heavier by the weight it is made with, and not at all heavier without one', () => {
+    const plain = ink(drawn(createRustGlyphPainter(rust), job()).canvas);
+    const zero = ink(drawn(createRustGlyphPainter(rust, { weight: 0 }), job()).canvas);
+    const heavy = ink(drawn(createRustGlyphPainter(rust, { weight: 2 }), job()).canvas);
+    expect(zero).toEqual(plain);
+    // Two device pixels on every side.
+    expect([plain.x0 - heavy.x0, plain.y0 - heavy.y0, heavy.x1 - plain.x1, heavy.y1 - plain.y1]).toEqual([2, 2, 2, 2]);
+  });
+
   it('is refused a job buffer no job could need, and paints the next job', () => {
     expect(rust.low.exports.mt_paint_job_reserve(0xffffffff)).toBe(0);
     expect(ink(drawn(createRustGlyphPainter(rust), job()).canvas)).not.toBe(null);

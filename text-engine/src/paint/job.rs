@@ -151,8 +151,13 @@ pub struct Request {
     /// The font, its size and synthetic style, and the fallback chain a
     /// letter it lacks is looked for in (zero for none).
     pub face: Face,
-    /// How a synthesised bold is drawn.
-    pub bold_draw: BoldDraw,
+    /// How a synthesised bold is drawn; `None` for the way that goes with
+    /// the engine's `boldAdvance` rule ([`BoldDraw::for_rule`]).
+    pub bold_draw: Option<BoldDraw>,
+    /// Extra weight: every filled glyph shape is grown by this many device
+    /// pixels on every side before it is painted, and bands lie round the
+    /// grown shape. Zero paints the outline as the font has it.
+    pub weight: f64,
     pub transform: Affine,
     pub tiles: Vec<Tile>,
 }
@@ -160,7 +165,11 @@ pub struct Request {
 /// First four bytes of the wire form: "MTPJ".
 pub const MAGIC: u32 = 0x4a50_544d;
 /// Bumped when the wire form changes; `paint.mjs` writes the same number.
-pub const WIRE_VERSION: u32 = 2;
+pub const WIRE_VERSION: u32 = 3;
+
+/// Largest extra weight accepted, in device pixels. A guard, not a design
+/// limit: the weight that was measured against the browsers is under one.
+pub const MAX_WEIGHT: f64 = 64.0;
 
 /// Largest tile side accepted, a guard like the surface's.
 const MAX_TILE_SIDE: u32 = 4096;
@@ -258,9 +267,11 @@ impl<'a> Reader<'a> {
 /// ```text
 /// u32 magic, u32 version
 /// u32 font, u32 synth bits (1 bold, 2 oblique)
-/// u32 fallback chain (0 none), u32 bold drawing (0 outset, 1 smear)
+/// u32 fallback chain (0 none)
+/// u32 bold drawing (0 as the engine's bold rule has it, 1 outset, 2 smear)
 /// f64 size
 /// f64 x 6 transform (a, b, c, d, e, f)
+/// f64 weight (device pixels, 0 to 64)
 /// u32 flags (1 curved, 2 silhouette), u32 align (0 left, 1 centre, 2 right)
 /// f64 letter spacing
 /// rgba silhouette
@@ -288,14 +299,19 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
     let synth = Synth::from_bits(r.u32()?);
     let chain = r.u32()?;
     let bold_draw = match r.u32()? {
-        0 => BoldDraw::Outset,
-        1 => BoldDraw::Smear,
+        0 => None,
+        1 => Some(BoldDraw::Outset),
+        2 => Some(BoldDraw::Smear),
         _ => return Err(Error::BadSpec),
     };
     let size = r.f64()?;
     let mut m = [0.0; 6];
     for v in &mut m {
         *v = r.f64()?;
+    }
+    let weight = r.f64()?;
+    if !(0.0..=MAX_WEIGHT).contains(&weight) {
+        return Err(Error::BadSpec);
     }
     let flags = r.u32()?;
     let align = match r.u32()? {
@@ -361,6 +377,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
             chain,
         },
         bold_draw,
+        weight,
         transform: Affine(m),
         tiles,
     })

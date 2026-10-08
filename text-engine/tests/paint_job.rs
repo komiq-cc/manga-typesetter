@@ -47,7 +47,8 @@ fn request(job: Job, face: Face) -> Request {
     Request {
         job,
         face,
-        bold_draw: BoldDraw::Outset,
+        bold_draw: None,
+        weight: 0.0,
         transform: Affine::IDENTITY,
         tiles: Vec::new(),
     }
@@ -287,6 +288,68 @@ fn a_surface_beyond_the_guard_is_refused() {
     r.transform = Affine([8.0, 0.0, 0.0, 8.0, 0.0, 0.0]);
     let ok = paint(&mut e, &r);
     assert!(ok.width <= MAX_SIDE && ok.height <= MAX_SIDE);
+}
+
+#[test]
+fn glyphs_that_overlap_are_one_shape_and_weight_grows_it() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let one = e.line_ink(face, "H").unwrap();
+    // Two H pulled over each other by half a letter, in a half-transparent
+    // fill: where they share ink it is laid once, neither doubled (a canvas
+    // that fills letter by letter) nor missing.
+    let mut j = job(vec![run("HH", 100.0, 100.0)]);
+    j.letter_spacing = -one.width / 2.0;
+    j.fill = Some(Fill::Solid(Rgba([255, 0, 0, 128])));
+    let r = paint(&mut e, &request(j.clone(), face));
+    let mut alphas = [0usize; 256];
+    for p in r.data.chunks_exact(4) {
+        alphas[p[3] as usize] += 1;
+    }
+    assert!(alphas[128] > 300, "{}", alphas[128]);
+    assert_eq!(alphas[129..].iter().sum::<usize>(), 0);
+    // The bar of the first H runs on into the second: one unbroken row.
+    let mid_y = (100.0 - one.ascent / 2.0) as i32;
+    let (from, to) = (
+        100.0 + one.left.abs() + 1.0,
+        100.0 + one.width / 2.0 + one.right - 1.0,
+    );
+    for x in from.ceil() as i32..to.floor() as i32 {
+        assert_eq!(px(&r, x, mid_y)[3], 128, "column {x}");
+    }
+
+    // Weight: every edge of the fill moves out by that many device pixels,
+    // here 2 at a scale of 2, and a band lies round the heavier shape.
+    let mut j = job(vec![run("H", 100.0, 100.0)]);
+    j.bands = vec![Band {
+        color: BLUE,
+        opacity: 1.0,
+        line: 4.0,
+    }];
+    let mut heavy = request(j, face);
+    heavy.transform = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    let plain = paint(&mut e, &heavy);
+    heavy.weight = 2.0;
+    let r = paint(&mut e, &heavy);
+    let left = |r: &Raster, colour: [u8; 4]| {
+        let y = 2 * mid_y;
+        (r.x..r.x + r.width as i32)
+            .find(|&x| px(r, x, y) == colour)
+            .unwrap()
+    };
+    let black = [0, 0, 0, 255];
+    assert_eq!(left(&plain, black) - left(&r, black), 2, "the fill");
+    assert_eq!(left(&plain, BLUE.0) - left(&r, BLUE.0), 2, "the band");
+    assert_box(
+        inked(&r),
+        (
+            2.0 * (100.0 - one.left - 2.0) - 2.0,
+            2.0 * (100.0 - one.ascent - 2.0) - 2.0,
+            2.0 * (100.0 + one.right + 2.0) + 2.0,
+            2.0 * (100.0 + one.descent + 2.0) + 2.0,
+        ),
+    );
 }
 
 #[test]
@@ -848,7 +911,7 @@ fn whitespace_a_canvas_turns_into_a_space_is_painted_as_one() {
 }
 
 #[test]
-fn a_bold_under_the_webkit_advance_rule_is_painted_where_it_is_measured() {
+fn a_synthesised_bold_is_painted_where_it_is_measured_under_each_rule() {
     let mut e = Engine::new();
     let font = load(&mut e, "DejaVuSans.ttf");
     let bold = Face {
@@ -859,31 +922,53 @@ fn a_bold_under_the_webkit_advance_rule_is_painted_where_it_is_measured() {
         ..Face::new(font, 36.0)
     };
     let (x, y) = (40.0, 80.0);
-    let narrow = e.line_ink(bold, "HIH").unwrap();
-    e.rules.bold_advance = BoldAdvance::WebKit;
-    let wide = e.line_ink(bold, "HIH").unwrap();
-    // Two glyphs each moved on by size / 36 = 1 px, and the advance by three.
-    assert!((wide.right - narrow.right - 2.0).abs() < 1e-9);
-    assert!((wide.width - narrow.width - 3.0).abs() < 1e-9);
-    for align in [Align::Left, Align::Center, Align::Right] {
-        let mut j = job(vec![run("HIH", x, y)]);
-        j.align = align;
-        let start = match align {
-            Align::Left => 0.0,
-            Align::Center => -wide.width / 2.0,
-            Align::Right => -wide.width,
-        };
-        let got = inked(&paint(&mut e, &request(j, bold)));
-        assert_box(
-            got,
-            (
-                x + start - wide.left,
-                y - wide.ascent,
-                x + start + wide.right,
-                y + wide.descent,
-            ),
-        );
+    let regular = e.line_ink(Face::new(font, 36.0), "HIH").unwrap();
+    let mut inks = Vec::new();
+    for rule in [BoldAdvance::Unchanged, BoldAdvance::WebKit] {
+        e.rules.bold_advance = rule;
+        // The request names no way to draw the bold: the rule decides, and
+        // the ink the engine measures is the ink of that drawing.
+        let ink = e.line_ink(bold, "HIH").unwrap();
+        for align in [Align::Left, Align::Center, Align::Right] {
+            let mut j = job(vec![run("HIH", x, y)]);
+            j.align = align;
+            let start = match align {
+                Align::Left => 0.0,
+                Align::Center => -ink.width / 2.0,
+                Align::Right => -ink.width,
+            };
+            let got = inked(&paint(&mut e, &request(j, bold)));
+            assert_box(
+                got,
+                (
+                    x + start - ink.left,
+                    y - ink.ascent,
+                    x + start + ink.right,
+                    y + ink.descent,
+                ),
+            );
+        }
+        inks.push(ink);
     }
+    let (grown, smeared) = (inks[0], inks[1]);
+    // Unchanged: the same advance, the ink grown on every side.
+    assert_eq!(grown.width, regular.width);
+    let by = grown.left - regular.left;
+    assert!(by > 0.3 && (grown.ascent - regular.ascent - by).abs() < 1e-9);
+    // WebKit: size / 36 = 1 px more per glyph, the last glyph two steps on
+    // and drawn again a step to the right, and nothing added above or below
+    // or on the left.
+    assert!((smeared.width - regular.width - 3.0).abs() < 1e-9);
+    assert!((smeared.right - regular.right - 3.0).abs() < 1e-9);
+    assert_eq!(
+        (smeared.left, smeared.ascent, smeared.descent),
+        (regular.left, regular.ascent, regular.descent)
+    );
+    // Naming the other drawing outright still paints it, off the measure.
+    let mut named = request(job(vec![run("HIH", x, y)]), bold);
+    named.bold_draw = Some(BoldDraw::Outset);
+    let got = inked(&paint(&mut e, &named));
+    assert!(f64::from(got.1) < y - smeared.ascent - 0.3, "{got:?}");
 }
 
 #[test]
@@ -906,7 +991,7 @@ fn a_bold_drawn_as_a_smear_thickens_stems_and_not_bars() {
     let ink = e.line_ink(plain, "H").unwrap();
     let smear = |e: &mut Engine, j: Job, face: Face| {
         let mut r = request(j, face);
-        r.bold_draw = BoldDraw::Smear;
+        r.bold_draw = Some(BoldDraw::Smear);
         paint(e, &r)
     };
     let regular = paint(&mut e, &request(job(vec![run("H", x, y)]), plain));
@@ -987,11 +1072,12 @@ fn wire(font: u32, text: &str) -> Vec<u8> {
     u(&mut b, font);
     u(&mut b, 2); // oblique
     u(&mut b, 5); // fallback chain
-    u(&mut b, 1); // bold drawn as a smear
+    u(&mut b, 2); // bold drawn as a smear
     f(&mut b, 40.0);
     for v in [2.0, 0.0, 0.0, 2.0, 5.0, 6.0] {
         f(&mut b, v);
     }
+    f(&mut b, 0.375); // weight
     u(&mut b, 0); // straight, no silhouette
     u(&mut b, 1); // centre
     f(&mut b, 1.5);
@@ -1036,7 +1122,8 @@ fn the_wire_form_decodes_to_the_job_it_states() {
     assert_eq!(r.face.size, 40.0);
     assert!(r.face.synth.oblique && !r.face.synth.bold);
     assert_eq!(r.face.chain, 5);
-    assert_eq!(r.bold_draw, BoldDraw::Smear);
+    assert_eq!(r.bold_draw, Some(BoldDraw::Smear));
+    assert_eq!(r.weight, 0.375);
     assert_eq!(r.transform, Affine([2.0, 0.0, 0.0, 2.0, 5.0, 6.0]));
     assert_eq!(
         r.job,
@@ -1101,11 +1188,21 @@ fn a_damaged_wire_form_is_refused_not_guessed_at() {
     version[4] = 99;
     assert!(decode(&version).is_err());
     let mut align = good.clone();
-    align[84] = 9;
+    align[92] = 9;
     assert!(decode(&align).is_err());
     let mut bold = good.clone();
     bold[20] = 7;
     assert!(decode(&bold).is_err());
+    // No drawing named: the engine's bold rule decides.
+    let mut by_rule = good.clone();
+    by_rule[20] = 0;
+    assert_eq!(decode(&by_rule).unwrap().bold_draw, None);
+    // A weight below nothing or beyond the guard: the f64 at byte 80.
+    for w in [-0.25, 64.5] {
+        let mut weight = good.clone();
+        weight[80..88].copy_from_slice(&f64::to_le_bytes(w));
+        assert_eq!(decode(&weight).err(), Some(Error::BadSpec), "{w}");
+    }
     // Text that is not UTF-8.
     let mut text = good.clone();
     let at = good.len() - 20 - 3 - 4;

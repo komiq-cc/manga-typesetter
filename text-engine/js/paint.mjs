@@ -34,7 +34,7 @@
 
 import { CHAIN_SHIFT, SYNTH_BOLD, SYNTH_OBLIQUE } from './engine.mjs'
 
-export const WIRE_VERSION = 2
+export const WIRE_VERSION = 3
 const MAGIC = 0x4a50544d // "MTPJ"
 
 const STATUS = {
@@ -82,10 +82,17 @@ const ALIGN = { left: 0, start: 0, center: 1, right: 2, end: 2 }
 
 /**
  * How a synthesised bold is drawn (`request.boldDraw`):
+ * - `rule` (the default): the way that goes with the engine's `boldAdvance`
+ *   rule, `outset` for `unchanged` and `smear` for `webkit`. The engine's
+ *   ink (`lineInk`) is measured for that drawing, so this is the one that
+ *   paints what was measured.
  * - `outset`: the outline grown on every side by the engine's bold pen. Skia's way.
  * - `smear`: the glyph and a second one `size / 36` to its right, as one shape. WebKit's way.
  */
-export const BOLD_DRAW = { outset: 0, smear: 1 }
+export const BOLD_DRAW = { rule: 0, outset: 1, smear: 2 }
+
+/** The largest `request.weight` the engine accepts, in device pixels. */
+export const MAX_WEIGHT = 64
 
 // One buffer for every job, grown when a job does not fit.
 let buf = new ArrayBuffer(4096)
@@ -183,7 +190,10 @@ function faceFlags(synth) {
  *   or an engine face's `flags`, which hold the fallback chain as well
  * @param {number} [request.chain] fallback chain (`engine.chainNew`) a letter the font
  *   lacks is drawn from; defaults to the one in `synth` when that is a face's flags, else none
- * @param {'outset' | 'smear'} [request.boldDraw] how a synthesised bold is drawn, see `BOLD_DRAW`
+ * @param {'rule' | 'outset' | 'smear'} [request.boldDraw] how a synthesised bold is drawn, see `BOLD_DRAW`
+ * @param {number} [request.weight] extra weight in device pixels, 0 to `MAX_WEIGHT`: every
+ *   filled glyph shape is grown by that much on every side before it is painted, and bands
+ *   lie round the grown shape. Default 0: the outline as the font has it.
  * @param {number[]} [request.transform] `[a, b, c, d, e, f]`, job space to device pixels;
  *   the canvas's current transform. Defaults to the identity.
  * @param {(fill: object) => ({width: number, height: number, data: ArrayLike<number>} | null)} [request.tiles]
@@ -193,7 +203,7 @@ function faceFlags(synth) {
  *   returned twice is sent once.
  * @returns {Uint8Array} a view of a buffer that the next call overwrites
  */
-export function encodeJob({ job, font, size, synth, chain, boldDraw = 'outset', transform, tiles }) {
+export function encodeJob({ job, font, size, synth, chain, boldDraw = 'rule', weight = 0, transform, tiles }) {
   at = 0
   const sent = []
   const tileIndex = (f) => {
@@ -208,7 +218,8 @@ export function encodeJob({ job, font, size, synth, chain, boldDraw = 'outset', 
   const m = transform ?? [1, 0, 0, 1, 0, 0]
   u32(MAGIC)
   u32(WIRE_VERSION)
-  if (!(boldDraw in BOLD_DRAW)) throw new Error(`mt-text: unknown boldDraw ${JSON.stringify(boldDraw)}`)
+  if (!Object.hasOwn(BOLD_DRAW, boldDraw)) throw new Error(`mt-text: unknown boldDraw ${JSON.stringify(boldDraw)}`)
+  if (!(weight >= 0 && weight <= MAX_WEIGHT)) throw new Error(`mt-text: weight is 0 to ${MAX_WEIGHT} device pixels, not ${weight}`)
   const flags = faceFlags(synth)
   u32(font)
   u32(flags & ((1 << CHAIN_SHIFT) - 1))
@@ -216,6 +227,7 @@ export function encodeJob({ job, font, size, synth, chain, boldDraw = 'outset', 
   u32(BOLD_DRAW[boldDraw])
   f64(size ?? job.face?.size)
   for (let i = 0; i < 6; i++) f64(m[i])
+  f64(weight)
   u32((job.curved ? 1 : 0) | (job.silhouette ? 2 : 0))
   // An alignment the canvas does not know leaves its `textAlign` at "start".
   u32(ALIGN[job.align] ?? 0)

@@ -41,7 +41,7 @@ pub mod compare;
 use geom::positive;
 pub use geom::{Affine, IBox, Polys, Pt};
 pub use job::{
-    decode, Align, Band, Fill, Job, Request, Rgba, Run, Stop, Tile, MAGIC, WIRE_VERSION,
+    decode, Align, Band, Fill, Job, Request, Rgba, Run, Stop, Tile, MAGIC, MAX_WEIGHT, WIRE_VERSION,
 };
 pub use outline::FLATTEN_TOLERANCE;
 pub use raster::{Coverage, Exact, Part, Rasterizer, STRIP_ROWS};
@@ -52,7 +52,7 @@ pub use stroke::{Join, Side};
 use compose::{compose, Layer};
 use shade::Shader;
 
-use crate::engine::{Engine, Face, WEBKIT_BOLD_ADVANCE};
+use crate::engine::{BoldAdvance, Engine, Face, WEBKIT_BOLD_ADVANCE};
 use crate::font::OBLIQUE_SKEW;
 use crate::metrics::bold_outset;
 use crate::Error;
@@ -75,23 +75,34 @@ pub const MAX_PIXELS: usize = 1 << 26;
 /// mitred outline as its base (see `Glyphs::band`).
 pub const BOLD_JOIN: Join = Join::Round;
 
-/// How a synthesised bold is drawn. The references do not agree, so this is
-/// a switch a request carries (`boldDraw` in `paint.mjs`) and not a
-/// constant; P5A-REPORT.md has the measurements and the pictures.
-///
-/// It is separate from the engine's `boldAdvance` rule, which says where the
-/// glyphs go: the painter takes the positions from the engine's shaping
-/// under whichever rule is set, and draws each glyph by this one.
+/// How a synthesised bold is drawn. The references do not agree
+/// (P5A-REPORT.md has the measurements and the pictures), and each way
+/// belongs to one way of measuring: the engine's `boldAdvance` rule decides
+/// both, so the ink the engine measures (`line_ink`) is the ink painted. A
+/// request can still name one outright (`boldDraw` in `paint.mjs`), which is
+/// for looking at the other and for tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoldDraw {
     /// Skia: the outline grown by [`bold_outset`] on every side, joined by
-    /// [`BOLD_JOIN`]. Stems and bars thicken alike. What `line_ink` assumes.
+    /// [`BOLD_JOIN`]. Stems and bars thicken alike. Goes with an unchanged
+    /// advance.
     #[default]
     Outset,
     /// WebKit: the glyph drawn at its place and again `size / 36` to the
     /// right ([`WEBKIT_BOLD_ADVANCE`]), as one shape. Upright stems thicken
-    /// by that much, level bars not at all.
+    /// by that much, level bars not at all. Goes with WebKit's wider advance,
+    /// which is that same step.
     Smear,
+}
+
+impl BoldDraw {
+    /// The drawing that goes with a `boldAdvance` rule.
+    pub fn for_rule(rule: BoldAdvance) -> Self {
+        match rule {
+            BoldAdvance::Unchanged => BoldDraw::Outset,
+            BoldAdvance::WebKit => BoldDraw::Smear,
+        }
+    }
 }
 
 /// The pixels a job paints.
@@ -292,10 +303,12 @@ pub fn paint_job_with(
         job,
         face,
         bold_draw,
+        weight,
         transform,
         tiles,
     } = request;
     let face: Face = *face;
+    let bold_draw = bold_draw.unwrap_or(BoldDraw::for_rule(engine.rules.bold_advance));
     // Checks that the font exists even when there is nothing to draw.
     engine.font(face.font)?;
     if !transform.is_finite() || transform.invert().is_none() || !positive(face.size) {
@@ -303,6 +316,15 @@ pub fn paint_job_with(
     }
     // The flattening tolerance is a distance in device pixels.
     let tol = FLATTEN_TOLERANCE / transform.max_scale();
+    // The weight is stated in device pixels and applied in job units, where
+    // every other pen is: divided by the scale that keeps areas, which is
+    // the scale itself for every transform that does not stretch one way
+    // more than another.
+    let weight = if positive(*weight) {
+        *weight / transform.det().abs().sqrt()
+    } else {
+        0.0
+    };
 
     // Every run's glyphs, and for each run the frame its fill is stated in.
     let mut glyphs = Glyphs::default();
@@ -324,7 +346,7 @@ pub fn paint_job_with(
             Affine::translate(run.x + align_offset(job.align, shaped.advance), run.y)
         };
         let from = glyphs.len();
-        glyphs.add_run(engine, &shaped, &start, *bold_draw, tol)?;
+        glyphs.add_run(engine, &shaped, &start, bold_draw, tol)?;
         runs.push((from..glyphs.len(), frame));
     }
     let all = 0..glyphs.len();
@@ -337,7 +359,7 @@ pub fn paint_job_with(
         // The glyphs and their widest band as one solid shape: grown by
         // half that band's pen, not a stroke laid over a fill.
         let extra = job.bands.first().map_or(0.0, |b| (b.line / 2.0).max(0.0));
-        let parts = glyphs.parts(all.clone(), extra, false, transform, tol);
+        let parts = glyphs.parts(all.clone(), extra + weight, false, transform, tol);
         let shader = Shader::new(&Fill::Solid(color), transform, tiles);
         planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
     } else {
@@ -345,7 +367,9 @@ pub fn paint_job_with(
             if !positive(band.line) {
                 continue;
             }
-            let parts = glyphs.parts(all.clone(), band.line / 2.0, true, transform, tol);
+            // The band lies round the glyph as it is filled, heavier or not.
+            let reach = band.line / 2.0 + weight;
+            let parts = glyphs.parts(all.clone(), reach, true, transform, tol);
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
             planned.extend(shader.and_then(|s| plan(parts, s, band.opacity)));
         }
@@ -375,7 +399,7 @@ pub fn paint_job_with(
             if range.is_empty() {
                 continue;
             }
-            let parts = glyphs.parts(range, 0.0, false, transform, tol);
+            let parts = glyphs.parts(range, weight, false, transform, tol);
             let shader = Shader::new(fill, &transform.after(&frame), tiles);
             planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
         }
