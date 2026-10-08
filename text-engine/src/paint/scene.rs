@@ -12,7 +12,7 @@ use super::outline::FLATTEN_TOLERANCE;
 use super::raster::Exact;
 use super::shade::Shader;
 use super::shape::shape_run;
-use super::{finish, plan, plan_ring, Glyphs, Planned, MAX_SIDE};
+use super::{finish, plan, plan_ring, BoldDraw, Glyphs, Planned, MAX_SIDE};
 use crate::engine::{Engine, Face};
 use crate::Error;
 
@@ -67,8 +67,13 @@ impl Scene {
             return Ok(());
         }
         let tol = FLATTEN_TOLERANCE / scale;
-        self.glyphs
-            .add_run(engine, &run, &Affine::translate(x, y), tol)
+        self.glyphs.add_run(
+            engine,
+            &run,
+            &Affine::translate(x, y),
+            BoldDraw::Outset,
+            tol,
+        )
     }
 
     /// Strokes every line added so far as one shape, round join.

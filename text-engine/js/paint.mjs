@@ -20,15 +20,21 @@
 //   the tile's pixels through `tiles`.
 //
 // What is NOT resolved here: which font a job's `face` means. The caller
-// passes the font id and the synthetic style beside the job.
+// passes the font id, the synthetic style and the fallback chain beside the
+// job (an engine face's `font` and `flags`).
+//
+// Where the glyphs go is the engine's business: the painter shapes each run
+// as the engine measures it, under whichever rules are set (`engine.setRule`),
+// fallback chain included. How a synthesised bold is DRAWN is the painter's,
+// and a switch: `boldDraw` (see `BOLD_DRAW`).
 //
 // Nothing in this file calls a `Math` function whose result an engine may
 // round differently (sin, cos, pow, ...): the numbers a job carries are
 // passed through as they are and all arithmetic on them happens in the wasm.
 
-import { SYNTH_BOLD, SYNTH_OBLIQUE } from './engine.mjs'
+import { CHAIN_SHIFT, SYNTH_BOLD, SYNTH_OBLIQUE } from './engine.mjs'
 
-export const WIRE_VERSION = 1
+export const WIRE_VERSION = 2
 const MAGIC = 0x4a50544d // "MTPJ"
 
 const STATUS = {
@@ -73,6 +79,13 @@ export function parseColor(css) {
 }
 
 const ALIGN = { left: 0, start: 0, center: 1, right: 2, end: 2 }
+
+/**
+ * How a synthesised bold is drawn (`request.boldDraw`):
+ * - `outset`: the outline grown on every side by the engine's bold pen. Skia's way.
+ * - `smear`: the glyph and a second one `size / 36` to its right, as one shape. WebKit's way.
+ */
+export const BOLD_DRAW = { outset: 0, smear: 1 }
 
 // One buffer for every job, grown when a job does not fit.
 let buf = new ArrayBuffer(4096)
@@ -152,7 +165,8 @@ function fill(f, tileIndex) {
   }
 }
 
-function synthBits(synth) {
+/** Synthetic styles and fallback chain as an engine face's `flags`. */
+function faceFlags(synth) {
   if (typeof synth === 'number') return synth
   if (!synth) return 0
   return (synth.bold ? SYNTH_BOLD : 0) | (synth.italic || synth.oblique ? SYNTH_OBLIQUE : 0)
@@ -165,7 +179,11 @@ function synthBits(synth) {
  * @param {object} request.job as `glyphJob` returns it
  * @param {number} request.font font id from `engine.addFont`
  * @param {number} [request.size] font size in job units; defaults to `job.face.size`
- * @param {{bold?: boolean, italic?: boolean} | number} [request.synth] styles to synthesise
+ * @param {{bold?: boolean, italic?: boolean} | number} [request.synth] styles to synthesise,
+ *   or an engine face's `flags`, which hold the fallback chain as well
+ * @param {number} [request.chain] fallback chain (`engine.chainNew`) a letter the font
+ *   lacks is drawn from; defaults to the one in `synth` when that is a face's flags, else none
+ * @param {'outset' | 'smear'} [request.boldDraw] how a synthesised bold is drawn, see `BOLD_DRAW`
  * @param {number[]} [request.transform] `[a, b, c, d, e, f]`, job space to device pixels;
  *   the canvas's current transform. Defaults to the identity.
  * @param {(fill: object) => ({width: number, height: number, data: ArrayLike<number>} | null)} [request.tiles]
@@ -175,7 +193,7 @@ function synthBits(synth) {
  *   returned twice is sent once.
  * @returns {Uint8Array} a view of a buffer that the next call overwrites
  */
-export function encodeJob({ job, font, size, synth, transform, tiles }) {
+export function encodeJob({ job, font, size, synth, chain, boldDraw = 'outset', transform, tiles }) {
   at = 0
   const sent = []
   const tileIndex = (f) => {
@@ -190,8 +208,12 @@ export function encodeJob({ job, font, size, synth, transform, tiles }) {
   const m = transform ?? [1, 0, 0, 1, 0, 0]
   u32(MAGIC)
   u32(WIRE_VERSION)
+  if (!(boldDraw in BOLD_DRAW)) throw new Error(`mt-text: unknown boldDraw ${JSON.stringify(boldDraw)}`)
+  const flags = faceFlags(synth)
   u32(font)
-  u32(synthBits(synth))
+  u32(flags & ((1 << CHAIN_SHIFT) - 1))
+  u32(chain ?? flags >>> CHAIN_SHIFT)
+  u32(BOLD_DRAW[boldDraw])
   f64(size ?? job.face?.size)
   for (let i = 0; i < 6; i++) f64(m[i])
   u32((job.curved ? 1 : 0) | (job.silhouette ? 2 : 0))
@@ -267,4 +289,58 @@ export function paintJob(engine, request) {
 /** Frees the engine's copy of the last raster. The next job would replace it anyway. */
 export function releaseRaster(engine) {
   engine.exports.mt_paint_job_release?.()
+}
+
+/**
+ * A hash of one raster (or of `null`, a job that drew nothing): 16 hex
+ * digits over its origin, its size and its bytes. Plain arithmetic on 32-bit
+ * integers, so it is the same number in node and in every browser; it is for
+ * telling two rasters apart, not for security. The native example
+ * (`text-engine/examples/paint_hash.rs`) computes the same.
+ */
+export function rasterHash(raster) {
+  // Two independent 32-bit hashes side by side: FNV-1a, and Jenkins's
+  // one-at-a-time.
+  let a = 0x811c9dc5
+  let b = 0
+  const eat = (bytes) => {
+    for (let i = 0; i < bytes.length; i++) {
+      const v = bytes[i]
+      a = Math.imul(a ^ v, 0x01000193)
+      b = (b + v) | 0
+      b = (b + (b << 10)) | 0
+      b ^= b >>> 6
+    }
+  }
+  if (raster) {
+    eat(new Uint8Array(new Int32Array([raster.x, raster.y, raster.width, raster.height]).buffer))
+    eat(raster.data)
+  }
+  b = (b + (b << 3)) | 0
+  b ^= b >>> 11
+  b = (b + (b << 15)) | 0
+  const hex = (v) => (v >>> 0).toString(16).padStart(8, '0')
+  return hex(a) + hex(b)
+}
+
+/** One hash of a list of hashes, by the same function. */
+export function combineHashes(hashes) {
+  const text = hashes.join('')
+  const codes = new Uint8Array(text.length)
+  for (let i = 0; i < text.length; i++) codes[i] = text.charCodeAt(i)
+  return rasterHash({ x: 0, y: 0, width: hashes.length, height: 1, data: codes })
+}
+
+/**
+ * Paints every request and hashes the rasters: one hash each and one of them
+ * all. For checking that the painter's bytes are the same in every engine
+ * that runs the wasm.
+ *
+ * @param {object} engine from `createEngine`
+ * @param {object[]} requests see `encodeJob`
+ * @returns {{hash: string, each: string[]}}
+ */
+export function hashJobs(engine, requests) {
+  const each = requests.map((request) => rasterHash(paintJob(engine, { ...request, view: true })))
+  return { hash: combineHashes(each), each }
 }

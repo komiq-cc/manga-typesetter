@@ -4,10 +4,10 @@
 #![cfg(feature = "paint")]
 
 use mt_text::paint::{
-    decode, paint_job, Affine, Align, Band, Fill, Job, Pt, Raster, Request, Rgba, Run, Stop, Tile,
-    MAGIC, MAX_SIDE, WIRE_VERSION,
+    decode, paint_job, Affine, Align, Band, BoldDraw, Fill, Job, Pt, Raster, Request, Rgba, Run,
+    Stop, Tile, MAGIC, MAX_SIDE, WIRE_VERSION,
 };
-use mt_text::{bold_outset, Engine, Error, Face, FontId, Synth};
+use mt_text::{bold_outset, BoldAdvance, Engine, Error, Face, FontId, Synth, WEBKIT_BOLD_ADVANCE};
 
 fn load(engine: &mut Engine, name: &str) -> FontId {
     let path = format!("{}/../src/test/fonts/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -47,6 +47,7 @@ fn request(job: Job, face: Face) -> Request {
     Request {
         job,
         face,
+        bold_draw: BoldDraw::Outset,
         transform: Affine::IDENTITY,
         tiles: Vec::new(),
     }
@@ -722,6 +723,200 @@ fn the_same_job_paints_the_same_bytes() {
     assert_eq!(paint(&mut e2, &req), a);
 }
 
+#[test]
+fn a_letter_the_face_lacks_is_painted_from_the_fallback_font() {
+    let mut e = Engine::new();
+    let comic = load(&mut e, "ComicNeue-Regular.ttf");
+    let dejavu = load(&mut e, "DejaVuSans.ttf");
+    let size = 40.0;
+    // Comic Neue has no Greek; DejaVu Sans has.
+    let chain = e.chain_new();
+    e.chain_push(chain, dejavu, Synth::NONE).unwrap();
+    let with = Face {
+        chain,
+        ..Face::new(comic, size)
+    };
+    let (x, y) = (50.0, 90.0);
+    let text = "A\u{3a9}B";
+    // Painted where it is measured: the line's ink box, fallback and all.
+    let ink = e.line_ink(with, text).unwrap();
+    let got = inked(&paint(&mut e, &request(job(vec![run(text, x, y)]), with)));
+    assert_box(
+        got,
+        (x - ink.left, y - ink.ascent, x + ink.right, y + ink.descent),
+    );
+    // The omega alone is DejaVu's glyph at the place the line gives it:
+    // after Comic Neue's "A".
+    let a = e.advance(Face::new(comic, size), "A").unwrap();
+    let omega = e.line_ink(Face::new(dejavu, size), "\u{3a9}").unwrap();
+    let mut only = request(job(vec![run("\u{3a9}", x + a, y)]), Face::new(dejavu, size));
+    let alone = paint(&mut e, &only);
+    let line = paint(&mut e, &request(job(vec![run(text, x, y)]), with));
+    let (mut same, mut all) = (0, 0);
+    for yy in alone.y..alone.y + alone.height as i32 {
+        // Clear of the A and the B on either side.
+        for xx in (x + a + 2.0) as i32..(x + a + omega.width - 2.0) as i32 {
+            all += 1;
+            same += usize::from(px(&alone, xx, yy) == px(&line, xx, yy));
+        }
+    }
+    assert!(all > 500 && same == all, "{same} of {all}");
+    // With no chain the same text is the face's own .notdef: another picture.
+    only = request(job(vec![run(text, x, y)]), Face::new(comic, size));
+    assert_ne!(paint(&mut e, &only), line);
+    // A line the face covers is not a bit different with a chain.
+    let plain = paint(
+        &mut e,
+        &request(job(vec![run("WAIT!", x, y)]), Face::new(comic, size)),
+    );
+    assert_eq!(
+        paint(&mut e, &request(job(vec![run("WAIT!", x, y)]), with)),
+        plain
+    );
+}
+
+#[test]
+fn whitespace_a_canvas_turns_into_a_space_is_painted_as_one() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 30.0);
+    let spaced = paint(&mut e, &request(job(vec![run("H H", 10.0, 40.0)]), face));
+    for text in ["H\tH", "H\nH", "H\rH", "H\u{c}H"] {
+        let got = paint(&mut e, &request(job(vec![run(text, 10.0, 40.0)]), face));
+        assert_eq!(got, spaced, "{text:?}");
+    }
+}
+
+#[test]
+fn a_bold_under_the_webkit_advance_rule_is_painted_where_it_is_measured() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let bold = Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..Face::new(font, 36.0)
+    };
+    let (x, y) = (40.0, 80.0);
+    let narrow = e.line_ink(bold, "HIH").unwrap();
+    e.rules.bold_advance = BoldAdvance::WebKit;
+    let wide = e.line_ink(bold, "HIH").unwrap();
+    // Two glyphs each moved on by size / 36 = 1 px, and the advance by three.
+    assert!((wide.right - narrow.right - 2.0).abs() < 1e-9);
+    assert!((wide.width - narrow.width - 3.0).abs() < 1e-9);
+    for align in [Align::Left, Align::Center, Align::Right] {
+        let mut j = job(vec![run("HIH", x, y)]);
+        j.align = align;
+        let start = match align {
+            Align::Left => 0.0,
+            Align::Center => -wide.width / 2.0,
+            Align::Right => -wide.width,
+        };
+        let got = inked(&paint(&mut e, &request(j, bold)));
+        assert_box(
+            got,
+            (
+                x + start - wide.left,
+                y - wide.ascent,
+                x + start + wide.right,
+                y + wide.descent,
+            ),
+        );
+    }
+}
+
+#[test]
+fn a_bold_drawn_as_a_smear_thickens_stems_and_not_bars() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let size = 72.0;
+    let plain = Face::new(font, size);
+    let bold = Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..plain
+    };
+    let by = size * WEBKIT_BOLD_ADVANCE;
+    assert_eq!(by, 2.0);
+    let (x, y) = (40.0, 100.0);
+    // "I" in DejaVu Sans is a plain bar, "H" two of them and a crossbar.
+    let ink = e.line_ink(plain, "H").unwrap();
+    let smear = |e: &mut Engine, j: Job, face: Face| {
+        let mut r = request(j, face);
+        r.bold_draw = BoldDraw::Smear;
+        paint(e, &r)
+    };
+    let regular = paint(&mut e, &request(job(vec![run("H", x, y)]), plain));
+    let smeared = smear(&mut e, job(vec![run("H", x, y)]), bold);
+    // The ink reaches `by` further right and no further anywhere else.
+    assert_box(
+        inked(&smeared),
+        (
+            x - ink.left,
+            y - ink.ascent,
+            x + ink.right + by,
+            y + ink.descent,
+        ),
+    );
+    // Through the crossbar, down the middle of the letter: as thick as it was.
+    let column = |r: &Raster, xx: i32| -> u32 {
+        (r.y..r.y + r.height as i32)
+            .map(|yy| u32::from(px(r, xx, yy)[3]))
+            .sum()
+    };
+    let mid = (x + (ink.right - ink.left) / 2.0) as i32;
+    assert_eq!(column(&smeared, mid), column(&regular, mid));
+    // Across the left stem, at a quarter of the height: wider by `by`.
+    let row =
+        |r: &Raster, yy: i32| -> u32 { (r.x..mid).map(|xx| u32::from(px(r, xx, yy)[3])).sum() };
+    let at = (y - ink.ascent / 4.0) as i32;
+    let grown = f64::from(row(&smeared, at)) - f64::from(row(&regular, at));
+    assert!((grown / 255.0 - by).abs() < 0.02, "{grown}");
+    // The outset bold thickens both.
+    let outset = paint(&mut e, &request(job(vec![run("H", x, y)]), bold));
+    let o = 2.0 * bold_outset(size);
+    let bar = f64::from(column(&outset, mid)) - f64::from(column(&regular, mid));
+    assert!((bar / 255.0 - o).abs() < 0.02, "{bar}");
+    // A band round a smeared bold starts from the smeared shape.
+    let mut j = job(vec![run("H", x, y)]);
+    j.bands = vec![Band {
+        color: RED,
+        opacity: 1.0,
+        line: 8.0,
+    }];
+    assert_box(
+        inked(&smear(&mut e, j, bold)),
+        (
+            x - ink.left - 4.0,
+            y - ink.ascent - 4.0,
+            x + ink.right + by + 4.0,
+            y + ink.descent + 4.0,
+        ),
+    );
+    // On a curve the smear turns with the glyph: a quarter turn clockwise
+    // sends it down the page.
+    let g = e.glyph_ink(plain, "I").unwrap();
+    let mut j = job(vec![Run {
+        rot: core::f64::consts::FRAC_PI_2,
+        fill: Some(Fill::Solid(BLACK)),
+        ..run("I", 200.0, 150.0)
+    }]);
+    j.curved = true;
+    j.fill = None;
+    assert_box(
+        inked(&smear(&mut e, j, bold)),
+        (
+            200.0 - g.descent,
+            150.0 - g.left,
+            200.0 + g.ascent,
+            150.0 + g.right + by,
+        ),
+    );
+}
+
 /// A request in its wire form, as `text-engine/js/paint.mjs` writes it.
 fn wire(font: u32, text: &str) -> Vec<u8> {
     let mut b = Vec::new();
@@ -731,6 +926,8 @@ fn wire(font: u32, text: &str) -> Vec<u8> {
     u(&mut b, WIRE_VERSION);
     u(&mut b, font);
     u(&mut b, 2); // oblique
+    u(&mut b, 5); // fallback chain
+    u(&mut b, 1); // bold drawn as a smear
     f(&mut b, 40.0);
     for v in [2.0, 0.0, 0.0, 2.0, 5.0, 6.0] {
         f(&mut b, v);
@@ -778,6 +975,8 @@ fn the_wire_form_decodes_to_the_job_it_states() {
     assert_eq!(r.face.font, 7);
     assert_eq!(r.face.size, 40.0);
     assert!(r.face.synth.oblique && !r.face.synth.bold);
+    assert_eq!(r.face.chain, 5);
+    assert_eq!(r.bold_draw, BoldDraw::Smear);
     assert_eq!(r.transform, Affine([2.0, 0.0, 0.0, 2.0, 5.0, 6.0]));
     assert_eq!(
         r.job,
@@ -827,14 +1026,14 @@ fn a_damaged_wire_form_is_refused_not_guessed_at() {
     let mut long = good.clone();
     long.push(0);
     assert_eq!(decode(&long).err(), Some(Error::BadSpec));
-    // A NaN where a number belongs: the size is the f64 at byte 16.
+    // A NaN where a number belongs: the size is the f64 at byte 24.
     let mut nan = good.clone();
-    nan[16..24].copy_from_slice(&f64::NAN.to_le_bytes());
+    nan[24..32].copy_from_slice(&f64::NAN.to_le_bytes());
     assert_eq!(decode(&nan).err(), Some(Error::BadSpec));
     let mut inf = good.clone();
-    inf[24..32].copy_from_slice(&f64::INFINITY.to_le_bytes());
+    inf[32..40].copy_from_slice(&f64::INFINITY.to_le_bytes());
     assert_eq!(decode(&inf).err(), Some(Error::BadSpec));
-    // Wrong magic, wrong version, an unknown alignment.
+    // Wrong magic, wrong version, an unknown alignment or way to draw a bold.
     let mut magic = good.clone();
     magic[0] ^= 1;
     assert!(decode(&magic).is_err());
@@ -842,8 +1041,11 @@ fn a_damaged_wire_form_is_refused_not_guessed_at() {
     version[4] = 99;
     assert!(decode(&version).is_err());
     let mut align = good.clone();
-    align[76] = 9;
+    align[84] = 9;
     assert!(decode(&align).is_err());
+    let mut bold = good.clone();
+    bold[20] = 7;
+    assert!(decode(&bold).is_err());
     // Text that is not UTF-8.
     let mut text = good.clone();
     let at = good.len() - 20 - 3 - 4;

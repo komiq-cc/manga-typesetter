@@ -52,7 +52,7 @@ pub use stroke::{Join, Side};
 use compose::{compose, Layer};
 use shade::Shader;
 
-use crate::engine::{Engine, Face};
+use crate::engine::{Engine, Face, WEBKIT_BOLD_ADVANCE};
 use crate::font::OBLIQUE_SKEW;
 use crate::metrics::bold_outset;
 use crate::Error;
@@ -75,6 +75,25 @@ pub const MAX_PIXELS: usize = 1 << 26;
 /// mitred outline as its base (see `Glyphs::band`).
 pub const BOLD_JOIN: Join = Join::Round;
 
+/// How a synthesised bold is drawn. The references do not agree, so this is
+/// a switch a request carries (`boldDraw` in `paint.mjs`) and not a
+/// constant; P5A-REPORT.md has the measurements and the pictures.
+///
+/// It is separate from the engine's `boldAdvance` rule, which says where the
+/// glyphs go: the painter takes the positions from the engine's shaping
+/// under whichever rule is set, and draws each glyph by this one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoldDraw {
+    /// Skia: the outline grown by [`bold_outset`] on every side, joined by
+    /// [`BOLD_JOIN`]. Stems and bars thicken alike. What `line_ink` assumes.
+    #[default]
+    Outset,
+    /// WebKit: the glyph drawn at its place and again `size / 36` to the
+    /// right ([`WEBKIT_BOLD_ADVANCE`]), as one shape. Upright stems thicken
+    /// by that much, level bars not at all.
+    Smear,
+}
+
 /// The pixels a job paints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Raster {
@@ -92,7 +111,8 @@ struct GlyphPolys {
     polys: Polys,
     /// The side of its contours that faces away from the ink.
     out: Side,
-    /// Half the pen a synthesised bold adds, in job units; 0 for none.
+    /// Half the pen a synthesised bold adds, in job units; 0 for none, and
+    /// for a bold that is drawn as a smear (it is in `polys` already).
     bold: f64,
 }
 
@@ -110,6 +130,7 @@ impl Glyphs {
         engine: &Engine,
         run: &ShapedRun,
         frame: &Affine,
+        bold_draw: BoldDraw,
         tol: f64,
     ) -> Result<(), Error> {
         for g in &run.glyphs {
@@ -135,15 +156,21 @@ impl Glyphs {
             } else {
                 Side::Left
             };
-            self.items.push(GlyphPolys {
-                polys,
-                out,
-                bold: if g.synth.bold {
-                    bold_outset(g.size)
-                } else {
+            let bold = match (g.synth.bold, bold_draw) {
+                (false, _) => 0.0,
+                (true, BoldDraw::Outset) => bold_outset(g.size),
+                (true, BoldDraw::Smear) => {
+                    // To the right in the run's own frame, wherever the
+                    // frame has turned that to.
+                    let m = &frame.0;
+                    let by = g.size * WEBKIT_BOLD_ADVANCE;
+                    let mut swept = Polys::default();
+                    stroke::sweep(&polys, Pt::new(m[0] * by, m[1] * by), out, &mut swept);
+                    polys = swept;
                     0.0
-                },
-            });
+                }
+            };
+            self.items.push(GlyphPolys { polys, out, bold });
         }
         Ok(())
     }
@@ -299,6 +326,7 @@ pub fn paint_job_with(
     let Request {
         job,
         face,
+        bold_draw,
         transform,
         tiles,
     } = request;
@@ -331,7 +359,7 @@ pub fn paint_job_with(
             Affine::translate(run.x + align_offset(job.align, shaped.advance), run.y)
         };
         let from = glyphs.len();
-        glyphs.add_run(engine, &shaped, &start, tol)?;
+        glyphs.add_run(engine, &shaped, &start, *bold_draw, tol)?;
         runs.push((from..glyphs.len(), frame));
     }
     let all = 0..glyphs.len();

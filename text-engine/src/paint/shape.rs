@@ -5,14 +5,14 @@
 //! and the two anchor rules ([`align_offset`] and [`curved_origin`]) say
 //! where a run's start lies relative to the point a job gives.
 //!
-//! Today a run is shaped with one font. When the engine learns to fall back
-//! to other fonts, [`shape_run`] is the one function that changes: each
-//! [`Placed`] already names its own font and synthetic style.
-
-use harfrust::{Buffer, Feature, ShapeOptions, ShaperFont, Tag};
+//! The glyphs are the engine's measured line (`Engine::measure_line`), the
+//! one `advance`, `lineInk` and the breaker read: the same whitespace rule,
+//! the same features, the same fallback parts, the same advances under the
+//! `boldAdvance` rule. So the ink lands where the measurement says, and a
+//! letter the face lacks is drawn from the font its part names.
 
 use super::job::Align;
-use crate::engine::{Engine, Face, FontId, Glyph, Synth};
+use crate::engine::{Engine, Face, FontId, ShapeMode, Synth};
 use crate::Error;
 
 /// One glyph, placed relative to the start of its run.
@@ -37,7 +37,13 @@ pub struct ShapedRun {
     pub advance: f64,
 }
 
-/// Shapes `text` as one run of `face` and places its glyphs.
+/// Shapes `text` as a line of `face` and places its glyphs.
+///
+/// The line is one part, or one per font when `face.chain` supplies a letter
+/// the face lacks (RULES.md rule 10). Positions are computed as
+/// `Engine::line_ink` computes them: each part's pen in integer font units,
+/// scaled once, after the widths of the parts before it; a synthesised bold
+/// under `boldAdvance = webkit` moves every later glyph of its part on.
 ///
 /// `letter_spacing` is canvas `letterSpacing` in pixels:
 ///
@@ -46,7 +52,7 @@ pub struct ShapedRun {
 ///   sits half a gap left of centre. Chromium, WebKit and Skia all do this
 ///   (measured on the reference pictures of the `spacing` cases, P5A-REPORT.md);
 /// - when it is not zero the optional ligatures (`liga`, `clig`) are turned
-///   off, as CSS asks and as Chromium and WebKit do, so "fi" is spaced as two
+///   off, as the breaker does for the same line, so "fi" is spaced as two
 ///   letters. Kerning stays on.
 pub fn shape_run(
     engine: &mut Engine,
@@ -54,75 +60,50 @@ pub fn shape_run(
     text: &str,
     letter_spacing: f64,
 ) -> Result<ShapedRun, Error> {
-    let upem = f64::from(engine.font(face.font)?.info.units_per_em);
-    let scale = face.size / upem;
-    let run: Vec<Glyph> = if letter_spacing == 0.0 {
-        engine.shape(face.font, text)?.to_vec()
-    } else {
-        shape_without_ligatures(engine, face.font, text)?
+    let mode = ShapeMode {
+        no_ligatures: letter_spacing != 0.0,
+        ..ShapeMode::MEASURE
     };
-    let mut glyphs = Vec::with_capacity(run.len());
-    let mut pen = 0i64;
+    engine.measure_line(face, text, mode)?;
+    let mut glyphs = Vec::with_capacity(engine.line.len());
+    let mut origin = 0.0f64;
     let mut gaps = 0u32;
-    for (i, g) in run.iter().enumerate() {
-        glyphs.push(Placed {
-            font: face.font,
-            glyph: g.id,
-            // Font units are summed as integers and scaled once, like
-            // `Engine::advance`, so the positions do not depend on how the
-            // additions are grouped.
-            x: (pen + i64::from(g.x_offset)) as f64 * scale + f64::from(gaps) * letter_spacing,
-            y: -f64::from(g.y_offset) * scale,
-            size: face.size,
-            synth: face.synth,
-        });
-        pen += i64::from(g.x_advance);
-        // The gap follows the last glyph of a cluster.
-        if run.get(i + 1).is_none_or(|next| next.cluster != g.cluster) {
-            gaps += 1;
+    let mut at = 0usize;
+    for part in engine.parts() {
+        let upem = f64::from(engine.font(part.font)?.info.units_per_em);
+        let scale = face.size / upem;
+        let extra = engine.bold_extra(part.synth, face.size);
+        let mut pen = 0i64;
+        for (n, g) in engine.line[part.glyphs.clone()].iter().enumerate() {
+            glyphs.push(Placed {
+                font: part.font,
+                glyph: g.id,
+                x: origin
+                    + n as f64 * extra
+                    + (pen + i64::from(g.x_offset)) as f64 * scale
+                    + f64::from(gaps) * letter_spacing,
+                y: -f64::from(g.y_offset) * scale,
+                size: face.size,
+                synth: part.synth,
+            });
+            pen += i64::from(g.x_advance);
+            at += 1;
+            // The gap follows the last glyph of a cluster. Clusters are
+            // counted along the whole line, so this holds across parts.
+            if engine
+                .line
+                .get(at)
+                .is_none_or(|next| next.cluster != g.cluster)
+            {
+                gaps += 1;
+            }
         }
+        origin += pen as f64 * scale + part.glyphs.len() as f64 * extra;
     }
     Ok(ShapedRun {
         glyphs,
-        advance: pen as f64 * scale + f64::from(gaps) * letter_spacing,
+        advance: engine.line_advance(face.size)? + f64::from(gaps) * letter_spacing,
     })
-}
-
-/// `Engine::shape` with `liga` and `clig` off. Kept apart from it because
-/// the engine's shape plans are cached per script and direction only; a
-/// spaced line is rare enough to pay for its own plan.
-fn shape_without_ligatures(engine: &Engine, font: FontId, text: &str) -> Result<Vec<Glyph>, Error> {
-    let entry = engine.font(font)?;
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut buffer = Buffer::default();
-    let mut cluster = 0u32;
-    for ch in text.chars() {
-        buffer.push(ch as u32, cluster);
-        cluster += ch.len_utf16() as u32;
-    }
-    buffer.guess_segment_properties();
-    let features = [
-        Feature::new(Tag::new(b"liga"), 0, ..),
-        Feature::new(Tag::new(b"clig"), 0, ..),
-    ];
-    let shaper = ShaperFont::new(&entry.hb);
-    let options = ShapeOptions::new().features(&features);
-    harfrust::shape(&shaper, &mut buffer, options).map_err(|_| Error::Shape)?;
-    Ok(buffer
-        .glyph_infos()
-        .iter()
-        .zip(buffer.glyph_positions())
-        .map(|(info, pos)| Glyph {
-            id: info.glyph_id,
-            cluster: info.cluster,
-            x_advance: pos.x_advance,
-            y_advance: pos.y_advance,
-            x_offset: pos.x_offset,
-            y_offset: pos.y_offset,
-        })
-        .collect())
 }
 
 /// Canvas `textAlign`: how far the run's start lies from the anchor.
@@ -209,7 +190,9 @@ mod tests {
         let (dx, dy) = curved_origin(&e, face, run.advance).unwrap();
         assert_eq!(dx, -run.advance / 2.0);
         assert_eq!(dy, e.middle_shift(face).unwrap());
-        let b = e.font_box(face).unwrap();
+        // The middle of the line box before it is rounded to whole pixels
+        // (RULES.md rule 5), so a glyph on a curve does not jump with the size.
+        let b = e.font_box_unrounded(face).unwrap();
         assert!((dy - (b.ascent - b.descent) / 2.0).abs() < 1e-12);
     }
 }

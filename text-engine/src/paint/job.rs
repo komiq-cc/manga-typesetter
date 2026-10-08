@@ -9,6 +9,7 @@
 
 use super::geom::{Affine, Pt};
 use super::shade::Premul;
+use super::BoldDraw;
 use crate::engine::{Face, Synth};
 use crate::Error;
 
@@ -147,7 +148,11 @@ impl Tile {
 /// A decoded request: the job and everything that came beside it.
 pub struct Request {
     pub job: Job,
+    /// The font, its size and synthetic style, and the fallback chain a
+    /// letter it lacks is looked for in (zero for none).
     pub face: Face,
+    /// How a synthesised bold is drawn.
+    pub bold_draw: BoldDraw,
     pub transform: Affine,
     pub tiles: Vec<Tile>,
 }
@@ -155,7 +160,7 @@ pub struct Request {
 /// First four bytes of the wire form: "MTPJ".
 pub const MAGIC: u32 = 0x4a50_544d;
 /// Bumped when the wire form changes; `paint.mjs` writes the same number.
-pub const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 2;
 
 /// Largest tile side accepted, a guard like the surface's.
 const MAX_TILE_SIDE: u32 = 4096;
@@ -252,7 +257,9 @@ impl<'a> Reader<'a> {
 ///
 /// ```text
 /// u32 magic, u32 version
-/// u32 font, u32 synth bits (1 bold, 2 oblique), f64 size
+/// u32 font, u32 synth bits (1 bold, 2 oblique)
+/// u32 fallback chain (0 none), u32 bold drawing (0 outset, 1 smear)
+/// f64 size
 /// f64 x 6 transform (a, b, c, d, e, f)
 /// u32 flags (1 curved, 2 silhouette), u32 align (0 left, 1 centre, 2 right)
 /// f64 letter spacing
@@ -279,6 +286,12 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
     }
     let font = r.u32()?;
     let synth = Synth::from_bits(r.u32()?);
+    let chain = r.u32()?;
+    let bold_draw = match r.u32()? {
+        0 => BoldDraw::Outset,
+        1 => BoldDraw::Smear,
+        _ => return Err(Error::BadSpec),
+    };
     let size = r.f64()?;
     let mut m = [0.0; 6];
     for v in &mut m {
@@ -341,7 +354,13 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
             fill,
             runs,
         },
-        face: Face { font, size, synth },
+        face: Face {
+            font,
+            size,
+            synth,
+            chain,
+        },
+        bold_draw,
         transform: Affine(m),
         tiles,
     })
