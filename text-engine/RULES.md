@@ -29,6 +29,7 @@ Two rules are switches (`engine.setRules`, `--rules` on the capture):
 |---|---|---|
 | `boldAdvance` | `unchanged`, `webkit` | `unchanged` (not decided, see rule 7) |
 | `fontBox` | `browser`, `skia` | `browser` |
+| `inkBaseline` | `include`, `exact` | `include` (rule 4; applied by the adapter, `src/lib/text-engine/rust.js`) |
 
 ## 1. Whitespace in a measured string
 
@@ -143,6 +144,33 @@ comes from it.
   | `new/e0` to `ref-sk` | 0.554 / 9.03 | 0.565 / 3.91 | 0.520 / 1.79 | 45.44% |
   | `ref-cr` to `ref-wk` | 1.080 / 28.0 | 1.255 / 22.6 | 0.013 / 1.71 | 32.21% |
 
+- **A line's ink box reaches its baseline** (`inkBaseline=include`, added
+  after P5 found it in the pictures). WebKit never reports a negative ascent
+  or descent: of the 8,315 covered cases where the outline lies wholly above
+  the baseline, it reports a descent of exactly 0 in 8,161 and a negative one
+  in none; Chromium reports the negative value in 8,038 [M]. The app reads a
+  negative ascent or descent as "no ink metrics" (`blockInk` in `measure.js`)
+  and then does not centre the block on its ink at all, so one line that sits
+  a fraction of a pixel above its baseline moves the whole block. With exact
+  outline boxes that happens more often than in either browser, and not in
+  the same boxes. Under `include` the engine clamps both at 0, as WebKit does;
+  `exact` leaves them as the outline has them.
+
+  | block top (`blockY`), same lines, covered [M] | more than 0.5 px apart | more than 2 px | max |
+  |---|---|---|---|
+  | `ref-cr` to `ref-wk`, all 16,658 | 799 | 305 | 28.1 px |
+  | engine `exact` to `ref-wk`, all 16,755 | 881 | 334 | 28.1 px |
+  | engine `include` to `ref-wk`, all 16,755 | 59 | 4 | 2.7 px |
+  | engine `exact` to `ref-cr`, all 16,772 | 88 | 32 | 8.5 px |
+  | engine `include` to `ref-cr`, all 16,772 | 791 | 315 | 28.1 px |
+  | `ref-cr` to `ref-wk`, the 2,255 real chapter boxes | 132 | 78 | 28.1 px |
+  | engine `include` to `ref-wk`, the 2,262 real chapter boxes | 20 | 2 | 2.7 px |
+
+  `include` is the default because it is what the app shows on macOS today
+  and because it never drops the centring; under it a block on Windows moves
+  to where macOS has always put it. The 8.5 px between `exact` and Chromium is
+  one box whose letters sit 3 font units above the baseline: Chromium's box
+  for it reaches the baseline and the outline's does not.
 - A tight gate on ink is not meaningful: the two browsers are 1.1 px apart at
   the median and tens of pixels apart at the tail. The engine is closer to
   Chromium than either browser is to the other.

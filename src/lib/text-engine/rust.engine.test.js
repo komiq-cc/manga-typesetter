@@ -3,7 +3,7 @@ import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
 import { matchSlot } from './rust.js';
 import { textEngine, setTextEngine } from './index.js';
 import {
-  canMeasure, lineWidth, charWidths, fontMetrics, lineInk, glyphInk, layoutLines, faceFor, setTypesetEnabled, typesetEnabled,
+  canMeasure, lineWidth, charWidths, fontMetrics, lineInk, glyphInk, layoutLines, faceFor, setTypesetEnabled, typesetEnabled, inkShiftY,
 } from '../measure.js';
 
 const defaultEngine = textEngine();
@@ -152,6 +152,29 @@ describe('the rules a browser canvas follows', () => {
     expect(engine.fontBox(face('Comic Neue', 5))).toEqual({ ascent: 4, descent: 1 });
   });
 
+  it("reaches a line's ink box to its baseline unless told to report the outline as it is", () => {
+    // A hyphen is drawn wholly above the baseline: its outline has a negative descent.
+    const f = face('Comic Neue', 40);
+    expect(engine.rules().inkBaseline).toBe('include');
+    const kept = engine.lineInk(f, '-');
+    expect(kept.descent).toBe(0);
+    expect(kept.ascent).toBeGreaterThan(5);
+    engine.setRules({ inkBaseline: 'exact' });
+    try {
+      const exact = engine.lineInk(f, '-');
+      expect(exact.descent).toBeLessThan(-5);
+      expect(exact.ascent).toBe(kept.ascent);
+    } finally {
+      engine.setRules({ inkBaseline: 'include' });
+    }
+    expect(() => engine.setRules({ inkBaseline: 'sometimes' })).toThrow(/unknown rule/);
+    // The block is centred on its ink only when every line reports one (measure.js).
+    setTextEngine(engine);
+    setTypesetEnabled(true);
+    const s = { ...style, size: 40, valign: 'middle' };
+    expect(inkShiftY(['WAIT', '--'], s, 40)).not.toBe(0);
+  });
+
   it('gives a string without ink a width and an empty box', () => {
     const f = face('Comic Neue', 40);
     for (const text of ['', ' ', '   ', '\t']) {
@@ -176,7 +199,7 @@ describe('the rules a browser canvas follows', () => {
     const regular = face('Comic Neue', 36);
     const bold = face('Comic Neue', 36, true);
     const w = e.advance(regular, 'WAIT');
-    expect(e.rules()).toEqual({ boldAdvance: 'unchanged', fontBox: 'browser' });
+    expect(e.rules()).toEqual({ boldAdvance: 'unchanged', fontBox: 'browser', inkBaseline: 'include' });
     expect(e.advance(bold, 'WAIT')).toBe(w);
     expect(e.lineInk(bold, 'WAIT').right).toBeGreaterThan(e.lineInk(regular, 'WAIT').right);
 
@@ -191,7 +214,7 @@ describe('the rules a browser canvas follows', () => {
 
     e.setRules({ fontBox: 'skia' });
     expect(e.fontBox(face('Comic Neue', 14.5)).ascent).toBeCloseTo(13.05, 9);
-    expect(e.rules()).toEqual({ boldAdvance: 'webkit', fontBox: 'skia' });
+    expect(e.rules()).toEqual({ boldAdvance: 'webkit', fontBox: 'skia', inkBaseline: 'include' });
     expect(() => e.setRules({ boldAdvance: 'gecko' })).toThrow('unknown rule boldAdvance=gecko');
     expect(() => e.setRules({ kerning: 'off' })).toThrow('unknown rule kerning=off');
   });

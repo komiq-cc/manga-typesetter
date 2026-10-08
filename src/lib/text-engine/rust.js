@@ -22,7 +22,9 @@ const HANDLES_MAX = 4096;
 
 // The rule choices that are switches (text-engine/RULES.md), and the value
 // each has unless a caller says otherwise.
-export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'unchanged', fontBox: 'browser' });
+export const DEFAULT_RULES = Object.freeze({ boldAdvance: 'unchanged', fontBox: 'browser', inkBaseline: 'include' });
+// Rules the adapter applies itself, to what the engine answered.
+const ADAPTER_RULES = { inkBaseline: ['exact', 'include'] };
 
 // Which registered slot a request draws from, and what it has to synthesise:
 // CSS font matching narrowed to the app's two axes, the same order as
@@ -65,8 +67,12 @@ export async function createRustTextEngine(source, options = {}) {
 
   function applyRules(next) {
     for (const [name, value] of Object.entries(next ?? {})) {
-      if (!RULES[name] || !(value in RULES[name].values)) throw new Error(`text engine: unknown rule ${name}=${value}`);
-      low.setRule(name, value);
+      if (ADAPTER_RULES[name]) {
+        if (!ADAPTER_RULES[name].includes(value)) throw new Error(`text engine: unknown rule ${name}=${value}`);
+      } else {
+        if (!RULES[name] || !(value in RULES[name].values)) throw new Error(`text engine: unknown rule ${name}=${value}`);
+        low.setRule(name, value);
+      }
       rules[name] = value;
     }
   }
@@ -139,7 +145,16 @@ export async function createRustTextEngine(source, options = {}) {
       return low.fontBox(resolve(face));
     },
     lineInk(face, text) {
-      return low.lineInk(resolve(face), text);
+      const ink = low.lineInk(resolve(face), text);
+      // RULES.md rule 4: a line's ink box reaches its baseline, as WebKit's
+      // does. A line drawn wholly above the baseline would otherwise report a
+      // negative descent, which `blockInk` in measure.js takes for "no ink
+      // metrics" and answers by not centring the whole block on its ink.
+      if (rules.inkBaseline === 'include') {
+        if (ink.ascent < 0) ink.ascent = 0;
+        if (ink.descent < 0) ink.descent = 0;
+      }
+      return ink;
     },
     glyphInk(face, text) {
       return low.glyphInk(resolve(face), text);
