@@ -244,6 +244,10 @@ export async function createRustTextEngine(source, options = {}) {
       const h = resolve(face);
       return { slot: h.slot, fauxBold: (h.flags & SYNTH_BOLD) !== 0, fauxItalic: (h.flags & SYNTH_OBLIQUE) !== 0 };
     },
+    /** The engine face a request draws with, `{ font, size, flags }`: what the low-level loader and the painter take. */
+    handle(face) {
+      return resolve(face);
+    },
     /** The low-level engine, for tools that need font ids or raw runs. */
     low,
   };
