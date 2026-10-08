@@ -16,8 +16,19 @@
   import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { plural } from './format.js';
 
-  // Reactive through every box's font, the font lists, and the one signal a
-  // face arriving raises - so it clears the moment the family is loaded.
+  // This is mounted for the whole session, so what each list listens to is
+  // what it costs.
+  //
+  // `missing` walks every box of the chapter and reads one thing of each, its
+  // font name. It is made again when a box changes font, when a box or a page
+  // comes or goes, and when the font lists or the one signal a face arriving
+  // raises change - so it clears the moment the family is loaded. Not when a
+  // box is typed in, moved, resized or restyled (FontNotice-cost.dom.test.js).
+  //
+  // `letters` listens to nothing but the switch while the browser measures.
+  // With the Rust engine on it reads every box's text, so a keystroke makes it
+  // again; the engine is asked only about a face and string it has not seen
+  // (engine-switch.svelte.js keeps the answers), the rest is one lookup a box.
   const missing = $derived(missingFonts(app.pages));
   const letters = $derived(boxesMissingLetters(app.pages));
   let open = $state(false);
