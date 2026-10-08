@@ -424,9 +424,23 @@ describe('a compressed face', () => {
     await addFontFile(fontFile('Anchor.ttf'));
     await addFontFile(fontFile('Webby.woff2', WOFF2()));
     await useTextEngine('rust');
-    expect(invoke.calls).toEqual([['font_to_sfnt', 'bytes']]);
+    // What the command was given is the file and nothing around it: Tauri
+    // sends a raw body only for bytes, and the command takes nothing else
+    // (the stand-in refuses as it does).
+    expect(invoke.calls).toHaveLength(1);
+    const [command, body] = invoke.calls[0];
+    expect(command).toBe('font_to_sfnt');
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect([...body]).toEqual([...WOFF2()]);
     expect(engine.registered()).toEqual({ Anchor: ['regular'], Webby: ['regular'] });
     expect(fontMissing('Webby')).toBe(false);
+  });
+
+  it('is not decoded by a call that wraps the bytes in arguments: the command refuses, as the real one does', async () => {
+    const invoke = fakeNative({});
+    await expect(invoke('font_to_sfnt', { bytes: WOFF2() })).rejects.toThrow('takes the font file as the raw body of the call');
+    await expect(invoke('font_to_sfnt', [...WOFF2()])).rejects.toThrow('raw body');
+    await expect(invoke('font_to_sfnt', WOFF2().buffer)).resolves.toBeInstanceOf(ArrayBuffer);
   });
 });
 

@@ -142,6 +142,11 @@ export function fakeRustEngine() {
  * `files` is { family: [{ slots: { slot: index }, bytes }] }, one entry per
  * font file the family's faces live in. Answers are held back until
  * `release()` when `hold` is set, to look at the moment in between.
+ *
+ * `calls` is what each command was really given. `font_to_sfnt` takes the
+ * font as the raw body of the call (src-tauri/src/font_decode.rs), and Tauri
+ * sends a raw body only for bytes: handed anything else - the same bytes
+ * wrapped in an object, say - this refuses in the real command's words.
  */
 export function fakeNative(files = {}, { hold = false } = {}) {
   const calls = [];
@@ -150,7 +155,7 @@ export function fakeNative(files = {}, { hold = false } = {}) {
   const waiting = [];
   const gate = () => (hold ? new Promise((resolve) => waiting.push(resolve)) : Promise.resolve());
   const invoke = async (cmd, args) => {
-    calls.push([cmd, cmd === 'font_to_sfnt' ? 'bytes' : args]);
+    calls.push([cmd, args]);
     await gate();
     if (cmd === 'system_font_face') {
       const file = (files[args.family] ?? []).find((f) => args.slot in f.slots);
@@ -160,7 +165,8 @@ export function fakeNative(files = {}, { hold = false } = {}) {
       return answer;
     }
     if (cmd === 'font_to_sfnt') {
-      if (args[4] === 0xff) throw new Error('not a WOFF file');
+      if (!(args instanceof Uint8Array || args instanceof ArrayBuffer)) throw new Error('font_to_sfnt takes the font file as the raw body of the call');
+      if (new Uint8Array(args)[4] === 0xff) throw new Error('not a WOFF file');
       return SFNT().buffer;
     }
     throw new Error(`unknown command ${cmd}`);

@@ -174,7 +174,9 @@ describe('user faces', () => {
   it('decodes a WOFF2 face natively, and the family is on its way until it is', async () => {
     const { engine, sync, invoke, onArrival } = setup({ hold: true });
     sync.setUserFace('Webby', 'regular', WOFF2());
-    expect(invoke.calls).toEqual([['font_to_sfnt', 'bytes']]);
+    // The decoder is handed the file itself, as bytes.
+    expect(invoke.calls).toEqual([['font_to_sfnt', WOFF2()]]);
+    expect(invoke.calls[0][1]).toBeInstanceOf(Uint8Array);
     expect(engine.registered()).toEqual({});
     expect(sync.ready('Webby')).toBe(false);
     expect(sync.missing('Webby')).toBe(false);
