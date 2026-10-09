@@ -3081,6 +3081,31 @@ function holdFit(b) {
   fitsAwaitingFace.add(b);
   fitsAwaited++;
 }
+// How short a drag of a box's top or bottom edge may leave it (the corner
+// drags scale the type and take no floor: resize-math.js). Auto height keeps
+// its promise through the drag - an edge can make the box roomier, never
+// shorter than its text - so the floor is what `lineCount` lines need, capped
+// at the page as the fit itself is, and the plain minimum for a box that is
+// not auto-sized or has no lines to count (curved text).
+//
+// It is here, beside the fits, because it is one of them and must stand down
+// when they do. While the box's face is arriving the count is of lines broken
+// in a stand-in, and a floor taken from it is a height nobody chose written
+// into the document by a one-pixel drag - upward, which is never undone. So
+// then the floor is the plain minimum, and the fit is held for when the face
+// lands, as an edit's is. With no font source `faceArriving` is always false
+// and this is the number the drag always used.
+export const EDGE_DRAG_MIN = 30;
+export function edgeDragFloor(b, lineCount, p = page()) {
+  const s = b?.style;
+  if (!s || s.autoHeight === false || lineCount == null) return EDGE_DRAG_MIN;
+  if (faceArriving(s)) {
+    holdFit(b);
+    return EDGE_DRAG_MIN;
+  }
+  return Math.min(neededHeight(lineCount, s, textInset(s)), p?.h || Infinity);
+}
+
 // The held boxes of a page whose face is in by now, each with the geometry it
 // stood at before anything fits it, and no longer held.
 function heldFitsLanding(p) {

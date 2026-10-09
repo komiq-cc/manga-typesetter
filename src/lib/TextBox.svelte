@@ -25,11 +25,11 @@
     isLongstrip,
     reviewBox,
     reviewOf,
+    edgeDragFloor,
   } from './store.svelte.js';
   import { stripDragYBounds } from './editor/strip.js';
 
   import { untrack } from 'svelte';
-  import { neededHeight } from './typeset.js';
   import { resizeBoxMath } from './resize-math.js';
   import { record } from './editor/history.svelte.js';
   import {
@@ -1195,12 +1195,12 @@
         const sdx = (ev.clientX - sx) / zz, sdy = (ev.clientY - sy) / zz;
         const dx = sdx * cos - sdy * sin, dy = sdx * sin + sdy * cos;
         // Auto-height keeps its promise through the drag: an edge can make the
-        // box roomier but never shorter than its text. `shaped` is null for
-        // curved and path text, which auto-height does not fit either. Capped at
-        // the page, as the fit itself is.
-        const floor = s.autoHeight !== false && shaped
-          ? Math.min(neededHeight(shaped.length, s, textInset(s)), pg?.h || Infinity)
-          : 30;
+        // box roomier but never shorter than its text. The floor is the store's
+        // (`edgeDragFloor`), beside the fits it mirrors, so that it stands down
+        // with them while the box's face is arriving and these lines are a
+        // stand-in's. `shaped` is null for curved and path text, which
+        // auto-height does not fit either.
+        const floor = edgeDragFloor(box, shaped ? shaped.length : null, pg);
         const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
         resizeBox(
           pageId,
