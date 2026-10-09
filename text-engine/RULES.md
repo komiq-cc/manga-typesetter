@@ -397,6 +397,11 @@ apart. The rule is pinned by unit tests on the fixture fonts.
   adapter) and does not work it out again from what each font covers: "the
   font the stretch before it is in" cannot be read off a list of missing
   letters, and a second reckoning cuts inside a cluster.
+  A chain handle the engine does not hold is an error to that question
+  (`mt_line_fonts` answers -1). The measuring exports and `mt_line_carets`
+  read the same handle as "no chain" (`measure_line`), and were left so: a
+  number measured without a chain is still the face's number, where a NAME
+  given without the chain the caller meant is the wrong font's.
 - With no list, or when the face has every letter, there is one part and the
   numbers are bit for bit what they were (the fast path shapes with the face
   first and looks further only if a `.notdef` came out).
@@ -687,6 +692,20 @@ instance's.
   format and limit were read; which hash it uses could not be, and FNV-1a is
   this engine's choice. The name is distinct and stable, and is not
   promised to be the one another implementation makes.]
+- **Two places never share a name, and no name carries a byte a
+  PostScript name may not.** A name the font states - name ID 6, a named
+  instance's PostScript name - is passed on only if it is printable ASCII
+  with no space and none of `[ ] ( ) { } < > / %`, at most 127 long; else
+  the font has no name of its own (ID 6) or the instance gets the made one.
+  A named instance's name, stated or made from its style, is used only if no
+  named instance at another place comes out with the same; else the place is
+  spelled out. And the place is spelled `_<value><tag>` only where that can
+  be read back: every axis tag, cut down to its letters and digits, begins
+  with a letter and is no other axis' tag. Tags `AB-C` and `A-BC` both read
+  `ABC`, and `_1` + `1abc` is `_11` + `abc`: such a font's instances get the
+  last-resort form, hashed over the tags as the file has them. [M:
+  tests/instance.rs.] Not covered: a font that states, as the name of one
+  place, exactly the name this rule makes for another.
 - **An axis that is not a range is not an axis.** A file whose `fvar` gives
   an axis a minimum above its maximum, a default outside the two, or a
   number that is not one, is a font without that axis: it is not listed,
