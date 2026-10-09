@@ -397,11 +397,16 @@ apart. The rule is pinned by unit tests on the fixture fonts.
   adapter) and does not work it out again from what each font covers: "the
   font the stretch before it is in" cannot be read off a list of missing
   letters, and a second reckoning cuts inside a cluster.
-  A chain handle the engine does not hold is an error to that question
-  (`mt_line_fonts` answers -1). The measuring exports and `mt_line_carets`
-  read the same handle as "no chain" (`measure_line`), and were left so: a
-  number measured without a chain is still the face's number, where a NAME
-  given without the chain the caller meant is the wrong font's.
+  A nonzero chain handle the engine does not hold is `UnknownFont` for
+  every query of a face, before the primary-face fast path or an empty-text
+  answer. This includes font boxes, advance, ink, wrapping, missing glyphs,
+  carets and names. Zero is "no chain"; a held empty chain is valid too.
+  `mt_advance` answers NaN, the standard buffered exports answer -2 and
+  clear their shared answer buffers, and `mt_line_fonts` retains its own
+  -1 unknown / -2 capacity contract without writing the caller's buffer.
+  JS wrappers throw before reading a refused answer. [M: focused P8c
+  tests/chains.rs and chains.engine.test.js on code committed as `1deb27a`;
+  final coordinator verification after P7 integration remains pending.]
 - With no list, or when the face has every letter, there is one part and the
   numbers are bit for bit what they were (the fast path shapes with the face
   first and looks further only if a `.notdef` came out).

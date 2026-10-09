@@ -1,14 +1,15 @@
 # P8: everything else that reads a font or draws text
 
-Branch `tp/fonts`, on `58369aa4`. Brief: `tp-data/briefs/p8-consumers.md`.
+First round: branch `tp/fonts`, on `58369aa4`. Brief: `tp-data/briefs/p8-consumers.md`.
 Every figure is marked **[M]** measured here or **[I]** inferred.
 
 A second round followed an outside review (brief
 `tp-data/briefs/p8b-consumers-fixes.md`, on `02ebc2c8`): nine defects, five
 mutations no test caught, the empty type layers and the audit's fit phase.
 It is the section "Second round" at the end. Lines of the first round that
-it made untrue are corrected in place, and the line numbers, the audit's
-tables and the proofs below are those of the final tree.
+it made untrue are corrected in place. The audit and its tables are the
+second round's historical measurements; later proofs are revision-bound
+in "Third round" below. Source line numbers in older sections are historical.
 
 With `textEngine: 'browser'` nothing is reached that was not reached before:
 every new behaviour is behind `engineDraws()` (text-engine/index.js) or
@@ -23,7 +24,8 @@ capture is byte for byte the base run [M].
 | 4. variable fonts | `wght` fixed and measured; `ital`, `slnt`, `opsz` not read |
 | 5. the audit | done; two callers left with the switch on |
 
-No file of another worker was touched. `git diff --name-only 58369aa4..HEAD`
+In the first round no file of another worker was touched. Its
+`git diff --name-only 58369aa4..HEAD`
 has no line of `TextBox.svelte`, `edit-lines.js`, `curve-caret.js`,
 `scripts/editor-check.mjs`, `text-engine/src/paint/*`, `abi.rs` or
 `abi_paint.rs` [M]. The variable-font commit added one new Rust file
@@ -32,7 +34,7 @@ has no line of `TextBox.svelte`, `edit-lines.js`, `curve-caret.js`,
 lines of `lib.rs`. The second round added one more of each
 (`text-engine/src/abi_line_fonts.rs`, `text-engine/js/line-fonts.mjs`), two
 more lines of `lib.rs`, and a test helper (`src/test/variable-fixture.js`);
-`git diff --name-only 02ebc2c8..HEAD` has no line of `TextBox.svelte`,
+the second round's `git diff --name-only 02ebc2c8..HEAD` has no line of `TextBox.svelte`,
 `flat-caret.js`, `type-rows.js`, `abi.rs` or `text-engine/src/paint/*` [M].
 
 ## 1. The PSD export
@@ -584,7 +586,8 @@ the last-resort face.
 - Both wait for the gate to know (`familiesKnown`, :95, through the store's
   new `fontFamiliesSettling`, store.svelte.js:5204): a system family is
   read from disk the first time anything asks, and until then it is neither
-  missing nor not. `packageFontStatuses` is async for that. A wait that
+  missing nor not. `inspectPackage` now waits only with the switch on, before
+  the synchronous `packageFontStatuses` reads the known statuses. A wait that
   gives up does not fail the package; the status is then the gate's at that
   moment.
 - With the switch off nothing of this is reached.
@@ -675,7 +678,9 @@ on it makes no browser text call [M].
 5. `install` stays a statement about the lists; a shipped font already in
    the library, unreadable there, is `missing` (finding 8).
 6. A package's font wait that gives up does not fail the package.
-7. `packageFontStatuses` became async; its one caller awaits it.
+7. In this second round `packageFontStatuses` became async. The third
+   round restores its synchronous return value and puts the engine-only
+   wait in `inspectPackage`; see below.
 8. The audit's fit phase writes the squeezed size straight into the box and
    calls `fitBoxNow` in the same turn, not through the mouse: a drag on a
    handle lets the canvas refit before "Fit now" is reached.
@@ -726,3 +731,133 @@ audit count things and time nothing.
 | `161cf8d7`, `5c6f75fa`, `9e1ec38e` | tests the mutations asked for |
 | `69b3758e` | docs(text-engine): rules 10 and 13 |
 | `43284e63` | test(text-port): the audit's fit phase acts; empty type layers in both modes |
+
+
+## Third round
+
+Brief `tp-data/briefs/p8c-consumers-small.md`, starting on `788af55`.
+The paused five commits end at `d72a8f6`. The review is items6–10 of
+`tp-data/reports/codex-round2-review.out`. Fresh-worker instructions:
+`tp-data/briefs/resume-p8c.md`. This round includes one integration fix:
+the chain
+policy previously deferred because `abi.rs` belonged to the typing worker.
+
+This section records focused worker proofs while final verification is
+scheduled. Coverage descriptions below are **[I]** unless a measured log
+is named. Original worker measurements are historical; no new full suite,
+capture or mutation replay is claimed until its log is listed.
+The coordinator still has to merge the reviewed P7 tree into this branch,
+rerun every proof and get the final read-only Codex review before merging P8.
+
+### Five review findings and four previously untested cases
+
+| finding | final behavior and behavioral coverage [I] |
+|---|---|
+| Axis tags lose punctuation and two places get one name | `tags_tell_axes_apart` allows readable value/tag names only when every filtered tag starts with a letter and tags remain distinct. Otherwise the last-resort hash includes each exact four-byte tag. `two_places_never_share_a_name_whatever_the_axis_tags_are` covers punctuation, digit-start, empty and distinct tags; shared named-instance words are tested separately. |
+| A font states forbidden PostScript bytes | NameID6 and a named instance's stated name must be printable ASCII, with no space or `[ ] ( ) { } < > / %`, and at most127 bytes. An invalid stated name is not passed to a PSD. NameID25's prefix is reduced to letters and digits at its one reader. Rust and wasm tests construct these name tables in memory from tracked fixtures. |
+| Export switch failure says nothing was written although whole files exist | `EngineSwitched` carries the completed-file count through page, PSD, strip and folder paths. Its message says how many whole files stand and that the current file and remaining files were not written. The tests cover zero, one and two completed files. |
+| Unknown fallback chain silently disappears in `mt_line_fonts` | Unknown and freed nonzero handles are rejected; zero and held empty chains are valid. The whole engine now uses this policy, as described below. |
+| Default package statuses gain a Promise tick | `packageFontStatuses` is synchronous again. `inspectPackage` waits for known statuses only when the switch is on. The default-mode same-tick test detects both an async status function and an extra await. |
+| Line-font output capacity | `room_for_fewer_parts_than_there_are_is_an_error_and_nothing_is_written` offers a large sentinel buffer with a smaller capacity: one integer short, one part, half a part and zero. All bytes, including those beyond capacity, remain untouched on refusal. |
+| Line-font allocation balance | `drawn-face.engine.test.js` counts every allocation/free over1000 calls and on refusal, including empty text. The count and sizes must balance and wasm memory must not grow. |
+| Third variable-axis step fails | The wasm test makes the third step fail and requires both intermediate font instances to be removed; cleanup of only the first must fail. |
+| Last-resort prefix cap | `the_last_resort_name_is_within_the_limit_whatever_the_prefix` uses a long nameID25 and requires the full generated name to fit127 bytes. |
+
+### One fallback-handle rule across consumers
+
+`Engine::check_chain` rejects a nonzero handle the engine does not hold with
+`UnknownFont`. `measure_line` checks before its primary-face fast path and
+clears the previous parts and glyph buffers. Font-box methods and the entry
+of `wrap_plain` use the same check: an empty string or newline-only paragraph
+must not bypass it. Advance, ink, missing glyphs, painter carets and
+`line_fonts` then share that rule. Zero means no list; a live empty list is
+valid. A live populated list still lends the same glyphs. [I]
+
+The existing return forms remain: `mt_advance` returns NaN; standard buffered
+measure exports return `Status::UnknownFont` (-2); `mt_line_fonts` has its
+own established -1 unknown / -2 capacity contract. A rejected standard query
+clears the shared output and fixed-size result buffers. A rejected
+`mt_line_fonts` leaves caller-owned memory untouched. JS wrappers throw
+before reading a refused answer, and unknown-handle error text names fonts
+and chains. `ABI_VERSION` stays2. Raw `mt_shape`/`shapeUnits` have no chain
+argument and retain their raw-font meaning. [I]
+
+New independent coverage: `text-engine/tests/chains.rs` tests every engine
+and ABI query on never-made and freed handles, empty/newline-only text,
+primary-covered text, borrowed text, valid zero/empty/live controls and
+valid→invalid→valid recovery. `src/lib/text-engine/chains.engine.test.js`
+checks the same wrappers on the actual rebuilt wasm and allocation balance
+when `lineFonts` refuses. Focused worker runs passed this matrix on the code committed as
+`1deb27a1fde510ff78144df5abe2cbd445d64550`; measured results follow. [M]
+
+### Mutation provenance
+
+The original25 definitions (14 Rust,11 JS) are preserved intact in
+`tp-data/reports/resume-20261009/p8c-mutations-prep/catalog.json` and
+`originals/`. Their old assertion kills are prior-worker evidence, not a
+fresh proof of this candidate. The original c23 first failed to apply;
+its corrected strip-count substitution was repeated and killed its test.
+Both outcomes are preserved. The moved shared chain check makes c12's
+old `line_fonts`-only substitution obsolete; its equivalent current-policy
+mutation must be labeled as a retarget, not reported as the old source
+mutation. New chain-policy and buffer/recovery mutations will be listed
+with their exact candidate revision and named failed assertions. [I]
+
+### Focused worker verification [M]
+
+Code committed as `1deb27a1fde510ff78144df5abe2cbd445d64550`; report/RULES
+edits were pending during the run and do not affect the engine build.
+One command at a time; load4.36–4.49 before each command.
+Logs and full arguments: `tp-data/reports/resume-20261009/p8c-worker-focused/results.json`.
+
+| command | measured result |
+|---|---|
+| `cargo fmt --manifest-path text-engine/Cargo.toml --check` | Clean |
+| `cargo test --manifest-path text-engine/Cargo.toml --test chains` |4 passed |
+| Same with `--no-default-features` |3 passed |
+| `npm run build:engine` |1,611,167 bytes; SHA256 `c073ae5ac4c764988655fa6a46e040f782db9182a875b1e106f386de11f8f1ab` |
+| `vitest run` with the new chain file and original five P8 JS targets, `--maxWorkers=1 --no-file-parallelism` |6 files,82 tests passed |
+
+The target files were `chains.engine.test.js`, `drawn-face.engine.test.js`,
+`variable-font.engine.test.js`, `package-fonts.test.js`,
+`package-fonts.engine.test.js` and `exporter-fonts-gate.test.js`.
+These focused proofs precede the P7 integration merge and are not full-tree
+acceptance. No mutation, capture, full suite or final review ran in this worker window.
+
+The new13 semantic mutation definitions and exact-revision scratch runner
+are prepared at `tp-data/reports/resume-20261009/p8c-chain-mutations/`.
+They cover the shared guard (labeled c12 retarget), its coverage/empty/metric
+entry points, cleared engine runs, shared ABI output/result clearing and JS
+status guards. None has been executed. The preserved original25 remain separate.
+
+### Final verification [not yet run]
+
+The coordinator will fill this table from exact-revision logs after P7 is
+merged into this feature. No capture equality or final suite count is
+claimed here. Historical first/second-round proofs remain above.
+
+| proof | revision and measured result |
+|---|---|
+| Engine rebuild and wasm SHA256 | Pending |
+| Engine cargo tests, default and no-default | Pending |
+| Engine fmt and clippy, three feature sets | Pending |
+| Full Vitest | Pending |
+| Tauri cargo tests with the required shared target directory | Pending |
+| App build | Pending |
+| Fresh default capture against `ref-sk/base` | Pending |
+| Fresh Rust capture against `new/r4` | Pending |
+| Original25 and current semantic mutation replay | Pending |
+| Final independent Codex review | Pending |
+
+### Scope and remaining desktop work
+
+The chain integration changes `abi.rs`, `engine.rs`, `metrics.rs`, `wrap.rs`
+and the low-level loader on this branch. The no-`abi.rs` statements above
+refer to the first and second consumer rounds only. No typing component,
+browser text path or painter pixel rule is changed by this integration fix.
+No font binary was added or downloaded. No file from `tp-data` belongs in a
+commit. [I]
+
+The desktop/Photoshop/second-machine checks listed above remain unrun.
+The old package/default built-in rules and the `ital`/`slnt`/`opsz` limits
+remain. The P10 cut-over list is preserved; cut-over needs the user's word.
