@@ -760,7 +760,7 @@ const lineBoxGeoms = (p, n) =>
 // count.
 export function autoFitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
-  if (faceArriving(b.style)) {
+  if (boxFaceArriving(b, p)) {
     holdFit(b);
     return false;
   }
@@ -944,7 +944,7 @@ const solveStands = (b, text) => !!b.auto?.stamp && b.auto.stamp === solveStamp(
 // `place` is for a caller that has just placed the block for the box exactly as
 // it stands (`placeBlock`), so the lines are not measured twice.
 export function reviewBox(b, p = page(), place) {
-  if (!b?.style || !canMeasure() || faceArriving(b.style)) return;
+  if (!b?.style || !canMeasure() || boxFaceArriving(b, p)) return;
   const cand = boxCandidate(b, boxText(b, p));
   const v = containBox(cand, place ?? placeBlock(cand));
   if (v.fits) {
@@ -960,7 +960,7 @@ export function reviewBox(b, p = page(), place) {
 // recorded no geometry: neither is an edit, so neither may resize anything but
 // the height, and that only upward.
 export function refitBox(b, p = page()) {
-  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
+  if (!b?.style || !canMeasure() || boxFaceArriving(b, p)) return false;
   const cand = boxCandidate(b, boxText(b, p));
   const place = placeBlock(cand);
   // Text on a curve has no lines to count, and is never an auto box.
@@ -989,7 +989,7 @@ export function refitBox(b, p = page()) {
 // so does the height (OVF-8, below). Placing it is the layout memo's hit on the
 // lines the component has just broken, not a second break.
 export function autoFitBoxTo(b, lineCount, p = page()) {
-  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
+  if (!b?.style || !canMeasure() || boxFaceArriving(b, p)) return false;
   const cand = boxCandidate(b, boxText(b, p));
   return growAndReview(b, p, cand, placeBlock(cand), lineCount);
 }
@@ -1084,7 +1084,7 @@ export const fitGeom = (b) => ({
 // One undo entry, and none when nothing moved.
 export function fitBoxNow(boxId = app.selectedId, p = page()) {
   const b = (p?.boxes ?? []).find((x) => x.id === boxId);
-  if (!b?.style || !canMeasure() || faceArriving(b.style)) return false;
+  if (!b?.style || !canMeasure() || boxFaceArriving(b, p)) return false;
   settleEdits();
   const before = cloneStyle(b.style);
   const geomBefore = fitGeom(b);
@@ -1204,21 +1204,28 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  for (const p of app.pages) {
-    // Counted so a session with nothing waiting never walks the boxes for it.
-    const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
-    n += solvePending(p);
-    if (landing) n += fitLanding(p, landing);
-    n += refitPage(p);
-    // Last, with the box as all three left it: the edit that asked for the fit
-    // was recorded before the fit could run, and its undo entry is owed this.
-    if (landing) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
-  }
+  for (const p of app.pages) n += landPage(p);
   if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
   if (n) markUnsaved();
+  return n;
+}
+
+// One page, after a font landed: the fits that were held for it, the solves
+// that were pending, and the grow-only refit of everything else. `open` is
+// false for a page that is no longer in the document (`fontsSettling`): it has
+// no history, and a page of the chapter that is open now may carry its id.
+function landPage(p, open = true) {
+  // Counted so a session with nothing waiting never walks the boxes for it.
+  const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
+  let n = solvePending(p);
+  if (landing) n += fitLanding(p, landing);
+  n += refitPage(p);
+  // Last, with the box as all three left it: the edit that asked for the fit
+  // was recorded before the fit could run, and its undo entry is owed this.
+  if (landing && open) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
   return n;
 }
 
@@ -1255,7 +1262,7 @@ export function solvePending(p, boxes = p?.boxes) {
       a.status = null;
       continue;
     }
-    if (!faceReady(b.style)) continue;
+    if (!faceReady(b.style, text)) continue;
     if (solveBox(b, p, text, { x: b.x + b.w / 2, y: b.y + b.h / 2 })) n++;
     else a.status = null;
   }
@@ -2899,7 +2906,7 @@ function bornBox(p, ln, imgX, imgY, measured) {
   const style = inheritedStyleFor(ln, p);
   const text = lineText(ln);
   const measurable = /\S/.test(text) && canMeasure();
-  const solvable = measurable && faceReady(style);
+  const solvable = measurable && faceReady(style, text);
   const det = detectedEntryFor(p, ln.n, imgX, imgY);
   // The block first: a detected rectangle is a measurement of where the Japanese
   // in THIS line sat, so it seeds the fill closer to the right balloon than a
@@ -2932,7 +2939,7 @@ function bornBox(p, ln, imgX, imgY, measured) {
     // engine is: the balanced size would be measured in the stand-in, written
     // into the box and into the `place` entry, and it is the solver's to give
     // when the face lands (the box is 'pending', below).
-    const bal = solvable || !canMeasure() || faceArriving(style) ? null : balancedBoxSize(text, style);
+    const bal = solvable || !canMeasure() || faceArriving(style, text) ? null : balancedBoxSize(text, style);
     g = bal ? placementRect(p, null, at.x, at.y, bal.w, bal.h) : placementRect(p, rect, imgX, imgY);
   }
   const b = {
@@ -3039,7 +3046,7 @@ function solveBox(b, p, text, at, stay = false) {
 // fits the box by the older rules; otherwise whether the box's rectangle or
 // size moved.
 function resolveBox(b, p, text, stay = !!b.auto.stamp) {
-  if (!canMeasure() || !/\S/.test(text) || !faceReady(b.style)) return null;
+  if (!canMeasure() || !/\S/.test(text) || !faceReady(b.style, text)) return null;
   const before = fitGeom(b);
   if (!solveBox(b, p, text, { x: b.x + b.w / 2, y: b.y + b.h / 2 }, stay)) return null;
   return ['x', 'y', 'w', 'h', 'size'].some((k) => before[k] !== (k === 'size' ? b.style.size : b[k]));
@@ -3052,8 +3059,8 @@ function resolveBox(b, p, text, stay = !!b.auto.stamp) {
 // and the face is asked for so the next placement has it. True where there is
 // no font set to ask (node, the realfont lane), and for a font string the set
 // cannot parse, which measures as the fallback on either path.
-function faceReady(style) {
-  if (faceArriving(style)) return false;
+function faceReady(style, text) {
+  if (faceArriving(style, text)) return false;
   const engine = textEngine();
   const face = faceFor(style, style.size);
   return engine ? engine.faceReady(face) : browserFaceReady(face);
@@ -3066,8 +3073,21 @@ function faceReady(style) {
 // in the document nobody chose, and growing is never undone. Asking is also
 // what sends for a system family's bytes the first time a box uses it. Always
 // false with no font source, which is the browser measuring as it always has.
-function faceArriving(style) {
-  return !!fontSource && !fontSource.ready(style.font);
+//
+// `text` is what the box holds, where the caller has it: a letter the face
+// lacks is drawn from another installed family, and that family arrives the
+// same way the face does - asked for by the first box that needs it, and not
+// to be written from until it is in (`lettersReady`). A box whose own face is
+// in can therefore still be waiting, for a letter.
+function faceArriving(style, text) {
+  if (!fontSource) return false;
+  if (!fontSource.ready(style.font)) return true;
+  return text != null && !!fontSource.lettersReady && !fontSource.lettersReady(style, text);
+}
+// The same for a box on its page. The text is not looked up at all with no
+// font source: this is asked before every fit, in every session.
+function boxFaceArriving(b, p) {
+  return !!fontSource && faceArriving(b.style, boxText(b, p));
 }
 
 // The boxes an edit tried to fit while their face was arriving. An edit runs
@@ -3119,7 +3139,7 @@ export function edgeDragFloor(b, dir, lineCount, p = page()) {
 function heldFitsLanding(p) {
   const out = [];
   for (const b of p.boxes) {
-    if (!fitsAwaitingFace.has(b) || faceArriving(b.style)) continue;
+    if (!fitsAwaitingFace.has(b) || boxFaceArriving(b, p)) continue;
     fitsAwaitingFace.delete(b);
     out.push({ b, was: fitGeom(b), pending: b.auto?.status === 'pending' });
   }
@@ -3161,7 +3181,7 @@ export function dropHeldFit(b) {
 // for the entry.
 export function payHeldFit(b, p) {
   if (!b?.style || !canMeasure()) return null;
-  if (faceArriving(b.style)) {
+  if (boxFaceArriving(b, p)) {
     holdFit(b);
     return null;
   }
@@ -4232,7 +4252,7 @@ export function resizeBox(pageId, boxId, geom, base = null) {
     if (resolveBox(b, p, boxText(b, p), true) != null) return b;
     // The face is on its way, so the text was not re-set in the new width:
     // owed for when it lands, as an edit's fit is (`autoFitBox`).
-    if (faceArriving(b.style)) holdFit(b);
+    if (boxFaceArriving(b, p)) holdFit(b);
   }
   // Any other drag is the user choosing the box, so it never runs the ladder -
   // but the flag has to describe the box they chose. A height-only drag changes
@@ -5133,12 +5153,45 @@ export function fontByName(name) {
 //                  way, and nothing may be written into the document from a
 //                  measurement of what stands in for it.
 //   missing(name)  whether the machine has no usable face for `name` at all.
+//   lettersReady(style, text)
+//                  false while a letter of `text` the style's face lacks is
+//                  still being looked for among the installed fonts, or the
+//                  family that has it is on its way: the same "nothing may be
+//                  written" as `ready`, for one box's text. Asking is what
+//                  starts the looking. Absent while the engine is starting.
+//   settle(pages)  a promise for "nothing these pages need is on its way any
+//                  more" (`fontsSettling`).
 //
 // Null, which is every session that never turns the switch on, leaves every
 // function below answering exactly as it did before there was a switch.
 let fontSource = null;
 export function setFontSource(source) {
   fontSource = source ?? null;
+}
+
+// What an export waits for before it paints `pages`: every face their boxes
+// are set in, and every family a letter of theirs is borrowed from, in the
+// Rust engine or known not to be coming, and the boxes that waited for them
+// fitted. A page of the chapter that was never on screen names fonts nobody
+// has asked for yet, so asking here is also what sends for them. Null with no
+// font source - the browser measuring - where there is nothing to wait for
+// and nothing is awaited.
+//
+// It answers for THESE pages. A font landing fits the pages that are open
+// (`relayoutAll`); the ones an export took may not be among them any more -
+// the chapter was closed, or another opened, while it waited - and nothing
+// would ever fit those. So they are fitted here, the same way, before the
+// export is let through to paint them.
+//
+// It rejects when the wait gives up (see `fontsSettled` in
+// engine-switch.svelte.js), and the export then fails and says so: it never
+// resolves over something still on its way.
+export function fontsSettling(pages = app.pages) {
+  const settling = fontSource?.settle ? fontSource.settle(pages) : null;
+  if (!settling) return null;
+  return settling.then(() => {
+    for (const p of pages ?? []) if (p?.boxes && !app.pages.includes(p)) landPage(p, false);
+  });
 }
 
 export function fontNameFor(name) {

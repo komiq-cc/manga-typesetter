@@ -1,5 +1,5 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
-import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
+import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth } from './measure.js';
 import { glyphPainter, engineDraws } from './text-engine/index.js';
 import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
@@ -1278,6 +1278,16 @@ export async function exportImages(fmt, scope) {
     await document.fonts.ready;
     const pages = scope === 'all' ? app.pages : [page()];
     const ext = EXT[fmt];
+    // THE ONE GATE for every file this writes - a page, the whole chapter,
+    // strip slices, a PSD's rasters. With the Rust engine measuring, a family
+    // is read from disk the first time a box uses it, and so is the family a
+    // letter is borrowed from: a page painted before they are in is a page
+    // broken against a stand-in. So nothing below runs until everything the
+    // pages need is in, or is known not to be coming. A strip slice paints
+    // its neighbours' lettering too, so a strip waits for the whole chapter.
+    // With the browser measuring this is null and nothing is awaited.
+    const settling = fontsSettling(isLongstrip() ? app.pages : pages);
+    if (settling) await settling;
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.

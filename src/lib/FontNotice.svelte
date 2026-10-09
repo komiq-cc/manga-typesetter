@@ -5,15 +5,20 @@
   // a font since removed, used to draw in a substitute and say nothing; the
   // only way to find out was to open a box and read its font menu.
   //
-  // With the Rust engine measuring it also lists the boxes holding letters no
-  // loaded face has, which a browser never tells anyone. And with the engine
-  // switched on but no font for it to read, it says that nothing is measuring.
+  // With the Rust engine measuring it also lists the boxes whose text is not
+  // all drawn in the font they are set in: a letter the font lacks is taken
+  // from another font on this computer (which letters, and which font), or is
+  // an empty box - because no installed font has it, or because the font that
+  // has it could not be read, and the line says which of the two it knows. A
+  // browser does the first silently and never tells anyone. And with the
+  // engine switched on but no font for it to read, it says that nothing is
+  // measuring.
   //
   // It is the review list's sibling and sits under it, so it wears the same
   // clothes: the rules below are that component's, copied because a
   // component's styles are its own.
   import { app, missingFonts, fontNameFor, fontByName, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
-  import { boxesMissingLetters, whyFontMissing, engineHasNoFont } from './engine-switch.svelte.js';
+  import { engineSwitch, boxesBorrowingLetters, boxLetters, lettersWereAskedFor, whyFontMissing, engineHasNoFont } from './engine-switch.svelte.js';
   import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { plural } from './format.js';
 
@@ -27,9 +32,14 @@
   // box is typed in, moved, resized or restyled (FontNotice-cost.dom.test.js).
   //
   // `letters` listens to nothing but the switch while the browser measures.
-  // With the Rust engine on it reads every box's text, so a keystroke makes it
-  // again; the engine is asked only about a face and string it has not seen
-  // (engine-switch.svelte.js keeps the answers), the rest is one lookup a box.
+  // With the Rust engine on it is made from every box's text, and a keystroke
+  // changes one box's: so each box's answer is kept by itself (`lettersIn`),
+  // made again when THAT box's text or face changes or a font lands, and the
+  // list reads the kept answers and no text. A keystroke is one box looked at
+  // again, in a chapter of four hundred as in one of four; the list itself is
+  // put together again only when that box's answer came out different, and a
+  // box that borrows nothing answers with the same nothing every time
+  // (FontNotice-cost.dom.test.js).
   //
   // `idle` is the switch on with no font the engine can read: no engine is
   // installed, and to the font sync EVERY name is one it has no bytes for -
@@ -42,8 +52,50 @@
     const all = missingFonts(app.pages);
     return idle ? all.filter((m) => WHY[whyFontMissing(m.name)] || !fontByName(m.name)) : all;
   });
-  const letters = $derived(boxesMissingLetters(app.pages));
+  // box -> what its text borrows, kept. The answers live as long as this
+  // component, which is what made them; a box that is gone takes its own
+  // with it.
+  //
+  // They are MADE in one derived (`answers`, which listens to which boxes
+  // there are and reads no text) and READ in another (`letters`): a derived
+  // does not listen to a signal it made itself in the same run, so a list
+  // that made its own answers would never hear of them changing.
+  const kept = new WeakMap();
+  function keep(b, p) {
+    const cell = kept.get(b);
+    if (cell?.page === p) return;
+    const answer = $derived(boxLetters(b, p));
+    kept.set(b, { page: p, get answer() { return answer; } });
+  }
+  const answers = $derived.by(() => {
+    // Nothing is kept, and no box is walked, while the browser measures.
+    if (engineSwitch.phase !== 'on') return null;
+    for (const p of app.pages) for (const b of p.boxes ?? []) if (b.style) keep(b, p);
+    // Another one every time, so that whoever reads the answers reads them again.
+    return {};
+  });
+  const letters = $derived(answers ? boxesBorrowingLetters(app.pages, (b, p) => kept.get(b)?.answer ?? boxLetters(b, p)) : []);
+  const count = (key) => letters.reduce((n, l) => n + (l[key].length ? 1 : 0), 0);
+  const borrowing = $derived(count('borrowed'));
+  const lacking = $derived(count('none'));
+  const unread = $derived(count('unread'));
   let open = $state(false);
+
+  // A handful of the letters, as themselves: enough to recognise the box by.
+  const shown = (cps) => cps.slice(0, 6).map((cp) => String.fromCodePoint(cp)).join(' ') + (cps.length > 6 ? ' …' : '');
+  // One short line for a box: what is borrowed and from where, then what
+  // nothing has. It says only what is known. "No installed font has" is said
+  // of a letter the native side looked for and did not find; in a plain
+  // browser nobody looked through the installed fonts, so the line does not
+  // claim anybody did; and a letter whose font was found and could not be
+  // read, or that could not be looked for at all, is said to be that - it may
+  // well be in a font on this computer.
+  function lettersLine(l) {
+    const parts = l.borrowed.map((b) => `${shown(b.letters)} drawn in ${b.family}`);
+    if (l.none.length) parts.push(`${lettersWereAskedFor() ? 'no installed font has' : 'no loaded font has'} ${shown(l.none)}`);
+    for (const u of l.unread) parts.push(u.family ? `${shown(u.letters)} is in ${u.family}, which could not be read` : `could not look for a font with ${shown(u.letters)}`);
+    return parts.join(' · ');
+  }
 
   const WHY = {
     compressed: 'a WOFF file, which the Rust engine can read only in the desktop app',
@@ -87,13 +139,16 @@
       const pg = app.pages[l.pageIndex];
       const b = pg?.boxes.find((x) => x.id === l.boxId);
       if (!b) continue;
-      const shown = l.letters.slice(0, 6).map((cp) => String.fromCodePoint(cp)).join(' ');
       out.push({
         key: `l:${pg.id}:${l.boxId}`,
         pill: `p.${l.pageIndex + 1}`,
         text: String(boxText(b, pg) ?? '').replace(/\s+/g, ' ').trim(),
-        why: `no loaded font has ${shown}${l.letters.length > 6 ? ' …' : ''}`,
-        title: 'These letters are measured as empty boxes: neither the box’s font nor the last-resort font has them.',
+        why: lettersLine(l),
+        title: l.none.length
+          ? 'The font this box is set in has no glyph for these letters. One no font on this computer has is measured and drawn as an empty box.'
+          : l.unread.length
+            ? 'The font this box is set in has no glyph for these letters, and the font they would be drawn from could not be read or looked for. They are measured and drawn as an empty box. Scanning the fonts again in the Font Library tries again.'
+            : 'The font this box is set in has no glyph for these letters, so they are drawn from another font on this computer.',
         pageIndex: l.pageIndex,
         boxId: l.boxId,
       });
@@ -105,7 +160,9 @@
     [
       idle ? 'Rust engine has no font to measure with' : '',
       missing.length ? `${plural(missing.length, 'font')} missing` : '',
-      letters.length ? `${plural(letters.length, 'box', 'boxes')} with letters no font has` : '',
+      lacking ? `${plural(lacking, 'box', 'boxes')} with letters no font has` : '',
+      unread ? `${plural(unread, 'box', 'boxes')} with letters whose font could not be read` : '',
+      borrowing ? `${plural(borrowing, 'box', 'boxes')} with letters from another font` : '',
     ]
       .filter(Boolean)
       .join(' · '),

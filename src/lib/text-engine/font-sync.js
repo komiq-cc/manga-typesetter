@@ -25,6 +25,34 @@
 //             resort (last-resort.js) for as long as that is true, and said
 //             so in the editor.
 //
+// A LETTER THE FACE LACKS. A lettering font has Latin and little else, and a
+// manga page mixes it with kana, kanji, Hangul, hearts, stars and notes. The
+// engine draws such a letter from the first family of its fallback chain that
+// has it (text-engine/RULES.md, rules 10 and 11), and this is where the chain
+// is made:
+//
+//   1. the last resort, which is there for every missing family anyway, with
+//      the face of it CSS matching picks for the weight and slant asked;
+//   2. then the installed families the native side named for the letters
+//      neither the face nor the last resort has (`systemCoverage`), in the
+//      one fixed order the native side gives them - not in the order they
+//      happened to be asked for, or a chapter would be set differently
+//      depending on which of its boxes was looked at first. Each lends from
+//      ONE face, its first (the regular, where it has one), emboldened and
+//      slanted by the engine where the box is: that is the face the native
+//      side judged the family by, so a family named for a letter is a family
+//      that draws it, in every weight, whatever else is loaded.
+//
+// A letter is asked about once (`lettersOf`), in one question with every
+// other letter that was new at that moment, and what came back is remembered
+// until the next scan - "no installed font has it", "nobody could be asked"
+// and "its family could not be read" included, each as what it is, so nothing
+// is asked in a loop and nothing is said that is not known. A family named
+// for a letter is sent for like any other system family. Until the answer is
+// in and the family with it the letter is PENDING, and a box that holds a
+// pending letter is not written from, exactly as a box whose own face is
+// arriving.
+//
 // Nothing here imports the store or Tauri: the lists, the two ways of getting
 // bytes and what to do when something lands are all handed in, which is what
 // lets the same code run against the real engine with fixture fonts.
@@ -48,6 +76,26 @@ export function fontKind(bytes) {
 // How many names `resolve` keeps an answer for. A chapter names a handful of
 // fonts; this is room for many chapters' worth before anything is forgotten.
 const RESOLVED_MAX = 256;
+
+// The most code points one coverage question carries; the native side refuses
+// more (`MAX_CODE_POINTS` in src-tauri/src/font_coverage.rs), and a longer
+// list goes as several questions.
+export const COVERAGE_MAX = 1024;
+
+// The native side's `order` strings are compared code point by code point
+// (font_coverage.rs, `order_key`), which is not how JavaScript compares
+// strings where an astral letter meets one from the top of the BMP.
+function byCodePoint(a, b) {
+  const x = [...a];
+  const y = [...b];
+  for (let i = 0; i < x.length && i < y.length; i++) {
+    const d = x[i].codePointAt(0) - y[i].codePointAt(0);
+    if (d) return d;
+  }
+  return x.length - y.length;
+}
+
+const NO_LETTERS = Object.freeze({ borrowed: Object.freeze([]), none: Object.freeze([]), pending: Object.freeze([]), unread: Object.freeze([]) });
 
 const asBytes = (data) =>
   data instanceof Uint8Array ? data : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
@@ -103,10 +151,15 @@ export function readSystemFace(buffer) {
  *   where there are no system fonts to ask for (a plain browser)
  * @param {((bytes: Uint8Array) => Promise<ArrayBuffer | Uint8Array>) | null} [with.toSfnt]
  *   WOFF / WOFF2 to a plain font; null where nothing can decode one
- * @param {(family: string) => void} [with.onArrival] bytes that were on their
- *   way are in, or are known not to be coming: every measurement is stale
+ * @param {((codePoints: number[]) => Promise<{ families: { name: string, order: string, codePoints: number[] }[], none: number[] }>) | null} [with.systemCoverage]
+ *   which installed family has each code point (`system_font_coverage`); null
+ *   where there is nobody to ask, and then a letter the face and the last
+ *   resort both lack stays the empty box it was
+ * @param {(family: string | null) => void} [with.onArrival] bytes that were on
+ *   their way are in, or are known not to be coming, or an answer about
+ *   letters is: every measurement is stale
  */
-export function createFontSync({ engine, fonts, os = null, systemFace = null, toSfnt = null, onArrival = () => {} }) {
+export function createFontSync({ engine, fonts, os = null, systemFace = null, toSfnt = null, systemCoverage = null, onArrival = () => {} }) {
   // family -> Map(slot -> { state: 'ready' | 'decoding' | 'unusable', why })
   const user = new Map();
   // family -> { state: 'loading' | 'ready' | 'failed', seen }
@@ -124,30 +177,164 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
   const flights = new Set();
   let systemSeen = null;
   let systemSeenLength = -1;
+  // A scan threw away what was known about letters and nobody was told yet (`refresh`).
+  let lettersForgotten = false;
   let systemByName = new Map();
   // The last-resort family, once the engine has it; null until then.
   let resort = null;
   let disposed = false;
+  // code point -> what the native side said of every letter it was ever asked
+  // about since the last scan: ASKING, ABSENT (it looked, and no installed
+  // family has it), UNASKED (the question failed: nothing is known), or
+  // { family } - with `unlisted` for a family this side's list does not have.
+  const letters = new Map();
+  // family -> its `order`: every family that was named for a letter.
+  const covering = new Map();
+  // Raised when what is known about letters is thrown away (a scan), so an
+  // answer that was on its way to the old knowledge is dropped.
+  let lettersGen = 0;
+  // The chain the engine was last given, to give it another only when it is one.
+  let chained = '[]';
+  // The families of that chain by name, in its order.
+  let chainNames = [];
+  const ASKING = Object.freeze({ state: 'asking' });
+  const ABSENT = Object.freeze({ state: 'absent' });
+  const UNASKED = Object.freeze({ state: 'unasked' });
 
   const usable = (fam) => [...fam.values()].some((f) => f.state === 'ready');
 
-  // The families a letter is looked for in when the face asked lacks it.
+  // The families a letter is looked for in when the face asked lacks it: the
+  // last resort, then the families named for letters, in the native side's
+  // order. One chain for the whole engine and not one per face: which family
+  // a letter comes from is a property of the letter (RULES.md rule 11), so
+  // every face borrows it from the same place.
   //
-  // THE SEAM for the next task: today this is the last resort alone, which is
-  // a Latin face, so kana, Hangul and CJK in a face without them still come
-  // out as `.notdef` and `engine.missing` reports them. Finding a system face
-  // by coverage belongs here: ask the native side which installed family has
-  // the code points `engine.missing` returned, send for it the way
-  // `startSystem` does, and append its name to this list.
+  // A family named for a letter lends from its first face and no other
+  // (`face: 'first'`, see rust.js): the native side judged it by that face,
+  // and its bold may lack what its regular has. Lent by the face CSS matching
+  // picks, a bold box's letter would be the empty box - or, worse, the glyph
+  // of whichever other family happened to be loaded for another page. The
+  // last resort is not judged by anybody but the engine, weight by weight
+  // (`missing` with depth 1), so it keeps its real bold and italic; when it
+  // is ALSO named for a letter (its bold lacks what its regular has) it is on
+  // the list a second time, as that one face.
   function fallbackChain() {
-    return resort ? [resort] : [];
+    if (!resort) return [];
+    const named = [...covering]
+      .filter(([name]) => engine.hasFamily(name))
+      .sort((a, b) => byCodePoint(a[1], b[1]) || byCodePoint(a[0], b[0]))
+      .map(([name]) => ({ family: name, face: 'first' }));
+    return [resort, ...named];
+  }
+
+  function rechain() {
+    const chain = fallbackChain();
+    const key = JSON.stringify(chain);
+    if (key === chained) return;
+    chained = key;
+    chainNames = chain.map((entry) => (typeof entry === 'string' ? entry : entry.family));
+    engine.setFallbacks(chain);
   }
 
   function setResort(name) {
     if (resort === name) return;
     resort = name;
     cache.clear();
-    engine.setFallbacks(fallbackChain());
+    rechain();
+  }
+
+  // What is known of a letter:
+  //
+  //   'pending'  the answer, or the family it named, is on its way - a face
+  //              of the user's own font of that name still being decoded
+  //              included: the family is not what it will be until they are
+  //              all in (`stateOf`);
+  //   'in'       its family is in the engine;
+  //   'absent'   the native side looked and no installed family has it, or
+  //              there is nobody to ask;
+  //   'unread'   not known to be absent: the question failed, or the family
+  //              named for it could not be read, or is not on this side's
+  //              list.
+  function letterState(rec) {
+    if (!rec || rec === ABSENT) return 'absent';
+    if (rec === ASKING) return 'pending';
+    if (rec === UNASKED || rec.unlisted) return 'unread';
+    if (user.has(rec.family)) {
+      const state = stateOf(rec.family);
+      return state === 'arriving' ? 'pending' : state === 'ready' ? 'in' : 'unread';
+    }
+    const state = system.get(rec.family)?.state;
+    if (state === 'loading') return 'pending';
+    return state === 'ready' || stale.has(rec.family) ? 'in' : 'unread';
+  }
+
+  function placeLetters(asked, answer) {
+    const left = new Set(asked);
+    for (const fam of Array.isArray(answer?.families) ? answer.families : []) {
+      const name = fam?.name;
+      if (typeof name !== 'string' || !name) continue;
+      // A family this side's list does not have was installed since the scan
+      // the list came from: there is nothing to send for until the next one.
+      const known = user.has(name) || (!!systemFace && systemByName.has(name));
+      for (const cp of Array.isArray(fam.codePoints) ? fam.codePoints : []) {
+        if (!left.delete(cp)) continue;
+        letters.set(cp, known ? { family: name } : { family: name, unlisted: true });
+      }
+      if (!known) continue;
+      covering.set(name, String(fam.order ?? ''));
+      if (!user.has(name) && !system.has(name)) startSystem(name);
+    }
+    for (const cp of left) letters.set(cp, ABSENT);
+  }
+
+  function ask(chunk) {
+    const gen = lettersGen;
+    for (const cp of chunk) letters.set(cp, ASKING);
+    const current = () => !disposed && gen === lettersGen;
+    // The relayout waits for the last thing the letters wait for: a family
+    // that was named and is being read lands by itself (`startSystem`).
+    const done = () => {
+      if (!chunk.some((cp) => letterState(letters.get(cp)) === 'pending')) landed(null);
+    };
+    let answer;
+    try {
+      answer = Promise.resolve(systemCoverage(chunk));
+    } catch (error) {
+      answer = Promise.reject(error);
+    }
+    track(
+      answer.then(
+        (found) => {
+          if (!current()) return;
+          placeLetters(chunk, found);
+          done();
+        },
+        () => {
+          if (!current()) return;
+          // Remembered like any other answer, as what it is - nothing is
+          // known of these letters - and not asked again until a scan.
+          for (const cp of chunk) letters.set(cp, UNASKED);
+          done();
+        },
+      ),
+    );
+  }
+
+  // One question for every letter of `cps` nobody has asked about yet.
+  function want(cps) {
+    if (!systemCoverage || disposed) return;
+    const fresh = cps.filter((cp) => !letters.has(cp)).sort((a, b) => a - b);
+    for (let i = 0; i < fresh.length; i += COVERAGE_MAX) ask(fresh.slice(i, i + COVERAGE_MAX));
+  }
+
+  // A scan found another list: a family may have come or gone, so what was
+  // said of every letter is asked again when it is next looked at.
+  function forgetLetters() {
+    if (!letters.size && !covering.size) return false;
+    letters.clear();
+    covering.clear();
+    lettersGen++;
+    return true;
   }
 
   // Which family is the last resort now (last-resort.js). A system family
@@ -204,7 +391,9 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       engine.removeFamily(name);
     }
     cache.clear();
+    if (forgetLetters()) lettersForgotten = true;
     relist();
+    rechain();
     return true;
   }
 
@@ -260,6 +449,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     if (disposed) return;
     cache.clear();
     relist();
+    rechain();
     onArrival(name);
   }
 
@@ -413,6 +603,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       }
       cache.clear();
       relist();
+      rechain();
     },
     removeUserFace(family, slot) {
       followSystemList();
@@ -422,6 +613,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       if (!fam.size) user.delete(family);
       cache.clear();
       relist();
+      rechain();
     },
     removeUserFamily(family) {
       followSystemList();
@@ -429,14 +621,94 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       engine.removeFamily(family);
       cache.clear();
       relist();
+      rechain();
     },
 
-    /** The system list was replaced, or anything else the lists say changed. */
+    /**
+     * The system list was replaced, or anything else the lists say changed.
+     * True when what was known about letters was thrown away with it: every
+     * box that borrowed a letter is then to be looked at again.
+     */
     refresh() {
       if (!followSystemList()) {
         cache.clear();
         relist();
+        rechain();
       }
+      const forgotten = lettersForgotten;
+      lettersForgotten = false;
+      return forgotten;
+    },
+
+    /**
+     * What becomes of the letters of `text` that `face` itself has no glyph
+     * for, each code point once:
+     *
+     *   borrowed  [{ family, letters }]: drawn from another family - the last
+     *             resort, or one named for them. The family is read off the
+     *             engine, not off what was answered: it is the first of the
+     *             engine's list that has a glyph for the letter, which is
+     *             the one that draws it;
+     *   none      the native side looked and no installed font has them (or
+     *             there is nobody to ask): drawn as the face's empty box;
+     *   unread    [{ family, letters }]: drawn as the empty box too, but not
+     *             known to be in no font - the family named for them could
+     *             not be read (`family`), or the question itself failed
+     *             (`family` null);
+     *   pending   being looked for, or their family is on its way. Nothing
+     *             may be written from a measurement of this text until they
+     *             are one of the others.
+     *
+     * Asking is what sends the question: the letters neither the face nor the
+     * last resort has, that nobody has asked about yet, go to the native side
+     * in one call. `face` is a face of a family the engine has.
+     */
+    lettersOf(face, text) {
+      const own = engine.missing(face, text, 0);
+      if (!own.length) return NO_LETTERS;
+      followSystemList();
+      // The engine is asked no more often than the answers can differ: the
+      // last resort adds nothing to its own face.
+      const beyond = resort && face.name !== resort ? engine.missing(face, text, 1) : own;
+      want(beyond);
+      // The family of the engine's list a letter is drawn from: the first
+      // that leaves it out of what is still lacking. Asked of the engine one
+      // family further at a time, and only for a text that has such a letter.
+      const lacking = [];
+      const drawnIn = (cp) => {
+        for (let depth = 2; depth <= chainNames.length; depth++) {
+          lacking[depth] ??= engine.missing(face, text, depth);
+          if (!lacking[depth].includes(cp)) return chainNames[depth - 1];
+        }
+        return null;
+      };
+      const group = (map, family, cp) => (map.get(family) ?? map.set(family, []).get(family)).push(cp);
+      const list = (map) => [...map].map(([family, cps]) => ({ family, letters: cps }));
+      const borrowed = new Map();
+      const unread = new Map();
+      const none = [];
+      const pending = [];
+      for (const cp of own) {
+        if (!beyond.includes(cp)) {
+          group(borrowed, resort, cp);
+          continue;
+        }
+        const rec = letters.get(cp);
+        const state = letterState(rec);
+        if (state === 'pending') {
+          pending.push(cp);
+          continue;
+        }
+        const family = drawnIn(cp);
+        if (family) group(borrowed, family, cp);
+        else if (state === 'absent') none.push(cp);
+        else group(unread, rec?.family ?? null, cp);
+      }
+      return { borrowed: list(borrowed), none, pending, unread: list(unread) };
+    },
+    /** Whether there is anybody to ask which family has a letter. */
+    canAskLetters() {
+      return !!systemCoverage;
     },
 
     /** The family `name` is measured as right now: itself, or the last resort; null when there is neither. */
@@ -478,7 +750,11 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       system.clear();
       stale.clear();
       cache.clear();
+      letters.clear();
+      covering.clear();
       resort = null;
+      chained = '[]';
+      chainNames = [];
       engine.setFallbacks([]);
     },
     /** For tests and for looking: what is registered and how. */
@@ -489,6 +765,14 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
         system: Object.fromEntries([...system].map(([name, rec]) => [name, rec.state])),
         // How many names have an answer kept for them.
         resolved: cache.size,
+        // What is known of each letter that was asked about: the family it
+        // is drawn from, 'pending', or null for one nothing has.
+        letters: Object.fromEntries(
+          [...letters].sort((a, b) => a[0] - b[0]).map(([cp, rec]) => {
+            const state = letterState(rec);
+            return [cp, state === 'in' ? rec.family : state === 'pending' ? 'pending' : null];
+          }),
+        ),
       };
     },
   };
