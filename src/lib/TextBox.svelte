@@ -2308,13 +2308,21 @@
   // measure; it is shown when nothing is selected.
   const typeMarks = $derived.by(() => {
     if (!typeFlat || !edSel) return null;
-    const caret = rowCaret(typed.rows, edSel.f, edUp);
+    let { a, f } = edSel;
+    // A browser selection can name only a component of a raw grapheme. Show
+    // the same whole span a pictured edit/cut replaces, keeping its focus on
+    // the same side. The IME's selection and pending text keep their own path.
+    if (!composing && composeText == null) {
+      const [lo, hi] = editStops(text, [a, f]);
+      [a, f] = a > f ? [hi, lo] : [lo, hi];
+    }
+    const caret = rowCaret(typed.rows, f, edUp);
     if (!caret) return null;
     return {
       caret,
-      on: edSel.a === edSel.f,
+      on: a === f,
       // A selected Return shows as a sliver past its line's end.
-      sel: selectionRects(typed.rows, edSel.a, edSel.f, s.size * 0.3),
+      sel: selectionRects(typed.rows, a, f, s.size * 0.3),
       comp: composeSpan ? selectionRects(typed.rows, composeSpan[0], composeSpan[1]) : [],
     };
   });

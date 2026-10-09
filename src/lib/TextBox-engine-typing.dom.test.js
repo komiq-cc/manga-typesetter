@@ -1624,6 +1624,43 @@ describe('a curve drag whose pointer the browser took back is over', () => {
     expect(m.sel()).toEqual([4, 4]);
   });
 
+  it('Rust takes ownership of every default curve drag, including older concurrent gestures', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const add = vi.spyOn(el, 'addEventListener');
+    const remove = vi.spyOn(el, 'removeEventListener');
+    const kinds = ['pointermove', 'pointerup', 'pointercancel'];
+    const left = () => add.mock.calls.filter(([type, fn]) => kinds.includes(type) && !remove.mock.calls.some(([t, f]) => t === type && f === fn)).length;
+    try {
+      el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1));
+      el.dispatchEvent(ptr('pointerdown', m, 90, 30, 2));
+      expect(add.mock.calls.filter(([type]) => kinds.includes(type))).toHaveLength(6);
+      expect(left()).toBe(6);
+      engineSwitch.painting = true;
+      await tick();
+      expect(m.q('.curve-edit')).toBe(el);
+      expect(left()).toBe(0);
+      const glyphs = typeModel(m.box, m.box.text).glyphs;
+      nativeSel(m, 4);
+      await tick();
+      m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      for (const id of [1, 2]) {
+        el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[0]), id));
+        expect(m.sel()).toEqual([4, 4]);
+      }
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      for (const id of [1, 2]) {
+        el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), id));
+        expect(m.sel()).toEqual([4, 4]);
+      }
+      expect(left()).toBe(0);
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
   it('a default curve overlay cannot move the selection of a later Rust edit', async () => {
     engineSwitch.painting = false;
     const m = await typing('arc');
@@ -2032,6 +2069,86 @@ describe('browser ranges on a real picture broken inside a raw grapheme', () => 
     expect(ev.defaultPrevented).toBe(true);
     expect(m.box.text).toBe('');
     expect(m.sel()).toEqual([0, 0]);
+  });
+
+  it.each([[2, 3], [3, 2], [1, 2], [2, 1]])('native partial selection [%i,%i] shows every touched grapheme piece before Cut', async (a, f) => {
+    const m = await realJamo();
+    const rows = rowsOf(m.box);
+    expect(rows.map((r) => r.offs)).toEqual([[0], [], [3]]);
+    nativeSel(m, a, f);
+    await tick();
+    // Native anchor/focus remains the browser's, including its direction.
+    // The picture shows the whole grapheme that copy/cut actually takes.
+    expect(m.sel()).toEqual([a, f]);
+    const marks = m.all('.tsel').map(px);
+    expect(marks).toHaveLength(3);
+    for (const [i, row] of rows.entries()) {
+      const from = row.lead?.x ?? row.xs[0];
+      const to = row.trail?.x ?? row.xs.at(-1);
+      expect(marks[i].left).toBeCloseTo(Math.min(from, to), 8);
+      expect(marks[i].width).toBeCloseTo(Math.abs(to - from), 8);
+      expect(marks[i].top).toBe(row.top);
+    }
+    expect(px(m.q('.tcaret')).top).toBe(rows[a > f ? 0 : 2].top);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(clipboardData.setData).toHaveBeenCalledWith('text/plain', SYLLABLE);
+    expect(m.box.text).toBe('');
+    expect(m.sel()).toEqual([0, 0]);
+  });
+
+  it('an interior collapsed native caret shows the legal insertion boundary on the real picture', async () => {
+    const m = await realJamo();
+    const rows = rowsOf(m.box);
+    nativeSel(m, 2);
+    await tick();
+    expect(m.sel()).toEqual([2, 2]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    expect(px(m.q('.tcaret')).top).toBe(rows[0].top);
+    expect(px(m.q('.tcaret')).left).toBe(rows[0].xs[0]);
+    expect(input(m, 'insertText', 'X').defaultPrevented).toBe(true);
+    await tick();
+    expect(m.box.text).toBe(`X${SYLLABLE}`);
+    expect(m.sel()).toEqual([1, 1]);
+  });
+
+  it('a composing partial native selection keeps its existing picture and browser ownership', async () => {
+    const m = await realJamo();
+    m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    nativeSel(m, 2, 3);
+    await tick();
+    expect(m.sel()).toEqual([2, 3]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(false);
+    expect(clipboardData.setData).not.toHaveBeenCalled();
+    expect(m.box.text).toBe(SYLLABLE);
+    expect(m.sel()).toEqual([2, 3]);
+  });
+
+  it('a partial native selection with Rust off retains partial clipboard and text behavior', async () => {
+    engineSwitch.painting = false;
+    const m = await realJamo();
+    nativeSel(m, 3, 2);
+    await tick();
+    expect(m.sel()).toEqual([3, 2]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(clipboardData.setData).toHaveBeenCalledWith('text/plain', 'ᆨ');
+    expect(m.box.text).toBe('가');
   });
 
   it.each(['deleteWordBackward', 'insertReplacementText'])('%s also replaces the whole touched grapheme', async (inputType) => {

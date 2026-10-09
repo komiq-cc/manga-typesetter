@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { typeModel, canType, linePens } from './type-rows.js';
-import { caretAt, rowOf, rowExtent, offsetAt, selectionRects, moveCaret } from './flat-caret.js';
+import { caretAt, rowOf, rowExtent, offsetAt, selectionRects, moveCaret, editStops } from './flat-caret.js';
 import { rawEdit } from './edit-lines.js';
 import { renderBoxTexture } from './exporter.js';
 import { boxCandidate, placeBlock } from './contain.js';
@@ -102,6 +102,34 @@ it('whole and partial real selections include only their interior extrema under 
   const [right] = selectionRects(model.rows, 3, 6);
   expect(left.x + left.w).toBeLessThan(Math.max(...row.xs));
   expect(right.x).toBeGreaterThan(Math.min(...row.xs));
+});
+
+it('a normalized partial raw selection covers every real wrapped grapheme row', () => {
+  const text = '각';
+  const box = boxOf(text, { size: 40 }, { w: 25 });
+  const model = typeModel(box, text);
+  expect(model.kind).toBe('flat');
+  expect(model.rows.map((r) => r.offs)).toEqual([[0], [], [3]]);
+  // Read the actual per-line pens, independent of the filtered piece cache.
+  const place = placeBlock(boxCandidate(box, text));
+  const face = faceFor(place.s, place.s.size);
+  const geometry = place.lines.map((line, i) => {
+    const pens = rust.lineCarets(face, line, 0);
+    return { x: pens.x.map((x) => place.lineX[i] + x), end: place.lineX[i] + pens.advance };
+  });
+  expect(geometry).toHaveLength(3);
+  for (const span of [[2, 3], [3, 2], [1, 2]]) {
+    const normalized = editStops(text, span);
+    expect(normalized).toEqual([0, 3]);
+    const marks = selectionRects(model.rows, ...normalized);
+    expect(marks).toHaveLength(3);
+    for (const [i, row] of geometry.entries()) {
+      const left = Math.min(row.x[0], row.end);
+      const right = Math.max(row.x[0], row.end);
+      expect(marks[i].x).toBeCloseTo(left, 8);
+      expect(marks[i].x + marks[i].w).toBeCloseTo(right, 8);
+    }
+  }
 });
 
 const SS = 2;

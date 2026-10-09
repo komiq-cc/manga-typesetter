@@ -1470,6 +1470,56 @@ backs up when the drawn start lies inside an uppercase expansion, and reads
 precomputed raw predecessor/successor boundaries. It adds no new calls to the
 raw-boundary predicate; the existing n+1 operation-bound regressions remain.
 
+### 13.2.2 Final selection consistency and the multiple-drag coverage gap
+
+The repair review at `c6b61d4` is `p7c-four-fixes-codex-findings.md`.
+It found one remaining P2 interaction defect: native raw selections `[2,3]`,
+reversed `[3,2]` and interior `[1,2]` in the same real narrow jamo box draw
+zero marks, although Cut copies and deletes all three units. This is
+**reviewer-measured** with controlled native selections; actual browser
+creation of such selections remains inferred. Existing piece extents are
+correct, but `selectionRects` rejects these rows before considering them.
+The review independently checked5040 legal forward/reversed selections,
+126 mounted range/clipboard cases and268 segmentation spans without finding
+another geometry/edit defect. Its multi-drag and stale-menu probes also
+passed the unmutated candidate.
+
+The final delta normalizes only the noncomposition flat picture's displayed
+anchor/focus span through the same `editStops` rule used by edits. Focus
+keeps its side for reverse selections; a collapsed interior offset shows
+the same legal insertion boundary. The browser's actual anchor/focus is
+left intact. An active composition or pending composed text retains its
+previous mark path, as do default-only and curve edits. Filtering and
+negative-spacing extents remain scoped to the selected raw graphemes.
+Mounted real-wasm regressions check four partial directions/interiors,
+three marks with the actual per-row extent before Cut, unchanged native
+selection direction, the pictured focus side, whole-grapheme clipboard/text,
+an interior collapsed caret, and composition/default controls. A separate
+real-engine oracle reads painter placement and direct `lineCarets` output
+without consulting the filtered piece metadata.
+
+A reviewer-executed in-memory mutation cleared the private default-drag set
+before registering each new drag. Single-drag assertions still passed, but
+a second default drag left three old listeners and allowed an old pointer
+to change selection during composition. The candidate itself passed that
+probe: this is a coverage gap, not another source defect. The added mounted
+regression starts two gestures, measures six listeners before Rust ownership
+and zero after, and requires both old pointers to leave the composition and
+postcomposition selection unchanged. Mutation `T2-multiple` reproduces the
+reviewer's exact clear-then-add change. `S1-shown-span`, `S1-direction` and
+`S1-compose` separately target visible-span agreement, reverse focus and
+IME ownership. Their definitions are prepared, not claimed killed yet.
+
+At this report draft the final delta has not run tests: the coordinator
+reserved the machine for P9's model run. The bounded pinned-source probe
+`p7c-review-repros/partial-selection.mjs` is prepared and unexecuted. Its
+old-source mode expects zero marks but whole-grapheme Cut; fixed mode
+requires three painter/engine-oracle marks with the native direction intact.
+The new mounted file remains compatible with old source `c6b61d4`, so the
+coordinator can copy it into a private archive and require actual named
+assertion failures. The real-engine oracle is a numerical control and is
+not presented as a failing old-source defect reproduction.
+
 ### 13.3 The ABI coverage gap
 
 The natural overflow test alone still passes when only the pen guard is
@@ -1520,11 +1570,12 @@ named assertions in49 tests, including a scratch generated zero-advance
 font. This is **historical coordinator evidence**. It does not mean the
 full older mutation tables were repeated. The105 recovered old definitions
 include rewritten/obsolete targets; their results must keep those labels.
-Fresh43 source substitutions and named tests are prepared separately in
+Fresh47 source substitutions and named tests are prepared separately in
 `tp-data/reports/resume-20261009/p7c-worker-mutations/`. They include all six
 fresh fixes, pointercancel, clipboard protection, pen-only guard removal and
 negative-spacing partial-output clearing, all four next-review fixes and the
-menu-mode coverage control. Their exact strings validate on source `c6b61d4`;
+menu-mode coverage control, final visible-span agreement and multiple-drag
+ownership. Their exact strings are prepared for the final source;
 preparing them executed no mutation tests. Only named assertion failures
 count as kills; parse/compile/load errors are not successful mutations.
 
@@ -1557,6 +1608,15 @@ one-minute loads were2.63 and2.30, respectively. Logs are
 `p7c-worker-final-focused.log` and `p7c-worker-final-dom-repeat.log` under the
 private resume directory. `git diff --check` was clean. No full suite,
 engine rebuild, browser, capture or mutation process ran in this fix pass.
+
+**Coordinator repeated at source `c6b61d4`/report HEAD `1ae9603`:** wasm
+hash unchanged;142 default/45 no-default engine tests, fmt/all3 clippy sets,
+3648 Vitest cases plus7 skips across127 passing files, Tauri301 plus1 ignored,
+and build all passed. Logs are `p7c-final2-*`. The coordinator also copied
+this candidate's mounted/engine tests onto old `69e6704`: five named
+assertion failures proved all four defects, with no import/collection errors.
+Those are coordinator measurements, and they precede section13.2.2's final
+delta. They are not final-source acceptance or mutation evidence.
 
 Remaining gates: finish all relevant proofs on the accepted final source,
 view the new pictures, obtain a fresh read-only Codex review, fix any real
