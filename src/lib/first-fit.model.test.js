@@ -1548,8 +1548,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await pass(0);
       expect(hand.writes).toHaveLength(1);
       await EVENTS.switchOff();
-      // A's Rust snapshot is behind the browser handoff B. The other finals
-      // still own the outgoing debt even when B matches both current files.
+      // A and B match the browser handoff. The other finals still own this
+      // outgoing debt when those receipts match both current files.
       hand.writes.shift().ok();
       await pass(0);
       expect(hand.writes).toHaveLength(1);
@@ -1559,7 +1559,9 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.editLine();
       // Keep every subsequent writer held. Old source must fail on an extra
       // held writer/pending final before unheld cleanup could enter its loop.
-      for (let i = 0; i < 3; i++) {
+      // C held the pre-edit snapshot; one new current snapshot must settle it.
+      // A/B already matched, so the completed queue has exactly these two.
+      for (let i = 0; i < 2; i++) {
         expect(hand.writes).toHaveLength(1);
         hand.writes.shift().ok();
         await pass(0);

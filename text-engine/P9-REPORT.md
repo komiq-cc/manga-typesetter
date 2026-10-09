@@ -1459,5 +1459,15 @@ result; collected Runtime exceptions cannot print all passed or exit0.
 The separately labeled review4 catalog removes only active-final retirement
 protection, required-layout validation, or the global page-error predicate.
 The32 original definitions and their sealed runner remain unchanged. These
-current repairs and new regressions are draft/unrun; all final-source model,
-mutation, real dry-run, browser, capture and final review proofs remain pending.
+current repairs were checked once by the granted worker focused20 at09db11a:
+start load3.03,13.77-second Vitest run,197 passing and one failing test, no
+timeout, owned cleanup verified empty and source unchanged. The sole failure
+was the new bounded overlapping-final fixture expecting a third held writer
+after the actual queue had completed following two. All other named cases,
+the preserved33-event seed and the generated20-order classification passed
+(18 completed, two precise browser prefixes, zero unknown,641/661 events).
+That raw failed run is preserved. The probe now expects the measured two
+post-edit snapshots (C's held old choice, then the current choice), while still
+requiring all three final calls and both physical independent choices to settle.
+This narrow fixture correction is unrun. All final-source model, mutation,
+real dry-run, browser, capture and final review proofs remain pending.
