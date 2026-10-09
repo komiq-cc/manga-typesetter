@@ -329,11 +329,22 @@ window.__p8 = {
     await settle();
     return { done: true };
   },
-  async autoFit(id) {
+  // A box pulled in under its text, and "Fit now" on it, in one turn: no
+  // effect of the canvas runs between the two, so what changes the box is
+  // the fit and nothing else. Then the page's own refit, as a font landing
+  // would ask it.
+  async squeezeFit(id) {
+    const b = st.page().boxes.find((x) => String(x.id) === String(id));
+    const geom = () => [b.w, b.h, b.style.size].map((n) => Math.round(n * 10) / 10);
+    const before = geom();
+    b.w = Math.max(48, b.w * 0.45);
+    b.h = Math.max(24, b.h * 0.3);
+    const squeezed = geom();
     const one = st.fitBoxNow(id);
+    const fitted = geom();
     const page = st.refitPage(st.page());
     await settle();
-    return { box: one, page };
+    return { before, squeezed, fitted, fitChangedTheBox: one && fitted.join() !== squeezed.join(), pageRefit: page, after: geom() };
   },
   async autoTypeset() {
     st.setChapterTypesetMode('smart');
@@ -361,6 +372,8 @@ window.__p8 = {
     const raws = new Map(pages.map((p) => [p.file, PNG1]));
     const cleaned = new Map(pages.filter((p) => p.cleaned).map((p) => [p.cleaned, PNG1]));
     const bytes = pkg.buildChapterPackage({ record: rec, translations: null, project: { name: 'P8 audit', layout: 'pages', ocrLanguage: 'ja' }, raws, cleaned, fonts: list, tags: [], app: 'p8-audit' });
+    // `familiesKnown` (package-flow.js), which the export awaits here.
+    try { await st.fontFamiliesSettling(named); } catch { /* said as it stands */ }
     const staying = flow.fontsStaying(list, named);
     const seen = await flow.inspectPackage(new File([bytes], 'audit.mtchapter'), null);
     await settle();
@@ -515,13 +528,12 @@ async function session(mode) {
   await phase('Inspector: font', () => call('inspect', 'font'));
   await phase('Inspector: size', () => call('inspect', 'size'));
   await phase('Inspector: bold, italic', async () => ({ bold: await call('inspect', 'bold'), italic: await call('inspect', 'italic'), box: await call('box', id) }));
-  // A box set far too large for its balloon, and then asked to fit ("Fit now").
+  // A box pulled in under its text, and then asked to fit ("Fit now").
   await phase('auto-fit', async () => {
-    const big = await call('inspect', 'largest');
-    const squeezed = await call('box', id);
-    const fit = await call('autoFit', id);
-    const after = await call('box', id);
-    return { set: big, ...fit, from: [squeezed.w, squeezed.h, squeezed.size].map(Math.round), to: [after.w, after.h, after.size].map(Math.round) };
+    const r = await call('squeezeFit', id);
+    // A phase in which fit changed nothing proves nothing about fit.
+    if (!r.fitChangedTheBox) throw new Error(`auto-fit did not change the box: ${JSON.stringify(r)}`);
+    return r;
   });
   await phase('auto-typeset a page', async () => {
     await call('goto', chapterRecord.pages.length - 1);
@@ -629,6 +641,12 @@ try {
       writeFileSync(file, bytes);
       proof.push({ index: i, page: made.page, file, bytes: bytes.length, boxes: made.boxes, engine: made.engine, draws: made.draws, off });
     }
+    // The same pages written with the switch OFF, for one question: a type
+    // layer that holds no text (a box with no text) - is it written either
+    // way, the same layer?
+    await call('engine', 'browser');
+    for (const row of proof) row.offLayers = typeLayers(Buffer.from((await call('psdOf', row.index)).psd, 'base64'));
+    if (!(await call('engine', 'rust')).draws) throw new Error('the engine did not come back on after the default-mode PSDs');
     report.proof = proof.map((row) => psdTable(row));
     md += proofMarkdown(report.proof, report.selfTest, report.breaks);
   }
@@ -650,7 +668,7 @@ function typeLayers(bytes) {
   const out = [];
   const walk = (layers) => {
     for (const l of layers ?? []) {
-      if (l.text) out.push({ name: l.name, text: l.text.text, font: l.text.style?.font?.name ?? null, fauxBold: !!l.text.style?.fauxBold, fauxItalic: !!l.text.style?.fauxItalic, runs: (l.text.styleRuns ?? []).map((r) => ({ length: r.length, font: r.style?.font?.name ?? null, fauxBold: r.style?.fauxBold, fauxItalic: r.style?.fauxItalic })) });
+      if (l.text) out.push({ name: l.name, at: [l.left, l.top, l.right, l.bottom], text: l.text.text, font: l.text.style?.font?.name ?? null, fauxBold: !!l.text.style?.fauxBold, fauxItalic: !!l.text.style?.fauxItalic, runs: (l.text.styleRuns ?? []).map((r) => ({ length: r.length, font: r.style?.font?.name ?? null, fauxBold: r.style?.fauxBold, fauxItalic: r.style?.fauxItalic })) });
       walk(l.children);
     }
   };
@@ -684,7 +702,10 @@ function psdTable(row) {
       breaksDiffer: !!browser && browser.join('\n') !== want,
     });
   }
-  return { page: row.page, file: row.file, bytes: row.bytes, typeLayers: layers.length, unmatched: left.map((l) => ({ name: l.name, font: l.font, lines: linesOf(l.text) })), rows };
+  const emptyOf = (list) => list.filter((l) => !String(l.text ?? '').trim()).map((l) => `${l.name} @ ${l.at.join(',')}`).sort();
+  const empty = { on: emptyOf(layers), off: emptyOf(row.offLayers ?? []), boxesWithNoText: row.boxes.filter((b) => !b.jobs.some((j) => j.lines?.some((l) => l.trim()))).map((b) => b.id) };
+  empty.same = empty.on.join('|') === empty.off.join('|');
+  return { page: row.page, file: row.file, bytes: row.bytes, typeLayers: layers.length, typeLayersOff: row.offLayers?.length ?? null, empty, unmatched: left.map((l) => ({ name: l.name, font: l.font, lines: linesOf(l.text) })), rows };
 }
 function proofMarkdown(proof, selfTest, breaks) {
   const out = ['## A PSD written with the engine on, read back', '', `Boxes on the pages the session did not edit: ${breaks.boxes}. Broken differently by the two engines: ${breaks.differ.length}${breaks.differ.length ? ` (${breaks.differ.map((b) => `p${b.page} ${b.box}`).join(', ')})` : ''}.`, '', `psdSelfTest on the first of these pages, engine on: ok ${selfTest.ok}, checks ${JSON.stringify(selfTest.checks)}.`, ''];
@@ -692,6 +713,7 @@ function proofMarkdown(proof, selfTest, breaks) {
     const text = p.rows.filter((r) => !r.rasterOnly);
     out.push(`### page ${p.page}: ${p.file.split('/').pop()} (${p.bytes} bytes, ${p.typeLayers} type layers)`, '');
     out.push(`Boxes with text: ${p.rows.length}. Type layers whose font name and faux flags are the engine's: ${text.filter((r) => r.same).length} of ${text.length}. Whose lines are the painter's lines: ${text.length} of ${text.length} (a layer is matched by them). Raster-only: ${p.rows.filter((r) => r.rasterOnly).length}. Boxes the two engines break differently: ${p.rows.filter((r) => r.breaksDiffer).length}.`, '');
+    out.push(`Type layers with no text: ${p.empty.on.length} with the engine on (${p.empty.on.join('; ') || 'none'}), ${p.empty.off.length} in the same page written with the switch off; the same layers, by name and rectangle: ${p.empty.same ? 'yes' : 'NO'}. Boxes of the page with no text: ${p.empty.boxesWithNoText.join(', ') || 'none'}. Type layers in all: ${p.typeLayers} on, ${p.typeLayersOff} off.`, '');
     if (p.unmatched.length) out.push(`Type layers with no painted box of the same lines: ${p.unmatched.map((l) => `"${l.name}" (${l.font}: ${l.lines.join(' / ')})`).join('; ')}.`, '');
     out.push('| box | asked | layer name | layer font | faux b/i | engine drew | faux b/i | lines (layer = engine) | browser breaks |', '|---|---|---|---|---|---|---|---|---|');
     for (const r of p.rows) {

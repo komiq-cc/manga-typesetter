@@ -273,6 +273,46 @@ describe('an export waits for the fonts its pages need', () => {
       expect(downloaded).toEqual(['ch01-11.png']);
     });
 
+    it('strip slices: the slices written before the switch stand, the one it happened on and the rest are not written', async () => {
+      app.projectLayout = 'longstrip';
+      app.stripSliceH = 1000;
+      const rust = stand();
+      setTextEngine(rust.engine);
+      setGlyphPainter(rust.painter);
+      gate().open();
+      neverReady();
+      const create = globalThis.document.createElement;
+      globalThis.document.createElement = (tag) => {
+        if (tag === 'canvas' && downloaded.length === 1) {
+          setTextEngine(was.engine);
+          setGlyphPainter(was.painter);
+        }
+        return create(tag);
+      };
+      expect(await exportImages('PNG', 'all')).toBe(false);
+      expect(downloaded).toEqual(['ch01-strip-01.png']);
+      expect(app.toast?.msg).toMatch(/text engine was switched/);
+    });
+
+    // Either half of "the engine" changing is the engine changing: a font
+    // landing can take the painter out and leave what measures (`apply`,
+    // engine-switch.svelte.js), and the reverse.
+    for (const [what, change] of [
+      ['only the painter is another', (rust) => setGlyphPainter({ engine: rust.engine, paint() {} })],
+      ['only what measures is another', () => setTextEngine(stand().engine)],
+    ]) {
+      it(`${what}: still not the engine it waited for`, async () => {
+        const rust = stand();
+        setTextEngine(rust.engine);
+        setGlyphPainter(rust.painter);
+        gate().open();
+        neverReady();
+        atFirstCanvas(() => change(rust));
+        expect(await exportImages('PNG', 'current')).toBe(false);
+        expect(downloaded).toEqual([]);
+      });
+    }
+
     it('another engine put in while the first one’s fonts are waited for: that one’s fonts are waited for too, and then it is written', async () => {
       const first = stand();
       setTextEngine(first.engine);

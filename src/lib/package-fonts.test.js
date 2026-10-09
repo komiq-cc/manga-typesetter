@@ -132,6 +132,14 @@ describe('the export says which fonts go without a file', () => {
     expect(fontsStaying([{ name: 'Arial', faces: {} }])).toEqual([]);
   });
 
+  it('a library font that goes without its file is not called a system font, drawn here or not', async () => {
+    engineOn();
+    // In the library and drawn as itself, and no file of it came out of the
+    // library to be copied (it was loaded and could not be saved).
+    expect(fontsStaying([{ name: 'WildWords', faces: {} }])).toEqual([{ name: 'WildWords', why: 'missing' }]);
+    expect(fontsStaying([{ name: 'Arial', faces: {} }])).toEqual([{ name: 'Arial', why: 'system' }]);
+  });
+
   it('a chapter whose every font travels has nothing to say', async () => {
     engineOn();
     chapter = chapterIn('WildWords');
