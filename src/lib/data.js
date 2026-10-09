@@ -106,8 +106,11 @@ export function fontCss(name, userFonts = USER_FONTS) {
 //             with the Rust engine measuring: a chapter still at 1 is one that
 //             engine has not fitted before, and the user is told what it
 //             changed (`firstFit` in the store). Written by a save, never by
-//             an open: the engine measuring when the save runs is the one
-//             that fitted what is being written (`stampTypesetting`).
+//             an open, and a save changes it only when an engine has in fact
+//             fitted what is being written: 2 with the Rust engine measuring
+//             and no box of the chapter still waiting for its font, 1 for a
+//             2 with the browser measuring, and the number the file had in
+//             every other case (`stampTypesetting`).
 //
 // The preference is only the NEW-chapter default, mirrored here by
 // prefs.svelte.js the way the box defaults below are, so a later change to it

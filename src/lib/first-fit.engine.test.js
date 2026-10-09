@@ -326,6 +326,63 @@ describe('a version 1 chapter opened with the Rust engine on', () => {
   });
 });
 
+// The second round (text-engine/P9-REPORT.md): the cases an outside review
+// found, on the real file.
+describe('what must reach the file all the same', () => {
+  it('a handle still held down when the app is quit: the box is written as the hand has it', async () => {
+    await useTextEngine('rust');
+    await openChapter(p.id, c.id);
+    await _engineSwitchSync().settled();
+    const before = await digest();
+    // TextBox writes the box as the pointer moves and marks nothing until it is let go.
+    boxes()[0].x -= 10;
+    boxes()[0].w += 30;
+    expect(app.saved).toBe(true);
+    expect(await flushBeforeLeaving('quit')).toBe(true);
+    const rec = await record();
+    expect(rec.pages[0].boxes[0]).toMatchObject({ x: BOXES[0].x - 10, w: BOXES[0].w + 30 });
+    expect((await digest())['/chapter.json']).not.toBe(before['/chapter.json']);
+  });
+
+  it('an edit made while a font is still being read is written at once, and the file is not called the engine\'s until that box is fitted', async () => {
+    await useTextEngine('rust');
+    let land;
+    slow = new Promise((resolve) => (land = resolve));
+    await openChapter(p.id, c.id);
+    expect(boxes()[1].h).toBe(20);
+    boxes()[0].text = 'EDITED';
+    markUnsaved();
+    await wait(DOC_SAVE_MS + 200);
+    let rec = await record();
+    expect(rec.pages[0].boxes[0].text).toBe('EDITED');
+    expect(rec.pages[0].boxes[1].h).toBe(20);
+    expect(rec.typesetting.version).toBe(1);
+    expect(app.saved).toBe(true);
+    // The font lands: the box it grows and the number follow, unasked.
+    land();
+    await _engineSwitchSync().settled();
+    expect(boxes()[1].h).toBeGreaterThan(20);
+    await wait(DOC_SAVE_MS + 200);
+    rec = await record();
+    expect(rec.typesetting.version).toBe(2);
+    expect(rec.pages[0].boxes[1].h).toBe(boxes()[1].h);
+  });
+
+  it('Keep with the chapter\'s folder gone: nothing was kept, the notice is back, and the chapter says it is not saved', async () => {
+    await useTextEngine('rust');
+    await openChapter(p.id, c.id);
+    await _engineSwitchSync().settled();
+    await rm(c.dir, { recursive: true, force: true });
+    await expect(keepFirstFit()).rejects.toThrow();
+    expect(firstFit).toMatchObject({ open: true, kept: false, dismissed: false });
+    expect(firstFitChanges()).toMatchObject({ grew: 3, kept: false });
+    expect(app.saved).toBe(false);
+    expect(app.saveFailed).toBe(true);
+    expect(app.typesetting.version).toBe(1);
+    app.saveFailed = false;
+  });
+});
+
 describe('the same chapter with the browser measuring', () => {
   it('opens and leaves as it always has: written on leaving, still version 1', async () => {
     const old = await record();

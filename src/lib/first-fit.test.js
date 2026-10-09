@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   app, loadProjectPages, page, autoFitBox, reviewOf, flaggedBoxes, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave,
-  firstFit, firstFitChanges, keepFirstFit, stampTypesetting,
+  firstFit, firstFitChanges, keepFirstFit, stampTypesetting, fitBoxNow, placeActiveAt,
 } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
@@ -178,7 +178,7 @@ describe('opened with the Rust engine on', () => {
 
   it('says what changed, counted against the file, and which box to look at first', () => {
     expect(firstFit).toMatchObject({ open: true, kept: false, dismissed: false });
-    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, first: { pageId: 1, boxId: 'relaid' }, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false });
   });
 
   it('lists a box whose lines moved in the review list, beside the flagged ones, without flagging it', () => {
@@ -281,7 +281,7 @@ describe('a version 1 chapter with no boxes, opened with the Rust engine on', ()
   it('is not written by leaving either, has nothing to say, and is stamped 2 by the first edit', async () => {
     await useTextEngine('rust');
     open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
-    expect(firstFitChanges()).toEqual({ grew: 0, flagged: 0, cleared: 0, relaid: 0, first: null, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 0, flagged: 0, cleared: 0, relaid: 0, laid: 0, first: null, kept: false });
     await flushSave();
     expect(saves).toHaveLength(0);
     // A box the user adds is theirs: it is not counted, and its save is the stamp.
@@ -300,7 +300,7 @@ describe('the switch turned on over an open chapter', () => {
     open(file);
     expect(firstFit.open).toBe(false);
     await useTextEngine('rust');
-    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, first: { pageId: 1, boxId: 'relaid' }, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false });
     expect(app.saved).toBe(true);
     await wait(900);
     expect(saves).toHaveLength(0);
@@ -368,5 +368,561 @@ describe('with the browser measuring, none of this is', () => {
     await useTextEngine('rust');
     open(back);
     expect(firstFitChanges()).toMatchObject({ grew: 1, flagged: 1, cleared: 1, relaid: 2 });
+  });
+});
+
+// ===========================================================================
+// The second round: what an outside review found (text-engine/P9-REPORT.md)
+// ===========================================================================
+
+describe('a change to the document that nobody marked', () => {
+  let file;
+  beforeEach(async () => {
+    file = lettered();
+    await useTextEngine('rust');
+    open(file);
+  });
+
+  // TextBox writes the box as the pointer moves and marks the chapter unsaved
+  // when the handle is let go. In between the document has changed and the
+  // chapter still reads "saved".
+  it('a handle held down: leaving writes the box as the hand has it', async () => {
+    const b = by('same');
+    b.x -= 20;
+    b.w += 40;
+    expect(app.saved).toBe(true);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0]).toMatchObject({ id: 'same', x: b.x, w: b.w });
+  });
+
+  it('a rotation in progress is written the same way', async () => {
+    by('same').style.rotation = 12;
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0].style.rotation).toBe(12);
+  });
+
+  it('and the switch going off in that moment puts nothing back: no height of the file over a width of the hand', async () => {
+    const b = by('grow');
+    const grown = b.h;
+    b.w += 4;
+    await useTextEngine('browser');
+    expect(b.h).toBe(grown);
+    expect(b.w).toBe(file.pages[1].boxes[0].w + 4);
+  });
+
+  it('a box the user added, or took away, is written by leaving', async () => {
+    app.pages[0].boxes.push(box('new', 'AnimeAce', 'AA', 200, 400));
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    app.pages[0].boxes.pop();
+    markSaved();
+    // Back to what was noted, but a save has carried it: leaving writes.
+    await flushSave();
+    expect(saves).toHaveLength(2);
+  });
+
+  it('a line of the queue changed without a mark is written by leaving', async () => {
+    close();
+    const pages = made();
+    pages[0].lines = [{ n: 1, text: 'AA', tr: 'AA', tags: [] }];
+    open({ pages, typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    await flushSave();
+    expect(saves).toHaveLength(0);
+    app.pages[0].lines[0].tr = 'AB';
+    await flushSave();
+    expect(saves).toHaveLength(1);
+  });
+
+  it('undone by hand, there is nothing to write again, and the switch going off puts the boxes back', async () => {
+    const b = by('same');
+    b.w += 40;
+    b.w -= 40;
+    await flushSave();
+    expect(saves).toHaveLength(0);
+    await useTextEngine('browser');
+    expect(rects()).toEqual(file.pages.flatMap((p) => p.boxes).map((x) => ({ id: x.id, x: x.x, y: x.y, w: x.w, h: x.h, size: x.style.size, review: x.review ?? null })));
+  });
+});
+
+// "Fit now" on a box it cannot improve writes why, and returns before it
+// marks the chapter unsaved, since no geometry moved: under the browser
+// leaving writes it, as leaving writes everything there.
+describe('"Fit now" on a box it cannot improve', () => {
+  const curved = () => ({ ...box('curve', 'Narrow', 'AAAAAAAAAAAA BBBBBBBBBBBB', 40, 100), style: { ...style('Narrow'), size: 12, curve: 40 } });
+  let file;
+  beforeEach(async () => {
+    open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [curved()] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    close();
+    expect(file.pages[0].boxes[0].review.reason).toBe(REVIEW_REASONS.curve);
+    await useTextEngine('rust');
+    open(file);
+  });
+
+  it('changes the reason and marks nothing', () => {
+    expect(fitBoxNow('curve', app.pages[0])).toBe(false);
+    expect(by('curve').review.reason).toBe(REVIEW_REASONS.minSize);
+    expect(app.saved).toBe(true);
+  });
+
+  it('is written by leaving', async () => {
+    await flushSave();
+    expect(saves).toHaveLength(0);
+    fitBoxNow('curve', app.pages[0]);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0].review.reason).toBe(REVIEW_REASONS.minSize);
+  });
+
+  it('and is not undone by the switch going off', async () => {
+    fitBoxNow('curve', app.pages[0]);
+    await useTextEngine('browser');
+    expect(by('curve').review.reason).toBe(REVIEW_REASONS.minSize);
+  });
+});
+
+// A box placed while its face was on its way is stored as never laid out
+// ('pending'), and is the one kind of box an open lays out, under either
+// engine: width, size and place included.
+describe('a box stored as never laid out', () => {
+  // Placed while the engine was still starting, when every face is on its way.
+  async function placedPending() {
+    let made;
+    const started = new Promise((resolve) => (made = () => resolve(engine)));
+    _setEngineSwitchDeps({ available: () => true, createEngine: () => started, invoke: async () => null, booted: async () => {}, os: () => 'macos' });
+    const on = useTextEngine('rust');
+    await wait(0);
+    expect(engineSwitch.phase).toBe('starting');
+    open({
+      pages: [
+        { id: 1, w: 800, h: 1200, lines: [{ n: 1, text: 'AAAA BBBB CCCC DDDD', tr: 'AAAA BBBB CCCC DDDD', tags: [] }], boxes: [box('grow', 'Narrow', 'AA BB', 60, 900)], activeLineN: 1 },
+      ],
+      typesetting: { mode: 'smart', version: LAYOUT_VERSION },
+    });
+    app.lastStyle.font = 'Narrow';
+    placeActiveAt(400, 400);
+    const file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    expect(file.pages[0].boxes[1].auto.status).toBe('pending');
+    close();
+    await useTextEngine('browser');
+    made();
+    await on;
+    _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => null, booted: async () => {}, os: () => 'macos' });
+    return file;
+  }
+  const whole = (b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, size: b.style.size, auto: copy(b.auto), review: b.review ?? null });
+
+  it('is laid out by the open, counted as that, and nothing is written', async () => {
+    const file = await placedPending();
+    await useTextEngine('rust');
+    open(file);
+    const stored = file.pages[0].boxes[1];
+    const b = app.pages[0].boxes[1];
+    expect(b.auto.status).not.toBe('pending');
+    expect([b.x, b.w]).not.toEqual([stored.x, stored.w]);
+    expect(firstFitChanges()).toMatchObject({ laid: 1, grew: 1 });
+    expect(app.saved).toBe(true);
+    await wait(900);
+    await flushSave();
+    expect(saves).toHaveLength(0);
+  });
+
+  it('the switch going off puts all of it back: the chapter is then what the browser alone makes of the file', async () => {
+    const file = await placedPending();
+    open(file);
+    const alone = copy(app.pages);
+    close();
+    await useTextEngine('rust');
+    open(file);
+    const b = app.pages[0].boxes[1];
+    const solved = whole(b);
+    expect(solved).not.toEqual(whole(alone[0].boxes[1]));
+    await useTextEngine('browser');
+    expect(copy(app.pages)).toEqual(alone);
+  });
+
+  it('laid out when its font lands after the open, it is still not written for that', async () => {
+    // Placed in a system family whose bytes were still on their way.
+    const native = (hold) =>
+      fakeNative(
+        { Zapfino: [{ slots: { regular: 0 }, bytes: SFNT() }], 'Helvetica Neue': [{ slots: { regular: 0, bold: 1, italic: 2, boldItalic: 3 }, bytes: TTC() }] },
+        { hold },
+      );
+    app.fonts.system = [
+      systemFontEntry({ name: 'Helvetica Neue', faces: { regular: true, bold: true, italic: true, boldItalic: true } }),
+      systemFontEntry({ name: 'Zapfino', faces: { regular: true } }),
+    ];
+    const held = native(true);
+    _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => held, booted: async () => {}, os: () => 'macos' });
+    const on = useTextEngine('rust');
+    while (engineSwitch.phase !== 'on') {
+      held.release();
+      await wait(0);
+    }
+    await on;
+    open({
+      pages: [{ id: 1, w: 800, h: 1200, lines: [{ n: 1, text: 'AAAA BBBB CCCC DDDD', tr: 'AAAA BBBB CCCC DDDD', tags: [] }], boxes: [], activeLineN: 1 }],
+      typesetting: { mode: 'smart', version: LAYOUT_VERSION },
+    });
+    app.lastStyle.font = 'Zapfino';
+    placeActiveAt(400, 400);
+    const file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    const stored = file.pages[0].boxes[0];
+    expect(stored.auto.status).toBe('pending');
+    close();
+    await useTextEngine('browser');
+    held.release();
+    open(file);
+    const alone = copy(app.pages);
+    close();
+
+    engine = fakeRustEngine();
+    const free = native(false);
+    _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => free, booted: async () => {}, os: () => 'macos' });
+    await useTextEngine('rust');
+    open(file);
+    const b = app.pages[0].boxes[0];
+    expect(b.auto.status).toBe('pending');
+    await _engineSwitchSync().settled();
+    expect(b.auto.status).not.toBe('pending');
+    expect([b.x, b.w]).not.toEqual([stored.x, stored.w]);
+    expect(firstFitChanges()).toMatchObject({ laid: 1 });
+    expect(app.saved).toBe(true);
+    await wait(900);
+    expect(saves).toHaveLength(0);
+    // And all of it goes back with the switch: the browser then lays the box
+    // out itself, as it does when it opens the file.
+    await useTextEngine('browser');
+    expect(copy(app.pages)).toEqual(alone);
+  });
+});
+
+describe('the switch going off while the chapter is still loading', () => {
+  it('puts the boxes back: the loader holding the chapter unsaved is not an edit', async () => {
+    const file = lettered();
+    await useTextEngine('rust');
+    // As library.svelte.js: the pages go in, and the pictures are waited for
+    // before the chapter is declared saved.
+    useChapterTypesetting(file.typesetting);
+    loadProjectPages(copy(file.pages));
+    expect(app.saved).toBe(false);
+    expect(by('grow').h).toBeGreaterThan(file.pages[1].boxes[0].h);
+    await useTextEngine('browser');
+    expect(copy(app.pages)).toEqual(file.pages);
+    // And the loader then finishes as it always does.
+    app.chapterRef = { projectId: 'p', chapterId: 'c' };
+    markSaved();
+    await flushSave();
+    expect(saves[0].pages).toEqual(file.pages);
+  });
+
+  it('but an edit made in that window is one', async () => {
+    const file = lettered();
+    await useTextEngine('rust');
+    useChapterTypesetting(file.typesetting);
+    loadProjectPages(copy(file.pages));
+    const grown = by('grow').h;
+    by('same').text = 'AB';
+    markUnsaved();
+    await useTextEngine('browser');
+    expect(by('grow').h).toBe(grown);
+  });
+});
+
+describe('a save taken while a box still waits for its font', () => {
+  let invoke;
+  const late = (version) => ({
+    pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [box('same', 'AnimeAce', 'AA', 200, 100), box('late', 'Zapfino', 'AAAA BBBB', 60, 300)] }],
+    typesetting: { mode: 'smart', version },
+  });
+  beforeEach(async () => {
+    invoke = fakeNative(
+      {
+        'Helvetica Neue': [{ slots: { regular: 0, bold: 1, italic: 2, boldItalic: 3 }, bytes: TTC() }],
+        Zapfino: [{ slots: { regular: 0 }, bytes: SFNT() }],
+      },
+      { hold: true },
+    );
+    _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => invoke, booted: async () => {}, os: () => 'macos' });
+    app.fonts.system = [
+      systemFontEntry({ name: 'Helvetica Neue', faces: { regular: true, bold: true, italic: true, boldItalic: true } }),
+      systemFontEntry({ name: 'Zapfino', faces: { regular: true } }),
+    ];
+    const on = useTextEngine('rust');
+    while (engineSwitch.phase !== 'on') {
+      invoke.release();
+      await wait(0);
+    }
+    await on;
+  });
+  const land = async () => {
+    for (let i = 0; i < 20 && by('late').h === 20; i++) {
+      invoke.release();
+      await wait(0);
+    }
+    await _engineSwitchSync().settled();
+  };
+
+  it('does not say the file is the Rust engine\'s: the edit is written at once, at the number the file had', async () => {
+    open(late(LAYOUT_VERSION));
+    expect(by('late').h).toBe(20);
+    by('same').text = 'AB';
+    markUnsaved();
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0].text).toBe('AB');
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION);
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+  });
+
+  it('and when the font lands the box it grew is saved, with the number', async () => {
+    open(late(LAYOUT_VERSION));
+    by('same').text = 'AB';
+    markUnsaved();
+    await flushSave();
+    await land();
+    expect(by('late').h).toBeGreaterThan(20);
+    expect(app.saved).toBe(false);
+    await wait(900);
+    expect(saves).toHaveLength(2);
+    expect(saves[1].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[1].pages[0].boxes[1].h).toBe(by('late').h);
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION_RUST);
+  });
+
+  it('left before the font lands, the chapter is still a version 1 chapter, and is told again', async () => {
+    open(late(LAYOUT_VERSION));
+    by('same').text = 'AB';
+    markUnsaved();
+    await flushSave();
+    const back = { pages: saves[0].pages, typesetting: saves[0].typesetting };
+    close();
+    await land().catch(() => {});
+    open(back);
+    expect(firstFit.open).toBe(true);
+  });
+
+  it('Keep waits for it: one write, with the grown box and the number; leaving meanwhile would write too', async () => {
+    open(late(LAYOUT_VERSION));
+    const kept = keepFirstFit();
+    await wait(0);
+    expect(saves).toHaveLength(0);
+    expect(app.saved).toBe(false);
+    await land();
+    await kept;
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[0].pages[0].boxes[1].h).toBeGreaterThan(20);
+  });
+
+  it('a version 2 chapter stays one, and a fit an edit was owed is saved when it lands', async () => {
+    open(late(LAYOUT_VERSION_RUST));
+    const b = by('late');
+    b.text = 'AAAA BBBB CCCC';
+    autoFitBox(b, page());
+    markUnsaved();
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[0].pages[0].boxes[1].h).toBe(20);
+    await land();
+    expect(b.h).toBeGreaterThan(20);
+    await wait(900);
+    expect(saves).toHaveLength(2);
+    expect(saves[1].pages[0].boxes[1].h).toBe(b.h);
+  });
+});
+
+describe('a save taken while the engine is still starting', () => {
+  let made;
+  beforeEach(() => {
+    const started = new Promise((resolve) => (made = () => resolve(engine)));
+    _setEngineSwitchDeps({ available: () => true, createEngine: () => started, invoke: async () => null, booted: async () => {}, os: () => 'macos' });
+  });
+
+  it('writes the number the file had: nobody has fitted this document', async () => {
+    const two = lettered(LAYOUT_VERSION_RUST);
+    const one = lettered();
+    const on = useTextEngine('rust');
+    await wait(0);
+    expect(engineSwitch.phase).toBe('starting');
+    open(two);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[0].pages).toEqual(two.pages);
+    close();
+    open(one);
+    by('same').text = 'AB';
+    markUnsaved();
+    await flushSave();
+    expect(saves).toHaveLength(2);
+    expect(saves[1].typesetting.version).toBe(LAYOUT_VERSION);
+    // Nor is anything said, or kept, before the engine has measured.
+    expect(firstFitChanges()).toBe(null);
+    close();
+    open(one);
+    await keepFirstFit();
+    expect(saves).toHaveLength(2);
+    close();
+    made();
+    await on;
+  });
+});
+
+describe('what the notice counts is what the engine did', () => {
+  it('a box the user makes taller in a chapter the engine changed nothing in is not counted, and no notice appears', async () => {
+    await useTextEngine('rust');
+    open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [box('same', 'AnimeAce', 'AA', 200, 100)] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    const fitted = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    close();
+    open(fitted);
+    expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, cleared: 0, relaid: 0 });
+    by('same').h += 30;
+    markUnsaved();
+    expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, cleared: 0, relaid: 0 });
+  });
+
+  describe('in the made-up chapter', () => {
+    beforeEach(async () => {
+      const file = lettered();
+      await useTextEngine('rust');
+      open(file);
+    });
+
+    it('a box the engine grew and the user then drags taller is theirs', () => {
+      expect(firstFitChanges().grew).toBe(1);
+      by('grow').h += 30;
+      markUnsaved();
+      expect(firstFitChanges().grew).toBe(0);
+      // A grow-only fit of it afterwards does not make it the engine's again.
+      app.pageIndex = 1;
+      autoFitBox(by('same'), app.pages[0]);
+      expect(firstFitChanges().grew).toBe(0);
+    });
+
+    it('a flag an edit raises is not the engine\'s, and one an edit clears is no longer counted', () => {
+      expect(firstFitChanges()).toMatchObject({ flagged: 1, cleared: 1 });
+      // A box sized by hand is flagged, not fitted, when its text outgrows it.
+      const same = by('same');
+      same.style.autoHeight = false;
+      same.w = 30 + INSET;
+      same.text = 'AAAAAAAAAAAAAAAA';
+      autoFitBox(same, app.pages[0]);
+      expect(same.review).toMatchObject({ kind: 'overflow' });
+      expect(firstFitChanges().flagged).toBe(1);
+      const flag = by('flag');
+      flag.w += 200;
+      autoFitBox(flag, app.pages[1]);
+      expect(flag.review ?? null).toBe(null);
+      expect(firstFitChanges()).toMatchObject({ flagged: 0, first: { boxId: 'relaid' } });
+    });
+
+    it('a box moved by hand is not counted either', () => {
+      by('grow').x += 5;
+      expect(firstFitChanges().grew).toBe(0);
+    });
+  });
+});
+
+describe('what the switch going off puts back, beyond a height', () => {
+  it('the top of a box that grew about its middle', async () => {
+    const mid = { ...box('mid', 'Narrow', 'AA BB', 60, 300), style: { ...style('Narrow'), valign: 'middle' } };
+    open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [mid] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    const file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    close();
+    await useTextEngine('rust');
+    open(file);
+    expect(by('mid').h).toBeGreaterThan(file.pages[0].boxes[0].h);
+    expect(by('mid').y).toBeLessThan(file.pages[0].boxes[0].y);
+    await useTextEngine('browser');
+    expect(copy(app.pages)).toEqual(file.pages);
+  });
+
+  it('the stamp of a solve, which a grown height moves', async () => {
+    // Placed under the browser, so the solver has a record of it.
+    open({
+      pages: [{ id: 1, w: 800, h: 1200, lines: [{ n: 1, text: 'AAAA BBBB CCCC DDDD EEEE FFFF', tr: 'AAAA BBBB CCCC DDDD EEEE FFFF', tags: [] }], boxes: [], activeLineN: 1 }],
+      typesetting: { mode: 'smart', version: LAYOUT_VERSION },
+    });
+    app.lastStyle.font = 'Narrow';
+    placeActiveAt(400, 400);
+    const file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: LAYOUT_VERSION } };
+    const stored = file.pages[0].boxes[0];
+    expect(stored.auto.stamp).toBeTruthy();
+    expect(stored.auto.status).not.toBe('pending');
+    close();
+    await useTextEngine('rust');
+    open(file);
+    const b = app.pages[0].boxes[0];
+    expect(b.h).toBeGreaterThan(stored.h);
+    expect(b.auto.stamp).not.toBe(stored.auto.stamp);
+    await useTextEngine('browser');
+    expect(copy(app.pages)).toEqual(file.pages);
+  });
+});
+
+describe('how the lines broke before, asked of an engine that cannot say', () => {
+  it('a box whose face the browser has not loaded is not said to have new line breaks', async () => {
+    const file = lettered();
+    browser.faceReady = (face) => face.name !== 'AnimeAce';
+    await useTextEngine('rust');
+    open(file);
+    expect(firstFitChanges()).toMatchObject({ grew: 1, flagged: 1, cleared: 1, relaid: 1 });
+    expect(flaggedBoxes().map((f) => f.boxId)).toEqual(['grow', 'flag']);
+  });
+
+  it('nor any box while the browser is still loading its fonts', async () => {
+    const file = lettered();
+    browser.loading = () => true;
+    await useTextEngine('rust');
+    open(file);
+    expect(firstFitChanges()).toMatchObject({ grew: 1, relaid: 0 });
+  });
+});
+
+describe('Keep, when the write fails', () => {
+  it('brings the notice back: nothing was kept, the chapter is unsaved, and the file\'s number is not taken', async () => {
+    const file = lettered();
+    await useTextEngine('rust');
+    open(file);
+    unhook();
+    unhook = setSaver(async () => {
+      stampTypesetting();
+      throw new Error('disk full');
+    });
+    await expect(keepFirstFit()).rejects.toThrow('disk full');
+    expect(firstFit).toMatchObject({ open: true, kept: false, dismissed: false });
+    expect(firstFitChanges()).toMatchObject({ grew: 1, kept: false });
+    expect(app.saved).toBe(false);
+    expect(app.saveFailed).toBe(true);
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+    // Leaving tries again; and so does a second press, with a disk that takes it.
+    unhook();
+    unhook = setSaver(saver);
+    await keepFirstFit();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(firstFit).toMatchObject({ kept: true, dismissed: true });
+    app.saveFailed = false;
+  });
+
+  it('an edit\'s save that fails has kept nothing either', async () => {
+    const file = lettered();
+    await useTextEngine('rust');
+    open(file);
+    unhook();
+    unhook = setSaver(async () => {
+      stampTypesetting();
+      throw new Error('disk full');
+    });
+    by('same').text = 'AB';
+    markUnsaved();
+    await expect(flushSave()).rejects.toThrow('disk full');
+    expect(firstFitChanges()).toMatchObject({ kept: false });
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+    app.saveFailed = false;
   });
 });
