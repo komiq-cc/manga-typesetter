@@ -23,7 +23,7 @@ import Canvas from '../../lib/editor/Canvas.svelte';
 import Queue from '../../lib/Queue.svelte';
 import {
   app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, firstFit, firstFitChanges, flaggedBoxes,
-  fontsSettling, reviewOf,
+  fontsSettling, reviewOf, gotoPage, selectBox,
 } from '../../lib/store.svelte.js';
 import { initHistory } from '../../lib/editor/history.svelte.js';
 import { restoreFonts, scanSystemFonts, addFontFile } from '../../lib/fonts.js';
@@ -174,6 +174,43 @@ window.__p9 = {
     return { head: head.querySelector('.rv-count').textContent.trim(), rows: rows.length, reasons };
   },
   queueRect: () => rectOf(document.getElementById('queue')),
+
+  // ---- a handle of the real TextBox, for the driver's own mouse ----
+  // A box the open left exactly as the file has it, selected on its page, and
+  // where its `dir` handle is on screen. The driver presses the mouse there
+  // itself: the page only says where.
+  async grab(dir) {
+    for (let pi = 0; pi < app.pages.length; pi++) {
+      const stored = record.pages[pi];
+      const candidates = app.pages[pi].boxes.map((b, i) => [b, i]).filter(([b, i]) => stored.boxes[i] && stored.boxes[i].h === b.h && stored.boxes[i].y === b.y && !b.review);
+      if (!candidates.length) continue;
+      if (app.pageIndex !== pi) gotoPage(pi);
+      await settle(3);
+      for (const [b, i] of candidates) {
+        selectBox(b.id);
+        await settle(2);
+        const el = document.querySelector(`#app .handle.${dir}`);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const x = r.x + r.width / 2;
+        const y = r.y + r.height / 2;
+        // Room below it to drag into, and nothing over it.
+        if (y + 80 > innerHeight || document.elementFromPoint(x, y) !== el) continue;
+        return { page: pi, index: i, x, y, box: [b.x, b.y, b.w, b.h] };
+      }
+    }
+    return null;
+  },
+  // That box now, whether the chapter reads as saved, and what the notice counts.
+  held(page, index) {
+    const b = app.pages[page].boxes[index];
+    return { box: [b.x, b.y, b.w, b.h], saved: app.saved, changes: firstFitChanges(), saves: saves.length };
+  },
+  // The same box in what the last save would have written.
+  keptBox(page, index) {
+    const b = kept?.pages[page]?.boxes[index];
+    return b ? [b.x, b.y, b.w, b.h] : null;
+  },
 };
 
 document.title = 'p9 ready';

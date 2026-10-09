@@ -264,6 +264,38 @@ try {
   report.steps.keptUnderBrowser = { opened: under, left: underLeft };
   check('a version 2 chapter under the browser: no notice; leaving saves it at version 1', !under.notice && underLeft.saves.length === 2 && underLeft.saves[1] === 1);
 
+  // 8. A handle held down (the second round). The real TextBox writes the box
+  // as the pointer moves and marks the chapter unsaved when the handle is let
+  // go. In between the document has changed and still reads "saved": leaving
+  // then must write it, and the notice must not count the user's own height
+  // as the engine's.
+  await p9('close');
+  await p9('engine', 'rust');
+  await p9('open');
+  await p9('wait', 300);
+  const grabbed = await p9('grab', 's');
+  if (check('a box the engine left as the file has it can be taken by its bottom handle', !!grabbed)) {
+    const mouse = (type, x, y, buttons) => cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons, clickCount: 1 });
+    const before = await p9('held', grabbed.page, grabbed.index);
+    await mouse('mousePressed', grabbed.x, grabbed.y, 1);
+    for (let i = 1; i <= 6; i++) await mouse('mouseMoved', grabbed.x, grabbed.y + i * 10, 1);
+    await p9('wait', 100);
+    const held = await p9('held', grabbed.page, grabbed.index);
+    check('held down: the box is taller, and the chapter still reads as saved', held.box[3] > before.box[3] && held.saved, `height ${before.box[3]} to ${held.box[3]}`);
+    check('held down: the notice does not count the user\'s height as the engine\'s', held.changes?.grew === before.changes?.grew, `grew ${before.changes?.grew} then ${held.changes?.grew}`);
+    // Quit, or the window going away, with the button still down: the flush.
+    await p9('leave');
+    const flushed = await p9('held', grabbed.page, grabbed.index);
+    const written = await p9('keptBox', grabbed.page, grabbed.index);
+    check('leaving with the handle still held writes the box as the hand has it', flushed.saves === before.saves + 1 && !!written && written[3] === held.box[3], `saves ${before.saves} to ${flushed.saves}; written height ${written?.[3]}`);
+    await mouse('mouseReleased', grabbed.x, grabbed.y + 60, 0);
+    await p9('wait', 1100);
+    const let_go = await p9('held', grabbed.page, grabbed.index);
+    check('let go: still not counted as grown by the engine', let_go.changes?.grew === before.changes?.grew, `grew ${let_go.changes?.grew}`);
+    report.steps.handleHeld = { before, held, flushed, written, letGo: let_go };
+    await shot('6-handle-held.png');
+  }
+
   report.errors = cdp.errors.slice(0, 20);
   report.failures = failures;
   writeFileSync(join(OUT, 'check.json'), JSON.stringify(report, null, 2) + '\n');
