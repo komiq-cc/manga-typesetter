@@ -22,8 +22,9 @@
 //!
 //! - Glyphs cannot undo each other. Summed as one shape, a glyph whose
 //!   contours run clockwise cancels a neighbour whose contours run the other
-//!   way wherever the two overlap. A part is filled by the non-zero rule by
-//!   itself, so which way a font winds its contours does not matter.
+//!   way wherever the two overlap. A part takes the absolute value of its signed-area
+//!   sum, clamped to one. Reversing all its contours preserves coverage;
+//!   oppositely wound contours within one part can still cancel.
 //! - Where two glyphs both cover part of a pixel, the sum of their coverage
 //!   counts what they share twice. How much they share is estimated from
 //!   which way each one's edge faces there (`unite`): nothing for two edges
@@ -31,7 +32,11 @@
 //!   the smaller for two that face the same way (one inside the other), and
 //!   `a * b` for two that cross at a right angle (the bands of two letters).
 //!   Any one fixed rule is wrong for two of those three; `parity/raster.mjs`
-//!   has the measurements of each.
+//!   has the measurements of each. At every band width, retain the sum of
+//!   incoming slopes. Coverage at or below 1e-6 contributes nothing; incoming
+//!   slopes with squared length below 1e-8 (length below 1e-4) are unknown.
+//!   Three or more parts sharing a pixel still have approximate coverage and
+//!   can move that coverage when reordered (RULES.md rule 12).
 //!
 //! # A part that has been moved, and which way is out
 //!
@@ -60,8 +65,8 @@
 //! ```
 //!
 //! A glyph wound anticlockwise is grown by its `R` alone and one wound
-//! clockwise by its `L`; a glyph that mixes them is grown by each where it
-//! applies; and where an inward offset turns inside out (a stem or a hole
+//! clockwise by its `L`; for mixed contours the code selects positive `R`
+//! and negative `L` from their pixel-integrated signed sums, which can cancel; and where an inward offset turns inside out (a stem or a hole
 //! thinner than the pen) it shows up with the other sign, inside what is
 //! grown anyway, which is how a hole thinner than the pen comes out covered.
 //! A ring, the band of a stroke, is `grown - shrunk`.
@@ -77,7 +82,12 @@
 //! rasteriser, zeno's and vello_cpu's, are kept behind the `raster-compare`
 //! feature so the comparison in P5A-REPORT.md can be run again.
 
+use super::budget;
 use super::geom::{IBox, Polys};
+use crate::Error;
+
+const COVERAGE_EPSILON: f32 = 1e-6;
+const SLOPE_SQUARED_EPSILON: f32 = 1e-8;
 
 /// Rows the compositor works through at a time. A band of rows this tall of
 /// a 1200 px wide block is 150 KB of coverage and 600 KB of colour, which
@@ -190,13 +200,13 @@ pub trait Coverage {
         out: &mut [f32],
         stride: usize,
         spans: &mut [(u32, u32)],
-    );
+    ) -> Result<(), Error>;
 }
 
 /// Turns shapes into coverage.
 pub trait Rasterizer {
     /// The union of `parts`; only what lies inside `bx` is wanted.
-    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage>;
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Result<Box<dyn Coverage>, Error>;
 }
 
 /// Exact-area coverage by signed-area accumulation.
@@ -215,17 +225,18 @@ struct Edge {
 
 /// The edges of one shape, sorted into the strips they cross.
 struct Edges {
-    edges: Vec<Edge>,
+    edges: budget::Buffer<Edge>,
     /// `bucket[k]..bucket[k + 1]` indexes `order` for the box's `k`th strip.
-    bucket: Vec<u32>,
-    order: Vec<u32>,
+    bucket: budget::Buffer<u32>,
+    order: budget::Buffer<u32>,
 }
 
 impl Edges {
-    fn new(polys: &Polys, bx: IBox) -> Self {
+    fn new(polys: &Polys, bx: IBox) -> Result<Self, Error> {
         let (ox, oy) = (f64::from(bx.x0), f64::from(bx.y0));
         let height = bx.height() as f64;
-        let mut edges = Vec::with_capacity(polys.pts.len());
+        let mut edges = budget::Buffer::new();
+        budget::reserve(&mut edges, polys.pts.len())?;
         for c in polys.contours() {
             for i in 0..c.len() {
                 let (p, q) = (c[i], c[(i + 1) % c.len()]);
@@ -243,7 +254,7 @@ impl Edges {
                 if e.y1 <= 0.0 || e.y0 >= height {
                     continue;
                 }
-                edges.push(e);
+                budget::push(&mut edges, e)?;
             }
         }
         // Counting sort of the edges into the strips they cross.
@@ -259,18 +270,19 @@ impl Edges {
             let b = (strip_of(bx.y0 + bottom) - first_strip) as usize;
             (a, b)
         };
-        let mut bucket = vec![0u32; strips + 1];
+        let mut bucket = budget::filled(strips + 1, 0u32)?;
         for e in &edges {
             let (a, b) = strip_range(e);
             for k in a..=b {
-                bucket[k + 1] += 1;
+                bucket[k + 1] = bucket[k + 1].checked_add(1).ok_or(Error::BadSpec)?;
             }
         }
         for k in 0..strips {
-            bucket[k + 1] += bucket[k];
+            bucket[k + 1] = bucket[k + 1].checked_add(bucket[k]).ok_or(Error::BadSpec)?;
         }
-        let mut fill = bucket.clone();
-        let mut order = vec![0u32; bucket[strips] as usize];
+        let mut fill = budget::filled(bucket.len(), 0u32)?;
+        fill.copy_from_slice(&bucket);
+        let mut order = budget::filled(bucket[strips] as usize, 0u32)?;
         for (i, e) in edges.iter().enumerate() {
             let (a, b) = strip_range(e);
             for k in a..=b {
@@ -278,11 +290,11 @@ impl Edges {
                 fill[k] += 1;
             }
         }
-        Self {
+        Ok(Self {
             edges,
             bucket,
             order,
-        }
+        })
     }
 
     /// Adds, to every pixel of rows `row_lo..row_hi` (counted from the box's
@@ -407,52 +419,63 @@ struct Piece {
 }
 
 struct ExactCoverage {
-    pieces: Vec<Piece>,
+    pieces: budget::Buffer<Piece>,
     bx: IBox,
     scratch: Scratch,
     /// One piece's coverage over one strip: a row above, the strip's rows, a
     /// row below, each with a spare column at both ends, so that every pixel
     /// of the strip has its four neighbours.
-    cov: Vec<f32>,
+    cov: budget::Buffer<f32>,
     /// The columns of each of those rows that can be non-zero.
-    rows: Vec<(u32, u32)>,
-    /// Which way the edge runs in each pixel of the layer's strip that one
-    /// piece covers partly so far: the slope of that piece's coverage,
-    /// across and down. Zero where no piece or more than one has been.
-    slope: [Vec<f32>; 2],
+    rows: budget::Buffer<(u32, u32)>,
+    /// Sum of the edge directions of the parts united at each pixel,
+    /// across and down. This retains a direction beyond the second part.
+    slope: [budget::Buffer<f32>; 2],
 }
 
 /// The two running sums of a piece being rasterised, and their spans.
 struct Scratch {
-    sums: [Vec<f32>; 2],
-    spans: [Vec<(u32, u32)>; 2],
+    sums: [budget::Buffer<f32>; 2],
+    spans: [budget::Buffer<(u32, u32)>; 2],
 }
 
 impl Rasterizer for Exact {
-    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
-        let pieces = parts
-            .iter()
-            .filter_map(|part| {
-                let pbx = part.pixel_box()?.intersect(&bx);
-                (!pbx.is_empty()).then(|| Piece {
-                    bx: pbx,
-                    right: Edges::new(&part.right, pbx),
-                    left: part.left.as_ref().map(|l| Edges::new(l, pbx)),
-                    ring: part.ring,
-                })
-            })
-            .collect();
-        Box::new(ExactCoverage {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Result<Box<dyn Coverage>, Error> {
+        let mut pieces = budget::Buffer::new();
+        // Keep a one-pixel coverage halo even where the surface clips ink.
+        // The union reads the part's neighbours, not transparent tile edges.
+        let halo = IBox {
+            x0: bx.x0 - 1,
+            y0: bx.y0 - 1,
+            x1: bx.x1 + 1,
+            y1: bx.y1 + 1,
+        };
+        for part in parts {
+            let Some(pbx) = part.pixel_box().map(|p| p.intersect(&halo)) else {
+                continue;
+            };
+            if pbx.is_empty() {
+                continue;
+            }
+            let piece = Piece {
+                bx: pbx,
+                right: Edges::new(&part.right, pbx)?,
+                left: part.left.as_ref().map(|l| Edges::new(l, pbx)).transpose()?,
+                ring: part.ring,
+            };
+            budget::push(&mut pieces, piece)?;
+        }
+        Ok(budget::boxed(ExactCoverage {
             pieces,
             bx,
             scratch: Scratch {
-                sums: [Vec::new(), Vec::new()],
-                spans: [Vec::new(), Vec::new()],
+                sums: [budget::Buffer::new(), budget::Buffer::new()],
+                spans: [budget::Buffer::new(), budget::Buffer::new()],
             },
-            cov: Vec::new(),
-            rows: Vec::new(),
-            slope: [Vec::new(), Vec::new()],
-        })
+            cov: budget::Buffer::new(),
+            rows: budget::Buffer::new(),
+            slope: [budget::Buffer::new(), budget::Buffer::new()],
+        })?)
     }
 }
 
@@ -472,7 +495,7 @@ impl Piece {
         scratch: &mut Scratch,
         dest: &mut [f32],
         spans: &mut [(u32, u32)],
-    ) {
+    ) -> Result<(), Error> {
         let rows = row_hi - row_lo;
         let width = self.bx.width();
         let stride = width + 2;
@@ -482,9 +505,9 @@ impl Piece {
             let Some(edges) = edges else { continue };
             let (sums, side_spans) = (&mut scratch.sums[side], &mut scratch.spans[side]);
             sums.clear();
-            sums.resize(stride * rows, 0.0);
+            budget::resize(sums, stride * rows, 0.0)?;
             side_spans.clear();
-            side_spans.resize(rows, (u32::MAX, 0));
+            budget::resize(side_spans, rows, (u32::MAX, 0))?;
             edges.accumulate(k, row_lo, row_hi, width, sums, stride, side_spans);
         }
         for r in 0..rows {
@@ -531,6 +554,7 @@ impl Piece {
                 };
             }
         }
+        Ok(())
     }
 }
 
@@ -542,7 +566,7 @@ impl Coverage for ExactCoverage {
         out: &mut [f32],
         stride: usize,
         spans: &mut [(u32, u32)],
-    ) {
+    ) -> Result<(), Error> {
         debug_assert!(stride >= self.bx.width() + 2);
         debug_assert_eq!(strip_of(y0), strip_of(y1 - 1));
         let rows = (y1 - y0) as usize;
@@ -559,7 +583,7 @@ impl Coverage for ExactCoverage {
         } = self;
         for s in slope.iter_mut() {
             s.clear();
-            s.resize(stride * rows, 0.0);
+            budget::resize(s, stride * rows, 0.0)?;
         }
         let [slope_x, slope_y] = slope;
         for piece in pieces.iter() {
@@ -573,9 +597,9 @@ impl Coverage for ExactCoverage {
             // The piece's coverage of these rows, and of the row above and
             // the row below them (in the neighbouring strips, or nothing).
             cov.clear();
-            cov.resize(cs * (prows + 2), 0.0);
+            budget::resize(cov, cs * (prows + 2), 0.0)?;
             cov_rows.clear();
-            cov_rows.resize(prows + 2, (0, 0));
+            budget::resize(cov_rows, prows + 2, (0, 0))?;
             if row_lo > 0 {
                 piece.cover(
                     row_lo - 1,
@@ -583,7 +607,7 @@ impl Coverage for ExactCoverage {
                     scratch,
                     &mut cov[..cs],
                     &mut cov_rows[..1],
-                );
+                )?;
             }
             piece.cover(
                 row_lo,
@@ -591,7 +615,7 @@ impl Coverage for ExactCoverage {
                 scratch,
                 &mut cov[cs..cs * (prows + 1)],
                 &mut cov_rows[1..prows + 1],
-            );
+            )?;
             if row_hi < piece.bx.height() {
                 piece.cover(
                     row_hi,
@@ -599,29 +623,34 @@ impl Coverage for ExactCoverage {
                     scratch,
                     &mut cov[cs * (prows + 1)..],
                     &mut cov_rows[prows + 1..],
-                );
+                )?;
             }
             // Where this piece's columns start in the layer's rows.
-            let dx = (piece.bx.x0 - bx.x0) as usize;
+            let dx = piece.bx.x0 - bx.x0;
             let first_row = (py0 - y0) as usize;
             for r in 0..prows {
-                let (start, end) = (cov_rows[r + 1].0 as usize, cov_rows[r + 1].1 as usize);
+                let start = (cov_rows[r + 1].0 as i32).max(-dx) as usize;
+                let end = (cov_rows[r + 1].1 as i32)
+                    .min(bx.width() as i32 - dx)
+                    .max(0) as usize;
                 if start >= end {
                     continue;
                 }
                 let row = first_row + r;
                 let span = &mut spans[row];
                 *span = (
-                    span.0.min((dx + start) as u32),
-                    span.1.max((dx + end) as u32),
+                    span.0.min((dx + start as i32) as u32),
+                    span.1.max((dx + end as i32) as u32),
                 );
                 let base = (r + 1) * cs + 1;
                 for x in start..end {
                     let c = cov[base + x];
-                    if c <= 0.0 {
+                    // One millionth of a pixel (0.000255 alpha levels):
+                    // running-sum residue must not contribute a direction.
+                    if c <= COVERAGE_EPSILON {
                         continue;
                     }
-                    let i = row * stride + dx + x;
+                    let i = row * stride + (dx + x as i32) as usize;
                     let o = out[i];
                     if o >= 1.0 {
                         continue;
@@ -634,6 +663,13 @@ impl Coverage for ExactCoverage {
                     // from the piece's edge into the piece.
                     let gx = cov[base + x + 1] - cov[base + x - 1];
                     let gy = cov[base + x + cs] - cov[base + x - cs];
+                    // Discard incoming slopes shorter than 1e-4 once, before
+                    // either storing or uniting them: rounding noise is unknown.
+                    let (gx, gy) = if gx * gx + gy * gy < SLOPE_SQUARED_EPSILON {
+                        (0.0, 0.0)
+                    } else {
+                        (gx, gy)
+                    };
                     if o <= 0.0 {
                         out[i] = c;
                         slope_x[i] = gx;
@@ -641,9 +677,9 @@ impl Coverage for ExactCoverage {
                         continue;
                     }
                     out[i] = unite(o, c, slope_x[i], slope_y[i], gx, gy);
-                    // More than one piece is here now: no one direction.
-                    slope_x[i] = 0.0;
-                    slope_y[i] = 0.0;
+                    // One rule at every width: retain the sum of directions.
+                    slope_x[i] += gx;
+                    slope_y[i] += gy;
                 }
             }
         }
@@ -652,6 +688,7 @@ impl Coverage for ExactCoverage {
                 *s = (0, 0);
             }
         }
+        Ok(())
     }
 }
 
@@ -667,7 +704,7 @@ impl Coverage for ExactCoverage {
 /// faces the same way, and where the bands of two letters cross the edges
 /// are across one another. So the shared part is taken between those three
 /// by the cosine of the angle between the slopes. A slope of zero (unknown,
-/// or more than one part there already) counts as a right angle.
+/// or opposing directions cancelling) counts as a right angle.
 #[inline]
 fn unite(a: f32, b: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     let norm = ((ax * ax + ay * ay) * (bx * bx + by * by)).sqrt();
@@ -695,7 +732,7 @@ mod tests {
     }
 
     fn render_parts(parts: &[Part], bx: IBox) -> Vec<f32> {
-        let mut cov = Exact.prepare(parts, bx);
+        let mut cov = Exact.prepare(parts, bx).unwrap();
         let (w, h) = (bx.width(), bx.height());
         let stride = w + 2;
         let mut all = vec![0.0f32; w * h];
@@ -705,7 +742,7 @@ mod tests {
             let rows = (y_end - y) as usize;
             let mut out = vec![0.0f32; stride * rows];
             let mut spans = vec![(0u32, 0u32); rows];
-            cov.render(y, y_end, &mut out, stride, &mut spans);
+            cov.render(y, y_end, &mut out, stride, &mut spans).unwrap();
             for r in 0..rows {
                 let (a, b) = spans[r];
                 for x in a as usize..b as usize {

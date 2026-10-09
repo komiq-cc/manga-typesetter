@@ -11,6 +11,7 @@
 //! `boldAdvance` rule. So the ink lands where the measurement says, and a
 //! letter the face lacks is drawn from the font its part names.
 
+use super::budget;
 use super::job::Align;
 use crate::engine::{Engine, Face, FontId, ShapeMode, Synth};
 use crate::Error;
@@ -31,7 +32,7 @@ pub struct Placed {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShapedRun {
-    pub glyphs: Vec<Placed>,
+    pub glyphs: budget::Buffer<Placed>,
     /// Where the pen ends: the sum of the advances, plus the letter spacing
     /// once per cluster. This is the width alignment uses.
     pub advance: f64,
@@ -60,12 +61,16 @@ pub fn shape_run(
     text: &str,
     letter_spacing: f64,
 ) -> Result<ShapedRun, Error> {
+    if text.len() > budget::MAX_RUN_BYTES {
+        return Err(Error::BadSpec);
+    }
     let mode = ShapeMode {
         no_ligatures: letter_spacing != 0.0,
         ..ShapeMode::MEASURE
     };
     engine.measure_line(face, text, mode)?;
-    let mut glyphs = Vec::with_capacity(engine.line.len());
+    let mut glyphs = budget::Buffer::new();
+    super::budget::reserve(&mut glyphs, engine.line.len())?;
     let mut origin = 0.0f64;
     let mut gaps = 0u32;
     let mut at = 0usize;
@@ -75,17 +80,20 @@ pub fn shape_run(
         let extra = engine.bold_extra(part.synth, face.size);
         let mut pen = 0i64;
         for (n, g) in engine.line[part.glyphs.clone()].iter().enumerate() {
-            glyphs.push(Placed {
-                font: part.font,
-                glyph: g.id,
-                x: origin
-                    + n as f64 * extra
-                    + (pen + i64::from(g.x_offset)) as f64 * scale
-                    + f64::from(gaps) * letter_spacing,
-                y: -f64::from(g.y_offset) * scale,
-                size: face.size,
-                synth: part.synth,
-            });
+            budget::push(
+                &mut glyphs,
+                Placed {
+                    font: part.font,
+                    glyph: g.id,
+                    x: origin
+                        + n as f64 * extra
+                        + (pen + i64::from(g.x_offset)) as f64 * scale
+                        + f64::from(gaps) * letter_spacing,
+                    y: -f64::from(g.y_offset) * scale,
+                    size: face.size,
+                    synth: part.synth,
+                },
+            )?;
             pen += i64::from(g.x_advance);
             at += 1;
             // The gap follows the last glyph of a cluster. Clusters are
@@ -134,6 +142,20 @@ mod tests {
         let mut e = Engine::new();
         let id = e.add_font_bytes(std::fs::read(path).unwrap(), 0).unwrap();
         (e, id)
+    }
+
+    #[test]
+    fn the_run_limit_precedes_shaping_allocations() {
+        let (mut e, font) = engine_with("DejaVuSans.ttf");
+        let before = e.line.capacity();
+        assert!(shape_run(
+            &mut e,
+            Face::new(font, 40.),
+            &"I".repeat(budget::MAX_RUN_BYTES + 1),
+            0.
+        )
+        .is_err());
+        assert_eq!(e.line.capacity(), before);
     }
 
     #[test]

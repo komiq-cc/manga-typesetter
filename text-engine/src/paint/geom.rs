@@ -4,6 +4,7 @@
 //! and coverage is wanted to a few thousandths of one, which is more than an
 //! `f32` holds.
 
+use super::budget;
 /// Whether `v` is a number above zero. Written as a function because the
 /// painter asks it of every length it is given, and "not above zero" has to
 /// include a NaN: a job built in Rust, unlike a decoded one, could hold one.
@@ -163,8 +164,8 @@ impl IBox {
 /// point joins its first.
 #[derive(Clone, Debug, Default)]
 pub struct Polys {
-    pub pts: Vec<Pt>,
-    pub ends: Vec<usize>,
+    pub pts: budget::Buffer<Pt>,
+    pub ends: budget::Buffer<usize>,
 }
 
 impl Polys {
@@ -188,7 +189,9 @@ impl Polys {
         if self.pts.len() > self.open_from() && self.pts[self.pts.len() - 1] == p {
             return;
         }
-        self.pts.push(p);
+        // OutlinePen cannot return an error. A failed reserve latches the
+        // job budget; the painter checks it before using this outline.
+        let _ = super::budget::push(&mut self.pts, p);
     }
 
     /// Ends the contour under construction. One with fewer than two distinct
@@ -202,7 +205,7 @@ impl Polys {
             self.pts.truncate(from);
             return;
         }
-        self.ends.push(self.pts.len());
+        let _ = super::budget::push(&mut self.ends, self.pts.len());
     }
 
     pub fn contours(&self) -> impl Iterator<Item = &[Pt]> + '_ {
@@ -216,16 +219,26 @@ impl Polys {
 
     pub fn append(&mut self, other: &Polys) {
         let base = self.pts.len();
+        if super::budget::reserve(&mut self.pts, other.pts.len()).is_err()
+            || super::budget::reserve(&mut self.ends, other.ends.len()).is_err()
+        {
+            return;
+        }
         self.pts.extend_from_slice(&other.pts);
         self.ends.extend(other.ends.iter().map(|e| e + base));
     }
 
     /// The same contours under `m`.
     pub fn map(&self, m: &Affine) -> Polys {
-        Polys {
-            pts: self.pts.iter().map(|&p| m.apply(p)).collect(),
-            ends: self.ends.clone(),
+        let mut out = Polys::default();
+        if super::budget::reserve(&mut out.pts, self.pts.len()).is_err()
+            || super::budget::reserve(&mut out.ends, self.ends.len()).is_err()
+        {
+            return out;
         }
+        out.pts.extend(self.pts.iter().map(|&p| m.apply(p)));
+        out.ends.extend_from_slice(&self.ends);
+        out
     }
 
     /// `(x_min, y_min, x_max, y_max)` of every point, or `None` when empty.
@@ -285,7 +298,7 @@ mod tests {
         p.close();
         p.push(Pt::new(5.0, 5.0));
         p.close();
-        assert_eq!(p.ends, vec![3]);
+        assert_eq!(&*p.ends, &vec![3]);
         assert_eq!(p.area2(), 1.0);
     }
 }

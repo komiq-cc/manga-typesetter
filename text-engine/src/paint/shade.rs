@@ -2,6 +2,7 @@
 //! repeated tile. A [`Shader`] answers one question, the premultiplied
 //! colour at a device pixel's centre.
 
+use super::budget;
 use super::geom::{positive, Affine, Pt};
 use super::job::{Fill, Rgba, Stop, Tile};
 
@@ -24,24 +25,32 @@ fn unit(c: Rgba) -> [f32; 4] {
 /// what CSS gradients do not): halfway from opaque red to transparent blue is
 /// half-transparent purple, not half-transparent red.
 pub struct Ramp {
-    stops: Vec<(f64, [f32; 4])>,
+    stops: budget::Buffer<(f64, [f32; 4], usize)>,
 }
 
 impl Ramp {
     pub fn new(stops: &[Stop]) -> Self {
-        let mut stops: Vec<(f64, [f32; 4])> = stops
-            .iter()
-            .map(|s| (s.pos.clamp(0.0, 1.0), unit(s.color)))
-            .collect();
-        // Stable, so stops at one position keep their given order.
-        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut sorted = budget::Buffer::new();
+        if super::budget::reserve(&mut sorted, stops.len()).is_err() {
+            return Self { stops: sorted };
+        }
+        sorted.extend(
+            stops
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.pos.clamp(0.0, 1.0), unit(s.color), i)),
+        );
+        // The index preserves equal-position order without stable sort's
+        // hidden, infallible scratch allocation.
+        sorted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+        let stops = sorted;
         Self { stops }
     }
 
     /// The premultiplied colour at `t`. Outside the first and last stop the
     /// end colours carry on; a gradient without stops paints nothing.
     pub fn at(&self, t: f64) -> Premul {
-        let Some(&(first_pos, first)) = self.stops.first() else {
+        let Some(&(first_pos, first, _)) = self.stops.first() else {
             return [0.0; 4];
         };
         if t <= first_pos {
@@ -52,8 +61,8 @@ impl Ramp {
         let Some(i) = self.stops.iter().position(|s| t < s.0) else {
             return premul(self.stops[self.stops.len() - 1].1);
         };
-        let (p0, c0) = self.stops[i - 1];
-        let (p1, c1) = self.stops[i];
+        let (p0, c0, _) = self.stops[i - 1];
+        let (p1, c1, _) = self.stops[i];
         // `p0 <= t < p1`, so the span is positive.
         let f = ((t - p0) / (p1 - p0)) as f32;
         premul([

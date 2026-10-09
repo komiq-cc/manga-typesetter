@@ -392,6 +392,11 @@ apart. The rule is pinned by unit tests on the fixture fonts.
 - Each part is shaped by itself with its own font: no kerning across a change
   of font. `advance`, `lineInk`, `glyphInk`, `wrapPlain` and `missing` all go
   through the same parts; `missing` reports what no font of the list has.
+- Whoever has to SAY which font drew a stretch (a PSD type layer's runs) asks
+  for those parts (`Engine::line_fonts`, `mt_line_fonts`; `lineParts` on the
+  adapter) and does not work it out again from what each font covers: "the
+  font the stretch before it is in" cannot be read off a list of missing
+  letters, and a second reckoning cuts inside a cluster.
 - With no list, or when the face has every letter, there is one part and the
   numbers are bit for bit what they were (the fast path shapes with the face
   first and looks further only if a `.notdef` came out).
@@ -545,6 +550,154 @@ Where the rule stops:
   for is then drawn from the loaded font's first face if that has it, and is
   said to be unread if not. While a face of the loaded font is still being
   decoded, the letter waits.
+
+## 12. Signed-area painting and refusals
+
+The painter accumulates signed area within each glyph, then unites glyphs.
+It does not integrate the non-zero winding rule within a pixel. Oppositely
+wound pieces of one glyph can cancel inside a pixel even when they do not
+overlap. Two rectangles ending at x=2.3 and starting at x=2.5 cover 0.8 of
+column 2 together. The painter reads 0.2: 51 alpha levels instead of 204,
+an error of 153 levels [M, P5c]. An L with a reversed square in its notch
+reads 0.740 instead of about 0.838 at (4,4), and 0.600 instead of about
+0.797 at (4,6): errors of 25 and 50 levels [M, 64x reference].
+
+An exact per-row winding sweep was removed. It slowed ordinary French,
+Japanese and Korean glyphs by 3–20 times. A separate-contour union candidate
+preserved their bytes but also exceeded the 1.05 timing gate [M, P5C-REPORT.md].
+Ordinary holes retain the original signed-area treatment. No weight behavior
+was changed; the application keeps text weight at zero on every OS.
+
+Parts are united by estimating their shared coverage from the cosine between
+coverage slopes: facing edges share `max(a+b-1, 0)`, parallel edges share
+`min(a,b)`, perpendicular or unknown directions share `a*b`; intermediate
+angles interpolate. The result is clamped to one. The direction is the sum
+of the retained slopes after each union, using one rule at every band width.
+Coverage at or below **1e-6** contributes neither coverage nor direction
+(0.000255 alpha levels). An incoming slope with **gx² + gy² < 1e-8**
+(length below **1e-4**) is counted as unknown once, before storing or uniting
+it. A zero slope, including cancellation of retained directions, is unknown
+and counts as perpendicular [I].
+
+Three or more parts sharing a pixel remain an approximation. Against 16x
+supersampled truth, the final errors below are maximum / pixels over 16 /
+mean over inked pixels. Bangers is size 34 with letters pulled 9.5 over each
+other; DejaVu `IIII` is size 40, four runs 0.2 job units apart [M, P5c].
+
+| band px | Bangers final truth error | IIII final truth error |
+|---|---|---|
+| 0.3 | 109 / 637 / 4.12 | 150 / 73 / 11.19 |
+| 0.6 | 100 / 891 / 5.05 | 97 / 12 / 2.89 |
+| 0.99 | 103 / 454 / 2.76 | 48 / 2 / 0.53 |
+| 1.5 | 79 / 190 / 1.38 | 8 / 0 / 0.22 |
+| 5 | 63 / 32 / 0.24 | 11 / 0 / 0.15 |
+
+At 0.6 px, the removed clear-after-union rule's `IIII` mean error was 15.32
+levels; the final rule reads 2.89. The 0.99/1.01-px geometry step still reaches
+46 levels on three Bangers pixels and three levels on `IIII`, compared with
+80 on 338 and 96 on 27 under the removed width exception. Cut hairline scenes
+now agree with larger-scene crops within one level (previously up to 56) [M].
+`four_hairline_parts_stay_near_supersampled_truth` checks mean error below four;
+`hairline_crop_ignores_rounding_noise_in_incoming_slopes` checks a crop delta
+at most one. Restoring the exception or removing the floor respectively
+fails those tests at 15.322 mean error and 55 levels [M, native mutations].
+
+The order of parts can move coverage where three or more share a pixel.
+The q4 hairline rows below measure all permutations: worst alpha delta /
+worst count over 16. I3/I4/I5 are `I` parts 0.2 apart; O4 is `OXVW` 3 apart,
+O5 is `OXVWA` 5 apart, A5 is `AVAVA` 9 apart [M, P5C-REPORT.md]. Text order
+is fixed in real jobs; agreement between permutations is not a truth test.
+
+| parts | DejaVu final order delta | Bangers final order delta |
+|---|---|---|
+| I3 | 21 / 53 | 21 / 1 |
+| I4 | 52 / 4 | 68 / 14 |
+| I5 | 42 / 5 | 92 / 24 |
+| O4 | 91 / 24 | 90 / 20 |
+| O5 | 85 / 36 | 85 / 18 |
+| A5 | 63 / 12 | 49 / 2 |
+
+The live painter-buffer cap is **1152 MiB** (`MAX_PAINT_BYTES`). The eleven
+review page/editor jobs peak at 1007.0 MiB (6554 English glyphs, four bands,
+scale 2); 1152 is the smallest 128-MiB step leaving at least a tenth of the
+limit spare, below 1536 MiB [M]. Growth checks the replacement while the old
+buffer is live; drop and owned-iterator drop refund its charge. Scene
+buffers are charged again to later calls. Decoded job vectors remain charged
+through the call. The raster's known RGBA bytes are checked before edges
+(job) or bands (Scene); per-glyph Part estimates were removed [I].
+Every paint run is capped at **262144 UTF-8 bytes** before decode copies,
+before any job run is shaped, and at the shaping entry point. Measurement
+APIs keep their existing behavior. Painter-buffer overflow, allocation
+failure, run-limit refusal, malformed jobs and surfaces above the existing
+**16384-pixel side / 67108864-pixel area** bounds return `BadSpec` (ABI -5);
+no partial raster is returned. Font bytes, the ABI input buffer and retained
+engine shaping buffers are outside the painter-buffer accounting [I].
+
+## 13. A variable font: which weight is drawn
+
+A font with a `wght` axis is one file and every weight. The app asks for two,
+regular and bold. The rule is in the adapter (`weightOnAxis`, `weighted` in
+src/lib/text-engine/rust.js); the engine makes the instance
+(`Engine::add_instance`, `mt_font_add_instance`), which is a font of its own
+from then on: advances (`HVAR`), outlines (`gvar`) and name are the
+instance's.
+
+- **Regular is weight 400 and bold is weight 700**, brought into the axis'
+  range. Not where the file's axes start: SF Compact starts at 1000 and
+  SF NS Mono at 294.67, and Chromium draws both at 400. [M: Chromium 155,
+  2026-10-09, the fonts of this Mac read in place.]
+- **Bold is the real instance, not the regular emboldened.** STIX Two Text,
+  20 letters at 100 px: 962.2 px at 400 and 1,047.3 px at 700 in the engine
+  and in Chromium for the installed font. [M] Kefa III: 936.2 and 1,018.8
+  against Chromium's 936.2 and 1,019.0. [M]
+- **This is NOT what Chromium does with a font the user loaded.** The app
+  hands a loaded file to the browser as `new FontFace(family, bytes)` with no
+  weight range, so the browser holds it for a 400 face, draws bold as the 400
+  instance emboldened by itself (962.2 px wide, 25,528 px of ink against
+  30,040 for the real 700) and never reaches the axis. [M] The engine draws
+  the real 700 for a loaded font as for an installed one. That is a choice:
+  one rule for both sources, and the font's own bold where it has one.
+- **A bold that the axis cannot reach is emboldened**: an axis that stops
+  under 600 is drawn at its heaviest and then synthesised, as CSS does. [I:
+  no font on this machine stops there.]
+- **A face in a bold slot is drawn at 700 whatever is asked**, as the
+  browser draws a face registered with `weight: 700`. [I]
+- **Only an axis on the CSS scale** (inside 1 to 1000, reaching 100) counts.
+  Skia.ttf, an old GX font, runs 0.48 to 3.2 and is drawn as its file starts.
+- **`ital` and `slnt` are not read.** An italic asked of a variable font
+  with no italic file is the upright sheared (rule 7), as before. No font on
+  this machine has either axis, so nothing could be measured. [not done]
+- **`opsz` is not set.** A browser sets the optical size to the font size;
+  the engine leaves the axis where the file starts it. SF Compact at 100 px,
+  weight 400: 975.8 px in Chromium, 1,074.4 px in the engine. [M] Only
+  Apple's hidden system fonts have the axis here.
+- **The name of an instance** is Adobe's rule for instances (Technical Note
+  5902): the named instance's own PostScript name if it states one, else the
+  font's prefix (name ID 25, else the family) and the instance's style name,
+  else the axis values spelled out. STIX Two Text at 700 is
+  `STIXTwoTextRoman-Bold`, Kefa III at 700 `KefaIII-Bold`. [M] CoreText
+  names the first one `STIXTwoText_Bold`. [M] Which of the two Photoshop
+  looks a font up by has not been seen; see text-engine/P8-REPORT.md.
+  An axis value in a name is the 16.16 number the file can hold, in the
+  fewest decimals that read back as that same number, with no zero before
+  the point and none after the last digit (`650`, `.5`, `-12.25`,
+  `650.00006`): two instances one step of 1/65536 apart have two names. A
+  name longer than 127 characters is not cut: it becomes the prefix, `-`, a
+  128-bit hash of the long name in 32 hex digits, and `...`. [I: the note's
+  format and limit were read; which hash it uses could not be, and FNV-1a is
+  this engine's choice. The name is distinct and stable, and is not
+  promised to be the one another implementation makes.]
+- **An axis that is not a range is not an axis.** A file whose `fvar` gives
+  an axis a minimum above its maximum, a default outside the two, or a
+  number that is not one, is a font without that axis: it is not listed,
+  and a place asked on it is an error (`mt_font_add_instance` answers 0).
+  So is a value that is not a finite number, on any axis. Nothing a font
+  file or a caller says reaches a panic: a panic in the wasm is the engine
+  gone for the session. [M: tests/instance.rs, with files damaged in the
+  test.]
+- A font with no `wght` axis, and every font at the weight its file starts
+  at, is the font as it was registered: no instance is made and no number
+  moves.
 
 ## What was looked at and found to be a property of a reference
 

@@ -7,9 +7,11 @@
 //! eight bits exactly once, at the end, so a pixel under three translucent
 //! layers is as accurate as one under a single layer.
 
+use super::budget;
 use super::geom::IBox;
 use super::raster::{strip_of, Coverage, STRIP_ROWS};
 use super::shade::Shader;
+use crate::Error;
 
 pub struct Layer<'a> {
     /// The device pixels the coverage was prepared for.
@@ -22,18 +24,24 @@ pub struct Layer<'a> {
 
 /// Paints `layers`, bottom first, over a transparent surface covering
 /// `surface`, and returns it as straight-alpha RGBA8, row by row from the top.
-pub fn compose(layers: &mut [Layer<'_>], surface: IBox) -> Vec<u8> {
+pub fn compose(layers: &mut [Layer<'_>], surface: IBox) -> Result<Vec<u8>, Error> {
     let (width, height) = (surface.width(), surface.height());
-    let mut out = vec![0u8; width * height * 4];
+    let mut out = budget::filled(
+        width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::BadSpec)?,
+        0u8,
+    )?;
     if width == 0 || height == 0 {
-        return out;
+        return Ok(out.into_vec());
     }
     let strip_rows = STRIP_ROWS as usize;
-    let mut colour = vec![0.0f32; width * strip_rows * 4];
+    let mut colour = budget::filled(width * strip_rows * 4, 0.0f32)?;
     // The columns of each row of the strip that any layer has painted.
-    let mut dirty = vec![(u32::MAX, 0u32); strip_rows];
-    let mut cov: Vec<f32> = Vec::new();
-    let mut spans = vec![(0u32, 0u32); strip_rows];
+    let mut dirty = budget::filled(strip_rows, (u32::MAX, 0u32))?;
+    let mut cov: budget::Buffer<f32> = budget::Buffer::new();
+    let mut spans = budget::filled(strip_rows, (0u32, 0u32))?;
 
     let mut y = surface.y0;
     while y < surface.y1 {
@@ -47,8 +55,8 @@ pub fn compose(layers: &mut [Layer<'_>], surface: IBox) -> Vec<u8> {
             let stride = layer.bx.width() + 2;
             let rows = (ly1 - ly0) as usize;
             cov.clear();
-            cov.resize(stride * rows, 0.0);
-            layer.cov.render(ly0, ly1, &mut cov, stride, &mut spans);
+            budget::resize(&mut cov, stride * rows, 0.0)?;
+            layer.cov.render(ly0, ly1, &mut cov, stride, &mut spans)?;
             let solid = layer.shader.solid().map(|c| c.map(|v| v * layer.alpha));
             for (r, &(a, b)) in spans[..rows].iter().enumerate() {
                 // The span in device columns, cut to the surface.
@@ -106,7 +114,7 @@ pub fn compose(layers: &mut [Layer<'_>], surface: IBox) -> Vec<u8> {
         }
         y = y_end;
     }
-    out
+    Ok(out.into_vec())
 }
 
 /// Source-over of the premultiplied colour `src` at coverage `c`.
@@ -157,7 +165,7 @@ mod tests {
     fn layer(polys: &Polys, bx: IBox, rgba: [f32; 4], alpha: f32) -> Layer<'static> {
         Layer {
             bx,
-            cov: Exact.prepare(&[Part::plain(polys.clone())], bx),
+            cov: Exact.prepare(&[Part::plain(polys.clone())], bx).unwrap(),
             shader: Shader::Solid(rgba),
             alpha,
         }
@@ -193,7 +201,7 @@ mod tests {
                 0.4,
             ),
         ];
-        let px = compose(&mut layers, surface);
+        let px = compose(&mut layers, surface).unwrap();
         let at = |x: usize, y: usize| &px[(y * 6 + x) * 4..(y * 6 + x) * 4 + 4];
         assert_eq!(at(0, 0), [255, 0, 0, 255]);
         assert_eq!(at(5, 39), [128, 0, 128, 255]);
@@ -218,7 +226,7 @@ mod tests {
             [0.2, 0.4, 0.6, 1.0],
             0.3,
         )];
-        let px = compose(&mut layers, surface);
+        let px = compose(&mut layers, surface).unwrap();
         assert_eq!(&px[0..4], &[51, 102, 153, 77]);
         // Straight colour is unchanged where a premultiplied 8-bit surface
         // would have had only 19 levels left to state it in.
@@ -240,6 +248,9 @@ mod tests {
             y1: 104,
         };
         let mut layers = vec![layer(&rect(100.0, 100.0, 104.0, 104.0), far, [1.0; 4], 1.0)];
-        assert!(compose(&mut layers, surface).iter().all(|&b| b == 0));
+        assert!(compose(&mut layers, surface)
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0));
     }
 }

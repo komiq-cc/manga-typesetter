@@ -42,10 +42,10 @@ fn paint(
     let mut scene = Scene::new(w, h, [scale, 0.0, 0.0, scale, 0.0, 0.0]).unwrap();
     scene.add_line(e, face, text, 40.0, 90.0).unwrap();
     if let Some(width) = stroke {
-        scene.stroke(width, WHITE);
+        scene.stroke(width, WHITE).unwrap();
     }
-    scene.fill(BLACK);
-    (scene.into_rgba(), w)
+    scene.fill(BLACK).unwrap();
+    (scene.into_rgba().unwrap(), w)
 }
 
 /// tiny-skia antialiases by 4x4 supersampling, so a sliver of ink narrower
@@ -160,8 +160,8 @@ fn overlapping_strokes_of_neighbours_are_laid_down_once() {
     let mut scene = Scene::new(300, 150, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).unwrap();
     scene.add_line(&mut e, face, "ll", 40.0, 90.0).unwrap();
     // A pen this wide makes the strokes of the two stems overlap.
-    scene.stroke(24.0, half);
-    let rgba = scene.into_rgba();
+    scene.stroke(24.0, half).unwrap();
+    let rgba = scene.into_rgba().unwrap();
     let max_alpha = rgba.chunks_exact(4).map(|p| p[3]).max().unwrap();
     assert!(max_alpha <= 129, "overlap doubled up: alpha {max_alpha}");
     assert!(max_alpha >= 127);
@@ -173,7 +173,7 @@ fn bad_surfaces_are_refused_and_empty_scenes_stay_transparent() {
     assert!(Scene::new(10, 100_000, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).is_err());
     assert!(Scene::new(10, 10, [f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]).is_err());
     let mut scene = Scene::new(8, 8, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).unwrap();
-    scene.stroke(4.0, WHITE);
-    scene.fill(BLACK);
-    assert!(scene.into_rgba().iter().all(|&b| b == 0));
+    scene.stroke(4.0, WHITE).unwrap();
+    scene.fill(BLACK).unwrap();
+    assert!(scene.into_rgba().unwrap().iter().all(|&b| b == 0));
 }

@@ -24,6 +24,12 @@ import { resolve } from 'node:path';
 //   TYPESET_BENCH_LAYOUT   a module whose default (or `layout`) export replaces
 //                          the store's placement as the layout under test.
 //
+// The cases run twice: under the browser engine (this lane's canvas), which is
+// the run the table, the approvals and `report.json`'s `cases` have always
+// been, and under the Rust text engine, whose run is printed beside it with
+// the differences between the two listed. The Rust run needs the wasm
+// (`npm run build:engine`); without it this file fails and says so.
+//
 // The page pixels reach the store the way balloon-wiring.test.js hands them
 // over: `pagePixelsFor` is the one function replaced, and it answers with the
 // page the runner drew for the case being run. Balloon detection itself is the
@@ -69,21 +75,36 @@ function summary(results, layoutName) {
 
 describe('the lettering benchmark', () => {
   let results;
+  let rust;
   beforeAll(async () => {
     const layout = await layoutUnderTest();
-    results = await bench.runBench(CASES, {
-      layout: layout.fn,
-      setPixels: (img) => {
-        pixels = img;
-      },
-      approved: bench.readApproved(),
-      keepArt: !!OUT,
-    });
+    const run = (engine) =>
+      bench.runBench(CASES, {
+        engine,
+        layout: layout.fn,
+        setPixels: (img) => {
+          pixels = img;
+        },
+        // The approved layouts are the browser engine's.
+        approved: engine === 'browser' ? bench.readApproved() : {},
+        keepArt: !!OUT,
+      });
+    results = await run('browser');
+    rust = await run('rust');
     pixels = null;
     console.log(`${bench.benchTable(results)}\n\n${summary(results, layout.name)}`);
+    const differences = bench.compareEngines(results, rust);
+    console.log(
+      `the same cases under both engines (browser | rust):\n${bench.enginesTable(results, rust)}\n\n` +
+        `${differences.length} of ${results.length} cases differ${differences.length ? `:\n${bench.enginesDifferences(results, rust)}` : ''}`,
+    );
     if (OUT) {
       const dir = resolve(OUT);
-      const files = [bench.writeReport(results, dir, { layout: layout.name }), ...bench.writeContactSheets(results, dir)];
+      const files = [
+        bench.writeReport(results, dir, { layout: layout.name, rust: { cases: rust }, differences }),
+        ...bench.writeContactSheets(results, dir),
+        ...bench.writeContactSheets(rust, dir, '.rust'),
+      ];
       console.log(`wrote:\n  ${files.join('\n  ')}`);
     }
     if (APPROVE) {
@@ -92,6 +113,47 @@ describe('the lettering benchmark', () => {
       console.log(`approved: ${bench.approve(results, ids).join(' ') || 'nothing'}`);
       if (unknown.length) console.log(`no such case: ${unknown.join(' ')}`);
     }
+  });
+
+  it('runs every case under the Rust engine too, and places a box with lines in it', () => {
+    expect(rust.map((r) => r.id)).toEqual(CASES.map((c) => c.id));
+    for (const r of rust) {
+      const { x, y, w, h, size, lines } = r.layout;
+      for (const v of [x, y, w, h, size]) expect(Number.isFinite(v), `${r.id}: ${v}`).toBe(true);
+      expect(w, r.id).toBeGreaterThan(0);
+      expect(h, r.id).toBeGreaterThan(0);
+      expect(lines.join(''), r.id).not.toBe('');
+      expect(Number.isFinite(r.metrics.boxOverflow), r.id).toBe(true);
+      // The exporter, on the same engine, draws the lines the layout made.
+      expect(r.metrics.renderMatches, r.id).toBe(true);
+      // Nothing of the Rust run is held against the browser's approvals.
+      expect(r.approval.status, r.id).toBe('new');
+    }
+  });
+
+  it('lists a case as different exactly when its layout or its ink is', () => {
+    const differ = bench.compareEngines(results, rust);
+    const ids = new Set(differ.map((d) => d.id));
+    for (const r of results) {
+      const other = rust.find((x) => x.id === r.id);
+      const same = JSON.stringify(r.layout) === JSON.stringify(other.layout);
+      if (!same) expect(ids.has(r.id), r.id).toBe(true);
+      if (!ids.has(r.id)) expect(same, r.id).toBe(true);
+    }
+    // A run compared with itself differs nowhere.
+    expect(bench.compareEngines(results, results)).toEqual([]);
+    expect(bench.enginesTable(results, rust).split('\n')).toHaveLength(results.length + 1);
+  });
+
+  it('leaves the browser engine installed, and its results what they were', async () => {
+    const seam = await import('./text-engine/index.js');
+    expect(seam.textEngine()?.id).toBe('browser');
+    expect(seam.glyphPainter().engine).toBeUndefined();
+    // The first case again, after the Rust run: the same layout as before it.
+    const again = await bench.runBench(CASES.slice(0, 1), { setPixels: (img) => (pixels = img), approved: {} });
+    pixels = null;
+    expect(again[0].layout).toEqual(results[0].layout);
+    expect(again[0].metrics).toEqual(results[0].metrics);
   });
 
   it('runs every case, and places a box with lines in it', () => {

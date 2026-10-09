@@ -247,6 +247,21 @@ repeat byte for byte; `ref-cr` repeats its numbers and all but about one
 picture in two thousand, which differ by a fraction of a percent of coverage
 (its glyph rasteriser is on the GPU).
 
+## One engine on two hosts
+
+```
+node scripts/text-port/same-pixels.mjs <runA> <runB> [--data <dir>]    # e.g. new/r4 new/r4-wk
+```
+
+Two `new` runs of one tree, taken on different hosts (node, Chromium, Safari),
+must be the same pictures. PNG bytes cannot show it, since each host has its
+own encoder, so this decodes both runs and compares pixel for pixel. A picture
+whose style asks the host's canvas for something (a shadow, a blur, a motion
+blur, a pattern tile, a clip mask, the PSD layer path) is counted and may
+differ; every other picture is the engine's own pixels, and one that differs
+makes the exit code 1. Measured on tree `e829744`: 3,558 of 3,558 equal in
+Chromium and in Safari against node; 32 of the 174 with a host step.
+
 ## Comparing
 
 `node scripts/text-port/compare.mjs <runA> <runB> [--out <dir>] [--gates <file>]`
@@ -288,3 +303,23 @@ worst first.
 - No host invents a number. No silent skip, no silent fallback font.
 - Real chapters are only ever read from copies under `$TP_DATA/chapters/`.
 - Nothing under `$TP_DATA` is committed.
+
+## The P8 audit: which browser text calls are left
+
+`p8-audit.mjs` loads the app itself in a headless Chromium and counts every
+call to `measureText`, `fillText`, `strokeText`, `document.fonts.load`,
+`.check` and `.ready`, `new FontFace`, and `Range.getClientRects` and
+`getBoundingClientRect`, by the line of the app that made it, through one
+acted-out session: a chapter opened, pages turned, a box selected, moved,
+resized, restyled in the Inspector, fitted, a page auto-typeset, and the PNG,
+PSD and `.mtchapter` exports. Once with `textEngine: 'browser'` and once with
+`'rust'`; then, engine on, it writes PSDs of untouched pages and reads them
+back against what the painter was handed.
+
+```sh
+node scripts/text-port/p8-audit.mjs --data <tp-data>   # -> <tp-data>/reports/p8/audit.md
+```
+
+It starts its own Vite (port 5204) and Chromium (DevTools port 9382) and
+stops both. The head of the file says what a plain browser makes it stand in
+for (the library on disk, system fonts) and that typing is not acted out.
