@@ -29,7 +29,7 @@
   } from './store.svelte.js';
   import { stripDragYBounds } from './editor/strip.js';
 
-  import { untrack } from 'svelte';
+  import { untrack, flushSync } from 'svelte';
   import { resizeBoxMath } from './resize-math.js';
   import { record } from './editor/history.svelte.js';
   import {
@@ -63,6 +63,7 @@
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
   import { boxCandidate, placeBlock, blockReach } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
+  import { isMacKeyboard } from './shortcuts.svelte.js';
   import { PICTURE_MAX_PX, PICTURE_DRAG_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
@@ -77,8 +78,10 @@
   import { reviewReach, reviewTitle } from './review-label.js';
   import { inkOverhang } from './paint-reach.js';
   import { screenPoint, flipPoint, flipDelta, mirrorTransform, mirrorCss } from './box-frame.js';
-  import { editLines, drawEditLines, rawOffset, domPoint, rawEdit } from './edit-lines.js';
+  import { editLines, drawEditLines, rawOffset, domPoint, rawEdit, stepChar } from './edit-lines.js';
   import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
+  import { typeModel } from './type-rows.js';
+  import { caretAt as rowCaret, selectionRects, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey } from './flat-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   // `shown` and `lazy` are read only while the Rust engine draws (see "the
@@ -102,14 +105,29 @@
   // starting, has failed, or has no font to measure in, the flag is false and
   // the box is the DOM it always was.
   //
-  // THE SEAM FOR TYPING: a box being typed into is still the browser's - the
-  // contenteditable below, exactly as it is with the switch off - so the
-  // picture stands down for it here, in `!editing`, and nowhere else. The task
-  // that draws the caret and the selection on the engine's glyphs removes
-  // those two words from `engineWanted`; everything downstream reads
-  // `engineShown`, which is that and "its paint did not throw".
+  // A BOX BEING TYPED INTO stays that picture (see "typing into the picture"
+  // below): it is painted again from every change, the caret and the selection
+  // are drawn over it from the painter's own layout (`typed`, type-rows.js),
+  // and the contenteditable holds the text unseen. `typed` is null for a box
+  // that cannot be typed into that way - a warped one, whose letters are
+  // where the mesh put them, and one the model has no answer for - and the
+  // picture then stands down for it here, in `engineWanted`, and nowhere
+  // else: it is the contenteditable it is with the switch off. Everything
+  // downstream reads `engineShown`, which is that and "its paint did not
+  // throw".
   const enginePaints = $derived(engineSwitch.painting);
-  const engineWanted = $derived(enginePaints && !editing);
+  const typed = $derived.by(() => {
+    if (!enginePaints || !editing || warped) return null;
+    // The lines and the faces are read through the measure's own memo, which
+    // is not reactive: this is what says they changed.
+    app.fontsVersion;
+    try {
+      return typeModel(box, composeText ?? text);
+    } catch {
+      return null;
+    }
+  });
+  const engineWanted = $derived(enginePaints && (!editing || typed !== null));
   // A PAINT THAT THREW. The picture is painted in an effect, and the painter
   // can refuse: the engine throws for a job it will not paint, and nothing
   // promises it never will. A box must not be left with the last picture it
@@ -128,6 +146,10 @@
   let paintFailed = $state(null);
   const failed = $derived(enginePaints && paintFailed !== null && wantedKey === paintFailed);
   const engineShown = $derived(engineWanted && !failed);
+  // The box is being typed into AS its picture. False with the switch off,
+  // and false the moment that picture's paint throws: the box is then its
+  // text in the document, in the same editable, with the same caret.
+  const typing = $derived(editing && engineShown && typed !== null);
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
@@ -161,6 +183,36 @@
     if (dragSoft) warpDrawn = '';
     dragSoft = false;
     resizing = false;
+  }
+  // WHILE KEYS ARE COMING INTO A BOX TYPED INTO AS ITS PICTURE every key is a
+  // repaint too, and it is given the same smaller budget for the same reason
+  // (`keying`, set by `keyed` from whatever changes the text of the box being
+  // typed into: an edit, an undo, what an IME has in hand). A box under that
+  // budget - a balloon at any zoom a display shows it whole at - is painted
+  // exactly as it was, the same bytes. A box over it is soft while it is
+  // typed into and is painted in full once, `KEY_SETTLE_MS` after the last
+  // key, and at once when the edit ends (`settleKeys`, from the editable's
+  // teardown, which also leaves no timer behind). The caret and the selection
+  // are drawn in page px from the rows, not from the picture, and do not move
+  // with any of it. Never set with the switch off.
+  const KEY_SETTLE_MS = 150;
+  let keying = $state(false);
+  let keySoft = false;
+  let keyTimer = null;
+  function keyed() {
+    if (!typing) return;
+    pictureEdit = true;
+    keying = true;
+    clearTimeout(keyTimer);
+    keyTimer = setTimeout(settleKeys, KEY_SETTLE_MS);
+  }
+  function settleKeys() {
+    clearTimeout(keyTimer);
+    keyTimer = null;
+    if (!keying) return;
+    if (keySoft) warpDrawn = '';
+    keySoft = false;
+    keying = false;
   }
   // Whether the box is near the viewport: null until the observer has said.
   //
@@ -583,7 +635,9 @@
         ? pictureKey({
             style: s,
             inkKey,
-            text,
+            // What an IME has in hand is in the picture while it is composed
+            // (`composeText`, null at any other time).
+            text: composeText ?? text,
             w: box.w,
             h: box.h,
             lines: shaped,
@@ -616,11 +670,15 @@
       warpGeom = paintWarpedBox(el, box, pg, z, tips);
       return;
     }
-    const budget = resizing ? PICTURE_DRAG_PX : PICTURE_MAX_PX;
-    const g = paintBoxPicture(el, box, pg, pictureRes, tips, budget);
+    const budget = resizing || keying ? PICTURE_DRAG_PX : PICTURE_MAX_PX;
+    // An IME's text is not the box's until the composition ends, so the box
+    // is painted with it standing in for its own.
+    const of = editing && composeText != null ? { ...box, text: composeText } : box;
+    const g = paintBoxPicture(el, of, pg, pictureRes, tips, budget);
     // Lower than asked for under the drag's budget: to be painted again when
-    // the drag settles (`settleResize`).
+    // the drag settles (`settleResize`), or the keys do (`settleKeys`).
     dragSoft = resizing && g.ss < pictureRes;
+    keySoft = keying && g.ss < pictureRes;
     warpGeom = { ...g, page: pageCorner(pageFrameEl) };
     keepReach(warpGeom);
   }
@@ -710,9 +768,11 @@
     const key = warpKey;
     const el = warpEl;
     const dragging = warpDragging;
-    // Read so that a resize settling runs this again (`settleResize`): the key
-    // is the same and only what was drawn for it has been forgotten.
+    // Read so that a resize settling runs this again (`settleResize`), and
+    // the keys settling (`settleKeys`): the key is the same and only what was
+    // drawn for it has been forgotten.
     resizing;
+    keying;
     if (!el) {
       // Warp switched off, or the box is going away: hand the pixels back and
       // forget what was drawn, so switching it on again paints the new canvas.
@@ -1069,7 +1129,7 @@
   // name needs (one on a plain div is not announced). Only then - typed into,
   // or with the switch off, the text is in the document and a name over it
   // would be read twice.
-  const spoken = $derived(engineShown && text ? text : null);
+  const spoken = $derived(engineShown && !editing && text ? text : null);
 
   // ---- what takes the pointer while the box is the engine's picture ----
   //
@@ -1087,7 +1147,7 @@
   // inside is on screen out there, and is pressed there. Not for a warped
   // box: its letters are where the mesh carried them, and it had no such
   // targets before either.
-  const hitsOn = $derived(engineShown && !warped);
+  const hitsOn = $derived(engineShown && !warped && !editing);
   const hitBlock = $derived.by(() => {
     if (!hitsOn || !shaped) return null;
     app.fontsVersion;
@@ -1164,8 +1224,10 @@
   // before its transform, which is the export's order. It used to sit on the
   // text alone, under the mask, so a mask cut the flipped text where the
   // unflipped text is cut on export, and the ink was not flipped at all.
-  // Not while typing: the caret gets the text the right way round.
-  const wrapMirror = $derived(mirror && !editing ? `transform:${mirror};` : '');
+  // Not while typing: the caret gets the text the right way round. Unless it
+  // is typed into as its picture (`typing`): the picture is the result, the
+  // flip included, and the caret and the selection are drawn in its frame.
+  const wrapMirror = $derived(mirror && (!editing || typing) ? `transform:${mirror};` : '');
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
@@ -1757,6 +1819,9 @@
   let editEl = null;
   let edSel = $state(null);
 
+  // Whether this edit has been a picture at any time: what the editable's
+  // teardown has to put back then, and with the switch off never true.
+  let pictureEdit = false;
   function editField(node) {
     let first = true;
     editEl = node;
@@ -1765,7 +1830,14 @@
       if (!sel.rangeCount || !node.contains(sel.focusNode)) return;
       const a = rawOffset(node, sel.anchorNode, sel.anchorOffset);
       const f = rawOffset(node, sel.focusNode, sel.focusOffset);
-      if (a != null && f != null) edSel = { a, f };
+      if (a == null || f == null) return;
+      // A selection the browser moved itself (a word step, a key it kept)
+      // starts again: no side of a wrap, no column kept (`edUp`, `goalX`).
+      if (typing && edSel && (edSel.a !== a || edSel.f !== f)) {
+        edUp = false;
+        goalX = null;
+      }
+      edSel = { a, f };
     };
     $effect(() => {
       document.addEventListener('selectionchange', onSel);
@@ -1773,6 +1845,16 @@
         document.removeEventListener('selectionchange', onSel);
         if (editEl === node) editEl = null;
         edSel = null;
+        if (!pictureEdit) return;
+        pictureEdit = false;
+        // The picture is painted in full at once, and no timer outlives the edit.
+        settleKeys();
+        typeDrag?.end();
+        nudge = { x: 0, y: 0 };
+        menuShift = null;
+        edUp = false;
+        goalX = null;
+        composeAt = null;
       };
     });
     $effect(() => {
@@ -1781,6 +1863,46 @@
       text;
       effSize;
       effLs;
+      // WITH THE ENGINE DRAWING, the effect that keeps the editable's own
+      // caret under the drawn one (`alignNative`). It is made HERE, as this
+      // effect's child, for two reasons. It then runs after this one has
+      // drawn the lines it measures, whatever changed. And it is made
+      // whenever the engine is drawing, not only when the edit began with
+      // it: the flag is read here, so the engine coming on in the middle of
+      // an edit (it starts after the first paint of the app, and it can be
+      // switched) runs this again and makes it. With the switch off the flag
+      // is false and nothing is made.
+      if (enginePaints) {
+        pictureEdit = true;
+        $effect(() => {
+          if (!typing) {
+            // Not a picture now (the paint threw, the model has no answer):
+            // the editable is where it is with the switch off, and nothing
+            // is kept to move it by when the picture comes back.
+            untrack(() => {
+              if (nudge.x || nudge.y) nudge = { x: 0, y: 0 };
+            });
+            return;
+          }
+          // What moves either caret: the marks, and what the box is laid out by.
+          typeMarks;
+          curveMarks;
+          z;
+          s.rotation;
+          s.flipH;
+          s.flipV;
+          box.w;
+          box.h;
+          inkShift;
+          untrack(() => alignNative(node));
+        });
+      } else if (pictureEdit) {
+        // The switch went off in the middle of the edit: the editable is
+        // where it is with the switch off, and nothing is kept to move it by.
+        untrack(() => {
+          if (nudge.x || nudge.y) nudge = { x: 0, y: 0 };
+        });
+      }
       if (composing) return;
       untrack(() => {
         if (first) {
@@ -1811,6 +1933,10 @@
     // is never drawn for one frame at the old offset on the new glyphs.
     const o = caret == null ? null : Math.min(caret, text.length);
     edSel = o == null ? { a: 0, f: text.length } : { a: o, f: o };
+    if (typing) {
+      edUp = false;
+      goalX = null;
+    }
   }
 
   function caretNow(node) {
@@ -1832,6 +1958,7 @@
   // setBoxText routes text to line for free-typed boxes.
   function commitEdit(v, caret, inputType) {
     if (v === text) return;
+    keyed();
     caretNext = caret;
     setBoxText(box, v);
     recordFieldEdit(fieldUndo, v, { atomic: isAtomicInput(inputType) });
@@ -1849,7 +1976,10 @@
     e.preventDefault();
     const node = e.currentTarget;
     if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
-    const span = editSpan(node, e);
+    let span = editSpan(node, e);
+    // A delete to the line's end is cut from the lines the picture draws; on
+    // a curve, which is one line, from the paragraph of the raw text.
+    if (typing && edSel && edSel.a === edSel.f) span = (typeFlat ? lineDeleteSpan(typed.rows, node.textContent, edSel.f, edUp, t) : curveCut(node.textContent, edSel.f, t)) ?? span;
     if (span) applyEdit(node, span, t, e.data ?? e.dataTransfer?.getData('text/plain'));
   }
 
@@ -1882,10 +2012,15 @@
   }
   function onEditInput(e) {
     if (!composing) readBack(e.currentTarget);
-    else if (curveEdit) composeText = e.currentTarget.textContent;
+    else if (curveEdit || typing) {
+      keyed();
+      composeText = e.currentTarget.textContent;
+    }
   }
   function onCompositionStart() {
     composing = true;
+    // What the composed text takes the place of, to mark it in the picture.
+    if (typing) composeAt = edSel ? { from: Math.min(edSel.a, edSel.f), cut: Math.abs(edSel.a - edSel.f) } : null;
   }
   function onCompositionEnd(e) {
     composing = false;
@@ -1893,6 +2028,7 @@
     // WebKit ends the composition before its last input lands.
     setTimeout(() => {
       composeText = null;
+      if (composeAt) composeAt = null;
       readBack(node);
     });
   }
@@ -1902,7 +2038,8 @@
     endEdit(e.currentTarget.textContent);
   }
   function onEditKey(e) {
-    if (curveEdit && !e.isComposing && !e.altKey && !e.ctrlKey && curveKey(e)) return;
+    if (typeFlat && !composing && !e.isComposing && typeKey(e)) return;
+    if ((curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       stepField(e.currentTarget, e.shiftKey);
@@ -1918,6 +2055,7 @@
   function stepField(node, redo) {
     const next = redo ? redoField(fieldUndo) : undoField(fieldUndo);
     if (next == null) return;
+    keyed();
     caretNext = caretAfter(node.textContent, next);
     setBoxText(box, next);
     markUnsaved();
@@ -1933,6 +2071,7 @@
 
   // The caret and the selection, on the glyphs being drawn.
   const curveMarks = $derived.by(() => {
+    if (typing) return typeCurve && edSel ? typeCurveMarks() : null;
     if (!curveEdit || !edSel) return null;
     const t = composeText ?? text;
     const glyphs = layout ?? [];
@@ -1963,6 +2102,7 @@
     return [dx * Math.cos(rad) - dy * Math.sin(rad), dx * Math.sin(rad) + dy * Math.cos(rad)];
   }
   function curveOffset(el, e) {
+    if (typeCurve) return curveRaw(caretNearest(typeGlyphs, ...typeCurvePoint(e)));
     const t = editEl?.textContent ?? text;
     return rawIndex(t, caretNearest(layout ?? [], ...curvePoint(el, e)));
   }
@@ -1970,6 +2110,8 @@
   // A click puts the caret at the glyph under it, a drag selects, and Shift
   // extends. Default prevented, so the editable keeps the focus.
   function onCurvePointerDown(e) {
+    // The right button, on a curve that is a picture: the path straight text has.
+    if (e.button === 2 && typeCurve && editEl && !composing) return typeMenu(e);
     if (e.button !== 0 || !editEl || composing) return;
     e.preventDefault();
     const el = e.currentTarget;
@@ -1977,8 +2119,13 @@
     const anchor = e.shiftKey && edSel ? edSel.a : o;
     setRawSel(anchor, o);
     el.setPointerCapture?.(e.pointerId);
-    const move = (ev) => setRawSel(anchor, curveOffset(el, ev));
-    const up = () => {
+    // On a picture the drag is the pointer's that began it: another pointer
+    // moving over the curve, or let go, is not it. (With the switch off the
+    // handlers are what they were.)
+    const mine = (ev) => !typing || ev.pointerId === e.pointerId;
+    const move = (ev) => mine(ev) && setRawSel(anchor, curveOffset(el, ev));
+    const up = (ev) => {
+      if (!mine(ev)) return;
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
@@ -1995,26 +2142,389 @@
     if (!editEl || composing) return;
     // The glyph under the pointer, not the caret beside it: the right half of
     // a word's last letter puts the caret after the word, on the space.
-    const g = glyphNearest(layout ?? [], ...curvePoint(e.currentTarget, e));
+    const g = typeCurve ? glyphNearest(typeGlyphs, ...typeCurvePoint(e)) : glyphNearest(layout ?? [], ...curvePoint(e.currentTarget, e));
     if (!g) return;
-    const [a, b] = wordAt(editEl.textContent, rawIndex(editEl.textContent, g.i));
+    const [a, b] = wordAt(editEl.textContent, typeCurve ? curveRaw(g.i) : rawIndex(editEl.textContent, g.i));
     setRawSel(a, b);
   }
 
   // Home, End, Up and Down on the curve (`caretKey`); true when it took the key.
+  //
+  // A key with Option or Control is the browser's, as it always was - except
+  // on a curve that is a picture, on a Mac: the keys the system binds to a
+  // move or a cut by lines (`boundKey`) would be answered on the lines of the
+  // editable nobody sees, so they are answered as the curve's own keys are.
+  // The curve is one line: a step by a line is a step to an end of the
+  // paragraph, and a page is the text.
   function curveKey(e) {
     const node = e.currentTarget;
+    let key = e.key;
+    let shift = e.shiftKey;
+    let step = 0;
+    if (e.altKey || e.ctrlKey) {
+      const b = typeCurve && isMacKeyboard() ? boundKey(e) : null;
+      if (!b || b.key === 'ArrowLeft' || b.key === 'ArrowRight') return false;
+      shift = b.shift;
+      key = { PageUp: 'ArrowUp', PageDown: 'ArrowDown', LineUp: 'Home', LineDown: 'End' }[b.key] ?? b.key;
+      step = b.key === 'LineUp' ? -1 : b.key === 'LineDown' ? 1 : 0;
+    }
     const sel = window.getSelection();
     if (!sel.rangeCount) return false;
     const a = rawOffset(node, sel.anchorNode, sel.anchorOffset);
     const f = rawOffset(node, sel.focusNode, sel.focusOffset);
     if (a == null || f == null) return false;
-    const to = caretKey(node.textContent, f, e.key, e.metaKey);
+    const v = node.textContent;
+    if (key === 'Kill') {
+      e.preventDefault();
+      applyEdit(node, a !== f ? [Math.min(a, f), Math.max(a, f)] : curveCut(v, f, 'deleteHardLineForward'), 'deleteContentForward');
+      return true;
+    }
+    const to = caretKey(v, step ? stepChar(v, f, step) : f, key, e.metaKey);
     if (to == null) return false;
     e.preventDefault();
-    setRawSel(e.shiftKey ? a : to, to);
+    setRawSel(shift ? a : to, to);
     return true;
   }
+  // The raw span a line delete takes on a curve that is a picture: to the
+  // start or the end of the paragraph of the raw text, which is the curve's
+  // line (`caretKey`), not a line of the editable nobody sees. Null for an
+  // input that is not one.
+  function curveCut(v, f, inputType) {
+    if (!/^delete(Soft|Hard)Line/.test(inputType)) return null;
+    return inputType.endsWith('Backward') ? [caretKey(v, f, 'Home'), f] : [f, caretKey(v, f, 'End')];
+  }
+
+  // ===== typing into the picture =====
+  // With the Rust engine drawing, the box being typed into is still the
+  // engine's picture of it, painted again from every change, so what is typed
+  // is the result as it is typed: every stroke, the gradient, the blur, the
+  // flip. The text itself sits in the editable above, unseen, laid out as it
+  // always was - it is what the system types into, and where it thinks the
+  // caret is - and every edit still goes through `beforeinput` to the raw
+  // text, exactly as it does with the switch off.
+  //
+  // What the browser used to do with glyphs it had laid out is done on the
+  // painter's own (`typed`: type-rows.js makes the rows from the lines and the
+  // pens the picture is painted from; flat-caret.js is the arithmetic): the
+  // caret, the selection, the pointer, and the keys that go by lines. Text on
+  // a curve has the marks and the keys it has with the switch off ("typing on
+  // the curve" above), on the glyphs the painter places.
+  const typeFlat = $derived(typing && typed.kind === 'flat');
+  const typeCurve = $derived(typing && typed.kind === 'curve');
+  // Which side of a wrap the caret shows on (flat-caret.js `rowOf`), and the
+  // x Up and Down are making for, kept from one to the next.
+  let edUp = $state(false);
+  let goalX = null;
+  // What an IME's text took the place of when it began: where, and how many
+  // characters. The span it is composing is marked from it.
+  let composeAt = $state(null);
+  const composeSpan = $derived.by(() => {
+    if (!typing || composeText == null || !composeAt) return null;
+    const to = composeAt.from + composeText.length - (text.length - composeAt.cut);
+    return to > composeAt.from ? [composeAt.from, to] : null;
+  });
+
+  // The caret, the selection and the composed span, in the rows' own px: page
+  // px from the box's corner. The caret is always there for `alignNative` to
+  // measure; it is shown when nothing is selected.
+  const typeMarks = $derived.by(() => {
+    if (!typeFlat || !edSel) return null;
+    const caret = rowCaret(typed.rows, edSel.f, edUp);
+    if (!caret) return null;
+    return {
+      caret,
+      on: edSel.a === edSel.f,
+      // A selected Return shows as a sliver past its line's end.
+      sel: selectionRects(typed.rows, edSel.a, edSel.f, s.size * 0.3),
+      comp: composeSpan ? selectionRects(typed.rows, composeSpan[0], composeSpan[1]) : [],
+    };
+  });
+  // What takes the pointer for text that reaches past the frame: the rows'
+  // own rectangle, when it does.
+  const typePad = $derived.by(() => {
+    if (!typeFlat) return null;
+    let x0 = 0;
+    let y0 = 0;
+    let x1 = box.w;
+    let y1 = box.h;
+    for (const r of typed.rows) {
+      x0 = Math.min(x0, r.xs[0]);
+      x1 = Math.max(x1, r.xs[r.xs.length - 1]);
+      y0 = Math.min(y0, r.top);
+      y1 = Math.max(y1, r.top + r.height);
+    }
+    return x0 < 0 || y0 < 0 || x1 > box.w || y1 > box.h ? { x0, y0, x1, y1 } : null;
+  });
+
+  // Selects raw [a, f], the focus on the side of a wrap `up` says.
+  function setTypeSel(a, f, up = false) {
+    setRawSel(a, f);
+    edUp = up;
+  }
+  // A pointer on the rows: box-local page px with the turn undone and the
+  // flip mirrored out (`maskLocal`), which is the frame the picture is painted
+  // in and the rows are made in.
+  const typeAt = (e) => offsetAt(typed.rows, ...maskLocal(e));
+
+  // A press puts the caret at the nearest stop of the row it is level with, a
+  // drag selects, and Shift extends. The second and third press of a
+  // double-click and a triple-click are `onTypeMouseDown`'s, and the drag that
+  // follows one of them goes by words, or by rows.
+  //
+  // The drag in hand: the pointer that began it (`id`: another pointer moving
+  // over the picture, or let go, is not it), and for a drag by words or rows
+  // what picks one (`pick`) and the one the press took (`base`), which stays
+  // selected whichever way the pointer goes.
+  let typeDrag = null;
+  function onTypePointerDown(e) {
+    if (!editEl || composing || !typeFlat) return;
+    // A second pointer while one is dragging is not a press of the text.
+    if (typeDrag && typeDrag.id !== e.pointerId) return;
+    if (e.button === 2) return typeMenu(e);
+    if (e.button !== 0) return;
+    const el = e.currentTarget;
+    const hit = typeAt(e);
+    const anchor = e.shiftKey && edSel ? edSel.a : hit.o;
+    goalX = null;
+    setTypeSel(anchor, hit.o, hit.up);
+    try {
+      el.setPointerCapture?.(e.pointerId);
+    } catch {
+      // A pointer the browser no longer has: the press still placed the caret.
+    }
+    const drag = { id: e.pointerId, pick: null, base: null, end: null };
+    const move = (ev) => {
+      if (ev.pointerId !== drag.id || !typeFlat) return;
+      const [x, y] = maskLocal(ev);
+      if (!drag.pick) {
+        const h = offsetAt(typed.rows, x, y);
+        return setTypeSel(anchor, h.o, h.up);
+      }
+      // By words or rows: from the far end of the one the press took to the
+      // far end of the one under the pointer.
+      const to = drag.pick(typed.rows, editEl.textContent, x, y);
+      const lo = Math.min(drag.base.a, drag.base.f);
+      const hi = Math.max(drag.base.a, drag.base.f);
+      if (Math.min(to.a, to.f) < lo) setTypeSel(hi, Math.min(to.a, to.f), false);
+      else if (Math.max(to.a, to.f) > hi) setTypeSel(lo, Math.max(to.a, to.f), to.up);
+      else setTypeSel(drag.base.a, drag.base.f, drag.base.up);
+    };
+    const up = (ev) => {
+      if (ev.pointerId !== drag.id) return;
+      drag.end();
+    };
+    drag.end = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      el.removeEventListener('lostpointercapture', up);
+      if (typeDrag === drag) typeDrag = null;
+    };
+    typeDrag?.end();
+    typeDrag = drag;
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+    el.addEventListener('lostpointercapture', up);
+  }
+  // Default prevented, so the editable keeps the focus. The press count is
+  // the mouse event's: two select a word and three a line of the picture, by
+  // the rule the browser goes by in the editable (flat-caret.js `wordPress`,
+  // `linePress`, which say what was measured). The drag the press began goes
+  // on from there, by words or by rows.
+  function onTypeMouseDown(e) {
+    e.preventDefault();
+    if (e.button !== 0 || e.detail < 2 || !editEl || composing || !typeFlat) return;
+    const pick = e.detail === 2 ? wordPress : linePress;
+    const to = pick(typed.rows, editEl.textContent, ...maskLocal(e));
+    setTypeSel(to.a, to.f, to.up);
+    if (typeDrag) Object.assign(typeDrag, { pick, base: to });
+  }
+  // The right button. The system's menu for text is offered only on an
+  // editable, and the overlay is not one; so the word under the pointer is
+  // selected (unless the press is on the selection), as the system does, and
+  // the overlay steps aside for the menu's own hit test, which then finds the
+  // editable under it and offers Cut, Copy and Paste on that selection.
+  //
+  // The editable is laid out by the browser, and a curve's is nothing like
+  // the curve: what it has under the pointer is not what the picture has, or
+  // is nothing (text past the frame, a curve's letters). The system selects
+  // the word IT finds under a right press that is not on the selection. So
+  // for as long as the overlay stands aside the editable is moved to put its
+  // own selection under the pointer (`menuShift`): the press is then on the
+  // selection, the system leaves it alone, and the menu is that selection's.
+  function typeMenu(e) {
+    const el = e.currentTarget;
+    const held = editEl.textContent;
+    const lo = edSel ? Math.min(edSel.a, edSel.f) : 0;
+    const hi = edSel ? Math.max(edSel.a, edSel.f) : 0;
+    if (typeCurve) {
+      const p = typeCurvePoint(e);
+      const o = curveRaw(caretNearest(typeGlyphs, ...p));
+      const g = glyphNearest(typeGlyphs, ...p);
+      if (g && (lo === hi || o < lo || o > hi)) setRawSel(...wordAt(held, curveRaw(g.i)));
+    } else {
+      const [x, y] = maskLocal(e);
+      const o = offsetAt(typed.rows, x, y).o;
+      if (lo === hi || o < lo || o > hi) {
+        const to = wordPress(typed.rows, held, x, y);
+        setTypeSel(to.a, to.f, to.up);
+      }
+    }
+    // The marks and the editable's own caret, as they are for this selection;
+    // and the editable as it is while the overlay stands aside (a curve's is
+    // clipped to the box at any other time, and what is clipped takes no
+    // pointer), which is what is measured.
+    flushSync();
+    el.classList.add('ctx');
+    const node = editEl;
+    const at = menuRect(node);
+    if (at) {
+      const [x, y] = boxDelta(e.clientX - (at.left + at.width / 2), e.clientY - (at.top + at.height / 2));
+      menuShift = { x, y };
+      flushSync();
+    }
+    const back = () => {
+      clearTimeout(timer);
+      window.removeEventListener('contextmenu', after, true);
+      el.classList.remove('ctx');
+      if (!menuShift) return;
+      menuShift = null;
+      // Back where its caret belongs.
+      flushSync();
+      if (editEl === node && typing) alignNative(node);
+    };
+    const after = () => setTimeout(back);
+    const timer = setTimeout(back, 1000);
+    window.addEventListener('contextmenu', after, true);
+  }
+  // A rectangle of the editable's own selection, on screen: of what is
+  // selected, or of its caret when nothing is.
+  function menuRect(node) {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !node.contains(sel.focusNode)) return null;
+    const rects = sel.getRangeAt(0).getClientRects?.();
+    for (const r of rects ?? []) if (r.width > 0 && r.height > 0) return r;
+    return nativeCaret(node);
+  }
+
+  // The keys that go by lines, on the picture's lines (`moveCaret`); true
+  // when it took the key. Left and Right too: where a line wrapped, the
+  // editable has two places for one offset and the browser would spend a
+  // press moving between them. And on a Mac the keys the system binds to a
+  // move or a cut by lines (`boundKey`): any other key with Option or Control
+  // is the browser's.
+  function typeKey(e) {
+    if (!edSel) return false;
+    const node = e.currentTarget;
+    const bound = e.altKey || e.ctrlKey;
+    const b = bound && isMacKeyboard() ? boundKey(e) : null;
+    if (bound && !b) return false;
+    if (b?.key === 'Kill') {
+      e.preventDefault();
+      const { a, f } = edSel;
+      applyEdit(node, a !== f ? [Math.min(a, f), Math.max(a, f)] : lineDeleteSpan(typed.rows, node.textContent, f, edUp, 'deleteHardLineForward'), 'deleteContentForward');
+      return true;
+    }
+    const to = moveCaret(typed.rows, node.textContent, { a: edSel.a, f: edSel.f, up: edUp }, b ? b.key : e.key, { shift: b ? b.shift : e.shiftKey, mod: !b && e.metaKey }, goalX);
+    if (!to) return false;
+    e.preventDefault();
+    setTypeSel(to.a, to.f, to.up);
+    goalX = to.goal;
+    return true;
+  }
+
+  // ----- the curve, as a picture -----
+  // The glyphs the painter places (`placeBlock`'s, in page px from the box
+  // centre), in the zoomed px the marks are drawn in.
+  const typeGlyphs = $derived(typeCurve ? typed.glyphs.map((g) => ({ ...g, x: g.x * z, y: g.y * z, w: g.w * z })) : null);
+  // A raw offset as a glyph, and a glyph as a raw offset. The glyphs are the
+  // CASED text's, which is longer where uppercasing made a letter two
+  // (`typed.map`).
+  const curveGlyph = (o) => (typed.map ? glyphIndex(typed.drawn, typed.map.toDrawn[Math.min(o, typed.map.toDrawn.length - 1)]) : glyphIndex(typed.drawn, o));
+  const curveRaw = (i) => (typed.map ? rawAtDrawn(typed.map, rawIndex(typed.drawn, i)) : rawIndex(typed.drawn, i));
+  function typeCurveMarks() {
+    const a = curveGlyph(edSel.a);
+    const f = curveGlyph(edSel.f);
+    const c = composeSpan;
+    return {
+      caret: caretAt(typeGlyphs, f),
+      off: a !== f,
+      sel: selectionBoxes(typeGlyphs, a, f),
+      comp: c ? selectionBoxes(typeGlyphs, curveGlyph(c[0]), curveGlyph(c[1])) : [],
+    };
+  }
+  // A pointer in the glyphs' frame: from the box centre, in zoomed px, the
+  // turn undone and the flip mirrored out.
+  function typeCurvePoint(e) {
+    const [x, y] = maskLocal(e);
+    return [(x - box.w / 2) * z, (y - box.h / 2) * z];
+  }
+
+  // ----- the editable's own caret -----
+  // The system puts an IME's window, and anything else it hangs on the
+  // caret, where the EDITABLE's caret is. The editable is laid out by the
+  // browser and the picture by the engine, and the two do not agree to the
+  // pixel (a synthesised bold advances differently; a curve is not laid out
+  // by the browser at all). So the editable is moved by the difference: the
+  // drawn caret's centre less the native caret's, measured on screen and
+  // taken back through the box's turn and flip into the editable's frame.
+  let nudge = $state({ x: 0, y: 0 });
+  function nativeCaret(node) {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !node.contains(sel.focusNode)) return null;
+    const { focusNode: n, focusOffset: o } = sel;
+    const r = document.createRange();
+    r.setStart(n, o);
+    r.collapse(true);
+    const rect = r.getClientRects?.()?.[0];
+    if (rect) return rect;
+    // Some places have no rectangle of their own (measured, Chromium 155). In
+    // front of a Return that starts its text node - the end of a line, which
+    // `drawEditLines` writes as a node of its own - the Return has one, as
+    // wide as nothing, where the caret is.
+    if (n.nodeType === 3) {
+      if (n.data[o] !== '\n') return null;
+      r.setEnd(n, o + 1);
+      return r.getClientRects?.()?.[0] ?? null;
+    }
+    // A line with nothing on it: its `<br>` has one.
+    const at = n.childNodes[o] ?? n;
+    const br = at.nodeName === 'BR' ? at : !at.textContent ? at.querySelector?.('br') : null;
+    return br?.getBoundingClientRect() ?? null;
+  }
+  // A distance on screen, in the editable's own frame: back through the
+  // box's turn and its flip.
+  function boxDelta(dx, dy) {
+    const rad = (-(s.rotation || 0) * Math.PI) / 180;
+    return flipDelta([dx * Math.cos(rad) - dy * Math.sin(rad), dx * Math.sin(rad) + dy * Math.cos(rad)], s);
+  }
+  function alignNative(node) {
+    // Moved aside for the system's menu (`typeMenu`): not where it belongs.
+    if (menuShift) return;
+    try {
+      const mark = node.parentNode?.querySelector('.tcaret, .ccaret');
+      const n = mark && nativeCaret(node);
+      if (!n) return;
+      const m = mark.getBoundingClientRect();
+      const [lx, ly] = boxDelta(m.left + m.width / 2 - (n.left + n.width / 2), m.top + m.height / 2 - (n.top + n.height / 2));
+      if (Math.abs(lx) < 0.25 && Math.abs(ly) < 0.25) return;
+      nudge = { x: nudge.x + lx, y: nudge.y + ly };
+    } catch {
+      // A caret the system has a little off is not worth an edit.
+    }
+  }
+  // Where the editable is moved to for the system's menu, on top of `nudge`:
+  // set for as long as the overlay stands aside for it (`typeMenu`).
+  let menuShift = $state(null);
+  // Where the editable is moved to: by the ink's centring (`inkShift`), as
+  // with the switch off, and while it is unseen by `nudge` as well.
+  const editShift = $derived.by(() => {
+    if (!typing) return inkShift ? `transform:translateY(${inkShift}px);` : '';
+    const x = nudge.x + (menuShift?.x ?? 0);
+    const y = nudge.y + inkShift + (menuShift?.y ?? 0);
+    return x || y ? `transform:translate(${x}px,${y}px);` : '';
+  });
 
   const corners = [['corner', 'nw'], ['corner', 'ne'], ['corner', 'sw'], ['corner', 'se']];
   const sides = [['side', 'n'], ['side', 's'], ['side', 'w'], ['side', 'e']];
@@ -2163,8 +2673,7 @@
         <span class="hit" style="left:{hitBlock.x0 * z}px;top:{hitBlock.y0 * z}px;width:{(hitBlock.x1 - hitBlock.x0) * z}px;height:{(hitBlock.y1 - hitBlock.y0) * z}px"></span>
       {/if}
     {/if}
-  {:else}
-    {#if layout}
+  {:else if layout}
       <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
            full set of glyph spans; they are all absolutely positioned already, so
            no layer has to hold the others up. -->
@@ -2182,31 +2691,74 @@
           </div>
         {/each}
       </div>
-    {/if}
-    {#if editing}
-      {#if curveEdit}
+  {/if}
+    <!-- The editable is ONE element whichever way the box is shown - under
+         the engine's picture (`typing`) or as the text itself - so a picture
+         that stops being painted in the middle of an edit hands the box back
+         to its text with the caret, the selection and the focus where they
+         were. -->
+    {#if editing && (typing || !pictured)}
+      {#if typeFlat}
+        <!-- Straight text typed into as its picture: this takes the pointer
+             and holds the caret, the selection and the span an IME is
+             composing, drawn from the painter's own rows. In the wrapper, so
+             the flip carries them as it carries the picture. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="type-edit" onpointerdown={onTypePointerDown} onmousedown={onTypeMouseDown} ondblclick={(e) => e.stopPropagation()}>
+          {#if typePad}
+            <span class="tpad" style="left:{typePad.x0 * z}px;top:{typePad.y0 * z}px;width:{(typePad.x1 - typePad.x0) * z}px;height:{(typePad.y1 - typePad.y0) * z}px"></span>
+          {/if}
+          {#if typeMarks}
+            {@const c = typeMarks.caret}
+            {#each typeMarks.sel as r, i (i)}
+              <span class="tsel" style="left:{r.x * z}px;top:{r.y * z}px;width:{r.w * z}px;height:{r.h * z}px"></span>
+            {/each}
+            {#each typeMarks.comp as r, i (i)}
+              <span class="tcomp" style="left:{r.x * z}px;top:{(r.y + r.h) * z - 2}px;width:{r.w * z}px"></span>
+            {/each}
+            <!-- Made again where it moves, so it is lit when it arrives. -->
+            {#key `${c.x}|${c.top}`}
+              <span class="tcaret" class:off={!typeMarks.on} style="left:{c.x * z}px;top:{c.top * z}px;height:{c.height * z}px"></span>
+            {/key}
+          {/if}
+        </div>
+      {:else if curveEdit || typeCurve}
         <!-- Curved text being typed into: the glyphs above are the result's,
              and this draws the caret and the selection on them and takes the
              pointer, so a click lands on the glyph under it rather than in the
              editable below, which holds the text and is not seen. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="curve-edit" onpointerdown={onCurvePointerDown} onmousedown={(e) => e.preventDefault()} ondblclick={onCurveDblClick}>
+          {#if typeCurve}
+            <!-- A curve leaves the frame, and its picture takes no pointer: a
+                 target a glyph, where the glyph is, as the picture at rest
+                 has (`hitsOn`). -->
+            {#each typeGlyphs as g, i (i)}
+              <span class="tpad" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+            {/each}
+          {/if}
           {#if curveMarks}
             {#each curveMarks.sel as r, i (i)}
               <span class="csel" style="width:{r.w}px;height:{effSize}px;transform:translate(calc(-50% + {r.x}px), calc(-50% + {r.y}px)) rotate({r.rot}rad)"></span>
             {/each}
+            {#if curveMarks.comp}
+              {#each curveMarks.comp as r, i (i)}
+                <span class="csel ccomp" style="width:{r.w}px;height:{effSize}px;transform:translate(calc(-50% + {r.x}px), calc(-50% + {r.y}px)) rotate({r.rot}rad)"></span>
+              {/each}
+            {/if}
             {#if curveMarks.caret}
               {@const c = curveMarks.caret}
-              <span class="ccaret" style="height:{effSize}px;transform:translate(calc(-50% + {c.x}px), calc(-50% + {c.y}px)) rotate({c.rot}rad)"></span>
+              <span class="ccaret" class:off={curveMarks.off} style="height:{effSize}px;transform:translate(calc(-50% + {c.x}px), calc(-50% + {c.y}px)) rotate({c.rot}rad)"></span>
             {/if}
           {/if}
         </div>
       {/if}
       <div
         class="txt editable"
-        class:ghost={curveEdit}
+        class:ghost={curveEdit || (typing && curved)}
+        class:unseen={typing}
         contenteditable="true"
-        style="{editStyle}{inkShift ? `transform:translateY(${inkShift}px);` : ''}"
+        style="{typing ? textStyle : editStyle}{editShift}"
         use:editField
         onbeforeinput={onEditBeforeInput}
         oninput={onEditInput}
@@ -2219,7 +2771,7 @@
         onblur={onEditBlur}
         onkeydown={onEditKey}
       ></div>
-    {:else if !layout}
+    {:else if !pictured && !layout}
       <div class="txt shaped stack" style="{textStyle}{stackTransform}{filterCss}">
         {#each layers as ly, li (li)}
           <div class="tlayer" class:base={li === 0} style={ly.css}>
@@ -2228,7 +2780,6 @@
         {/each}
       </div>
     {/if}
-  {/if}
     {#if !pictured && inkActive(s.ink)}
       <!-- Inside the clip wrapper so the visibility mask hides ink the same way
            it hides letters; positioned off the box's own top-left, offset by the

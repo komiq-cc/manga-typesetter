@@ -21,8 +21,11 @@ import { engineSwitch, useTextEngine } from '../../lib/engine-switch.svelte.js';
 import { textEngine, glyphPainter } from '../../lib/text-engine/index.js';
 import { flipTestPaint } from './refuse.js';
 import { renderPageCanvas, warpTexture } from '../../lib/exporter.js';
-import { pictureScale, pictureTexture } from '../../lib/editor/box-picture.js';
+import { pictureScale, pictureTexture, PICTURE_MAX_PX, PICTURE_DRAG_PX } from '../../lib/editor/box-picture.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
+import { boxText } from '../../lib/store.svelte.js';
+import { typeModel } from '../../lib/type-rows.js';
+import { rawOffset, domPoint } from '../../lib/edit-lines.js';
 
 const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 // Effects flushed, the observer's first answers in, and what they caused painted.
@@ -714,11 +717,413 @@ window.__ec = {
       await this.endEdit();
     }
     out.blobs = this.blobs().filter((b) => b.live).map((b) => b.size);
+    try {
+      out.typing = await this.typeSelf();
+    } catch (err) {
+      out.typing = { error: String(err?.stack ?? err) };
+    }
     out.errors = consoleErrors.slice();
     return out;
   },
   spec(name) {
-    return { limits: LIMITS_SPEC, mask: MASK_SPEC }[name];
+    return { limits: LIMITS_SPEC, mask: MASK_SPEC, type: TYPE_SPEC, typeEdge: TYPE_EDGE_SPEC, typeCost: TYPE_COST_SPEC, type2: TYPE2_SPEC }[name];
+  },
+
+  // ---- typing into the picture (P7) ----
+  // The box being typed into, as the page has it: its text, what the editable
+  // holds and has selected (raw offsets, anchor and focus), what the box is
+  // made of, the marks drawn over the picture, and where the browser has its
+  // own caret - the rectangle the system hangs an IME's window on.
+  typeState() {
+    const id = app.editingId;
+    const el = id != null ? boxEl(id) : null;
+    const ed = el?.querySelector('.txt.editable');
+    if (!ed) return { editing: id ?? null, editable: false, text: id != null ? boxText(boxOf(id), page()) : null };
+    const sel = window.getSelection();
+    const inside = sel.rangeCount > 0 && ed.contains(sel.focusNode);
+    let native = null;
+    if (inside) {
+      const r = document.createRange();
+      r.setStart(sel.focusNode, sel.focusOffset);
+      r.collapse(true);
+      // Where the browser's caret is. A place with no rectangle of its own
+      // (measured, Chromium 155): in front of a Return that starts its text
+      // node, where the Return's rectangle - as wide as nothing - is; and on
+      // a line with nothing on it, where its `<br>`'s is.
+      let q = r.getClientRects()[0];
+      let from = 'range';
+      const n = sel.focusNode;
+      if (!q && n.nodeType === 3 && n.data[sel.focusOffset] === '\n') {
+        r.setEnd(n, sel.focusOffset + 1);
+        q = r.getClientRects()[0];
+        from = 'return';
+      } else if (!q && n.nodeType === 1) {
+        const at = n.childNodes[sel.focusOffset] ?? n;
+        const br = at.nodeName === 'BR' ? at : !at.textContent ? at.querySelector('br') : null;
+        q = br?.getBoundingClientRect();
+        from = 'br';
+      }
+      native = q ? { x: q.x, y: q.y, w: q.width, h: q.height, from } : null;
+    }
+    const cnv = el.querySelector('canvas.warpl');
+    const mark = el.querySelector('.tcaret, .ccaret');
+    return {
+      editing: id,
+      editable: true,
+      focused: document.activeElement === ed,
+      unseen: ed.classList.contains('unseen'),
+      ghost: ed.classList.contains('ghost'),
+      text: boxText(boxOf(id), page()),
+      held: ed.textContent,
+      sel: inside ? [rawOffset(ed, sel.anchorNode, sel.anchorOffset), rawOffset(ed, sel.focusNode, sel.focusOffset)] : null,
+      canvas: cnv ? { painter: cnv.dataset.painter ?? null, w: cnv.width, h: cnv.height, rect: rectOf(cnv) } : null,
+      overlay: el.querySelector('.type-edit') ? 'flat' : el.querySelector('.curve-edit') ? 'curve' : null,
+      caret: mark ? { ...rectOf(mark), off: mark.classList.contains('off') } : null,
+      sels: [...el.querySelectorAll('.tsel, .csel:not(.ccomp)')].map(rectOf),
+      comps: [...el.querySelectorAll('.tcomp, .ccomp')].map(rectOf),
+      native,
+      nudge: ed.style.transform || '',
+    };
+  },
+  // Where a caret can stand on a box, from the model the marks are drawn by
+  // (type-rows.js), with every stop as a point of the screen: the middle of
+  // its row, through the box's zoom, flip and turn. For a curve, the glyphs,
+  // each with the middle of its left and right half. Needs the engine.
+  typeRows(id) {
+    const b = boxOf(id);
+    const el = boxEl(id);
+    const ed = el.querySelector('.txt.editable');
+    const m = typeModel(b, ed ? ed.textContent : boxText(b, page()));
+    if (!m) return null;
+    const r = el.getBoundingClientRect();
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    const z = app.zoom;
+    const rad = ((b.style.rotation || 0) * Math.PI) / 180;
+    const client = (x, y) => {
+      let dx = (x - b.w / 2) * z;
+      let dy = (y - b.h / 2) * z;
+      if (b.style.flipH) dx = -dx;
+      if (b.style.flipV) dy = -dy;
+      return { x: cx + dx * Math.cos(rad) - dy * Math.sin(rad), y: cy + dx * Math.sin(rad) + dy * Math.cos(rad) };
+    };
+    if (m.kind === 'flat') {
+      return {
+        kind: 'flat',
+        zoom: z,
+        lines: m.lines,
+        rows: m.rows.map((row) => ({ top: row.top, height: row.height, offs: row.offs, xs: row.xs, soft: row.soft, hard: row.hard, line: row.line, y: row.top + row.height / 2, lead: row.lead ? { ...row.lead, p: client(row.lead.x, row.top + row.height / 2) } : null, trail: row.trail ? { ...row.trail, p: client(row.trail.x, row.top + row.height / 2) } : null })),
+        // A point of the box's own frame (page px from its corner) on screen.
+        at: m.rows.map((row) => row.xs.map((x) => client(x, row.top + row.height / 2))),
+        frame: { origin: client(0, 0), ex: client(1, 0), ey: client(0, 1) },
+      };
+    }
+    const half = (g, side) => client(b.w / 2 + g.x + (side * g.w * Math.cos(g.rot)) / 4, b.h / 2 + g.y + (side * g.w * Math.sin(g.rot)) / 4);
+    return { kind: 'curve', zoom: z, drawn: m.drawn, mapped: !!m.map, glyphs: m.glyphs.map((g) => ({ ch: g.ch, left: half(g, -1), right: half(g, 1) })) };
+  },
+  // Every letter of a box as the two places a press on it can go: the middle
+  // of its left half (the caret goes before it, raw offset `o`) and of its
+  // right (after it). `row` and `k` say which stop of the model that is.
+  typeHalves(id) {
+    const m = this.typeRows(id);
+    const out = [];
+    if (!m) return out;
+    const far = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    if (m.kind === 'curve') {
+      m.glyphs.forEach((g, i) => {
+        if (far(g.left, g.right) < 1.5) return;
+        out.push({ p: g.left, o: i, row: 0, k: i }, { p: g.right, o: i + 1, row: 0, k: i + 1 });
+      });
+      return out;
+    }
+    m.rows.forEach((row, i) => {
+      for (let k = 0; k + 1 < row.offs.length; k++) {
+        const a = m.at[i][k];
+        const b = m.at[i][k + 1];
+        if (far(a, b) < 1.5) continue;
+        out.push({ p: lerp(a, b, 0.25), o: row.offs[k], row: i, k }, { p: lerp(a, b, 0.75), o: row.offs[k + 1], row: i, k: k + 1 });
+      }
+    });
+    return out;
+  },
+  // The typing check's questions that need no screenshot, no outside pointer
+  // and no IME: what any browser can answer of itself (`selfCheck`, for the
+  // system's WebKit). The presses are events made here, not the system's.
+  // What matters most in it is `nativeCaret`: how far the browser's own caret
+  // - where the system would hang an IME's window - is from the drawn one.
+  async typeSelf() {
+    await this.engine('rust');
+    await this.openCustom(TYPE_SPEC);
+    await this.zoom(1);
+    const out = {};
+    const mid = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+    for (const b of TYPE_SPEC.pages[0].boxes) {
+      const id = b.id;
+      await this.reveal(id);
+      const rest = rectOf(boxEl(id).querySelector('canvas.warpl'));
+      await this.edit(id);
+      const first = this.typeState();
+      const row = { whileTyping: { canvas: first.canvas?.painter ?? null, overlay: first.overlay, unseen: first.unseen, focused: first.focused }, picture: this.typeSame(id), canvasMoved: JSON.stringify(first.canvas?.rect) !== JSON.stringify(rest) };
+      const overlay = boxEl(id).querySelector('.type-edit, .curve-edit');
+      const pts = this.typeHalves(id);
+      let wrong = 0;
+      let worst = 0;
+      const none = [];
+      const from = new Set();
+      for (const h of pts) {
+        const init = { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true, clientX: h.p.x, clientY: h.p.y };
+        overlay?.dispatchEvent(new PointerEvent('pointerdown', init));
+        overlay?.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }));
+        await settle(1);
+        const s = this.typeState();
+        if (s.sel?.[0] !== h.o || s.sel?.[1] !== h.o) wrong++;
+        if (s.native && s.caret) {
+          from.add(s.native.from);
+          const a = mid(s.native);
+          const c = mid(s.caret);
+          worst = Math.max(worst, Math.hypot(a.x - c.x, a.y - c.y));
+        } else none.push(h.o);
+      }
+      Object.assign(row, { presses: pts.length, wrongOffset: wrong, nativeCaret: { worstCssPxFromDrawn: +worst.toFixed(2), noRectangle: none.length, noRectangleAt: [...new Set(none)], from: [...from] } });
+      // A key the page takes (Up), and one edit through `beforeinput`.
+      const ed = boxEl(id).querySelector('.txt.editable');
+      const before = this.typeState();
+      const down = new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true });
+      ed.dispatchEvent(down);
+      ed.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'q', bubbles: true, cancelable: true }));
+      await settle(2);
+      const after = this.typeState();
+      row.keyTaken = down.defaultPrevented;
+      row.typed = { text: after.text.length === before.text.length + 1, picture: this.typeSame(id).bytes };
+      ed.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+      await settle(2);
+      row.textBack = this.typeState().text === before.text;
+      await this.endEdit();
+      out[id] = row;
+    }
+    return out;
+  },
+  // The picture of one box against `renderBoxTexture` asked for the same
+  // scale - painted from what the editable holds, which while an IME composes
+  // is not yet the box's text.
+  typeSame(id) {
+    const b = boxOf(id);
+    const pg = page();
+    const el = boxEl(id);
+    const cnv = el?.querySelector('canvas.warpl[data-painter="engine"]');
+    if (!cnv) return { id, canvas: false };
+    if (!cnv.width) return { id, canvas: true, painted: false };
+    const held = el.querySelector('.txt.editable')?.textContent;
+    const of = held != null && held !== boxText(b, pg) ? { ...b, text: held } : b;
+    const scale = pictureScale(app.zoom, devicePixelRatio, b.style.rotation);
+    const tex = pictureTexture(of, pg, null, scale);
+    const r = warpTexture(tex, of);
+    const out = { id, canvas: true, painted: true, editor: [cnv.width, cnv.height], exporter: [r.canvas.width, r.canvas.height], composing: of !== b };
+    if (cnv.width === r.canvas.width && cnv.height === r.canvas.height) Object.assign(out, differ(pixelsOf(cnv), pixelsOf(r.canvas)));
+    r.canvas.width = 0;
+    r.canvas.height = 0;
+    return out;
+  },
+  // The selection put where the browser itself would put it (a word step, a
+  // key it kept): raw offsets, in the editable, and said as the browser says it.
+  async typeSelect(a, f = a) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    const [ac, ai] = domPoint(ed, a);
+    const [fc, fi] = domPoint(ed, f);
+    window.getSelection().setBaseAndExtent(ac, ai, fc, fi);
+    document.dispatchEvent(new Event('selectionchange'));
+    await settle(2);
+    return this.typeState();
+  },
+  // How long the rows of a box take to make, from its text: the model the
+  // caret and the selection are drawn by, `n` times.
+  timeModel(id, n = 5) {
+    const b = boxOf(id);
+    const text = boxText(b, page());
+    const ms = [];
+    let rows = 0;
+    let stops = 0;
+    for (let i = 0; i < n; i++) {
+      const t0 = performance.now();
+      const m = typeModel(b, text);
+      ms.push(performance.now() - t0);
+      rows = m?.rows?.length ?? 0;
+      stops = m?.rows?.reduce((sum, r) => sum + r.offs.length, 0) ?? 0;
+    }
+    return { letters: text.length, rows, stops, ms: stats(ms) };
+  },
+  // What the paint of a box alone takes, at the scale the editor shows it
+  // at: within the budget a box at rest has, and within the one a key's
+  // paint is given. The texture only, `n` times each, in turn.
+  timePaint(id, n = 7) {
+    const b = boxOf(id);
+    const pg = page();
+    const scale = pictureScale(app.zoom, devicePixelRatio, b.style.rotation);
+    const out = {};
+    const ms = { full: [], key: [] };
+    for (let i = 0; i < n; i++) {
+      for (const [name, budget] of [['full', PICTURE_MAX_PX], ['key', PICTURE_DRAG_PX]]) {
+        const t0 = performance.now();
+        const tex = pictureTexture(b, pg, null, scale, budget);
+        ms[name].push(performance.now() - t0);
+        out[`${name}MP`] = +((tex.canvas.width * tex.canvas.height) / 1e6).toFixed(2);
+        tex.canvas.width = 0;
+        tex.canvas.height = 0;
+      }
+    }
+    return { ...out, full: stats(ms.full), key: stats(ms.key) };
+  },
+  // A paste or a cut, as the event the browser sends, carrying its own
+  // clipboard: the system's is the user's and is not read or written here.
+  clip(type, text = null) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    const data = new DataTransfer();
+    if (text != null) data.setData('text/plain', text);
+    const ev = new ClipboardEvent(type, { clipboardData: data, bubbles: true, cancelable: true });
+    ed.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, data: data.getData('text/plain') };
+  },
+  // A word put in the place of another the way the system's autocorrect and
+  // its spelling menu do it: one `beforeinput` naming the range it replaces
+  // and carrying the new word, which is not `data`.
+  replace(a, b, word) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    const [sc, so] = domPoint(ed, a);
+    const [ec, eo] = domPoint(ed, b);
+    const data = new DataTransfer();
+    data.setData('text/plain', word);
+    const ev = new InputEvent('beforeinput', {
+      inputType: 'insertReplacementText', data: null, dataTransfer: data, bubbles: true, cancelable: true,
+      targetRanges: [new StaticRange({ startContainer: sc, startOffset: so, endContainer: ec, endOffset: eo })],
+    });
+    ed.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented };
+  },
+  // Every edit the browser has asked for since the last call: its kind, and
+  // the range it names as raw offsets and as the place in the document.
+  inputsSeen() {
+    return inputs.splice(0);
+  },
+  // The picture of the box typed into at the first frame after each of those
+  // edits, read in the page: how long after the edit, and the canvas then.
+  // (Read from outside, a loaded machine can be past the pause before it
+  // has looked.)
+  picturesSeen() {
+    return pictures.splice(0);
+  },
+  // The edit ended at the first frame after the next edit, in the page, so
+  // that it ends inside the pause whatever the machine is doing: `endSeen`
+  // says how long after the edit that was, and the canvas before and at once
+  // after.
+  endAtNextEdit() {
+    ending = { armed: true };
+  },
+  endSeen() {
+    return ending;
+  },
+  // The last request for the system's menu: what it was aimed at.
+  menuSeen() {
+    const m = menu;
+    menu = null;
+    return m;
+  },
+  async wait(frames = 1) {
+    await settle(frames);
+  },
+  // Only the picture: the selection's frame and handles, the drawn marks and
+  // the browser's own caret and highlight all hidden, so that two screenshots
+  // of a box differ by its text alone.
+  bare(on) {
+    document.getElementById('ec-bare')?.remove();
+    if (!on) return;
+    const st = document.createElement('style');
+    st.id = 'ec-bare';
+    st.textContent = [
+      '.tbox, .tbox:hover { outline-color: transparent !important; }',
+      '.tbox .handle, .tbox .rotate-stem, .tbox .mask-gizmo, .tbox .review-badge, .tbox .lock-chip-wrap, .tbox .tsel, .tbox .tcaret, .tbox .tcomp, .tbox .csel, .tbox .ccaret { visibility: hidden !important; }',
+      '.tbox .txt.editable { caret-color: transparent !important; }',
+      '.tbox .txt.editable::selection, .tbox .txt.editable *::selection { background: transparent !important; }',
+    ].join('\n');
+    document.head.append(st);
+  },
+  // The drawn caret held lit, so that a picture of it is a picture of it.
+  freezeCaret(on) {
+    document.getElementById('ec-freeze')?.remove();
+    if (!on) return;
+    const st = document.createElement('style');
+    st.id = 'ec-freeze';
+    st.textContent = '.tcaret, .ccaret { animation: none !important; }';
+    document.head.append(st);
+  },
+  // What a keystroke costs, from the edit the browser asks for (`beforeinput`,
+  // the one way in for every kind of typing) to the end of its effects - for a
+  // pictured box that is the paint - and to the next frame. A letter typed at
+  // the end of the text and taken away again, `n` times each.
+  async timeType(n = 20) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    if (!ed) return { error: 'no box is being typed into' };
+    const el = ed.closest('.tbox');
+    const sync = [];
+    const withFrame = [];
+    const send = (inputType, data) => ed.dispatchEvent(new InputEvent('beforeinput', { inputType, data, bubbles: true, cancelable: true }));
+    for (let i = 0; i < n * 2; i++) {
+      await frame();
+      const t0 = performance.now();
+      if (i % 2 === 0) send('insertText', 'A');
+      else send('deleteContentBackward', null);
+      flushSync();
+      document.body.getBoundingClientRect();
+      sync.push(performance.now() - t0);
+      await frame();
+      withFrame.push(performance.now() - t0);
+    }
+    const cnv = el.querySelector('canvas.warpl');
+    // What the canvas holds while the keys are coming, and after the pause
+    // the full paint waits for (TextBox.svelte `keyed`). The full paint is
+    // timed where it can be made to happen: an edit that ends inside the
+    // pause paints it at once, so the edit is ended there, and begun again.
+    const during = cnv ? [cnv.width, cnv.height] : null;
+    const id = app.editingId;
+    const pictured = cnv?.dataset.painter === 'engine';
+    const unseen = ed.classList.contains('unseen');
+    const t0 = performance.now();
+    // As the blur ends it: with the text the editable holds.
+    endEdit(ed.textContent);
+    flushSync();
+    document.body.getBoundingClientRect();
+    const ending = performance.now() - t0;
+    await frame();
+    const settled = cnv?.isConnected ? [cnv.width, cnv.height] : null;
+    const soft = !!(during && settled && during[0] * during[1] < settled[0] * settled[1]);
+    await this.edit(id);
+    // And by the pause itself: a key, then nothing for twice the pause.
+    const again = document.querySelector('.tbox .txt.editable');
+    const cnv2 = again?.closest('.tbox').querySelector('canvas.warpl');
+    again?.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'A', bubbles: true, cancelable: true }));
+    flushSync();
+    const key1 = cnv2 ? [cnv2.width, cnv2.height] : null;
+    await new Promise((r) => setTimeout(r, 320));
+    await frame();
+    const afterPause = cnv2 ? [cnv2.width, cnv2.height] : null;
+    again?.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+    flushSync();
+    await new Promise((r) => setTimeout(r, 320));
+    await frame();
+    return { sync: stats(sync), toNextFrame: stats(withFrame), canvas: settled, during, soft, endingMs: ending, afterKey: key1, afterPause, pictured, unseen };
+  },
+  // The same from a real key: stamped when the page hears the key go down,
+  // and again at the first frame after it. The driver sends the keys.
+  keyTimes(on) {
+    if (on === false) {
+      const out = keyStamps.slice();
+      keyStamps.length = 0;
+      window.removeEventListener('keydown', onKeyStamp, true);
+      return out;
+    }
+    keyStamps.length = 0;
+    window.addEventListener('keydown', onKeyStamp, true);
+    return [];
   },
   // Every blob the page has minted a URL for, and whether it still stands.
   blobs() {
@@ -788,6 +1193,115 @@ const minted = [];
     return revoke(url);
   };
 }
+const boxOf = (id) => page().boxes.find((x) => String(x.id) === String(id));
+let menu = null;
+window.addEventListener('contextmenu', (e) => {
+  const ed = document.querySelector('.tbox .txt.editable');
+  const sel = window.getSelection();
+  const inside = ed && sel.rangeCount > 0 && ed.contains(sel.focusNode);
+  menu = {
+    inEditable: !!e.target.closest?.('[contenteditable="true"]'), target: String(e.target.className ?? ''), prevented: e.defaultPrevented,
+    // What is selected as the menu is asked for, and whether the pointer is on it.
+    sel: inside ? [rawOffset(ed, sel.anchorNode, sel.anchorOffset), rawOffset(ed, sel.focusNode, sel.focusOffset)] : null,
+    onSelection: inside ? [...sel.getRangeAt(0).getClientRects()].some((r) => e.clientX >= r.left - 0.5 && e.clientX <= r.right + 0.5 && e.clientY >= r.top - 0.5 && e.clientY <= r.bottom + 0.5) : false,
+    moved: ed?.style.transform ?? '',
+  };
+}, true);
+const inputs = [];
+window.addEventListener('beforeinput', (e) => {
+  const ed = e.target.closest?.('.txt.editable');
+  const r = e.getTargetRanges?.()[0];
+  const where = (n, o) => `${n.nodeType === 3 ? `"${n.data.replace(/\n/g, '\\n')}"` : `<${n.nodeName.toLowerCase()}${n.className ? `.${String(n.className).replace(/ /g, '.')}` : ''}>`}:${o}`;
+  inputs.push({
+    type: e.inputType,
+    range: r && ed ? [rawOffset(ed, r.startContainer, r.startOffset), rawOffset(ed, r.endContainer, r.endOffset)] : null,
+    from: r ? where(r.startContainer, r.startOffset) : null,
+    to: r ? where(r.endContainer, r.endOffset) : null,
+  });
+  const t0 = performance.now();
+  const type = e.inputType;
+  requestAnimationFrame(() => {
+    const cnv = app.editingId != null ? boxEl(app.editingId)?.querySelector('canvas.warpl') : null;
+    pictures.push({ type, ms: performance.now() - t0, w: cnv?.width ?? 0, h: cnv?.height ?? 0 });
+    if (!ending?.armed) return;
+    ending = { armed: false, ms: performance.now() - t0, before: { w: cnv?.width ?? 0, h: cnv?.height ?? 0 } };
+    document.querySelector('.tbox .txt.editable')?.blur();
+    flushSync();
+    if (app.editingId) endEdit(null);
+    flushSync();
+    ending.after = { w: cnv?.width ?? 0, h: cnv?.height ?? 0 };
+    ending.editing = app.editingId ?? null;
+    ending.sameCanvas = !!cnv?.isConnected;
+  });
+}, true);
+const pictures = [];
+let ending = null;
+const keyStamps = [];
+function onKeyStamp(e) {
+  const row = { key: e.key, heard: performance.now(), sinceEvent: performance.now() - e.timeStamp };
+  keyStamps.push(row);
+  // The handlers and their effects run in this task; the frame is after it.
+  queueMicrotask(() => setTimeout(() => (row.task = performance.now() - row.heard)));
+  requestAnimationFrame(() => (row.frame = performance.now() - row.heard));
+}
+// One box of each kind the typing check goes through (scripts/editor-check.mjs,
+// `type`). The fallback box: no font here or among the user's has kana, so
+// its borrowed letters are Greek and Cyrillic (from the last-resort family)
+// and its kana is the letter no font has.
+const TYPE_SPEC = { pages: [{ w: 1560, h: 760, boxes: [
+  { id: 'centre', x: 40, y: 60, w: 240, h: 120 },
+  { id: 'left', x: 340, y: 60, w: 240, h: 120, over: { align: 'left', valign: 'top', size: 24 } },
+  { id: 'right', x: 640, y: 60, w: 240, h: 120, over: { align: 'right', valign: 'bottom', size: 24, letterSpacing: 2 } },
+  { id: 'stroke-gradient', x: 940, y: 60, w: 240, h: 120, over: { size: 32, strokes: [{ color: '#101010', width: 3, opacity: 1 }], gradient: { on: true, kind: 'linear', angle: 180, scope: 'line', stops: [{ color: '#ff2a00', pos: 0, opacity: 1 }, { color: '#1b3cff', pos: 1, opacity: 1 }] } } },
+  { id: 'bold', x: 1240, y: 60, w: 260, h: 120, over: { bold: true } },
+  { id: 'italic', x: 40, y: 300, w: 240, h: 120, over: { font: SANS, size: 24, italic: true }, text: 'Wait for me\noffice affix' },
+  { id: 'upper', x: 340, y: 300, w: 240, h: 120, over: { uppercase: true, size: 26 }, text: 'Wait for me\nStraße over' },
+  { id: 'wrapped', x: 640, y: 300, w: 240, h: 150, over: { size: 22, align: 'left', valign: 'top' }, text: 'the quick brown fox jumps over the lazy dog and runs off home' },
+  { id: 'returns', x: 940, y: 300, w: 240, h: 150, over: { size: 26, valign: 'top' }, text: 'AFTER ME\nTHE END\n\n' },
+  { id: 'fallback', x: 1240, y: 300, w: 260, h: 120, over: { size: 26 }, text: 'HAVE Ω Ж\nLACK あ' },
+  { id: 'rot30', x: 80, y: 560, w: 240, h: 120, over: { rotation: 30 } },
+  { id: 'flipped', x: 440, y: 560, w: 240, h: 120, over: { flipH: true, strokes: [{ color: '#d02020', width: 3, opacity: 1 }] } },
+  { id: 'arc', x: 800, y: 580, w: 260, h: 120, over: { curve: 45 }, text: 'ALONG AN ARC WE GO' },
+] }] };
+// The typing check's odd ones: nothing to draw, nothing but spaces, a word
+// the system corrects, a picture refused while it is typed into, and the
+// boxes with something over or under their text.
+const TYPE_EDGE_SPEC = { pages: [{ w: 1560, h: 520, boxes: [
+  { id: 'empty', x: 40, y: 60, w: 240, h: 120, text: '' },
+  { id: 'spaces', x: 340, y: 60, w: 240, h: 120, text: '   ', over: { align: 'left', valign: 'top' } },
+  { id: 'corrected', x: 640, y: 60, w: 240, h: 120, text: 'teh quick fox\nran home', over: { size: 26 } },
+  { id: 'refused', x: 940, y: 60, w: 240, h: 120 },
+  { id: 'masked', x: 40, y: 300, w: 240, h: 120, over: { clip: ellipse(120, 60, 90, 40) } },
+  { id: 'inked', x: 340, y: 300, w: 240, h: 120, over: { ink: { on: true, strokes: [{ size: 9, color: '#0a50c8', opacity: 1, pts: [[10, 96, 0.6], [60, 104, 1], [120, 92, 1], [180, 106, 0.8], [214, 96, 0.4]] }] } } },
+  { id: 'smear', x: 640, y: 300, w: 240, h: 120, over: { motionBlur: { on: true, x: 2, y: 0, amount: 6 } } },
+  { id: 'warped', x: 940, y: 300, w: 240, h: 120, over: { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [252, 14], [-8, 128], [240, 120]] } } },
+] }] };
+// The second round's boxes: three rows of a word each; a letter cased to two
+// with the line broken between the two; an uppercase curve with such a
+// letter; a box over the budget a key's paint is given, and one under it.
+const TYPE2_SPEC = { pages: [{ w: 1560, h: 900, boxes: [
+  { id: 'rows', x: 60, y: 60, w: 96, h: 150, over: { size: 26, align: 'left', valign: 'top' }, text: 'AAAA BBBB CCCC' },
+  { id: 'split', x: 300, y: 60, w: 60, h: 200, over: { size: 40, uppercase: true, align: 'left', valign: 'top', shape: 'off' }, text: 'aßb' },
+  { id: 'upper-arc', x: 480, y: 90, w: 320, h: 140, over: { curve: 45, uppercase: true }, text: 'straße über uns' },
+  { id: 'small', x: 900, y: 60, w: 220, h: 110 },
+  { id: 'bold', x: 1200, y: 60, w: 300, h: 120, over: { bold: true } },
+  { id: 'big', x: 60, y: 340, w: 640, h: 440, over: { size: 90, strokes: [{ color: '#d02020', width: 4, opacity: 1 }], shadows: [{ x: 4, y: 4, blur: 6, color: '#000000', opacity: 0.6 }], blur: 1 } },
+  // Text that runs out of its frame, straight and on a curve: where the
+  // editable under the picture is not.
+  { id: 'spill', x: 1240, y: 320, w: 80, h: 40, text: 'OVERFLOWING\nSIDEWAYS\nAND\nDOWN' },
+  { id: 'arc-out', x: 880, y: 460, w: 260, h: 60, over: { curve: 80 }, text: 'ALONG AN ARC WE GO' },
+] }] };
+// One line of twenty thousand letters, which nothing breaks.
+const LONG_LINE = 'A'.repeat(20000);
+// The three sizes of box the cost of a keystroke is taken on.
+const TYPE_COST_SPEC = { pages: [{ w: 1400, h: 1700, boxes: [
+  { id: 'balloon', x: 60, y: 60, w: 220, h: 110 },
+  { id: 'effect', x: 60, y: 260, w: 600, h: 400, over: { size: 90, strokes: [{ color: '#d02020', width: 4, opacity: 1 }], shadows: [{ x: 4, y: 4, blur: 6, color: '#000000', opacity: 0.6 }], blur: 1 } },
+  { id: 'page-wide', x: 60, y: 760, w: 1100, h: 800, over: { size: 150, strokes: [{ color: '#d02020', width: 6, opacity: 1 }], shadows: [{ x: 6, y: 6, blur: 8, color: '#000000', opacity: 0.6 }] } },
+  // One word of twenty thousand letters: the breaker keeps a word whole, so
+  // it is one line, and one row of twenty thousand stops.
+  { id: 'long-line', x: 60, y: 1600, w: 1100, h: 60, over: { size: 20, align: 'left', valign: 'top' }, text: LONG_LINE },
+] }] };
 const consoleErrors = [];
 {
   const error = console.error.bind(console);
