@@ -386,6 +386,25 @@ impl Engine {
         idx as ChainId + 1
     }
 
+    /// Whether `chain` is zero (no chain) or a handle `chain_new` gave and
+    /// `chain_free` has not taken back.
+    pub fn chain_known(&self, chain: ChainId) -> bool {
+        chain == 0
+            || self
+                .chains
+                .get((chain as usize).wrapping_sub(1))
+                .is_some_and(Option::is_some)
+    }
+
+    /// Zero is no fallback list; every nonzero handle must still be held.
+    /// Use one rule for every query, including those with no text to shape.
+    pub(crate) fn check_chain(&self, chain: ChainId) -> Result<(), Error> {
+        if !self.chain_known(chain) {
+            return Err(Error::UnknownFont);
+        }
+        Ok(())
+    }
+
     /// Appends a font to a chain. Earlier fonts are preferred.
     pub fn chain_push(&mut self, chain: ChainId, font: FontId, synth: Synth) -> Result<(), Error> {
         self.font(font)?;
@@ -442,6 +461,8 @@ impl Engine {
     ) -> Result<(), Error> {
         self.parts.clear();
         self.line.clear();
+        self.run.clear();
+        self.check_chain(face.chain)?;
         self.shape_mode(face.font, text, 0, mode)?;
         let chain = match face.chain {
             0 => None,
@@ -570,6 +591,10 @@ impl Engine {
     /// the parts `measure_line` cuts it into, which is what `advance`
     /// measures and what the painter paints. Nobody has to work out from
     /// coverage which family lent a letter: this is the answer itself.
+    ///
+    /// A chain this engine does not hold is `UnknownFont`, as it is for
+    /// every query of a face. Zero means no chain; a held empty chain is
+    /// valid too. The shared `measure_line` check precedes its fast path.
     pub fn line_fonts(&mut self, face: Face, text: &str) -> Result<&[Part], Error> {
         self.measure_line(face, text, ShapeMode::MEASURE)?;
         Ok(&self.parts)

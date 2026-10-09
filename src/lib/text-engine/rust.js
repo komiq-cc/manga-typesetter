@@ -15,6 +15,7 @@ import { createEngine, SYNTH_BOLD, SYNTH_OBLIQUE, CHAIN_SHIFT, RULES } from '../
 import { addInstance, instancesSupported } from '../../../text-engine/js/instance.mjs';
 import { lineFonts, lineFontsSupported } from '../../../text-engine/js/line-fonts.mjs';
 import { FACE_SLOTS } from '../data.js';
+import { fontBytesHash } from './font-identity.js';
 
 const ITALIC_SLOTS = new Set(['italic', 'boldItalic']);
 const BOLD_SLOTS = new Set(['bold', 'boldItalic']);
@@ -76,6 +77,10 @@ export async function createRustTextEngine(source, options = {}) {
   // face.key -> the resolved engine face; emptied whenever the faces change
   const handles = new Map();
   const listeners = new Set();
+  // Font id is reusable. PSD fallback identity instead follows the file's
+  // bytes, collection index and actual clamped variable place, not the id.
+  const fontSources = new Map();
+  let postScriptNames = null;
   // Families a letter is looked for in when the face lacks it, in order, and
   // the engine chain built from them for each weight and slant asked.
   let fallbacks = [];
@@ -88,6 +93,7 @@ export async function createRustTextEngine(source, options = {}) {
 
   // Every measurement a caller kept may be stale after this.
   function changed() {
+    postScriptNames = null;
     for (const chain of chains.values()) low.chainFree(chain);
     chains.clear();
     handles.clear();
@@ -135,14 +141,23 @@ export async function createRustTextEngine(source, options = {}) {
     if (at.wght === axis.default) return { font, fauxBold: at.fauxBold };
     let made = instances.get(font);
     if (!made) instances.set(font, (made = new Map()));
-    if (!made.has(at.wght)) made.set(at.wght, addInstance(low, font, { wght: at.wght }));
+    if (!made.has(at.wght)) {
+      const instance = addInstance(low, font, { wght: at.wght });
+      made.set(at.wght, instance);
+      const source = fontSources.get(font);
+      fontSources.set(instance, { ...source, location: [['wght', Math.fround(at.wght)]] });
+      postScriptNames = null;
+    }
     return { font: made.get(at.wght), fauxBold: at.fauxBold };
   }
   // Called for a slot's font when it goes, after `changed()`: nothing names
   // the instances by then.
   function forgetWeights(font) {
     weightAxes.delete(font);
-    for (const instance of instances.get(font)?.values() ?? []) low.removeFont(instance);
+    for (const instance of instances.get(font)?.values() ?? []) {
+      low.removeFont(instance);
+      fontSources.delete(instance);
+    }
     instances.delete(font);
   }
 
@@ -232,6 +247,7 @@ export async function createRustTextEngine(source, options = {}) {
   function removeFont(font) {
     forgetWeights(font);
     low.removeFont(font);
+    fontSources.delete(font);
     const file = fontFile.get(font);
     if (file === undefined) return;
     fontFile.delete(font);
@@ -355,6 +371,7 @@ export async function createRustTextEngine(source, options = {}) {
       } catch (error) {
         throw new Error(`text engine: cannot read ${family}/${slot}: ${error.message}`);
       }
+      fontSources.set(font, { bytes: fontBytesHash(bytes), index: index >>> 0, location: [] });
       put(family, [[slot, font]]);
     },
     /**
@@ -375,16 +392,21 @@ export async function createRustTextEngine(source, options = {}) {
       for (const f of faces) checkFace(family, f.slot);
       let beside = file == null ? undefined : fileFonts.get(file)?.values().next().value;
       if (beside === undefined && !bytes) throw new Error(`text engine: the file of ${family} is not held, and no bytes came with it`);
+      const sourceBytes = beside === undefined ? fontBytesHash(bytes) : fontSources.get(beside).bytes;
       const made = [];
       try {
         for (const f of faces) {
           const font = beside === undefined ? low.addFont(bytes, f.index ?? 0) : low.addSiblingFace(beside, f.index ?? 0);
+          fontSources.set(font, { bytes: sourceBytes, index: (f.index ?? 0) >>> 0, location: [] });
           beside ??= font;
           made.push([f.slot, font]);
         }
       } catch (error) {
         // All or nothing: half a family would measure its bold as a smeared regular.
-        for (const [, font] of made) low.removeFont(font);
+        for (const [, font] of made) {
+          low.removeFont(font);
+          fontSources.delete(font);
+        }
         throw new Error(`text engine: cannot read ${family}: ${error.message}`);
       }
       for (const [, font] of made) noteFile(font, file);
@@ -502,6 +524,31 @@ export async function createRustTextEngine(source, options = {}) {
     /** The engine face a request draws with, `{ font, size, flags }`: what the low-level loader and the painter take. */
     handle(face) {
       return resolve(face);
+    },
+    /** Stable PSD source identity; size and faux styling do not change it. */
+    sourceIdentity(font) {
+      const source = fontSources.get(font);
+      if (!source) throw new Error('text engine: PSD font source is not held');
+      return JSON.stringify([source.bytes, source.index, source.location]);
+    },
+    /** All declared/generated names reachable by the app's real style requests.
+     * Compute the complete set once per registration state, including variable
+     * 400/700 places not requested yet: fallback names cannot depend on which
+     * box is exported first. Instances share bytes and are freed with the slot.
+     */
+    postScriptNames() {
+      if (!postScriptNames) {
+        const names = new Set();
+        for (const fam of families.values()) for (const slot of present(fam)) {
+          const font = fam[slot];
+          for (const id of new Set([font, weighted(font, slot, false, false).font, weighted(font, slot, true, false).font])) {
+            const name = low.fontInfo(id).postScriptName;
+            if (name) names.add(name);
+          }
+        }
+        postScriptNames = names;
+      }
+      return postScriptNames;
     },
     /** The low-level engine, for tools that need font ids or raw runs. */
     low,

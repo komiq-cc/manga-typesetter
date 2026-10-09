@@ -79,6 +79,7 @@ pub(crate) fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> R {
 }
 
 /// Runs `f` with the engine and the first `len` bytes of the text buffer.
+/// A rejected query leaves no previous or partial answer in either buffer.
 fn with_text<R>(
     len: usize,
     f: impl FnOnce(&mut Engine, &str, &mut State2<'_>) -> Result<R, Error>,
@@ -91,9 +92,16 @@ fn with_text<R>(
             result,
             ..
         } = s;
-        let bytes = text.get(..len).ok_or(Error::BadText)?;
-        let text = core::str::from_utf8(bytes).map_err(|_| Error::BadText)?;
-        f(engine, text, &mut State2 { out, result })
+        let answer = (|| {
+            let bytes = text.get(..len).ok_or(Error::BadText)?;
+            let text = core::str::from_utf8(bytes).map_err(|_| Error::BadText)?;
+            f(engine, text, &mut State2 { out, result })
+        })();
+        if answer.is_err() {
+            out.clear();
+            result.fill(0.0);
+        }
+        answer
     })
 }
 
@@ -111,7 +119,9 @@ fn code<T: Into<i32>>(r: Result<T, Error>) -> i32 {
 }
 
 /// `flags`: bit 0 synthetic bold, bit 1 synthetic oblique, bits 8 and up the
-/// fallback chain's handle (zero for none).
+/// fallback chain's handle (zero for none). Every nonzero handle must still
+/// be held, including for a font-box or empty-text query: otherwise the
+/// answer is `UnknownFont` (NaN for `mt_advance`).
 fn face(font: u32, size: f64, flags: u32) -> Face {
     Face {
         font,
@@ -367,7 +377,11 @@ pub extern "C" fn mt_font_box(font: u32, size: f64, flags: u32) -> i32 {
             s.result[1] = b.descent;
             2
         }
-        Err(e) => Status::from(e) as i32,
+        Err(e) => {
+            s.out.clear();
+            s.result.fill(0.0);
+            Status::from(e) as i32
+        }
     })
 }
 
@@ -563,7 +577,10 @@ pub extern "C" fn mt_paint_end() -> i32 {
 ///
 /// A size or a letter spacing that is not a finite number is `BadSpec`:
 /// every position would be NaN or infinite, and a caller told "n clusters"
-/// would draw a caret from them.
+/// would draw a caret from them. So is an ANSWER with a pen or an advance
+/// that is not finite, which finite numbers can still give (a size so large
+/// that the pens overflow): the answer is checked, not only the question,
+/// and the out buffer is left empty.
 #[cfg(feature = "paint")]
 #[no_mangle]
 pub extern "C" fn mt_line_carets(
@@ -574,6 +591,10 @@ pub extern "C" fn mt_line_carets(
     letter_spacing: f64,
 ) -> i32 {
     if !size.is_finite() || !letter_spacing.is_finite() {
+        with(|s| {
+            s.out.clear();
+            s.result.fill(0.0);
+        });
         return Status::BadSpec as i32;
     }
     code(with_text(text_len, |engine, text, st| {
@@ -590,10 +611,18 @@ pub extern "C" fn mt_line_carets(
             last = Some(glyph.cluster);
             let upem = f64::from(engine.font(placed.font)?.info.units_per_em);
             let pen = placed.x - f64::from(glyph.x_offset) * (size / upem);
+            if !pen.is_finite() {
+                st.out.clear();
+                return Err(Error::BadSpec);
+            }
             st.out
                 .extend_from_slice(&f64::from(glyph.cluster).to_le_bytes());
             st.out.extend_from_slice(&pen.to_le_bytes());
             n += 1;
+        }
+        if !run.advance.is_finite() {
+            st.out.clear();
+            return Err(Error::BadSpec);
         }
         let len16 = text.encode_utf16().count() as f64;
         st.out.extend_from_slice(&len16.to_le_bytes());

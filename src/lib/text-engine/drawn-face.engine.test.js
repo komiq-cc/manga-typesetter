@@ -1,11 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
-import { blankName } from '../../test/variable-fixture.js';
+import { blankName, withTables, nameTable } from '../../test/variable-fixture.js';
 import { createRustGlyphPainter } from './rust-painter.js';
 import { drawnFace, drawnRuns, postScriptNameOf } from './drawn-face.js';
+import { lineFonts } from '../../../text-engine/js/line-fonts.mjs';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './index.js';
 import { clearLayoutMemo } from '../measure.js';
-import { textLayerFor, BORROWED_MARK } from '../psd.js';
+import { textLayerFor, fontRequestFor, BORROWED_MARK } from '../psd.js';
+import { app } from '../store.svelte.js';
 
 // ===========================================================================
 // Which font drew each stretch of a text: asked of the engine, not reckoned
@@ -134,11 +136,66 @@ describe('a borrowed stretch', () => {
   });
 });
 
+describe('asking the engine for a line’s fonts (`lineFonts`)', () => {
+  // The wasm's allocator, counted: every `mt_alloc` and every `mt_free`,
+  // with the bytes of each.
+  const counted = () => {
+    const ex = rust.low.exports;
+    const seen = { allocs: 0, frees: 0, held: new Map() };
+    const exports = {
+      memory: ex.memory,
+      mt_line_fonts: ex.mt_line_fonts,
+      mt_alloc: (bytes) => {
+        const ptr = ex.mt_alloc(bytes);
+        seen.allocs++;
+        seen.held.set(ptr, bytes);
+        return ptr;
+      },
+      mt_free: (ptr, bytes) => {
+        seen.frees++;
+        // Freed as it was allocated: the same pointer, the same size.
+        expect(seen.held.get(ptr)).toBe(bytes);
+        seen.held.delete(ptr);
+        return ex.mt_free(ptr, bytes);
+      },
+    };
+    return { engine: { exports }, seen };
+  };
+
+  it('gives back everything it allocated, call after call', () => {
+    rust.setFallbacks(['Bangers', 'DejaVu Sans']);
+    const handle = rust.handle(face('Comic Neue'));
+    const { engine, seen } = counted();
+    const pages = rust.low.exports.memory.buffer.byteLength;
+    for (let i = 0; i < 1000; i++) {
+      const text = ['AĦ ΩĦB', '', 'A', 'ΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩ'][i % 4];
+      expect(lineFonts(engine, handle, text).reduce((n, p) => n + (p.end - p.start), 0)).toBe(text.length);
+    }
+    // Two allocations a call with text (the text, the answer), one without.
+    expect(seen.allocs).toBe(750 + 1000);
+    expect(seen.frees).toBe(seen.allocs);
+    expect(seen.held.size).toBe(0);
+    // And the heap did not grow for it.
+    expect(rust.low.exports.memory.buffer.byteLength).toBe(pages);
+  });
+
+  it('gives it back when the engine refuses, too', () => {
+    const handle = rust.handle(face('Comic Neue'));
+    const { engine, seen } = counted();
+    // A chain nobody made, and a font nobody added.
+    expect(() => lineFonts(engine, { font: handle.font, flags: 65535 << 8 }, 'AΩ')).toThrow(/unknown font or chain/);
+    expect(() => lineFonts(engine, { font: 987654, flags: 0 }, 'AΩ')).toThrow(/unknown font or chain/);
+    expect(seen.allocs).toBe(4);
+    expect(seen.held.size).toBe(0);
+  });
+});
+
 describe('a font whose PostScript name is only spaces', () => {
   it('has no name of its own, and the type layer is given the constructed one', () => {
     const bytes = blankName(fixtureFont('Bangers-Regular.ttf'));
     const font = rust.low.addFont(bytes);
-    expect(rust.low.fontInfo(font).postScriptName).toMatch(/^ +$/);
+    // The engine does not pass it on (font.rs, where name ID 6 is read).
+    expect(rust.low.fontInfo(font).postScriptName).toBe('');
     expect(postScriptNameOf(rust, font)).toBe('');
     rust.low.removeFont(font);
 
@@ -150,15 +207,49 @@ describe('a font whose PostScript name is only spaces', () => {
       clearLayoutMemo();
       const style = { font: 'Blank Name', size: 30, bold: true, italic: false, lineHeight: 1.1, align: 'center', valign: 'top', color: '#000000', strokes: [] };
       const layer = textLayerFor({ lines: [] }, { id: 'b', lineN: null, text: 'WAIT', x: 10, y: 10, w: 300, h: 100, style }, null);
-      // The name the writer constructs when a font states none (`postScriptName`
-      // in psd.js: the family's CSS name with its spaces out; here, where the
-      // app's own font list does not hold the family, the default family's).
-      expect(layer.text.style.font.name).toBe('ComicNeue');
+      // The engine's fallback names the actual family/source, even when the
+      // app's CSS font list would have substituted its default family.
+      expect(layer.text.style.font.name).toMatch(/^MTFallback-BlankName-[0-9A-F]{32}\.\.\.$/);
       expect(layer.text.style.fauxBold).toBe(true);
     } finally {
       setTextEngine(before.engine);
       setGlyphPainter(before.painter);
       rust.removeFamily('Blank Name');
+    }
+  });
+});
+
+describe('engine PSD names after rejecting the file name', () => {
+  it('sanitizes/caps family fallbacks for primary and borrowed faces, preserves distinctions and leaves the browser constructor compatible', () => {
+    const oldSystem = app.fonts.system;
+    const families = ['Bad[](){}<>/%é\u0007\u007f', 'X'.repeat(140), '漢字', 'Bad[]', 'Bad()'];
+    const invalidName = (filename) => withTables(fixtureFont(filename), { name: nameTable([[1, 'Fixture'], [2, 'Regular'], [6, 'Bad/Name']]) });
+    const style = (font) => ({ font, size: 30, bold: false, italic: false, lineHeight: 1.1, align: 'left', valign: 'top', color: '#000000', strokes: [] });
+    const valid = (name) => name.length > 0 && name.length <= 127 && /^[!-~]+$/.test(name) && !/[\[\](){}<>/%]/.test(name);
+    try {
+      app.fonts.system = [...oldSystem, ...families.map((name) => ({ name, css: `"${name}"` }))];
+      setTextEngine(rust);
+      setGlyphPainter(createRustGlyphPainter(rust));
+      const names = [];
+      for (const family of families) {
+        rust.addFace(family, 'regular', invalidName('DejaVuSans.ttf'));
+        expect(drawnFace(rust, face(family)).postScriptName).toBe('');
+        const request = fontRequestFor(style(family));
+        expect(valid(request.name), JSON.stringify(family)).toBe(true);
+        expect(fontRequestFor(style(family)).name).toBe(request.name);
+        names.push(request.name);
+        rust.setFallbacks([family]);
+        const layer = textLayerFor({ lines: [] }, { id: 'b', lineN: null, text: 'AΩ', x: 0, y: 0, w: 200, h: 100, style: style('Comic Neue') }, null);
+        expect(layer.text.styleRuns.find((run) => run.style.font)?.style.font.name).toBe(request.name);
+      }
+      expect(new Set(names).size).toBe(families.length);
+      expect(names[1]).toHaveLength(127);
+      setTextEngine(before.engine);
+      setGlyphPainter(before.painter);
+      expect(fontRequestFor(style('Bad[]')).name).toBe('Bad[]');
+    } finally {
+      families.forEach((name) => rust.removeFamily(name));
+      app.fonts.system = oldSystem;
     }
   });
 });

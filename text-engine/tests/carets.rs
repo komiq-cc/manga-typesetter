@@ -200,3 +200,128 @@ fn a_size_or_a_spacing_that_is_no_number_is_an_error_and_not_a_line_of_them() {
     let c = carets(font, 30.0, 0, "ab", -2.5);
     assert!(c.x.iter().all(|x| x.is_finite()) && c.advance.is_finite());
 }
+
+/// A question with finite numbers can still have an answer without them: a
+/// size so large that the pens overflow. That is an error too, with nothing
+/// left in the out buffer for a caller to read as positions.
+#[test]
+fn an_answer_with_a_position_that_is_not_finite_is_an_error() {
+    let font = abi_font("ComicNeue-Regular.ttf");
+    assert_eq!(answer(font, f64::MAX, "MMMM", 0.0), Status::BadSpec as i32);
+    assert_eq!(mt_out_len(), 0);
+    assert_eq!(answer(font, 30.0, "MMMM", f64::MAX), Status::BadSpec as i32);
+    assert_eq!(mt_out_len(), 0);
+    assert_eq!(
+        answer(font, 30.0, "MMMM", -f64::MAX),
+        Status::BadSpec as i32
+    );
+    assert_eq!(mt_out_len(), 0);
+    // One letter: its pen is 0 and written, and the advance alone is not a
+    // number. Nothing is left of the pen.
+    assert_eq!(
+        answer(font, f64::MAX, "M", f64::MAX),
+        Status::BadSpec as i32
+    );
+    assert_eq!(mt_out_len(), 0);
+    // Large, and every position still a number: answered.
+    assert_eq!(answer(font, 1.0e9, "MMMM", 0.0), 4);
+    let c = carets(font, 1.0e9, 0, "MMMM", 0.0);
+    assert!(c.x.iter().all(|x| x.is_finite()) && c.advance.is_finite());
+    assert!(c.advance > c.x[3] && c.x[3] > c.x[1]);
+}
+
+/// Alter the existing test font in memory. Every advance is zero; a GPOS
+/// single-position lookup moves only A by 32767 units. No font file is made.
+fn zero_advance_offset_font() -> Vec<u8> {
+    use skrifa::{FontRef, MetadataProvider};
+    let font = bytes("ComicNeue-Regular.ttf");
+    let glyph = FontRef::new(&font)
+        .unwrap()
+        .charmap()
+        .map('A')
+        .unwrap()
+        .to_u32() as u16;
+    let u16_at = |at: usize| u16::from_be_bytes(font[at..at + 2].try_into().unwrap());
+    let u32_at = |at: usize| u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) as usize;
+    let mut tables = Vec::new();
+    for i in 0..usize::from(u16_at(4)) {
+        let rec = 12 + i * 16;
+        let tag: [u8; 4] = font[rec..rec + 4].try_into().unwrap();
+        let (at, len) = (u32_at(rec + 8), u32_at(rec + 12));
+        if tag != *b"GPOS" {
+            tables.push((tag, font[at..at + len].to_vec()));
+        }
+    }
+    let hhea = &tables.iter().find(|(tag, _)| tag == b"hhea").unwrap().1;
+    let metrics = usize::from(u16::from_be_bytes(hhea[34..36].try_into().unwrap()));
+    let hmtx = &mut tables.iter_mut().find(|(tag, _)| tag == b"hmtx").unwrap().1;
+    for i in 0..metrics {
+        hmtx[i * 4..i * 4 + 2].copy_from_slice(&0u16.to_be_bytes());
+    }
+    let words = |out: &mut Vec<u8>, values: &[u16]| {
+        out.extend(values.iter().flat_map(|v| v.to_be_bytes()));
+    };
+    let mut gpos = Vec::new();
+    // Header, ScriptList with DFLT/default LangSys, FeatureList with kern,
+    // LookupList with one SinglePos format 1/xPlacement, coverage of A.
+    words(&mut gpos, &[1, 0, 10, 30, 44, 1]);
+    gpos.extend(b"DFLT");
+    words(&mut gpos, &[8, 4, 0, 0, 0xffff, 1, 0, 1]);
+    gpos.extend(b"kern");
+    words(
+        &mut gpos,
+        &[8, 0, 1, 0, 1, 4, 1, 0, 1, 8, 1, 8, 1, 32767, 1, 1, glyph],
+    );
+    tables.push((*b"GPOS", gpos));
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = font[..4].to_vec();
+    out.extend((tables.len() as u16).to_be_bytes());
+    out.extend([0u8; 6]);
+    let mut body = Vec::new();
+    for (tag, data) in &tables {
+        out.extend(tag);
+        out.extend(0u32.to_be_bytes());
+        out.extend(((12 + tables.len() * 16 + body.len()) as u32).to_be_bytes());
+        out.extend((data.len() as u32).to_be_bytes());
+        body.extend(data);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+    }
+    out.extend(body);
+    out
+}
+
+#[test]
+fn a_nonfinite_pen_with_finite_advance_is_refused_and_cleared() {
+    let data = zero_advance_offset_font();
+    let mut engine = Engine::new();
+    let own = engine.add_font_bytes(data.clone(), 0).unwrap();
+    let shaped = engine.shape(own, "BA").unwrap().to_vec();
+    let run = shape_run(&mut engine, Face::new(own, f64::MAX), "BA", 0.0).unwrap();
+    assert_eq!(
+        run.advance, 0.0,
+        "the advance guard must not mask the pen guard"
+    );
+    assert_eq!(shaped.len(), 2);
+    assert_eq!(shaped[0].x_offset, 0);
+    assert_eq!(shaped[1].x_offset, 32767);
+    let scale = f64::MAX / f64::from(engine.font(own).unwrap().info.units_per_em);
+    let pens: Vec<_> = run
+        .glyphs
+        .iter()
+        .zip(&shaped)
+        .map(|(p, g)| p.x - f64::from(g.x_offset) * scale)
+        .collect();
+    assert!(pens[0].is_finite());
+    assert!(!pens[1].is_finite());
+    let ptr = mt_alloc(data.len());
+    // SAFETY: mt_alloc gave us data.len() writable bytes; mt_font_add owns them.
+    let font = unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        mt_font_add(ptr, data.len(), 0)
+    };
+    assert_eq!(answer(font, f64::MAX, "BA", 0.0), Status::BadSpec as i32);
+    assert_eq!(mt_out_len(), 0, "the earlier finite pen must be cleared");
+    assert_eq!(answer(font, 30.0, "BA", 0.0), 2);
+}

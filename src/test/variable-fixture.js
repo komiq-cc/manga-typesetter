@@ -76,3 +76,15 @@ export function blankName(font, id = 6) {
   }
   return out;
 }
+
+/** A Windows-English name table made in memory for naming regressions. */
+export function nameTable(records) {
+  const strings = [];
+  const out = [...u16(0), ...u16(records.length), ...u16(6 + records.length * 12)];
+  for (const [id, text] of records) {
+    const wide = Array.from({ length: text.length }, (_, i) => text.charCodeAt(i)).flatMap(u16);
+    out.push(...u16(3), ...u16(1), ...u16(0x409), ...u16(id), ...u16(wide.length), ...u16(strings.length));
+    strings.push(...wide);
+  }
+  return Uint8Array.from([...out, ...strings]);
+}

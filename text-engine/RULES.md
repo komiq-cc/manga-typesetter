@@ -397,6 +397,16 @@ apart. The rule is pinned by unit tests on the fixture fonts.
   adapter) and does not work it out again from what each font covers: "the
   font the stretch before it is in" cannot be read off a list of missing
   letters, and a second reckoning cuts inside a cluster.
+  A nonzero chain handle the engine does not hold is `UnknownFont` for
+  every query of a face, before the primary-face fast path or an empty-text
+  answer. This includes font boxes, advance, ink, wrapping, missing glyphs,
+  carets and names. Zero is "no chain"; a held empty chain is valid too.
+  `mt_advance` answers NaN, the standard buffered exports answer -2 and
+  clear their shared answer buffers, and `mt_line_fonts` retains its own
+  -1 unknown / -2 capacity contract without writing the caller's buffer.
+  JS wrappers throw before reading a refused answer. [M: focused P8c
+  tests/chains.rs and chains.engine.test.js on code committed as `1deb27a`;
+  final coordinator verification after P7 integration remains pending.]
 - With no list, or when the face has every letter, there is one part and the
   numbers are bit for bit what they were (the fast path shapes with the face
   first and looks further only if a `.notdef` came out).
@@ -687,6 +697,31 @@ instance's.
   format and limit were read; which hash it uses could not be, and FNV-1a is
   this engine's choice. The name is distinct and stable, and is not
   promised to be the one another implementation makes.]
+- **Two places never share a name, and no name carries a byte a
+  PostScript name may not.** A name the font states - name ID 6, a named
+  instance's PostScript name - is passed on only if it is printable ASCII
+  with no space and none of `[ ] ( ) { } < > / %`, at most 127 long; else
+  the font has no name of its own (ID 6) or the instance gets the made one.
+  A named instance's name, stated or made from its style, is used only if it
+  differs from the installed default and every other named place after capping,
+  and is outside the coordinate/hash namespace reserved for generated places;
+  else the place is spelled out. A generated name equal to the default uses
+  the exact-location hash. A non-ASCII family still accepts a valid stated name
+  and has a prefix fallback for unnamed places. [I: new native/wasm regressions,
+  fresh combined proof pending.] And the place is spelled `_<value><tag>` only where that can
+  be read back: every axis tag, cut down to its letters and digits, begins
+  with a letter and is no other axis' tag. Tags `AB-C` and `A-BC` both read
+  `ABC`, and `_1` + `1abc` is `_11` + `abc`: such a font's instances get the
+  last-resort form, hashed over the tags as the file has them. [M:
+  tests/instance.rs, historical.] Engine PSD fallback names after missing or
+  invalid ID6 use a generated namespace capped to127 bytes. Its hash includes
+  the unsanitized family, real slot, bytes fingerprint, collection index and
+  actual variable place; display normalization only changes the prefix.
+  Parsed/generated names reachable by all real style requests are checked
+  before assigning a deterministic salted fallback, independent of request
+  order. Primary and borrowed runs share the same actual-source identity.
+  Size and faux flags do not change the real font name. The browser keeps
+  its earlier constructor. [I: new PSD identity regressions pending.]
 - **An axis that is not a range is not an axis.** A file whose `fvar` gives
   an axis a minimum above its maximum, a default outside the two, or a
   number that is not one, is a font without that axis: it is not listed,

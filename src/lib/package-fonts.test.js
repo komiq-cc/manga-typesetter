@@ -30,7 +30,7 @@ vi.mock('./library.svelte.js', () => ({
 
 const { app, setFontSource } = await import('./store.svelte.js');
 const { addFontFile, removeUserFont, installFontFace, systemFontEntry } = await import('./fonts.js');
-const { exportChapterPackage, inspectPackage, importChapterPackage, fontStatus, fontsStaying, stayingNote } = await import('./package-flow.js');
+const { exportChapterPackage, inspectPackage, importChapterPackage, fontStatus, fontsStaying, stayingNote, packageFontStatuses } = await import('./package-flow.js');
 const { readChapterPackage, buildChapterPackage } = await import('./package.js');
 
 const comic = fixtureFont('ComicNeue-Regular.ttf');
@@ -173,6 +173,63 @@ describe('the import says what each font will be on this machine', () => {
     // A system font is "missing", a built-in is "builtin", and a family the manifest does not list is not listed.
     expect(await statuses(incoming())).toEqual({ 'Shipped Font': 'install', Arial: 'missing', 'Gone Font': 'missing', Mine: 'present' });
     expect(await statuses(incoming(['Shipped Font', 'Comic Neue'], ['Shipped Font', 'Comic Neue', 'Bangers']))).toEqual({ 'Shipped Font': 'install', 'Comic Neue': 'builtin' });
+  });
+
+  it('with the switch off the statuses are there at once: no promise, and not a tick later than before', async () => {
+    await addFontFile(fontFile('Mine.ttf', comic));
+    const bytes = incoming();
+    // The list itself, not a promise of it.
+    const out = packageFontStatuses(readChapterPackage(bytes));
+    expect(Array.isArray(out)).toBe(true);
+    expect(Object.fromEntries(out.map((f) => [f.name, f.status]))).toEqual({ 'Shipped Font': 'install', Arial: 'missing', 'Gone Font': 'missing', Mine: 'present' });
+    // `inspectPackage` awaits the file's bytes and nothing else. Set beside
+    // a function that awaits exactly that and was started AFTER it: one
+    // more await anywhere in it, and the other finishes first.
+    const order = [];
+    const file = asFile(bytes);
+    const inspected = inspectPackage(file, 'p1').then(() => order.push('inspectPackage'));
+    const beside = (async () => void (await file.arrayBuffer()))().then(() => order.push('one await'));
+    await Promise.all([inspected, beside]);
+    expect(order).toEqual(['inspectPackage', 'one await']);
+  });
+
+  it('inspection waits again when the font source is replaced, including when the old wait rejects', async () => {
+    for (const rejectOld of [false, true]) {
+      let endOld, endNew, askedNew;
+      let newCalls = 0;
+      const newAsked = new Promise((resolve) => (askedNew = resolve));
+      const oldWait = new Promise((resolve, reject) => (endOld = rejectOld ? () => reject(new Error('old source gave up')) : resolve));
+      setFontSource({ ready: () => true, missing: () => false, settle: () => oldWait });
+      const inspected = statuses(incoming(['Arial']));
+      // `inspectPackage` has awaited the bytes and begun the original wait.
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      let pending = true;
+      const newWait = new Promise((resolve) => (endNew = () => { pending = false; resolve(); }));
+      setFontSource({ ready: () => !pending, missing: () => !pending, settle: () => (newCalls++, askedNew(), newWait) });
+      let finished = false;
+      inspected.then(() => { finished = true; });
+      endOld();
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      expect(newCalls).toBe(1);
+      await newAsked;
+      expect(finished).toBe(false);
+      endNew();
+      expect(await inspected).toEqual({ Arial: 'missing' });
+    }
+  });
+
+  it('give-up errors stay visible and a pending family is never called system or present', async () => {
+    setFontSource({ ready: () => false, missing: () => false, settle: () => Promise.reject(new Error('the fonts never settled')) });
+    expect(packageFontStatuses(readChapterPackage(incoming(['Arial'])))).toEqual([{ name: 'Arial', status: 'missing' }]);
+    await expect(statuses(incoming(['Arial']))).rejects.toThrow(/Could not inspect package fonts.*never settled/);
+    setFontSource({ ready: () => false, missing: () => false, settle: async () => {} });
+    await expect(statuses(incoming(['Arial']))).rejects.toThrow(/still loading/);
+  });
+
+  it('unending source replacement gives up visibly rather than returning an unsound status', async () => {
+    const next = () => ({ ready: () => false, missing: () => false, settle: async () => { setFontSource(next()); } });
+    setFontSource(next());
+    await expect(statuses(incoming(['Arial']))).rejects.toThrow(/font source kept changing/);
   });
 
   it('a shipped font is present once every face of it is in the library, in either mode', async () => {

@@ -15,14 +15,16 @@
 // `faceFor` (measure.js) makes of a style.
 
 /**
- * The PostScript name (name ID 6) of one engine font; '' when the font states
- * none. A name of nothing but spaces is none: the parser this replaces
- * (`parsePostScriptName`, fonts.js) trimmed and refused it, and a type layer
- * that names its font "   " names no font.
+ * The PostScript name of one engine font; '' when it has none. The engine
+ * answers a name only if it IS a PostScript name (`is_postscript_name`,
+ * text-engine/src/font.rs, where name ID 6 is read): trimmed, printable
+ * ASCII with no space and no PostScript delimiter. A name of nothing but
+ * spaces, or one with a bracket or a slash in it, is none - a type layer
+ * that names its font "   " names no font - and whoever asked makes one.
  */
 export function postScriptNameOf(engine, font) {
   try {
-    return String(engine.low.fontInfo(font).postScriptName ?? '').trim();
+    return String(engine.low.fontInfo(font).postScriptName ?? '');
   } catch {
     return '';
   }
@@ -32,17 +34,20 @@ export function postScriptNameOf(engine, font) {
  * The face a request is drawn in, as `{ family, slot, fauxBold, fauxItalic,
  * postScriptName }`: the slot the engine resolved, whether it emboldened or
  * slanted that face itself, and the font's own name. Null for a family the
- * engine does not hold.
+ * engine does not hold. `{ source: true }` adds a stable sourceIdentity for
+ * PSD fallback naming; the default public shape stays the same.
  */
-export function drawnFace(engine, face) {
+export function drawnFace(engine, face, { source = false } = {}) {
   const resolved = engine.resolveFace(face);
   if (!resolved) return null;
+  const font = engine.handle(face).font;
   return {
+    ...(source ? { sourceIdentity: engine.sourceIdentity(font) } : {}),
     family: face.name,
     slot: resolved.slot,
     fauxBold: resolved.fauxBold,
     fauxItalic: resolved.fauxItalic,
-    postScriptName: postScriptNameOf(engine, engine.handle(face).font),
+    postScriptName: postScriptNameOf(engine, font),
   };
 }
 
@@ -70,10 +75,11 @@ const LINE_END = /\r\n|\r|\n/g;
  *
  * Null for a family the engine does not hold. From an engine that cannot say
  * (`lineParts` absent or null) the whole text is the face's own run: nothing
- * is claimed that was not asked.
+ * is claimed that was not asked. `{ source: true }` includes the actual
+ * source identity on primary and borrowed runs, otherwise it is omitted.
  */
-export function drawnRuns(engine, face, text) {
-  const own = drawnFace(engine, face);
+export function drawnRuns(engine, face, text, { source = false } = {}) {
+  const own = drawnFace(engine, face, { source });
   if (!own) return null;
   const whole = [{ start: 0, end: text.length, own: true, ...own }];
   if (typeof engine.lineParts !== 'function') return whole;
@@ -85,12 +91,12 @@ export function drawnRuns(engine, face, text) {
     return lenders.find((l) => l.font === font) ?? null;
   };
   const named = new Map();
-  const source = (part) => {
+  const sourceFor = (part) => {
     if (part.font === ownFont) return own;
     const key = `${part.font}/${part.bold ? 'b' : ''}${part.italic ? 'i' : ''}`;
     if (!named.has(key)) {
       const from = lender(part.font);
-      named.set(key, { family: from?.family ?? null, slot: from?.slot ?? 'regular', fauxBold: part.bold, fauxItalic: part.italic, postScriptName: postScriptNameOf(engine, part.font) });
+      named.set(key, { ...(source ? { sourceIdentity: engine.sourceIdentity(part.font) } : {}), family: from?.family ?? null, slot: from?.slot ?? 'regular', fauxBold: part.bold, fauxItalic: part.italic, postScriptName: postScriptNameOf(engine, part.font) });
     }
     return named.get(key);
   };
@@ -106,7 +112,7 @@ export function drawnRuns(engine, face, text) {
     if (end > at) {
       const parts = engine.lineParts(face, text.slice(at, end));
       if (!parts) return false;
-      for (const part of parts) put(at + part.start, at + part.end, source(part));
+      for (const part of parts) put(at + part.start, at + part.end, sourceFor(part));
     }
     return true;
   };

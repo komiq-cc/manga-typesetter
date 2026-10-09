@@ -23,7 +23,7 @@ import { placeBlock, boxCandidate } from './contain.js';
 import { faceFor } from './measure.js';
 import { editLines } from './edit-lines.js';
 import { textEngine } from './text-engine/index.js';
-import { buildRows, caseMap, mapRows } from './flat-caret.js';
+import { buildRows, caseMap, caretStops, stopRows } from './flat-caret.js';
 
 /** Whether the installed engine can say where a caret stands (the wasm has the export). */
 export function canType() {
@@ -34,20 +34,6 @@ export function canType() {
 // an alignment it does not know is the line's start).
 function alignOffset(align, advance) {
   return align === 'center' ? -advance / 2 : align === 'right' || align === 'end' ? -advance : 0;
-}
-
-// Made when first asked for: importing this file runs nothing.
-let segmenter;
-// Whether a caret may stand at an offset of `text`: a grapheme boundary.
-function graphemeBounds(text) {
-  if (segmenter === undefined) segmenter = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
-  if (!segmenter) return null;
-  // Plain text - the usual case - has a boundary at every offset.
-  // eslint-disable-next-line no-control-regex
-  if (/^[\x00-\x7f]*$/.test(text) && !text.includes('\r')) return null;
-  const at = new Set([text.length]);
-  for (const { index } of segmenter.segment(text)) at.add(index);
-  return (o) => at.has(o);
 }
 
 /**
@@ -89,10 +75,10 @@ export function linePens(engine, face, line, letterSpacing) {
  *
  * `map` is `caseMap`'s: null when a raw offset is a cased one. Null when the
  * box cannot be typed into as a picture - the engine has no `lineCarets`,
- * the lines cannot be laid over the text, the casing cannot be mapped, or a
- * row of it would have nowhere for a caret to stand - and it is then typed
- * into as DOM text, as it always was. Throws when the engine does (a size
- * that is no number); the caller takes that as null.
+ * the lines cannot be laid over the text, or the casing cannot be mapped -
+ * and it is then typed into as DOM text, as it always was. Throws when the
+ * engine does (a size that is no number, or one its pens overflow at); the
+ * caller takes that as null.
  */
 export function typeModel(box, text) {
   const engine = textEngine();
@@ -125,9 +111,11 @@ export function typeModel(box, text) {
     };
   });
   const space = engine.advance(face, ' ') + spacing;
-  // A caret stands at a grapheme boundary of the RAW text; where the casing
-  // changed the text's length the cased text's are not the raw text's.
-  const rows = mapRows(buildRows(drawn, segs, geom, { space, bounds: graphemeBounds(drawn) }), map, map ? graphemeBounds(raw) : null);
-  if (!rows) return null;
+  // Where a caret may stand is the RAW text's to say (`caretStops`), and
+  // `stopRows` is the one place the rows are held to it - their ends too,
+  // which the breaker can put inside a flag or between a letter and its
+  // mark. (The drawn text's own graphemes only divide a cluster's width.)
+  const stops = caretStops(raw);
+  const rows = stopRows(buildRows(drawn, segs, geom, { space, bounds: map ? caretStops(drawn) : stops }), map, stops);
   return { kind: 'flat', rows, lines: place.lines, map };
 }

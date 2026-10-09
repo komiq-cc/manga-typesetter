@@ -25,9 +25,11 @@ pub const LINE_FONT_FIELDS: usize = 4;
 ///
 /// `text` is `text_len` bytes of UTF-8 and `out` room for `out_cap` `u32`s,
 /// both in memory the caller got from `mt_alloc`. Returns -1 for an unknown
-/// font or chain or text that is not UTF-8, and -2 when the parts do not
-/// fit in `out` - a line of `n` UTF-16 units has at most `n` parts, so
-/// `4 * n` always fits.
+/// font, for a chain handle the engine does not hold (`Engine::line_fonts`;
+/// zero is "no chain" and is not one of those), or for text that is not
+/// UTF-8, and -2 when the parts do not fit in `out` - a line of `n` UTF-16
+/// units has at most `n` parts, so `4 * n` always fits. On -1 and on -2
+/// nothing is written to `out`.
 ///
 /// # Safety
 ///
