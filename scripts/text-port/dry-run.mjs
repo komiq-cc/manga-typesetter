@@ -44,8 +44,9 @@ try {
   const totals = await writeReport({ data, out });
   console.log(`dry run: ${out}/report.html`);
   console.log(JSON.stringify(totals.total));
-  // G6: no box changes x, w or size on open, and heights only grow.
-  if (totals.total.x || totals.total.w || totals.total.size || totals.total.shrank) process.exitCode = 2;
+  // G6: no box changes x, w or size on open, heights only grow, and a top
+  // edge moves only with the height it belongs to.
+  if (totals.total.x || totals.total.w || totals.total.size || totals.total.shrank || totals.total.yAlone) process.exitCode = 2;
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

@@ -87,7 +87,7 @@ function explain(row, c, wk) {
 const blank = () => ({
   boxes: 0, lettered: 0, compared: 0, pending: 0,
   x: 0, w: 0, size: 0, shrank: 0,
-  grew: 0, grewNotEngine: 0, grewMax: 0, grewSum: 0, yMoved: 0,
+  grew: 0, grewNotEngine: 0, grewMax: 0, grewSum: 0, yMoved: 0, yAlone: 0,
   newlyFlagged: 0, newlyFlaggedNotEngine: 0, unflagged: 0, unflaggedNotEngine: 0, flaggedBefore: 0, flaggedAfter: 0,
   lines: 0, moved: 0, movedOver2: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
   back: { run: 0, grew: 0, newlyFlagged: 0, unflagged: 0, x: 0, w: 0, size: 0 },
@@ -152,6 +152,7 @@ export async function writeReport({ data, out }) {
     if (row.review) t.flaggedBefore++;
     if (row.rust.state.review) t.flaggedAfter++;
     if (c.dy !== 0) t.yMoved++;
+    if (c.dy !== 0 && !c.grew) t.yAlone++;
     if (c.grew) {
       t.grewMax = Math.max(t.grewMax, c.dh);
       t.grewSum += c.dh;
@@ -298,6 +299,7 @@ function summaryLines(t) {
   const lines = [];
   lines.push(`${t.total.boxes} boxes in ${Object.keys(t.chapters).length} chapters; ${t.total.lettered} have text; Safari's capture has ${t.total.compared} of those to compare lines and positions with.`);
   lines.push(`Width, size or horizontal position changed: **${t.total.x + t.total.w + t.total.size}**. Heights that shrank: **${t.total.shrank}**.`);
+  lines.push(`Top edge moved: ${t.total.yMoved}, each a box that grew (a box grows about its vertical anchor: down from the top, both ways from the middle, up from the bottom). Top edge moved without the height growing: **${t.total.yAlone}**.`);
   lines.push(`Boxes that grew taller: **${t.total.grew}** (${t.total.grewNotEngine} of them not because of the engine: the stored height was already under what today's app gives the box on open). Largest growth ${px(t.total.grewMax)} px.`);
   lines.push(`Boxes newly flagged "needs review": **${t.total.newlyFlagged}** (${t.total.newlyFlaggedNotEngine} of them already overflow in Safari today and only lacked the flag in the file). Boxes no longer flagged: **${t.total.unflagged}** (${t.total.unflaggedNotEngine} of them pass Safari's check today as well).`);
   lines.push(`Boxes whose line breaks changed: **${t.total.lines}** of ${t.total.compared} compared.`);

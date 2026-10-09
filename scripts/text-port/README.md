@@ -280,8 +280,9 @@ Safari's capture `runs/ref-wk/base`; "after" is the store's own load, the real
 switch, the wasm and the user's fonts, in node. It also reads the counts the
 app's notice would show, and what leaving, Keep and a save back under the
 browser write. Reads copies only and writes only under `--out`; two runs give
-the same bytes. Exit code 2 when a box changed its x, width or size or a
-height shrank (gate G6), 1 when the run failed.
+the same bytes. Exit code 2 when a box changed its x, width or size, a
+height shrank, or a top edge moved without its height growing (gate G6); 1
+when the run failed.
 
 ```
 node scripts/text-port/p9-check.mjs --data <dir> [--out <dir>] [--chapter <stem>]
