@@ -379,7 +379,10 @@ apart. The rule is pinned by unit tests on the fixture fonts.
 
 - `setFallbacks([family, …])` on the adapter gives an ordered list of
   registered families. Each answers with the face CSS matching would pick from
-  it for the weight and slant asked, synthesised where it has none.
+  it for the weight and slant asked, synthesised where it has none. A family
+  listed as `{ family, face: 'first' }` answers with ONE face whatever is
+  asked: its regular, or the first slot it has, synthesised to the weight and
+  slant asked. Rule 11 lists the families it names that way.
 - A line is cut where coverage changes. Each cluster, a letter with the marks
   that belong to it, is drawn from the face itself if the face can; else from
   the font the stretch before it is in, if that font can; else from the first
@@ -414,15 +417,27 @@ builds the engine's list from the answers (`lettersOf` and `fallbackChain` in
 The rule, for one letter (a code point) of a box's text:
 
 1. The face has it: the face draws it (rule 10).
-2. Else the last resort has it (P3A-REPORT.md section 3): the last resort
+2. Else the last resort has it (P3A-REPORT.md section 3), in the face CSS
+   matching picks from it for the box's weight and slant: the last resort
    draws it, and nothing is asked.
-3. Else it is drawn from **the first installed family that has it**, looking
-   in this order:
+3. Else it is drawn from **the first installed family whose regular face has
+   it** (the first face the family has, when it has no regular), looking in
+   this order:
    1. this OS's list in the table below, as written;
    2. then every other installed family, by its name folded to lower case,
       and by the name itself where two names fold alike.
+
+   **That one face draws it, in every weight and slant.** A bold or slanted
+   box gets the letter emboldened or slanted by the engine, also where the
+   family has a bold of its own. The face that was judged is the face that
+   draws.
 4. No installed family has it: it stays the face's `.notdef`, and the editor
    says "no installed font has" it.
+5. Nobody could say: the question to the native side failed, or the family
+   it named could not be read. It stays the face's `.notdef` too, and the
+   editor says that ("is in X, which could not be read", "could not look for
+   a font with"). It does not say "no installed font has": that was not
+   found out.
 
 What makes the answer the same every time on one machine:
 
@@ -442,13 +457,26 @@ What makes the answer the same every time on one machine:
   at first would draw its kanji from the Korean family (which has them) and
   never ask, and the same chapter opened at another page would draw them from
   the Japanese one.
-- **A family is judged by one face**, its regular, or the first slot it has
-  when it has no regular, and by the `cmap` subtable a shaper reads: (3,10),
-  (0,6), (0,4), (3,1), then (0,3) to (0,0). A font with only the symbol
-  encoding (3,0) lends nothing.
-- **What is known is kept until the next scan of the system fonts**, "nothing
-  has it" and "its family could not be read" included. A scan forgets all of
-  it, because a font may have been installed or removed.
+- **A family is judged by one face, and lends from that face only**: its
+  regular, or the first slot it has when it has no regular. Judged by its
+  regular and lent by the face CSS matching picks, a family whose bold lacks
+  a letter its regular has gave a bold box the empty box, or the glyph of
+  whichever other family was loaded for another page. [M, real wasm, fixture
+  fonts: a bold letter measured 21.27 px, the empty box, with the lending
+  family alone, and was another family's glyph once that one was loaded.
+  Now it is the lending family's regular made bold, in both orders of
+  arrival: `font-fallback.engine.test.js`.]
+- **The face is read by the `cmap` subtable a shaper reads**: (3,10), (0,6),
+  (0,4), (3,1), then (0,3) to (0,0). A font with only the symbol encoding
+  (3,0) lends nothing. A table that asks for more reading than it has bytes
+  is a damaged font and lends nothing.
+- **The editor names the family the engine draws from.** It asks the engine
+  which family of its list is the first to have the letter. It does not
+  repeat the answer it was given.
+- **What is known is kept until the next scan of the system fonts**: "no
+  installed font has it", "its family could not be read" and "the question
+  failed", each as what it is. A scan forgets all of it, because a font may
+  have been installed or removed.
 
 The lists, most preferred first:
 
@@ -495,19 +523,28 @@ Where the rule stops:
 - **Rule 10 keeps a stretch in one font, and that can beat the order above.**
   A letter that follows a borrowed letter is drawn from the same family if
   that family has it, even when a family earlier on the list has it too. The
-  editor's line names the family step 3 gives. The two differ only where two
-  borrowed letters stand side by side and the later-listed family has both.
+  editor's line names the first family of the list that has the letter. The
+  two differ only where two borrowed letters stand side by side and the
+  later-listed family has both.
   [M, the same 2,298 boxes, counted by walking each text with rule 10's
   words, not read out of the engine: 1 box has two such letters side by
   side, and in 0 boxes do the two answers differ.]
-- **A family is judged by its regular face.** A bold or italic face of the
-  same family may lack a letter the regular has. Then the engine draws that
-  letter from the next family of the list that has it, or as `.notdef`.
+- **A borrowed letter is never a real bold or italic.** The lending
+  family's regular is emboldened or slanted by the engine, also where the
+  family has a bold of its own. That is the price of step 3. [M: of the 12
+  chapter boxes above that borrow beyond the last resort, 0 are bold and 0
+  italic.] The last resort is not under this: it lends the face CSS matching
+  picks, because the engine itself is asked what it lacks in each weight.
 - **The Windows and Linux lists were not read off a machine** [I]. Step 3.2
   still finds a family there; which one is first may not be what the OS
   itself would pick.
 - **Fonts the user loaded are not looked through.** A letter one loaded font
   lacks and another has is still borrowed from an installed family.
+- **A loaded font with the name of an installed family has that name.** The
+  engine holds one family a name. A letter the installed family was named
+  for is then drawn from the loaded font's first face if that has it, and is
+  said to be unread if not. While a face of the loaded font is still being
+  decoded, the letter waits.
 
 ## What was looked at and found to be a property of a reference
 
