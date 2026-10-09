@@ -466,7 +466,7 @@ function choicesIn(id, record, text, when, allowed = new Set()) {
     const extra = extraIndex >= 0 ? tp?.extraBoxes[extraIndex] : null;
     const got = {
       text: b?.text, height: b?.h, style: b?.style?.color, fit: b?.fit,
-      file: pg?.file, cleaned: pg?.cleaned ?? pg?.cleanedFile ?? null,
+      file: pg?.file, cleaned: pg?.cleaned ?? null,
       translation: ln?.en, order: record.pages.map((p) => p.id),
       mode: record.mode, typesetting: record.typesetting?.mode,
     }[want.kind];
@@ -482,7 +482,10 @@ function choicesIn(id, record, text, when, allowed = new Set()) {
 }
 function choicesLive(when) {
   if (!live()) return;
-  choicesIn(c.id, { pages: app.pages, mode: app.chapterMode, typesetting: app.typesetting }, JSON.parse(buildTextJson(app.pages)), when);
+  // Live page.cleaned is a minted image URL; documentNow explicitly reads
+  // cleanedFile as the durable name. Disk records already store that name
+  // in cleaned. Neither representation may borrow the other's fallback.
+  choicesIn(c.id, { pages: documentNow(), mode: app.chapterMode, typesetting: app.typesetting }, JSON.parse(buildTextJson(app.pages)), when);
 }
 function choicesOnDisk(ch, when) {
   const path = paths(ch);
@@ -1495,6 +1498,35 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
 
   it('reopening a saved user choice starts an untouched first-fit cycle without forgetting the historical choice', async () => {
     expect(await run(['switchOn', 'open1', 'editLate', 'open1'])).toBe(null);
+  });
+
+  it('a runtime cleaned image URL cannot hide either a wrong live durable filename or a wrong serialized filename', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      const pg = app.pages[0];
+      const intended = 'chosen-cleaned.png';
+      choose('cleaned', intended, pg);
+      pg.cleanedFile = intended;
+      pg.cleaned = 'blob:runtime-image-url';
+      state.touched = true;
+      relayoutAll();
+      expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      expect(JSON.parse(onDisk()).pages[0].cleaned).toBe(intended);
+      expect(() => choicesLive('live durable cleaned name, despite runtime URL')).not.toThrow();
+      expect(() => choicesOnDisk(c, 'serialized durable cleaned name')).not.toThrow();
+
+      pg.cleanedFile = 'wrong-live-cleaned.png';
+      expect(() => choicesLive('wrong live durable cleaned name')).toThrow('user cleaned choice');
+      pg.cleanedFile = intended;
+      const record = JSON.parse(onDisk());
+      record.pages[0].cleaned = 'wrong-disk-cleaned.png';
+      fsx._tree.files.set(chapterPath, JSON.stringify(record));
+      expect(() => choicesOnDisk(c, 'wrong serialized cleaned name')).toThrow('user cleaned choice');
+    } finally { await cleanupModel(); }
   });
 
   it('an empty chapter Keep does not wait for the previous chapter’s held font', async () => {

@@ -1339,6 +1339,43 @@ Full witnesses are saved only when an explicit fresh private
 `MODEL_WITNESS_OUT` path is supplied. The console stays compact; no default
 filesystem writes or serialized witness dump is added to CI.
 
+The verified P7/P8 integration was merged into P9 as
+`d629769473845f4ae043bbdd908fb28a5cb9a6d3`. A static carry audit found all38
+non-store carry files identical to integration0272 and all eight P9-only
+source/test/report files unchanged. The store differs only by P8's five-line
+fontSourceNow getter; P9's first-fit and actual receipt logic remains intact.
+This is a source comparison, not a new behavioral proof.
+
+The coordinator's combined focused20 run on d629 started at load4.05 and
+finished in15.88s with unchanged source:167 of168 tests passed. Every named
+probe passed. The20 original generated orders classified17 completed,
+two exact browser witnesses (seeds20261019/26), and one unknown failure
+(seed20261024). Its original661 requested events executed641, with20
+unexecuted tail events; shrink replays are separate. The full output and
+both-file witness records are preserved in private p9c-root-d629769 artifacts.
+
+The remaining seed shrank to
+`switchOn,open1,holdWrites,editLate,open1,unmarked_cleaned`. At rest the
+source ordering shows the physical filename check had returned before
+the live choice oracle falsely
+read page.cleaned's runtime blob URL before page.cleanedFile's durable
+filename. Library loading and saving explicitly use those distinct fields.
+The narrow test-only correction normalizes live pages through documentNow;
+physical serialized records still read their cleaned filename directly.
+A named control saves a chosen filename while a runtime blob URL exists,
+then separately proves wrong live and wrong physical filenames still fail.
+This correction and control are unrun. The failing seed and raw earlier
+evidence remain; no production change, event removal or choice exemption
+was made.
+
+The model's completed-order claim is scoped: active documents under Rust
+or independently outstanding Rust save debt check both physical files at
+rest. After actual debt retirement, active ordinary browser disk state is
+outside that at-rest invariant; live independent intent still checks, as do
+actual leave/open boundaries and inactive chapter files. A completed order
+does not prove all active browser autosave states. The exact final-window
+browser witnesses and their unexecuted tails remain separately reported.
+
 Syntax checks and parsing of the generated metric page passed (measured).
 The private p9c-mutations.py runner requires a full candidate commit SHA and
 clean worktree, archives that commit's tracked files, and makes scratch-only
