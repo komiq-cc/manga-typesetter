@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { app, loadProjectPages, setFontSource } from './store.svelte.js';
 import { exportImages } from './exporter.js';
+import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { releaseAllPageImages } from './page-images.js';
 
 // Every file an export writes waits for the fonts its pages need
@@ -139,6 +140,61 @@ describe('an export waits for the fonts its pages need', () => {
     setFontSource(null);
     expect(await exportImages('PNG', 'current')).toBe(true);
     expect(downloaded).toEqual(['ch01-22.png']);
+  });
+
+  it('a PSD whose wait fails is no file at all, and the user is told why', async () => {
+    const psd = await import('./psd.js');
+    const built = vi.spyOn(psd, 'buildPagePsd').mockResolvedValue(new Uint8Array([1, 2, 3]));
+    setFontSource({ ready: () => true, settle: () => Promise.reject(new Error('the fonts kept changing while it waited for them; nothing was written. Try again.')) });
+    expect(await exportImages('PSD', 'all')).toBe(false);
+    expect(built).not.toHaveBeenCalled();
+    expect(downloaded).toEqual([]);
+    expect(app.toast.msg).toBe('Export failed: the fonts kept changing while it waited for them; nothing was written. Try again.');
+    expect(app.exporting).toBe(false);
+  });
+
+  // Which font set an export waits on: the browser's own when the browser
+  // draws the text, the engine's gate alone when the engine does.
+  describe('the browser’s font set', () => {
+    let asked;
+    const before = { engine: textEngine(), painter: glyphPainter() };
+    beforeEach(() => {
+      asked = 0;
+      Object.defineProperty(globalThis.document, 'fonts', { get: () => (asked++, { ready: Promise.resolve() }) });
+    });
+    afterEach(() => {
+      setTextEngine(before.engine);
+      setGlyphPainter(before.painter);
+    });
+
+    it('is what is waited for with the switch off, once, as it was', async () => {
+      setFontSource(null);
+      expect(await exportImages('PNG', 'current')).toBe(true);
+      expect(asked).toBe(1);
+    });
+
+    it('is not asked when the engine measures and draws', async () => {
+      const engine = { id: 'rust', onFontsChange: () => () => {}, loading: () => false };
+      setTextEngine(engine);
+      setGlyphPainter({ paint() {}, engine });
+      const fonts = gate();
+      const exporting = exportImages('PNG', 'current');
+      await flush();
+      fonts.open();
+      expect(await exporting).toBe(true);
+      expect(fonts.asked).toHaveLength(1);
+      expect(asked).toBe(0);
+    });
+
+    it('is waited for after the gate when the switch is on and the browser still draws', async () => {
+      const fonts = gate();
+      const exporting = exportImages('PNG', 'current');
+      await flush();
+      expect(asked).toBe(0);
+      fonts.open();
+      expect(await exporting).toBe(true);
+      expect(asked).toBe(1);
+    });
   });
 
   it('a wait that fails is an export that fails, said so, and not a page painted anyway', async () => {

@@ -5194,6 +5194,14 @@ export function fontsSettling(pages = app.pages) {
   });
 }
 
+// Whether an export has that wait in front of it: a font source that can
+// settle, which is the Rust engine switched on. An exporter asks so that it
+// waits on ONE thing - this, or the browser's own font set, which is what it
+// waited on before there was a switch and still does without one.
+export function fontsGated() {
+  return !!fontSource?.settle;
+}
+
 export function fontNameFor(name) {
   if (fontSource?.nameFor) {
     // What a name resolves to here changes with no list changing - the bytes

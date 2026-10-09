@@ -1,5 +1,5 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
-import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, PAGE_W, PAGE_H } from './store.svelte.js';
+import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth } from './measure.js';
 import { glyphPainter, engineDraws } from './text-engine/index.js';
 import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
@@ -1275,7 +1275,11 @@ export async function exportTextJson(scope) {
 export async function exportImages(fmt, scope) {
   app.exporting = true;
   try {
-    await document.fonts.ready;
+    // The browser's own font set is the browser path's wait, and with the
+    // Rust engine switched on it is not the one that matters: the gate below
+    // is (and it is asked first only so that, with the switch off, this line
+    // runs exactly where it always ran).
+    if (!fontsGated()) await document.fonts.ready;
     const pages = scope === 'all' ? app.pages : [page()];
     const ext = EXT[fmt];
     // THE ONE GATE for every file this writes - a page, the whole chapter,
@@ -1288,6 +1292,10 @@ export async function exportImages(fmt, scope) {
     // With the browser measuring this is null and nothing is awaited.
     const settling = fontsSettling(isLongstrip() ? app.pages : pages);
     if (settling) await settling;
+    // The switch can be on with nothing of the engine's drawing - no font on
+    // this machine it can read - and then the browser paints the text after
+    // all, from its own fonts.
+    if (settling && !engineDraws()) await document.fonts.ready;
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
