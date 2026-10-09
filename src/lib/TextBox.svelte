@@ -25,11 +25,11 @@
     isLongstrip,
     reviewBox,
     reviewOf,
+    edgeDragFloor,
   } from './store.svelte.js';
   import { stripDragYBounds } from './editor/strip.js';
 
   import { untrack } from 'svelte';
-  import { neededHeight } from './typeset.js';
   import { resizeBoxMath } from './resize-math.js';
   import { record } from './editor/history.svelte.js';
   import {
@@ -60,9 +60,10 @@
     TILE_SS,
   } from './text-paint.js';
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
-  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
+  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
+  import { boxCandidate, placeBlock, blockReach } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
-  import { PICTURE_MAX_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture } from './editor/box-picture.js';
+  import { PICTURE_MAX_PX, PICTURE_DRAG_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
@@ -105,25 +106,110 @@
   // contenteditable below, exactly as it is with the switch off - so the
   // picture stands down for it here, in `!editing`, and nowhere else. The task
   // that draws the caret and the selection on the engine's glyphs removes
-  // those two words; everything downstream reads `engineShown`.
+  // those two words from `engineWanted`; everything downstream reads
+  // `engineShown`, which is that and "its paint did not throw".
   const enginePaints = $derived(engineSwitch.painting);
-  const engineShown = $derived(enginePaints && !editing);
+  const engineWanted = $derived(enginePaints && !editing);
+  // A PAINT THAT THREW. The picture is painted in an effect, and the painter
+  // can refuse: the engine throws for a job it will not paint, and nothing
+  // promises it never will. A box must not be left with the last picture it
+  // had, or with none, so the box whose paint threw is shown as its DOM text
+  // - exactly what it is with the switch off - until what it is painted from
+  // changes (`paintFailed` is the key that failed), and then it is tried
+  // again. The throw is caught where the paint is called, in the effect, so
+  // the other boxes of the same flush are painted as if nothing had happened.
+  //
+  // A WARPED box too, and it loses its mesh by it: CSS cannot state a mesh,
+  // and the painter that refused the engine's picture is the one the old
+  // warped paint asks as well, so the choice is its lines unwarped in its
+  // frame or nothing at all, and a box nobody can see or press is not a
+  // choice. `failed` therefore stands down every picture of the box, the old
+  // one included (`pictured`, `warpKey`). Always false with the switch off.
+  let paintFailed = $state(null);
+  const failed = $derived(enginePaints && paintFailed !== null && wantedKey === paintFailed);
+  const engineShown = $derived(engineWanted && !failed);
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
   const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
+  // WHILE A HANDLE IS RESIZING THE BOX every frame of the drag is a repaint,
+  // and a frame has no time for megapixels. So while moves are arriving
+  // (`resizing`, set by the drag in `startTransform`) the picture is painted
+  // within a smaller budget (`PICTURE_DRAG_PX`, handed to the paint in the
+  // place of the usual one, so it is counted on what is painted). A box
+  // inside that budget is painted exactly as at rest.
+  //
+  // The budget is not in the picture's key - it changes nothing about what
+  // the picture is OF - so the paint says what it came out at, and a picture
+  // that came out lower than the box has at rest is remembered as soft
+  // (`dragSoft`). When the moves stop coming, `settleResize` forgets what was
+  // drawn for a soft picture, and the paint effect, which reads `resizing`,
+  // paints it once in full; for a box that was never lowered it does nothing.
+  //
+  // The moves stop coming in more ways than a pointer coming up over the
+  // document, and each of them settles it: the pointer cancelled, the window
+  // losing the focus (a pointer let go over another window is never heard
+  // of), the handle losing the pointer's capture, and the handles going away
+  // under the drag (`handlesOn`: the box deselected, which is what Escape
+  // does, another box selected, the box typed into). A drag whose handles
+  // are gone can still move the box, as it always could, and is then painted
+  // in full: the flag is only ever set while there is a handle to end it.
+  let resizing = $state(false);
+  let dragSoft = false;
+  function settleResize() {
+    if (!resizing) return;
+    if (dragSoft) warpDrawn = '';
+    dragSoft = false;
+    resizing = false;
+  }
   // Whether the box is near the viewport: null until the observer has said.
-  let rootEl = $state(null);
+  //
+  // What is watched is not the box's rectangle but what its picture covers
+  // (`reachEl`, an element with nothing in it, laid over the picture's
+  // footprint). Ink goes past the rectangle - an overflowing line, a curve, a
+  // shadow, a mesh - and a box judged by its rectangle let go of ink that was
+  // still in view.
+  //
+  // While the box holds its picture the footprint is the one that paint
+  // returned (`paintedReach`). While it has been LET GO there is no paint to
+  // return one, and the box goes on changing - more text, another size, a
+  // shadow - so the footprint is worked out instead (`boxFootprint`: the
+  // layout's arithmetic, no canvas), again whenever what it is made from
+  // changes. Kept at the last painted footprint it would be the rectangle of
+  // a picture the box no longer has, and ink that grew into view would wait
+  // for a scroll to bring the OLD rectangle near. The two are one measure -
+  // the paint sizes its canvas by this arithmetic, and only rounds it up to
+  // whole pixels - so what is worked out is never larger than what was
+  // painted, and a box that came back for it stays. Not worked out on a
+  // hidden page, where nothing is watched.
+  let reachEl = $state(null);
+  let paintedReach = $state(null);
+  const keepReach = (g) => {
+    const r = paintedReach;
+    if (r && r.ox === g.ox && r.oy === g.oy && r.cw === g.cw && r.ch === g.ch) return;
+    paintedReach = { ox: g.ox, oy: g.oy, cw: g.cw, ch: g.ch };
+  };
+  const reach = $derived.by(() => {
+    if (!enginePaints) return null;
+    if (!shown || engineKey !== PICTURE_OFF) return paintedReach;
+    // The lines and the faces are read through the measure's own memo, which
+    // is not reactive: these three are what says they changed.
+    app.fontsVersion;
+    shaped;
+    indents;
+    return boxFootprint(box, pg);
+  });
   let near = $state(null);
   $effect(() => {
-    if (!enginePaints || !shown || !rootEl) {
+    if (!enginePaints || !shown || !reachEl) {
       near = null;
+      if (!enginePaints) paintedReach = null;
       return;
     }
     // Asked again each time the page comes back on screen: an observer tells
     // of changes, and "still off screen" after a page turn is not one.
     near = null;
-    return watchNear(rootEl, (v) => {
+    return watchNear(reachEl, (v) => {
       near = v;
     });
   });
@@ -220,10 +306,13 @@
     maskH = h;
   };
   $effect(() => {
-    // Not while the box is the engine's picture: the mask is in those pixels
-    // (as it is in a warped box's), and an image nobody applies is megabytes
-    // held for nothing. It is built again when the box is typed into.
-    if (!clipActive(s.clip) || engineShown) {
+    // Kept while the box is the engine's picture, though the mask is in those
+    // pixels and nothing applies this image then. The encode below answers a
+    // task later, so an image built when an edit starts leaves the editable
+    // on screen unmasked - excluded text shown - until it lands; standing, it
+    // is there on the edit's first frame. What stands is a blob URL: the
+    // encoded PNG of a flat mask, which nothing decodes until CSS applies it.
+    if (!clipActive(s.clip)) {
       maskKey = '';
       maskSeq++;
       setMask('', 0, 0);
@@ -470,7 +559,7 @@
   // the display's scale rather than at 2 and stretched, and it is not painted
   // at all for a box nobody can see (`pictureOn`).
   const warped = $derived(warpActive(s, box.w, box.h));
-  const pictured = $derived(warped || engineShown);
+  const pictured = $derived((warped || engineShown) && !failed);
   let warpEl = $state(null);
   let warpGeom = $state(null);
   // Everything the picture is drawn from - the whole style, because a warped
@@ -488,8 +577,8 @@
   // - so turning a box repaints nothing, and it states the LINES, so a change
   // to how the text breaks repaints whatever caused it and a move, which
   // re-derives the same lines, does not.
-  const warpKey = $derived(
-    engineShown
+  const engineKey = $derived(
+    engineWanted
       ? pictureOn
         ? pictureKey({
             style: s,
@@ -503,20 +592,71 @@
             fonts: app.fontsVersion,
           })
         : PICTURE_OFF
+      : '',
+  );
+  // The key of the picture the box is to be, whichever paint makes it: the
+  // engine's, or the old one a warped box has with the switch off (and, with
+  // it on, while it is being typed into).
+  const wantedKey = $derived(
+    engineWanted
+      ? engineKey
       : warped
         ? JSON.stringify({ ...s, ink: 0 }) +
           `|${inkKey}|${text}|${box.w}|${box.h}|${z}|${app.fontsVersion}`
         : '',
   );
+  const warpKey = $derived(failed ? '' : wantedKey);
   let warpDrawn = '';
   let warpLive = null; // non-reactive twin of warpEl: what the pixel release acts on
   let warpTips = null;
   let warpSeq = 0;
 
   function paintWarp(el, tips) {
-    warpGeom = engineShown
-      ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
-      : paintWarpedBox(el, box, pg, z, tips);
+    if (!engineShown) {
+      warpGeom = paintWarpedBox(el, box, pg, z, tips);
+      return;
+    }
+    const budget = resizing ? PICTURE_DRAG_PX : PICTURE_MAX_PX;
+    const g = paintBoxPicture(el, box, pg, pictureRes, tips, budget);
+    // Lower than asked for under the drag's budget: to be painted again when
+    // the drag settles (`settleResize`).
+    dragSoft = resizing && g.ss < pictureRes;
+    warpGeom = { ...g, page: pageCorner(pageFrameEl) };
+    keepReach(warpGeom);
+  }
+
+  // The paint, for the effect: true when it painted. When it threw, the canvas
+  // holds nothing (a half-made picture is not kept), the picture stands down
+  // for this key (`paintFailed`, above) and the error is said once for the
+  // box, not once a frame of a drag that keeps failing.
+  //
+  // ONLY WITH THE ENGINE PAINTING. With the switch off the effect calls the
+  // paint bare, as it did before there was an engine's picture, and whatever a
+  // paint throws leaves the effect as it always has: nothing is released and
+  // nothing is logged here that was not before.
+  let failSaid = false;
+  function tryPaint(el, tips, key) {
+    if (!enginePaints) {
+      paintWarp(el, tips);
+      return true;
+    }
+    try {
+      paintWarp(el, tips);
+      failSaid = false;
+      return true;
+    } catch (err) {
+      el.width = 0;
+      el.height = 0;
+      warpGeom = null;
+      warpTips = null;
+      warpSeq++;
+      if (!failSaid) {
+        failSaid = true;
+        console.error(`the picture of box ${box.id} could not be painted; it is shown as its text${warped ? ', without its mesh' : ''}`, err);
+      }
+      paintFailed = key;
+      return false;
+    }
   }
 
   // ---- the gizmo's live drag ----
@@ -543,7 +683,7 @@
     begin() {
       releaseWarpTex();
       warpTex = engineShown
-        ? renderBoxTexture(box, pg, warpTips, pictureRes, PICTURE_MAX_PX)
+        ? pictureTexture(box, pg, warpTips, pictureRes)
         : renderBoxTexture(box, pg, warpTips);
       warpDragging = true;
     },
@@ -555,6 +695,7 @@
       warpGeom = engineShown
         ? { ...paintPictureTexture(warpLive, warpTex, box), page: warpGeom?.page }
         : paintWarpedTexture(warpLive, warpTex, box, z);
+      if (engineShown) keepReach(warpGeom);
     },
     end() {
       releaseWarpTex();
@@ -569,6 +710,9 @@
     const key = warpKey;
     const el = warpEl;
     const dragging = warpDragging;
+    // Read so that a resize settling runs this again (`settleResize`): the key
+    // is the same and only what was drawn for it has been forgotten.
+    resizing;
     if (!el) {
       // Warp switched off, or the box is going away: hand the pixels back and
       // forget what was drawn, so switching it on again paints the new canvas.
@@ -615,7 +759,7 @@
       warpSeq++;
       return;
     }
-    paintWarp(el, warpTips);
+    if (!tryPaint(el, warpTips, key)) return;
     const ids = inkTipIds(s.ink);
     const wantNoise = s.roughen.on && !noiseSettled;
     if (!ids.size && !wantNoise) {
@@ -629,7 +773,7 @@
         if (wantNoise) noiseSettled = true;
         const before = warpTips;
         warpTips = map ?? null;
-        if (wantNoise || !sameTips(before, warpTips)) paintWarp(el, warpTips);
+        if (wantNoise || !sameTips(before, warpTips)) tryPaint(el, warpTips, key);
       },
       () => {},
     );
@@ -675,6 +819,14 @@
       inspectorTab.id === 'effects' &&
       effectsSubTab.id === 'transform',
   );
+
+  // The resize and rotate handles are on the box: while it is selected and
+  // nothing else has its controls. A resize whose handles go away has had its
+  // last frame as far as the picture is concerned (`settleResize`).
+  const handlesOn = $derived(selected && !editing && !bulkOn && !warpGizmoOn);
+  $effect(() => {
+    if (!handlesOn) settleResize();
+  });
 
   // Padded by the content box's inset - the padding plus the outline's reach
   // (`textInset`, measure.js) - so the flex layout and `text-align` put the block
@@ -909,6 +1061,43 @@
   // way on the page, and here it is too.
   const stackTransform = $derived(inkShift ? `transform:translateY(${inkShift}px);` : '');
 
+  // ---- what a screen reader is told while the box is the engine's picture ----
+  //
+  // With the switch off the words are text nodes and are read as such. As a
+  // picture they are pixels on a canvas that is hidden from the accessibility
+  // tree, so the box says them itself: its text as its name, and the role a
+  // name needs (one on a plain div is not announced). Only then - typed into,
+  // or with the switch off, the text is in the document and a name over it
+  // would be read twice.
+  const spoken = $derived(engineShown && text ? text : null);
+
+  // ---- what takes the pointer while the box is the engine's picture ----
+  //
+  // With the switch off the letters are elements, and a press on one selects
+  // the box wherever the letter is - outside the frame too, where an arc or an
+  // overflowing block puts it. The picture's canvas takes no pointer and must
+  // not: its footprint is the ink plus padding on every side, and it would
+  // take presses meant for whatever lies under that padding. So while the box
+  // is a picture, transparent targets stand where the letters' elements stood:
+  // one per glyph of a curve (in the markup, from `layout`), and for straight
+  // text one rectangle - only when it reaches past the box, since inside it
+  // the box is the target already. The rectangle is the block's line boxes
+  // and its glyphs' ink together (`blockReach`): the picture is cut to hold
+  // the ink, so a letter that leans out of the frame while its advance stays
+  // inside is on screen out there, and is pressed there. Not for a warped
+  // box: its letters are where the mesh carried them, and it had no such
+  // targets before either.
+  const hitsOn = $derived(engineShown && !warped);
+  const hitBlock = $derived.by(() => {
+    if (!hitsOn || !shaped) return null;
+    app.fontsVersion;
+    const r = blockReach(placeBlock(boxCandidate(box, text)));
+    if (!r || !(r.x1 > r.x0) || (r.x0 >= 0 && r.y0 >= 0 && r.x1 <= box.w && r.y1 <= box.h)) return null;
+    return r;
+  });
+  // A glyph's element with the switch off is its advance wide and a line high.
+  const hitLine = $derived(effSize * (s.lineHeight > 0 ? s.lineHeight : 1));
+
   // Reactive auto-fit effect for text metrics.
   //
   // The box's height follows its line count, and this component has just worked
@@ -1062,7 +1251,8 @@
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const handle = e.currentTarget;
+    handle.setPointerCapture?.(e.pointerId);
     focusPage(pg);
     if (!selected) selectBox(box.id);
     settleEdits();
@@ -1108,13 +1298,16 @@
         const sdx = (ev.clientX - sx) / zz, sdy = (ev.clientY - sy) / zz;
         const dx = sdx * cos - sdy * sin, dy = sdx * sin + sdy * cos;
         // Auto-height keeps its promise through the drag: an edge can make the
-        // box roomier but never shorter than its text. `shaped` is null for
-        // curved and path text, which auto-height does not fit either. Capped at
-        // the page, as the fit itself is.
-        const floor = s.autoHeight !== false && shaped
-          ? Math.min(neededHeight(shaped.length, s, textInset(s)), pg?.h || Infinity)
-          : 30;
+        // box roomier but never shorter than its text. The floor is the store's
+        // (`edgeDragFloor`), beside the fits it mirrors, so that it stands down
+        // with them while the box's face is arriving and these lines are a
+        // stand-in's. `shaped` is null for curved and path text, which
+        // auto-height does not fit either.
+        const floor = edgeDragFloor(box, dir, shaped ? shaped.length : null, pg);
         const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
+        // From the first move, not from the press: a handle pressed and let
+        // go changes nothing and must repaint nothing.
+        if (enginePaints && handlesOn) resizing = true;
         resizeBox(
           pageId,
           box.id,
@@ -1129,6 +1322,7 @@
       if (ev.pointerId !== pid) return;
       live.delete(ac);
       ac.abort();
+      settleResize();
       // Both gestures on this handle CHANGE THE STYLE - the rotation handle
       // writes `rotation`, a corner writes `size` - and the next box placed is
       // meant to follow the box the user just shaped. Nothing else on this path
@@ -1168,6 +1362,11 @@
     document.addEventListener('pointermove', move, { signal: ac.signal });
     document.addEventListener('pointerup', end, { signal: ac.signal });
     document.addEventListener('pointercancel', end, { signal: ac.signal });
+    // The ways the moves stop without either of those (`settleResize`). They
+    // settle the picture and leave the gesture as it is: if the moves do come
+    // again it goes on, and its end is still `end`.
+    window.addEventListener('blur', settleResize, { signal: ac.signal });
+    handle.addEventListener('lostpointercapture', settleResize, { signal: ac.signal });
   }
 
   // Drag one bezier-path anchor or handle. `which` is 'a' (the anchor itself),
@@ -1831,7 +2030,8 @@
   class:flagged={!!review}
   data-id={box.id}
   style={boxStyle}
-  bind:this={rootEl}
+  role={spoken ? 'group' : undefined}
+  aria-label={spoken ?? undefined}
   onpointerdown={onBoxPointerDown}
   ondblclick={onDblClick}
 >
@@ -1910,6 +2110,19 @@
     class="clipwrap"
     style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{pictured ? '' : maskCss}{wrapMirror}"
   >
+  {#if enginePaints}
+    <!-- What tells whether the box is near the viewport (`reach`, above):
+         nothing to see and nothing to click, only a rectangle for the
+         observer. Inside the wrapper so it is mirrored as the picture is. -->
+    <div
+      class="reach"
+      bind:this={reachEl}
+      style={reach
+        ? `left:${-reach.ox * z}px;top:${-reach.oy * z}px;width:${reach.cw * z}px;height:${reach.ch * z}px`
+        : 'left:0;top:0;width:100%;height:100%'}
+      aria-hidden="true"
+    ></div>
+  {/if}
   {#if pictured}
     <!-- The whole box as one picture: type, ink and every filter, carried
          through the mesh by the exporter's painter. Placed off the box's own
@@ -1938,6 +2151,18 @@
         : 'left:0;top:0;width:0;height:0'}
       aria-hidden="true"
     ></canvas>
+    {#if hitsOn}
+      <!-- What takes the pointer for text outside the frame (`hitsOn`, above).
+           No pointer-events of their own: they follow the box, which the hand
+           tool makes deaf. -->
+      {#if layout}
+        {#each layout as g, i (i)}
+          <span class="hit" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+        {/each}
+      {:else if hitBlock}
+        <span class="hit" style="left:{hitBlock.x0 * z}px;top:{hitBlock.y0 * z}px;width:{(hitBlock.x1 - hitBlock.x0) * z}px;height:{(hitBlock.y1 - hitBlock.y0) * z}px"></span>
+      {/if}
+    {/if}
   {:else}
     {#if layout}
       <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
@@ -2121,7 +2346,7 @@
        ones the sub-tab was opened for, so they win by being the only ones there
        - and the box still MOVES by its body, because a warp handle stops its own
        pointerdown from reaching it. -->
-  {#if selected && !editing && !bulkOn && !warpGizmoOn}
+  {#if handlesOn}
     <div class="rotate-stem"></div>
     {#each corners as [kind, dir] (dir)}
       <div class="handle {kind} {dir}" onpointerdown={(e) => startTransform(e, dir)}></div>
@@ -2164,6 +2389,20 @@
     pointer-events: none;
     user-select: none;
     -webkit-user-select: none;
+  }
+  /* A transparent pointer target over text that the engine's picture shows
+     outside the box's frame. */
+  .hit {
+    position: absolute;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* The rectangle the near-viewport observer is given for a box shown as the
+     engine's picture. It is geometry only. */
+  .reach {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
   }
   /* The path gizmo. The svg itself lets clicks through to the box; only the
      anchors and handles take the pointer. High-contrast colours so the curve

@@ -5,6 +5,13 @@
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
+// Which handles' drags are held by the height floor: the top and bottom edges,
+// alone. A corner scales the type with the box and takes none, and a left or
+// right edge does not change the height. Said here, where the floor is
+// applied, for whoever works a floor out (`edgeDragFloor`, the store): one
+// that is not going to be used has nothing to stand down for.
+export const takesHeightFloor = (dir) => dir === 'n' || dir === 's';
+
 // `o` is the box at pointer-down ({ x, y, w, h, size }), `dx`/`dy` the pointer
 // travel already turned into the box's own frame, `rotation` its angle in
 // degrees. `heightFloor` is how short an edge drag may make the box: the text's
@@ -16,7 +23,7 @@ export function resizeBoxMath(dx, dy, dir, o, rotation = 0, heightFloor = 30) {
   const cos = Math.cos(rad), sin = Math.sin(rad);
   const hasE = dir.includes('e'), hasW = dir.includes('w'), hasN = dir.includes('n'), hasS = dir.includes('s');
   const corner = (hasE || hasW) && (hasN || hasS);
-  const floor = corner ? 30 : Math.max(30, heightFloor);
+  const floor = takesHeightFloor(dir) ? Math.max(30, heightFloor) : 30;
 
   let nw = o.w, nh = o.h;
   if (hasE) nw = Math.max(40, o.w + dx);
