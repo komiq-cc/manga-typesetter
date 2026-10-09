@@ -61,7 +61,7 @@
   } from './text-paint.js';
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
-  import { boxCandidate, placeBlock, blockRect } from './contain.js';
+  import { boxCandidate, placeBlock, blockReach } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
   import { PICTURE_MAX_PX, PICTURE_DRAG_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
@@ -1080,15 +1080,18 @@
   // take presses meant for whatever lies under that padding. So while the box
   // is a picture, transparent targets stand where the letters' elements stood:
   // one per glyph of a curve (in the markup, from `layout`), and for straight
-  // text the block's own rectangle - only when it reaches past the box, since
-  // inside it the box is the target already. `blockRect` is the rectangle the
-  // exporter sizes the footprint by. Not for a warped box: its letters are
-  // where the mesh carried them, and it had no such targets before either.
+  // text one rectangle - only when it reaches past the box, since inside it
+  // the box is the target already. The rectangle is the block's line boxes
+  // and its glyphs' ink together (`blockReach`): the picture is cut to hold
+  // the ink, so a letter that leans out of the frame while its advance stays
+  // inside is on screen out there, and is pressed there. Not for a warped
+  // box: its letters are where the mesh carried them, and it had no such
+  // targets before either.
   const hitsOn = $derived(engineShown && !warped);
   const hitBlock = $derived.by(() => {
     if (!hitsOn || !shaped) return null;
     app.fontsVersion;
-    const r = blockRect(placeBlock(boxCandidate(box, text)));
+    const r = blockReach(placeBlock(boxCandidate(box, text)));
     if (!r || !(r.x1 > r.x0) || (r.x0 >= 0 && r.y0 >= 0 && r.x1 <= box.w && r.y1 <= box.h)) return null;
     return r;
   });

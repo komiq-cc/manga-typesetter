@@ -25,10 +25,11 @@ vi.mock('./text-paint.js', async (original) => {
 import TextBox from './TextBox.svelte';
 import { app, loadProjectPages, page, selectBox, deselect, beginEdit, endEdit, setZoom, setZoomLive, moveBoxTo, moveGeom, noteFontsChanged } from './store.svelte.js';
 import { engineSwitch } from './engine-switch.svelte.js';
+import { textEngine, setTextEngine } from './text-engine/index.js';
 import { paintBoxPicture, PICTURE_DRAG_PX, PICTURE_MAX_PX, TURNED_OVERSAMPLE } from './editor/box-picture.js';
 import { paintWarpedBox, renderBoxTexture } from './exporter.js';
 import { _setDisplayScale } from './editor/display-scale.svelte.js';
-import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
+import { setTypesetEnabled, typesetEnabled, clearLayoutMemo, textInset } from './measure.js';
 import { defaultStyle, normalizeStyle } from './data.js';
 import { installFakeCanvas } from '../test/fake-canvas.js';
 
@@ -1041,6 +1042,68 @@ describe('what takes the pointer while the box is a picture', () => {
     const r = css(m.root.querySelector('.hit'));
     expect(r.left).toBeLessThan(0);
     expect(r.left + r.width).toBeGreaterThan(60);
+  });
+
+  // Glyphs ink past their advances: an italic's first letter starts left of
+  // its line. The picture now holds that ink (the footprint grew for it), so
+  // it is on screen outside the frame, and the target must be under it. An
+  // engine that says so stands in for the Rust one here: half the size per
+  // letter across, and ink that starts a fifth of the size left of the line
+  // (exporter-footprint.engine.test.js has the real face's numbers).
+  describe('ink that overhangs the frame while the advances stay inside it', () => {
+    // (`left` is how far the ink reaches left of the pen, as a canvas says it.)
+    const ink = (face, text) => ({ width: text.length * face.size * 0.5, left: face.size * 0.2, right: text.length * face.size * 0.5, ascent: face.size * 0.7, descent: face.size * 0.2 });
+    const leaning = {
+      id: 'rust',
+      advance: (face, text) => text.length * face.size * 0.5,
+      fontBox: (face) => ({ ascent: Math.round(face.size * 0.8), descent: Math.round(face.size * 0.2) }),
+      lineInk: ink,
+      glyphInk: ink,
+      loading: () => false,
+      onFontsChange: () => () => {},
+      faceReady: () => true,
+    };
+    let was;
+    beforeEach(() => {
+      was = textEngine();
+      setTextEngine(leaning);
+      clearLayoutMemo();
+    });
+    afterEach(() => {
+      setTextEngine(was);
+      clearLayoutMemo();
+    });
+    const J = async (over = {}) => {
+      const m = await mounted('straight', { zoom: 2 });
+      Object.assign(m.box.style, { align: 'left', size: 100, autoHeight: false, valign: 'middle', padding: 0, ...over });
+      m.box.text = 'J';
+      m.box.w = 200;
+      m.box.h = 300;
+      await tick();
+      return m;
+    };
+
+    it('gets a target that holds the ink: left of the frame by what the letter leans, and a press on it selects the box', async () => {
+      const m = await J();
+      const hits = [...m.root.querySelectorAll('.hit')];
+      expect(hits).toHaveLength(1);
+      const r = css(hits[0]);
+      // A fifth of 100 px left of where the line starts, at 200%; the line
+      // starts the content box's inset in, which is less than that.
+      const inset = textInset(m.box.style);
+      expect(inset).toBeLessThan(20);
+      expect(r.left).toBeCloseTo((inset - 20) * 2, 6);
+      // And the line's own box still: to the end of the advance, a line high.
+      expect(r.left + r.width).toBeCloseTo((inset + 50) * 2, 6);
+      expect(r.height).toBeGreaterThanOrEqual(100 * m.box.style.lineHeight * 2 - 1e-6);
+      press(hits[0]);
+      expect(app.selectedId).toBe('straight');
+    });
+
+    it('and none when the ink is inside the frame as well', async () => {
+      const m = await J({ align: 'center' });
+      expect(m.root.querySelector('.hit')).toBe(null);
+    });
   });
 
   it('a warped box has none, as it has none with the switch off', async () => {

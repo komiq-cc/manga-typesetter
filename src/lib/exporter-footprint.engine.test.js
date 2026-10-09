@@ -3,7 +3,7 @@ import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { renderBoxTexture, renderBoxLayer } from './exporter.js';
 import { paintBoxPicture, pictureCss } from './editor/box-picture.js';
-import { boxCandidate, placeBlock, linesInkRect, blockRect } from './contain.js';
+import { boxCandidate, placeBlock, linesInkRect, blockRect, blockReach } from './contain.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter, engineDraws } from './text-engine/index.js';
 import { createRustGlyphPainter } from './text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
@@ -323,5 +323,33 @@ describe('everything that places the picture still places it where it was', () =
     const r = blockRect(place);
     expect(r.x0).toBeGreaterThanOrEqual(0);
     expect(linesInkRect(place).x0).toBeLessThan(r.x0 - 40);
+  });
+
+  // What takes the pointer over a picture (`blockReach`, laid over the box by
+  // TextBox.svelte) is the line boxes and the ink together. The outside
+  // review's box, in the real face: the advances are inside the frame and say
+  // "no target needed", and the hook is 47 px outside it.
+  it('the rectangle that takes the pointer holds the ink the footprint was grown for', () => {
+    const box = J();
+    const place = placeBlock(boxCandidate(box, box.text));
+    const lines = blockRect(place);
+    const ink = linesInkRect(place);
+    expect(lines.x0).toBeGreaterThanOrEqual(0);
+    expect(lines.x1).toBeLessThanOrEqual(box.w);
+    expect(lines.y0).toBeGreaterThanOrEqual(0);
+    expect(lines.y1).toBeLessThanOrEqual(box.h);
+    expect(ink.x0).toBeLessThan(-40);
+    const r = blockReach(place);
+    expect(r).toEqual({ x0: Math.min(lines.x0, ink.x0), y0: Math.min(lines.y0, ink.y0), x1: Math.max(lines.x1, ink.x1), y1: Math.max(lines.y1, ink.y1) });
+    expect(r.x0).toBe(ink.x0);
+    // And it is inside what is painted: the footprint reaches at least as far.
+    const t = painted(box, 1);
+    expect(-t.ox).toBeLessThanOrEqual(r.x0);
+    expect(-t.oy).toBeLessThanOrEqual(r.y0);
+    expect(-t.ox + t.cw).toBeGreaterThanOrEqual(r.x1);
+    expect(-t.oy + t.ch).toBeGreaterThanOrEqual(r.y1);
+    // A curve has no block.
+    const arc = boxOf({ curve: 40 }, 'ROUND');
+    expect(blockReach(placeBlock(boxCandidate(arc, arc.text)))).toBe(null);
   });
 });

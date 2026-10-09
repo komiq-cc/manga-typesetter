@@ -241,9 +241,10 @@ export function placeBlock(cand, opts) {
 // A straight block's line boxes as one box-local rectangle: each line's
 // advance, at the x it is drawn at, across; the block's line heights down.
 // Null for a curve, which has no block. This is the rectangle the exporter
-// grows a box's footprint to hold (`layoutBox`), and the one the editor lays
-// over a box shown as a picture so that text past the frame still takes the
-// pointer - the place the lines' own elements stand with the switch off.
+// grows a box's footprint to hold (`layoutBox`), and the place the lines' own
+// elements stand in the editor with the switch off. (What the editor lays
+// over a box shown as a picture, so that text past the frame still takes the
+// pointer, is this and the ink together: `blockReach`.)
 export function blockRect(place) {
   if (!place || place.isCurve) return null;
   const s = place.s;
@@ -273,6 +274,20 @@ export function linesInkRect(place) {
     r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
   }
   return r;
+}
+
+// Where a straight block is on screen once it is a picture: its line boxes
+// (`blockRect`) and its glyphs' ink (`linesInkRect`) as one box-local
+// rectangle. The picture holds both - the exporter's footprint is grown to
+// the ink where the engine draws (`layoutBox`) - so this is what must take
+// the pointer for the part of a box past its frame: an italic J whose advance
+// is inside the frame and whose hook is 47 px left of it is drawn there and
+// has to be pressable there. Null for a curve.
+export function blockReach(place) {
+  const b = blockRect(place);
+  if (!b) return null;
+  const k = linesInkRect(place);
+  return k ? unite(b, k.x0, k.y0, k.x1, k.y1) : b;
 }
 
 // The same placement after a change of height alone. Line breaking reads the
