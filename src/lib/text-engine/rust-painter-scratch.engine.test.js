@@ -10,14 +10,17 @@ import { createRustGlyphPainter, SCRATCH_KEEP_PX } from './rust-painter.js';
 // canvas, kept from paint to paint. What it keeps is what this file is about:
 // every canvas the painter asks the document for is a double that records the
 // size it was given, so "still holding" is read off the record and not off a
-// canvas that reports a released size as something else.
+// canvas that reports a released size as something else. Every size is
+// recorded, not only the last: a canvas given its new width before its new
+// height is, between the two, a canvas of the new width and the OLD height,
+// and that one is allocated too.
 
 const hadDocument = 'document' in globalThis;
 const oldDocument = globalThis.document;
 let made = [];
 function recorded() {
   const c = createCanvas(300, 150);
-  const rec = { c, w: 300, h: 150 };
+  const rec = { c, w: 300, h: 150, took: [[300, 150]] };
   for (const side of ['width', 'height']) {
     const own = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(c), side);
     Object.defineProperty(c, side, {
@@ -25,6 +28,7 @@ function recorded() {
       get: () => own.get.call(c),
       set: (v) => {
         rec[side === 'width' ? 'w' : 'h'] = v;
+        rec.took.push([rec.w, rec.h]);
         own.set.call(c, v);
       },
     });
@@ -34,6 +38,8 @@ function recorded() {
 }
 const held = () => made.filter((r) => r.w * r.h > 0);
 const heldPx = () => held().reduce((n, r) => n + r.w * r.h, 0);
+// The most pixels any one canvas held at any moment, and the size it had then.
+const peak = () => made.flatMap((r) => r.took).reduce((m, [w, h]) => (w * h > m.px ? { px: w * h, w, h } : m), { px: 0, w: 0, h: 0 });
 
 let rust;
 beforeAll(async () => {
@@ -107,6 +113,32 @@ describe('the scratch canvas the Rust painter keeps', () => {
     painter.paint(ctx, WIDE);
     expect(held().length).toBeLessThanOrEqual(1);
     expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+  });
+
+  // The outside review's sequence: cut from the tall raster to the wide one,
+  // width first, the canvas was 8738 x 6212 on the way - the very canvas the
+  // bound is there to prevent, for as long as it takes to set a height.
+  for (const [name, jobs] of [
+    ['tall then wide', [TALL, WIDE]],
+    ['wide then tall', [WIDE, TALL]],
+    ['back and forth, with small ones between', [TALL, SMALL, WIDE, SMALL, TALL, WIDE, TALL]],
+  ]) {
+    it(`at no moment is any canvas over the bound: ${name}`, () => {
+      const painter = createRustGlyphPainter(rust);
+      const ctx = target(6);
+      for (const j of jobs) painter.paint(ctx, j);
+      const most = peak();
+      expect(most.px, `${most.w} x ${most.h}`).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+    });
+  }
+
+  it('a raster over the bound by itself is the most its own canvas ever holds', () => {
+    const painter = createRustGlyphPainter(rust);
+    painter.paint(target(6), job([{ text: 'W'.repeat(60), x: 2, y: 60 }, { text: 'W', x: 2, y: 260 }], 40));
+    const [w, h] = made[0].took.reduce((m, t) => (t[0] * t[1] > m[0] * m[1] ? t : m));
+    // Its own size, taken once: not that width with some other height.
+    expect(made[0].took.filter((t) => t[0] * t[1] === w * h)).toHaveLength(1);
+    expect(made[0].took.filter((t) => t[0] * t[1] > SCRATCH_KEEP_PX)).toHaveLength(1);
   });
 
   it('is one canvas for a run of ordinary rasters: nothing is made per paint', () => {

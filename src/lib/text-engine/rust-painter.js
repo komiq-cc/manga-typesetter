@@ -85,9 +85,20 @@ export function createRustGlyphPainter(rust, options = {}) {
     const grownW = Math.max(cnv.width, width);
     const grownH = Math.max(cnv.height, height);
     if (cnv !== scratch || grownW * grownH > SCRATCH_KEEP_PX) {
-      cnv.width = width;
-      cnv.height = height;
+      // Two assignments, and between them the canvas has one new side and one
+      // old: cut from 186 x 6212 to 8738 x 50 width first, it is 8738 x 6212
+      // on the way, which is the canvas the bound is there to prevent. The
+      // side that shrinks goes first, so what stands between the two is never
+      // larger than both what was and what will be.
+      if (width < cnv.width) {
+        cnv.width = width;
+        cnv.height = height;
+      } else {
+        cnv.height = height;
+        cnv.width = width;
+      }
     } else {
+      // Growing in place: within the bound at the end, so within it between.
       if (cnv.width < width) cnv.width = width;
       if (cnv.height < height) cnv.height = height;
     }
