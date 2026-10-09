@@ -60,7 +60,7 @@
     TILE_SS,
   } from './text-paint.js';
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
-  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
+  import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
   import { boxCandidate, placeBlock, blockRect } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
   import { PICTURE_OFF, pictureScale, dragScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
@@ -146,23 +146,45 @@
   // Whether the box is near the viewport: null until the observer has said.
   //
   // What is watched is not the box's rectangle but what its picture covers
-  // (`reachEl`, an element with nothing in it, laid over the footprint the
-  // picture was last painted to and over the box until there is one). Ink
-  // goes past the rectangle - an overflowing line, a curve, a shadow, a mesh
-  // - and a box judged by its rectangle let go of ink that was still in view.
-  // The footprint is kept when the pixels are let go, so a box that is far
-  // comes back by the same measure it left by.
+  // (`reachEl`, an element with nothing in it, laid over the picture's
+  // footprint). Ink goes past the rectangle - an overflowing line, a curve, a
+  // shadow, a mesh - and a box judged by its rectangle let go of ink that was
+  // still in view.
+  //
+  // While the box holds its picture the footprint is the one that paint
+  // returned (`paintedReach`). While it has been LET GO there is no paint to
+  // return one, and the box goes on changing - more text, another size, a
+  // shadow - so the footprint is worked out instead (`boxFootprint`: the
+  // layout's arithmetic, no canvas), again whenever what it is made from
+  // changes. Kept at the last painted footprint it would be the rectangle of
+  // a picture the box no longer has, and ink that grew into view would wait
+  // for a scroll to bring the OLD rectangle near. The two are one measure -
+  // the paint sizes its canvas by this arithmetic, and only rounds it up to
+  // whole pixels - so what is worked out is never larger than what was
+  // painted, and a box that came back for it stays. Not worked out on a
+  // hidden page, where nothing is watched.
   let reachEl = $state(null);
-  let reach = $state(null);
+  let paintedReach = $state(null);
   const keepReach = (g) => {
-    if (reach && reach.ox === g.ox && reach.oy === g.oy && reach.cw === g.cw && reach.ch === g.ch) return;
-    reach = { ox: g.ox, oy: g.oy, cw: g.cw, ch: g.ch };
+    const r = paintedReach;
+    if (r && r.ox === g.ox && r.oy === g.oy && r.cw === g.cw && r.ch === g.ch) return;
+    paintedReach = { ox: g.ox, oy: g.oy, cw: g.cw, ch: g.ch };
   };
+  const reach = $derived.by(() => {
+    if (!enginePaints) return null;
+    if (!shown || engineKey !== PICTURE_OFF) return paintedReach;
+    // The lines and the faces are read through the measure's own memo, which
+    // is not reactive: these three are what says they changed.
+    app.fontsVersion;
+    shaped;
+    indents;
+    return boxFootprint(box, pg);
+  });
   let near = $state(null);
   $effect(() => {
     if (!enginePaints || !shown || !reachEl) {
       near = null;
-      if (!enginePaints) reach = null;
+      if (!enginePaints) paintedReach = null;
       return;
     }
     // Asked again each time the page comes back on screen: an observer tells

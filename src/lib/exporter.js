@@ -23,7 +23,7 @@ import {
   drawInk,
 } from './text-paint.js';
 import { warpActive } from './warp.js';
-import { warpBoxCanvas } from './warp-paint.js';
+import { warpBoxCanvas, warpExtent } from './warp-paint.js';
 import { settleBoxTips } from './brush-tips.js';
 import { withPageImages } from './page-images.js';
 import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
@@ -692,6 +692,23 @@ export function warpTexture(tex, box, release = true) {
     tex.canvas.height = 0;
   }
   return { canvas: warped.canvas, ox: warped.ox, oy: warped.oy, cw: warped.cw, ch: warped.ch };
+}
+
+/**
+ * Where a box's picture sits and what it spans, without painting it: the
+ * `ox`, `oy`, `cw`, `ch` that `renderBox` would hand back, in page px - the
+ * layout's footprint, carried through the mesh for a warped box. It is
+ * arithmetic on the box and its measured lines; no canvas is made. (A painted
+ * texture can span a fraction of a page px more: its canvas is cut to whole
+ * pixels, outwards.) For the editor, which has to know what a box it is not
+ * painting would cover.
+ */
+export function boxFootprint(box, p) {
+  const L = layoutBox(box, p);
+  const flat = { ox: L.ox, oy: L.oy, cw: L.cw, ch: L.ch };
+  const s = box.style;
+  if (!warpActive(s, box.w, box.h)) return flat;
+  return warpExtent({ warp: s.warp, w: box.w, h: box.h, ...flat }) ?? flat;
 }
 
 // The box drawn into an editor canvas, at the editor's zoom. This is the

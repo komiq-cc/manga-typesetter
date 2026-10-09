@@ -659,15 +659,101 @@ describe('a box nobody can see', () => {
     expect(over()).toEqual(held);
   });
 
-  it('before anything has been painted the watched element is the box\'s own rectangle', async () => {
+  it('before anything has been painted the watched element is over the footprint already: it is worked out, not read off a paint', async () => {
     const m = await mounted('finish', { props: { lazy: true } });
     expect(m.paints()).toBe(0);
     const el = m.reach();
-    expect([el.style.left, el.style.top, el.style.width, el.style.height]).toEqual(['0px', '0px', '100%', '100%']);
+    const f = footprint(m.box, m.pg);
+    expect(css(el).left).toBeCloseTo(-f.ox, 6);
+    expect(css(el).top).toBeCloseTo(-f.oy, 6);
+    expect(css(el).width).toBeCloseTo(f.cw, 6);
+    expect(css(el).height).toBeCloseTo(f.ch, 6);
+    const waiting = css(el);
     say(el, true);
     await tick();
     expect(m.paints()).toBe(1);
-    expect(css(el).left).toBeLessThan(-8);
+    // Painted, it is where it was: a box comes back by the measure it left by.
+    expect(css(el)).toEqual(waiting);
+  });
+
+  // The outside review's box: let go for being far, then given lines that
+  // reach into view. Its old footprint is still far, and nothing would ever
+  // say otherwise.
+  const letGo = async (id = 'straight') => {
+    const m = await mounted(id);
+    m.box.style.autoHeight = false;
+    m.box.style.valign = 'top';
+    m.box.w = 200;
+    m.box.h = 60;
+    await tick();
+    say(m.reach(), false);
+    await tick();
+    expect([m.canvas().width, m.canvas().height]).toEqual([0, 0]);
+    return { ...m, held: css(m.reach()), painted: m.paints() };
+  };
+  const overFootprint = (m) => {
+    const f = footprint(m.box, m.pg);
+    const r = css(m.reach());
+    expect(r.left).toBeCloseTo(-f.ox, 6);
+    expect(r.top).toBeCloseTo(-f.oy, 6);
+    expect(r.width).toBeCloseTo(f.cw, 6);
+    expect(r.height).toBeCloseTo(f.ch, 6);
+    return f;
+  };
+
+  it('a box that was let go and is then given more text is watched by what the new text covers, with no paint', async () => {
+    const m = await letGo();
+    m.box.text = Array.from({ length: 40 }, (_, i) => `LINE ${i + 1}`).join('\n');
+    await tick();
+    const f = overFootprint(m);
+    // Forty lines under a box sixty px high.
+    expect(f.ch).toBeGreaterThan(1000);
+    expect(css(m.reach()).height).toBeGreaterThan(m.held.height * 10);
+    // Still let go, and nothing was painted to find that out.
+    expect(m.paints()).toBe(m.painted);
+    expect([m.canvas().width, m.canvas().height]).toEqual([0, 0]);
+    // The observer, seeing the larger rectangle near, brings the picture back.
+    say(m.reach(), true);
+    await tick();
+    expect(m.paints()).toBe(m.painted + 1);
+    expect(m.canvas().height).toBe(f.ch);
+  });
+
+  it('and by its new size, and by its new style', async () => {
+    const m = await letGo();
+    m.box.w = 520;
+    m.box.h = 300;
+    await tick();
+    expect(css(m.reach()).width).toBeGreaterThan(m.held.width + 300);
+    overFootprint(m);
+    const plain = css(m.reach());
+    m.box.style.shadows = [{ x: 40, y: 60, blur: 0, color: '#000000', opacity: 1 }];
+    await tick();
+    expect(css(m.reach()).height).toBeGreaterThan(plain.height + 50);
+    overFootprint(m);
+    expect(m.paints()).toBe(m.painted);
+  });
+
+  it('a warped box that was let go is watched by where its mesh carries it', async () => {
+    const m = await mounted('warped');
+    say(m.reach(), false);
+    await tick();
+    const held = css(m.reach());
+    m.box.style.warp.pts = [[0, 0], [250, 12], [-6, 96], [240, 700]];
+    await tick();
+    expect(css(m.reach()).height).toBeGreaterThan(held.height + 400);
+    const waiting = css(m.reach());
+    say(m.reach(), true);
+    await tick();
+    expect(m.canvas().width).toBeGreaterThan(0);
+    // The painted footprint is the one that was worked out.
+    expect(css(m.reach())).toEqual(waiting);
+  });
+
+  it('on a hidden page nothing is worked out for it', async () => {
+    const m = await mounted('finish', { props: { shown: false } });
+    const el = m.reach();
+    expect([el.style.left, el.style.top, el.style.width, el.style.height]).toEqual(['0px', '0px', '100%', '100%']);
   });
 
   it('follows the picture when the box changes', async () => {

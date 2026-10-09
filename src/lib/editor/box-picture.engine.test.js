@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../../test/rust-engine.js';
 import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture, pictureTexture } from './box-picture.js';
-import { renderBoxTexture, warpTexture } from '../exporter.js';
+import { renderBoxTexture, warpTexture, boxFootprint } from '../exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../text-engine/index.js';
 import { createRustGlyphPainter, SCRATCH_KEEP_PX, MAX_RASTER_SIDE } from '../text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo, arcLayout, circleLayout, applyCase } from '../measure.js';
@@ -142,6 +142,33 @@ describe('the picture is renderBoxTexture\'s, byte for byte', () => {
         expect(g).toEqual({ ox: want.ox, oy: want.oy, cw: want.cw, ch: want.ch });
       });
     }
+  }
+
+  // What the editor watches for a box it is not painting (`boxFootprint`) is
+  // the footprint a paint would have told it, for every route.
+  for (const [kind, over] of Object.entries(KINDS)) {
+    it(`${kind}: the footprint worked out without a paint is the one a paint returns`, () => {
+      const box = boxOf(over, kind === 'circle' ? RING : undefined);
+      const p = pageOf(box);
+      const before = made.length;
+      const f = boxFootprint(box, p);
+      // Arithmetic: no canvas was asked for.
+      expect(made.length).toBe(before);
+      for (const scale of [1, 2]) {
+        const g = paintBoxPicture(createCanvas(300, 150), box, p, scale, null);
+        expect({ ox: g.ox, oy: g.oy, cw: g.cw, ch: g.ch }, `scale ${scale}`).toEqual(f);
+      }
+      // At a scale that is not whole the painted one is cut to whole pixels,
+      // outwards: never smaller than what was worked out, and under a pixel more.
+      if (!over.warp) {
+        const g = paintBoxPicture(createCanvas(300, 150), box, p, 2.74, null);
+        expect([g.ox, g.oy]).toEqual([f.ox, f.oy]);
+        expect(g.cw - f.cw).toBeGreaterThanOrEqual(0);
+        expect(g.cw - f.cw).toBeLessThan(1 / 2.74);
+        expect(g.ch - f.ch).toBeGreaterThanOrEqual(0);
+        expect(g.ch - f.ch).toBeLessThan(1 / 2.74);
+      }
+    });
   }
 
   it('a second paint into the same canvas leaves nothing of the first', () => {
