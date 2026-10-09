@@ -77,6 +77,33 @@ it('the full row extent includes real interior extrema under negative spacing', 
   expect(row.offs).toContain(offsetAt(model.rows, near, row.top + 1).o);
 });
 
+it('whole and partial real selections include only their interior extrema under negative spacing', () => {
+  const text = 'iMMMMi';
+  const model = typeModel(boxOf(text, { size: 40, letterSpacing: -20 }), text);
+  expect(model.kind).toBe('flat');
+  expect(model.rows).toHaveLength(1);
+  const row = model.rows[0];
+  expect(row.offs).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  // The first i moves the next pen left; the last i brings the final pen
+  // back inside the run. Both interior extrema belong to the whole run.
+  expect(row.xs[1]).toBeLessThan(row.xs[0]);
+  expect(row.xs[5]).toBeGreaterThan(row.xs[6]);
+  for (const [a, b] of [[0, 6], [0, 2], [3, 6]]) {
+    const selected = row.xs.slice(a, b + 1);
+    const left = Math.min(...selected);
+    const right = Math.max(...selected);
+    const marks = selectionRects(model.rows, a, b);
+    expect(marks).toHaveLength(1);
+    expect(marks[0].x, `selection ${a}..${b}`).toBeCloseTo(left, 8);
+    expect(marks[0].x + marks[0].w, `selection ${a}..${b}`).toBeCloseTo(right, 8);
+  }
+  // Partial selections must exclude the far extremum of the other end.
+  const [left] = selectionRects(model.rows, 0, 2);
+  const [right] = selectionRects(model.rows, 3, 6);
+  expect(left.x + left.w).toBeLessThan(Math.max(...row.xs));
+  expect(right.x).toBeGreaterThan(Math.min(...row.xs));
+});
+
 const SS = 2;
 // The box painted at `SS`, as alpha by box-local device column: `col(x)` is
 // the strongest alpha in the device column `x` px right of the box's left.

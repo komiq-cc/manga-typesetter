@@ -23,6 +23,8 @@
 //                    also the next row's first (see `rowOf`)
 //     hard,          the row ends at a Return that is in the text
 //     line,          the drawn line it is, or -1 for a row the layout trims
+//     pieces[],     extents of drawn parts, owned by raw grapheme intervals,
+//                    when illegal interior stops have been filtered
 //     lead, trail }  only where the line broke INSIDE a grapheme
 //                    (`stopRows`): the part of it this row draws
 //
@@ -62,6 +64,23 @@ export function caretStops(text) {
   }
   stopsOf = { text: v, at };
   return at;
+}
+
+// Browser ranges can name a component of a grapheme when the hidden editable
+// puts its components on different lines. A replacement takes every grapheme
+// it touches. A collapsed insertion stands at the preceding legal boundary,
+// the same place the picture shows for an offset inside a grapheme.
+export function editStops(text, [from, to]) {
+  const v = String(text ?? '');
+  const ok = caretStops(v);
+  let a = Math.max(0, Math.min(v.length, Math.min(from, to)));
+  let b = Math.max(0, Math.min(v.length, Math.max(from, to)));
+  if (!ok) return [a, b];
+  const collapsed = a === b;
+  while (a > 0 && !ok(a)) a--;
+  if (collapsed) return [a, a];
+  while (b < v.length && !ok(b)) b++;
+  return [a, b];
 }
 // The stop one step before (`dir` -1) or after (+1) raw offset `o`.
 function stepStop(v, o, dir) {
@@ -267,18 +286,36 @@ export function selectionRects(rows, a, b, nl = 0) {
     const tail = r.trail && hi >= r.trail.o && lo < r.trail.o ? r.trail.x : null;
     let x0 = head;
     let x1 = tail;
+    let from;
+    let to;
     let brk = 0;
     if (r.offs.length) {
-      const from = Math.max(lo, first(r));
-      const to = Math.min(hi, last(r));
+      from = Math.max(lo, first(r));
+      to = Math.min(hi, last(r));
       if (from > to) continue;
       brk = r.hard && hi > last(r) ? nl : 0;
       if (from === to && !brk && head == null && tail == null) continue;
       x0 ??= xOn(r, from);
       x1 ??= xOn(r, to);
     } else if (head == null || tail == null) continue;
-    const left = Math.min(x0, x1);
-    out.push({ x: left, y: r.top, w: Math.abs(x1 - x0) + brk, h: r.height });
+    let left = Math.min(x0, x1);
+    let right = Math.max(x0, x1);
+    // Negative spacing can reverse the pens inside the selected run. Include
+    // its interior stops, not the full row's extent (which can include text
+    // outside the selection).
+    for (let i = 0; i < r.offs.length; i++) {
+      if (r.offs[i] < from || r.offs[i] > to) continue;
+      left = Math.min(left, r.xs[i]);
+      right = Math.max(right, r.xs[i]);
+    }
+    // A filtered grapheme can have interior geometry with no legal stop.
+    // Its raw interval decides whether its part on this row is selected.
+    for (const p of r.pieces ?? []) {
+      if (lo >= p.b || hi <= p.a) continue;
+      left = Math.min(left, p.from);
+      right = Math.max(right, p.to);
+    }
+    out.push({ x: left, y: r.top, w: right - left + brk, h: r.height });
   }
   return out;
 }
@@ -654,9 +691,27 @@ export function stopRows(rows, map, stops = null) {
     if (!offs.length || drawn(offs[offs.length - 1]) !== to) {
       trail = { x: r.xs[r.xs.length - 1], o: after[Math.min(o, end)] };
     }
+    // The raw grapheme owning each drawn piece. Adjacent pieces of the same
+    // grapheme share one extent, including when a row has no stop of its own.
+    const pieces = [];
+    for (let i = 0; i + 1 < r.offs.length; i++) {
+      const d0 = r.offs[i];
+      const d1 = r.offs[i + 1];
+      const p = t ? rawAtDrawn(map, d0) : d0;
+      const q = t ? rawAtDrawn(map, d1) : d1;
+      const a = before[Math.max(0, p - (drawn(p) > d0 ? 1 : 0))];
+      const b = after[Math.min(q, end)];
+      const from = Math.min(r.xs[i], r.xs[i + 1]);
+      const to = Math.max(r.xs[i], r.xs[i + 1]);
+      const prev = pieces[pieces.length - 1];
+      if (prev && prev.a === a && prev.b === b) {
+        prev.from = Math.min(prev.from, from);
+        prev.to = Math.max(prev.to, to);
+      } else pieces.push({ a, b, from, to });
+    }
     // Keep the full geometry before illegal stops are removed: with negative
     // spacing, an interior pen may reach beyond either legal endpoint.
-    out.push({ ...r, offs, xs, extent: rowExtent(r), soft: r.soft && !trail, ...(lead ? { lead } : null), ...(trail ? { trail } : null) });
+    out.push({ ...r, offs, xs, pieces, extent: rowExtent(r), soft: r.soft && !trail, ...(lead ? { lead } : null), ...(trail ? { trail } : null) });
   }
   return out;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { editLines } from './edit-lines.js';
-import { buildRows, rowOf, caretAt, selectionRects, rowExtent, offsetAt, wordAround, wordPress, linePress, rowSpan, moveCaret, lineDeleteSpan, boundKey, caseMap, caretStops, stopRows, rawAtDrawn } from './flat-caret.js';
+import { buildRows, rowOf, caretAt, selectionRects, rowExtent, offsetAt, wordAround, wordPress, linePress, rowSpan, moveCaret, lineDeleteSpan, boundKey, caseMap, caretStops, stopRows, rawAtDrawn, editStops } from './flat-caret.js';
 
 // ===========================================================================
 // The caret on straight text that is a picture: arithmetic on rows
@@ -54,6 +54,75 @@ describe('boundary searches and the full row geometry', () => {
     const [whole] = stopRows([row], null, (o) => o === 0 || o === 3);
     expect(whole.offs).toEqual([0, 3]);
     expect(rowExtent(whole)).toEqual([-9, 45]);
+  });
+});
+
+describe('external edits and selections keep whole raw graphemes', () => {
+  it.each([
+    ['각', [2, 3], [0, 3]],
+    ['aß\u0301b', [2, 3], [1, 3]],
+    ['x🇯🇵y', [2, 4], [1, 5]],
+    ['a👩‍👩‍👧‍👦b', [3, 7], [1, 12]],
+    ['a\r\nb', [2, 3], [1, 3]],
+  ])('%s: a nonempty replacement takes each touched grapheme', (text, span, want) => {
+    expect(editStops(text, span)).toEqual(want);
+    expect(editStops(text, [...span].reverse())).toEqual(want);
+  });
+
+  it('a collapsed external insertion stands where the picture shows its caret', () => {
+    expect(editStops('aß\u0301b', [2, 2])).toEqual([1, 1]);
+    expect(editStops('x🇯🇵y', [4, 4])).toEqual([1, 1]);
+    expect(editStops('plain', [2, 2])).toEqual([2, 2]);
+  });
+
+  it('a partial selection includes its own reversed interior pens and excludes unselected ones', () => {
+    const row = { top: 0, height: H, offs: [0, 1, 2, 3, 4], xs: [10, 50, 0, 30, 100], hard: false };
+    expect(selectionRects([row], 1, 3)).toEqual([{ x: 0, y: 0, w: 50, h: H }]);
+    expect(selectionRects([row], 3, 1)).toEqual([{ x: 0, y: 0, w: 50, h: H }]);
+    expect(selectionRects([row], 0, 4)).toEqual([{ x: 0, y: 0, w: 100, h: H }]);
+  });
+
+  it('a partial selection includes filtered grapheme geometry without taking its neighbours', () => {
+    const row = { top: 0, height: H, offs: [0, 1, 2, 3, 4, 5], xs: [0, 10, -20, 50, 20, 100], hard: false };
+    const rows = stopRows([row], null, caretStops('a각b'));
+    expect(rows[0].offs).toEqual([0, 1, 4, 5]);
+    expect(selectionRects(rows, 1, 4)).toEqual([{ x: -20, y: 0, w: 70, h: H }]);
+    expect(selectionRects(rows, 0, 1)).toEqual([{ x: 0, y: 0, w: 10, h: H }]);
+    expect(selectionRects(rows, 4, 5)).toEqual([{ x: 20, y: 0, w: 80, h: H }]);
+  });
+
+  it.each(['ß\u0301', 'ﬃ\u0301'])('%s: an expanding uppercase grapheme owns every drawn piece', (middle) => {
+    const text = `a${middle}b`;
+    const cased = text.toUpperCase();
+    const n = cased.length;
+    const xs = Array.from({ length: n + 1 }, (_, i) => i * 10);
+    xs[2] = -20;
+    xs[n - 2] = 70;
+    xs[0] = -100;
+    xs[n] = 200;
+    const row = { top: 0, height: H, offs: Array.from({ length: n + 1 }, (_, i) => i), xs, hard: false };
+    const rows = stopRows([row], caseMap(text, cased), caretStops(text));
+    expect(rows[0].offs).toEqual([0, 1, 3, 4]);
+    // Only the cased middle grapheme, from after A to before B. Its drawn
+    // interior extremes survive even though no raw caret may stand there.
+    expect(selectionRects(rows, 1, 3)).toEqual([{ x: -20, y: 0, w: 90, h: H }]);
+    expect(selectionRects(rows, 0, 1)).toEqual([{ x: -100, y: 0, w: 110, h: H }]);
+  });
+
+  it('a selected grapheme retains interior extrema on its stopless middle row', () => {
+    const rows = stopRows([
+      { top: 0, height: H, offs: [0, 1, 2], xs: [-100, 10, 20], hard: false },
+      { top: H, height: H, offs: [2, 3, 4], xs: [20, -30, 50], hard: false },
+      { top: H * 2, height: H, offs: [4, 5, 6, 7], xs: [50, 60, 70, 200], hard: false },
+    ], null, caretStops('a👩‍👧b'));
+    // The five-unit emoji occupies raw [1,6); the last fixture row reaches
+    // its legal end. The middle row has neither caret endpoint of its own.
+    expect(rows[1].offs).toEqual([]);
+    expect(selectionRects(rows, 1, 6)).toEqual([
+      { x: 10, y: 0, w: 10, h: H },
+      { x: -30, y: H, w: 80, h: H },
+      { x: 50, y: H * 2, w: 20, h: H },
+    ]);
   });
 });
 

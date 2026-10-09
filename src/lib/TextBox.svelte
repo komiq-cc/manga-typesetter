@@ -81,7 +81,7 @@
   import { editLines, drawEditLines, rawOffset, domPoint, rawEdit, stepChar } from './edit-lines.js';
   import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
   import { typeModel } from './type-rows.js';
-  import { caretAt as rowCaret, selectionRects, rowExtent, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey } from './flat-caret.js';
+  import { caretAt as rowCaret, selectionRects, rowExtent, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey, editStops } from './flat-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   // `shown` and `lazy` are read only while the Rust engine draws (see "the
@@ -1836,7 +1836,10 @@
     let first = true;
     // A composition belongs to one editable. A new picture edit must not
     // inherit a composition whose editable has already gone away.
-    if (enginePaints) clearComposition();
+    if (enginePaints) {
+      clearComposition();
+      endDefaultCurveDrags();
+    }
     editEl = node;
     const onSel = () => {
       const sel = window.getSelection();
@@ -1860,6 +1863,7 @@
           clearComposition();
           menuBack?.(false);
           curveDrag?.end();
+          endDefaultCurveDrags();
         }
         if (editEl === node) editEl = null;
         edSel = null;
@@ -1984,6 +1988,7 @@
   }
 
   function applyEdit(node, span, inputType, data) {
+    if (typeFlat && !composing) span = editStops(node.textContent, span);
     const r = rawEdit(node.textContent, span, inputType, data);
     if (r) commitEdit(r.v, r.caret, inputType);
   }
@@ -2019,8 +2024,9 @@
   function onEditCopy(e) {
     if (e.type === 'cut' && pictureEdit && composing) return;
     const node = e.currentTarget;
-    const span = editSpan(node);
+    let span = editSpan(node);
     if (!span || span[0] === span[1]) return;
+    if (typeFlat && !composing) span = editStops(node.textContent, span);
     e.preventDefault();
     e.clipboardData.setData('text/plain', node.textContent.slice(...span));
     if (e.type === 'cut') applyEdit(node, span, 'deleteByCut');
@@ -2052,6 +2058,7 @@
     if (pictureEdit) {
       typeDrag?.end();
       curveDrag?.end();
+      endDefaultCurveDrags();
       menuBack?.(false);
     }
     // What the composed text takes the place of, to mark it in the picture.
@@ -2195,11 +2202,12 @@
       el.removeEventListener('pointercancel', up);
       if (pictured) el.removeEventListener('lostpointercapture', up);
       if (curveDrag === drag) curveDrag = null;
+      defaultCurveDrags.delete(drag);
     };
     if (pictured) {
       curveDrag?.end();
       curveDrag = drag;
-    }
+    } else defaultCurveDrags.add(drag);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
@@ -2349,10 +2357,17 @@
   // selected whichever way the pointer goes.
   let typeDrag = null;
   let curveDrag = null;
+  // Default-only gestures keep their old listeners and pointer rules. Keep
+  // their cleanup privately so an incoming Rust edit can end every one.
+  const defaultCurveDrags = new Set();
+  function endDefaultCurveDrags() {
+    for (const drag of defaultCurveDrags) drag.end();
+  }
   let menuBack = null;
   // A picture's drag/menu belongs to its current editing mode. Switching,
   // failure or a different model ends it; switching back never revives it.
   $effect(() => {
+    if (enginePaints) endDefaultCurveDrags();
     const mode = typing ? typed.kind : null;
     if (mode !== 'flat') typeDrag?.end();
     if (mode !== 'curve') curveDrag?.end();
@@ -2472,8 +2487,8 @@
       clearTimeout(timer);
       clearTimeout(afterTimer);
       window.removeEventListener('contextmenu', after, true);
-      el.classList.remove('ctx');
       if (menuBack !== back) return;
+      el.classList.remove('ctx');
       menuBack = null;
       menuShift = null;
       // Back where its caret belongs.
@@ -2483,6 +2498,7 @@
       }
     };
     const after = () => {
+      if (menuBack !== back) return;
       clearTimeout(afterTimer);
       afterTimer = setTimeout(back);
     };
