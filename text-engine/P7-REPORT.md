@@ -9,7 +9,7 @@ Where the code ended up different, section 1 says so in a line marked
 A second round followed an outside review (brief
 `tp-data/briefs/p7b-typing-fixes.md`): section 12. Lines of sections 1 to 11
 that it made untrue are corrected in place and marked **Second round**; the
-line numbers in every section are the final tree's.
+code references use file and function names. Third-round updates are in section 13.
 
 ## 1. Design (written first)
 
@@ -206,13 +206,13 @@ real key, mouse and IME events (`scripts/editor-check.mjs`, steps `type` and
 
 | What | Where |
 |---|---|
-| The one flag everything new is behind | `engineSwitch.painting`, read as `enginePaints`, `src/lib/TextBox.svelte:118` |
-| The model is not made with the switch off | `typed` returns null first thing, `TextBox.svelte:119-120` |
-| The overlay is not in the DOM | `{#if typeFlat}` and `typeCurve`, `TextBox.svelte:2701`, `2725` |
-| The one new effect is made only while the engine is drawing (**second round**: not only for an edit begun with it) | a child of the editable's redraw effect, made inside `if (enginePaints)`, `TextBox.svelte:1875-1898`; what the teardown puts back is behind `if (!pictureEdit) return;`, `TextBox.svelte:1848`. With the switch off the flag is read, false, and nothing is made |
-| The key budget (**second round**) | `keyed()` returns first thing unless the box is typed into as a picture, `TextBox.svelte:202-203`: no state set, no timer |
-| The editable has no new attribute | `class:unseen={typing}` is false, `style` is `editStyle` as before, `TextBox.svelte:2759-2761` |
-| New listeners | none on the editable. The overlay's are on the overlay. On a curve's overlay with the switch off the drag handlers are what they were (`!typing ||`, `TextBox.svelte:2125`) |
+| The one flag everything new is behind | `engineSwitch.painting`, read as `enginePaints`, `src/lib/TextBox.svelte` |
+| The model is not made with the switch off | `typed` returns null first thing, `TextBox.svelte` |
+| The overlay is not in the DOM | `{#if typeFlat}` and `typeCurve`, `TextBox.svelte`, `curve-edit template` |
+| The one new effect is made only while the engine is drawing (**second round**: not only for an edit begun with it) | a child of the editable's redraw effect, made inside `if (enginePaints)`, `TextBox.svelte`; what the teardown puts back is behind `if (!pictureEdit) return;`, `TextBox.svelte`. With the switch off the flag is read, false, and nothing is made |
+| The key budget (**second round**) | `keyed()` returns first thing unless the box is typed into as a picture, `TextBox.svelte`: no state set, no timer |
+| The editable has no new attribute | `class:unseen={typing}` is false, `style` is `editStyle` as before, `TextBox.svelte` |
+| New listeners | none on the editable. The overlay's are on the overlay. On a curve's overlay with the switch off the drag handlers are what they were (`onCurvePointerDown`, `TextBox.svelte`) |
 
 Proofs.
 
@@ -235,12 +235,12 @@ which is this task:
 
 | What | Where |
 |---|---|
-| The export: per cluster, its UTF-16 offset and the pen of its first glyph, then the length and the advance | `mt_line_carets`, `text-engine/src/abi.rs:565`, a new function at the end of the file. It calls `paint::shape_run`, the painter's call for a straight run. `src/paint/` is not edited |
-| JS adapter | `lineCarets`, `text-engine/js/engine.mjs:289`; `src/lib/text-engine/rust.js:235` |
-| Rows from the painter's statements | `typeModel`, `src/lib/type-rows.js:97`: `placeBlock` (lines, `lineX`, `blockY`, `lineH`, so indent and the ink shift are the painter's), `editLines`, `linePens` |
-| A line's start | `lineX[i] + alignOffset(align, advance)`, `type-rows.js:116`, the painter's own sum |
+| The export: per cluster, its UTF-16 offset and the pen of its first glyph, then the length and the advance | `mt_line_carets`, `text-engine/src/abi.rs`, a new function at the end of the file. It calls `paint::shape_run`, the painter's call for a straight run. `src/paint/` is not edited |
+| JS adapter | `lineCarets`, `text-engine/js/engine.mjs:289`; `src/lib/text-engine/rust.js` |
+| Rows from the painter's statements | `typeModel`, `src/lib/type-rows.js`: `placeBlock` (lines, `lineX`, `blockY`, `lineH`, so indent and the ink shift are the painter's), `editLines`, `linePens` |
+| A line's start | `lineX[i] + alignOffset(align, advance)`, `type-rows.js`, the painter's own sum |
 | The arithmetic | `src/lib/flat-caret.js` (no DOM, no engine) |
-| Curves | the glyph list `placeBlock` gives the painter, `type-rows.js:107` |
+| Curves | the glyph list `placeBlock` gives the painter, `type-rows.js` |
 
 Proofs.
 
@@ -256,19 +256,19 @@ Proofs.
 
 | Behaviour | Code | Rule |
 |---|---|---|
-| Caret at every raw offset, blinking, `--tintline`, as tall as the line | `typeMarks`, `TextBox.svelte:2230`; `.tcaret`, `src/styles.css:808` | `caretAt`, `flat-caret.js:205` |
-| Selection, one rectangle a row | `selectionRects`, `flat-caret.js:215` | a selected Return adds a sliver 0.3 of the font size wide, so an empty selected line shows |
-| Press, drag, Shift+press | `onTypePointerDown`, `TextBox.svelte:2279` | `offsetAt`, `flat-caret.js:255`: the nearest stop of the row level with the pointer, the later of two as near |
-| Double-click | `onTypeMouseDown`, `TextBox.svelte:2335`; `wordPress`, `flat-caret.js:313` | measured in Chromium, below |
-| Triple-click | `linePress`, `flat-caret.js:320` | measured in Chromium, below |
-| A drag from the second or third press (**second round**) | the same drag, `TextBox.svelte:2296-2310`, `2341` | by words, by rows, as the browser does: section 12, finding 8 |
-| Up, Down with a remembered column; Home, End; Cmd+Left, Right, Up, Down; Shift forms | `typeKey`, `TextBox.svelte:2417`; `moveCaret`, `flat-caret.js:355` | our rows |
-| The keys a Mac binds to a move or a cut by lines: Control+A, E, N, P, F, B, V, K, Control+Left and Right, Option+Up and Down, Option+PageUp and PageDown (**second round**) | `boundKey`, `flat-caret.js:446`; `typeKey` | our rows: section 12, finding 2 |
+| Caret at every raw offset, blinking, `--tintline`, as tall as the line | `typeMarks`, `TextBox.svelte`; `.tcaret`, `src/styles.css` | `caretAt`, `flat-caret.js` |
+| Selection, one rectangle a row | `selectionRects`, `flat-caret.js` | a selected Return adds a sliver 0.3 of the font size wide, so an empty selected line shows |
+| Press, drag, Shift+press | `onTypePointerDown`, `TextBox.svelte` | `offsetAt`, `flat-caret.js`: the nearest stop of the row level with the pointer, the later of two as near |
+| Double-click | `onTypeMouseDown`, `TextBox.svelte`; `wordPress`, `flat-caret.js` | measured in Chromium, below |
+| Triple-click | `linePress`, `flat-caret.js` | measured in Chromium, below |
+| A drag from the second or third press (**second round**) | the same drag, `TextBox.svelte`, `onTypeMouseDown` | by words, by rows, as the browser does: section 12, finding 8 |
+| Up, Down with a remembered column; Home, End; Cmd+Left, Right, Up, Down; Shift forms | `typeKey`, `TextBox.svelte`; `moveCaret`, `flat-caret.js` | our rows |
+| The keys a Mac binds to a move or a cut by lines: Control+A, E, N, P, F, B, V, K, Control+Left and Right, Option+Up and Down, Option+PageUp and PageDown (**second round**) | `boundKey`, `flat-caret.js`; `typeKey` | our rows: section 12, finding 2 |
 | Left, Right | the same | one grapheme of the raw text. Taken, not left native: where a line wrapped the editable has two places for one offset and a native Right spent a press between them (the check counts 0 presses that did not move) |
 | Word movement, word delete | left to the browser | logical order, no layout in it |
-| Line deletes | `onEditBeforeInput`, `TextBox.svelte:1982`; `lineDeleteSpan`, `flat-caret.js:413` | our row, on the side of a wrap the caret shows on. **Second round:** the hard-line deletes take the row too (they took the paragraph), and a curve cuts to its paragraph's end (`curveCut`, `TextBox.svelte:2192`). No other `inputType` was found whose target range depends on layout |
-| Ligatures and clusters | `bodyPens`, `flat-caret.js:150` (**second round**: one pass over the clusters; `penAt` searched them again for every letter) | even divisions of the cluster's advance, one a grapheme; no stop inside a grapheme (`graphemeBounds`, `type-rows.js:42`) |
-| Wraps and trimmed Returns | `buildRows`, `flat-caret.js:65`; `rowOf`, `flat-caret.js:179` | section 1.3, rules 2 to 5: hidden spaces hang; a wrap's offset shows on the lower row unless the caret came there by End, by a press past the upper row's end, or by Up or Down; each trimmed Return has a row of its own |
+| Line deletes | `onEditBeforeInput`, `TextBox.svelte`; `lineDeleteSpan`, `flat-caret.js` | our row, on the side of a wrap the caret shows on. **Second round:** the hard-line deletes take the row too (they took the paragraph), and a curve cuts to its paragraph's end (`curveCut`, `TextBox.svelte`). No other `inputType` was found whose target range depends on layout |
+| Ligatures and clusters | `bodyPens`, `flat-caret.js` (**second round**: one pass over the clusters; `penAt` searched them again for every letter) | even divisions of the cluster's advance, one a grapheme; no stop inside a grapheme (`caretStops`, `flat-caret.js`) |
+| Wraps and trimmed Returns | `buildRows`, `flat-caret.js`; `rowOf`, `flat-caret.js` | section 1.3, rules 2 to 5: hidden spaces hang; a wrap's offset shows on the lower row unless the caret came there by End, by a press past the upper row's end, or by Up or Down; each trimmed Return has a row of its own |
 | Empty box, empty line, only spaces | `buildRows` | one stop at the anchor; spaces hang from it |
 
 What the browser selects today (measured with the switch off, real presses
@@ -305,14 +305,14 @@ round.)
 
 ### Item 4. Uppercase
 
-**Chosen: mapped properly.** `caseMap` (`flat-caret.js:473`) builds the cased
+**Chosen: mapped properly.** `caseMap` (`flat-caret.js`) builds the cased
 offset of every raw offset, letter by letter, and checks the result against
 the cased text the painter is given. Rows are built in cased offsets and
-carried to raw ones (`mapRows`, `flat-caret.js:533`), so no caret can stand
+carried to raw ones (`stopRows`, `flat-caret.js`), so no caret can stand
 between the two S of one `ß`. Why: the fallback would make one German word
 change how a whole box is typed into. If the check fails (a casing that is
 not letter by letter) `typeModel` returns null and the box is DOM text
-(`type-rows.js:106`); no such casing is known for `toUpperCase`.
+(`type-rows.js`); no such casing is known for `toUpperCase`.
 **Second round:** the map no longer puts a stop inside a grapheme of the
 text typed, and a `ß` whose two S are on two rows keeps both (section 12,
 findings 1 and 6).
@@ -326,12 +326,12 @@ edits, at both densities. A curve with `ß` is typed into as a picture too
 
 | What | Where |
 |---|---|
-| Composed text is in the picture | `composeText` is in the picture's key and the paint reads a stand-in box, `TextBox.svelte:639-640`, `676`; `onEditInput`, `2013` |
-| The composing span is underlined | `composeAt`, `composeSpan`, `TextBox.svelte:2220-2228`; `.tcomp`, `.ccomp` |
-| The native caret is under the drawn one | `nativeCaret`, `alignNative`, `editShift`, `TextBox.svelte:2473-2530`. The editable is laid out as before and then moved by the measured difference, taken back through the turn and the flip |
+| Composed text is in the picture | `composeText` is in the picture's key and the paint reads a stand-in box, `TextBox.svelte`, `paint effect`; `onEditInput`, `onEditInput` |
+| The composing span is underlined | `composeAt`, `composeSpan`, `TextBox.svelte`; `.tcomp`, `.ccomp` |
+| The native caret is under the drawn one | `nativeCaret`, `alignNative`, `editShift`, `TextBox.svelte`. The editable is laid out as before and then moved by the measured difference, taken back through the turn and the flip |
 | Places with no rectangle of their own | in front of a Return that starts its text node, the Return's own rectangle; on an empty line, its `<br>`'s (measured in Chromium; fixed in `c761767` after the self-check found them) |
-| Autocorrect | `insertReplacementText` goes through `editSpan` (`getTargetRanges`) and `applyEdit` with `dataTransfer`, as it always did: `TextBox.svelte:1949`, `1968` |
-| Right button | `typeMenu`, `TextBox.svelte:2356` (**second round**: on a curve too, and the editable has its own selection under the pointer) |
+| Autocorrect | `insertReplacementText` goes through `editSpan` (`getTargetRanges`) and `applyEdit` with `dataTransfer`, as it always did: `TextBox.svelte`, `applyEdit` |
+| Right button | `typeMenu`, `TextBox.svelte` (**second round**: on a curve too, and the editable has its own selection under the pointer) |
 
 | Proof (browser, each density) | Figure |
 |---|---|
@@ -374,9 +374,9 @@ What is lost, exactly:
 
 | What | Where |
 |---|---|
-| The canvas is the same element, not repainted, when the edit starts and ends | the picture's key does not hold `editing`; `engineWanted`, `TextBox.svelte:130` |
+| The canvas is the same element, not repainted, when the edit starts and ends | the picture's key does not hold `editing`; `engineWanted`, `TextBox.svelte` |
 | The first focus selects all and shows it | `editField` as before; `typeMarks.sel`; the caret is hidden over a selection (`.off`) |
-| The page does not scroll | `overflow-anchor:none` on the unseen editable, `styles.css:803` |
+| The page does not scroll | `overflow-anchor:none` on the unseen editable, `styles.css` |
 
 | Proof (browser) | Figure |
 |---|---|
@@ -398,7 +398,7 @@ unseen editable is no scroll anchor. Default mode is left as it is.
 The marks are children of the clip wrapper, placed in page px times the
 zoom, so the box's turn and the wrapper's flip carry them as they carry the
 canvas. A pointer is taken back through both (`maskLocal`,
-`TextBox.svelte:1530`).
+`TextBox.svelte`).
 
 | Box | Presses right, 60 / 100 / 300% | Worst caret, CSS px | Seen in the pictures |
 |---|---|---|---|
@@ -418,12 +418,12 @@ The press counts are the same at 1x. What each of these does while typed into:
 ### Item 8. A failure never eats text
 
 One `contenteditable` in the template serves both ways of showing the box
-(`TextBox.svelte:2701`, `2756`). A paint that throws sets `failed`; `typing`
+(`TextBox.svelte`, `editable template`). A paint that throws sets `failed`; `typing`
 goes false; the class `unseen` and the style change on the element that has
 the focus. Nothing is replaced. A model that throws is caught and is the
-same (`TextBox.svelte:124-128`). The input path is not forked: the same
+same (`TextBox.svelte`). The input path is not forked: the same
 handlers, with one line that swaps the range of a line delete
-(`TextBox.svelte:1982`).
+(`TextBox.svelte`).
 
 | Proof | Result |
 |---|---|
@@ -436,7 +436,7 @@ handlers, with one line that swaps the range of a line delete
 rows below, found the large boxes over a frame (103.1 ms a key for the
 effect box at 300%, 74.6 and 46.6 for the page-wide box) and proposed a
 smaller pixel budget while keys are coming. That is built
-(`TextBox.svelte:198-216`, `673`, `681`): a key marks the box as being typed
+(`TextBox.svelte`, `paint effect`, `paint budget`): a key marks the box as being typed
 into for 150 ms; while it is, the picture is painted within the budget a
 resize has (`PICTURE_DRAG_PX`, 1,048,576 px, where the full one is
 8,388,608); 150 ms after the last key it is painted once in full, and at
@@ -574,7 +574,7 @@ IME composing, a caret, a selection) and `type-1x-edges.png`,
   no caret.
 - The arc and the smeared box have no outline in the pictures. That is the
   check page's own rule for a box flagged for review
-  (`editor-check.html:16`), not the app.
+  (`editor-check.html`), not the app.
 
 ## 5. Mutations: what each new test fails on
 
@@ -778,9 +778,9 @@ Second round:
     system collapses the selection (measured in Chromium, section 12,
     finding 7). The move lasts until the menu event or 1 s.
 21. **A letter split across two rows is kept in the picture**, not sent back
-    to DOM text: each row says which half it draws (`lead`, `trail`). Only a
-    row that is nothing but the middle of one letter (no casing makes one)
-    sends the box back to DOM text.
+    to DOM text: each row says which half it draws (`lead`, `trail`). **Third round:** a row that holds only the middle of one grapheme stays
+    in the picture with no stop, and with both `lead` and `trail`. Clicks and
+    vertical movement go to a legal stop on another row (section 13).
 22. **The pause is 150 ms**, the budget the one a resize has
     (`PICTURE_DRAG_PX`). An undo and what an IME has in hand count as keys.
 23. **A second pointer** neither moves nor ends a drag, and its press is
@@ -865,7 +865,7 @@ Set the text engine to Rust in Settings first.
 
 ## 10. Final proofs
 
-**Second round: this table is the final tree's.** (The first round's
+**Second round: this table records that round's verified tree.** Current third-round proofs are in section 13. (The first round's
 figures were 3,437 tests, 103 Rust tests, 1072 of 1072.)
 
 | Proof | Result |
@@ -958,13 +958,13 @@ proofs (section 10).
 - Reproduced: yes, in Node (`node_modules/.cache/p7b/repro-model.mjs`, run
   on the first round's tree). Uppercase `ßá` (an `a` and U+0301): the raw
   stops were 0, 1, 2, 3, with 2 between the `a` and its accent.
-- What was wrong: `mapRows` gave every raw offset the cased stop nearest
+- What was wrong: `stopRows` gave every raw offset the cased stop nearest
   it, so a boundary `buildRows` had left out of the cased text came back;
   the only place it knew to be inside a letter was a surrogate pair.
 - Now: a raw offset is a stop of a row only when a caret may stand there in
-  the RAW text (`bounds`, the raw text's graphemes, `type-rows.js:130`) and
+  the RAW text (`bounds`, the raw text's graphemes, `type-rows.js`) and
   its cased offset is exactly a stop of the cased row
-  (`flat-caret.js:536`, `548`). The same run now gives 0, 1, 3.
+  (`flat-caret.js`, `stopRows`). The same run now gives 0, 1, 3.
 - Tests (`flat-caret.test.js`): "a letter and the mark it carries, after a
   letter cased to two: no stop between them"; "an emoji after a letter
   cased to two: no stop inside its pair of units".
@@ -984,21 +984,21 @@ proofs (section 10).
   `deleteHardLineBackward` naming the row, so in the app Cmd+Backspace on a
   wrapped line would have cut to the paragraph's start. (Chromium, which the
   first round's check ran in, sends `deleteSoftLineBackward`.)
-- Now: `boundKey` (`flat-caret.js:445-459`) is the table of the system's
+- Now: `boundKey` (`flat-caret.js`) is the table of the system's
   keys whose result depends on a row, as keys of `moveCaret`; `typeKey`
-  (`TextBox.svelte:2417-2433`) answers them from the picture's rows, on the
+  (`TextBox.svelte`) answers them from the picture's rows, on the
   side of a wrap the caret is drawn on, and prevents the key, so the system
   does nothing of its own (run: 33 keys with the keydown prevented, 0
   `beforeinput`, 0 moves of the selection). Option+Up and Down are
-  `LineUp` and `LineDown` (`flat-caret.js:373`). Control+K cuts from the
+  `LineUp` and `LineDown` (`flat-caret.js`). Control+K cuts from the
   caret to the row's end through the same edit path as any delete, so undo
-  holds it (`TextBox.svelte:2423-2427`). Every line delete the browser
+  holds it (`TextBox.svelte`). Every line delete the browser
   sends, soft or hard, is cut from the row (`lineDeleteSpan`,
-  `flat-caret.js:413`; `TextBox.svelte:1982`). On a curve, which is one
+  `flat-caret.js`; `TextBox.svelte`). On a curve, which is one
   line, they are the curve's keys: the paragraph's ends, the text's ends,
-  a cut to the paragraph's end (`curveKey`, `TextBox.svelte:2159`;
-  `curveCut`, `2192`). Only on a Mac keyboard (`isMacKeyboard`,
-  `shortcuts.svelte.js:39`), and never with the switch off.
+  a cut to the paragraph's end (`curveKey`, `TextBox.svelte`;
+  `curveCut`, `curveCut`). Only on a Mac keyboard (`isMacKeyboard`,
+  `shortcuts.svelte.js`), and never with the switch off.
 - Tests: `flat-caret.test.js` "the keys a Mac binds to a move or a cut by
   lines" (4) and "the deletes that name a paragraph take the row too";
   `TextBox-engine-typing.dom.test.js` "the keys a Mac binds to a move or a
@@ -1043,7 +1043,7 @@ offsets 0-5, 5-10, 10-14, the caret at 7, the key sent to the view as an
 | Cmd+Forward Delete | none | a keydown; nothing | nothing to answer |
 | Control+D | `deleteForward:` | `deleteContentForward` `[7,8]` | the browser's: one offset, no row in it |
 | Control+H | `deleteBackward:` | `deleteContentBackward` `[6,7]` | the browser's |
-| Control+T | `transpose:` | `insertText` over `[6,8]` | the browser's: its range is the two letters at the caret. An insert that carries no text does nothing (`edit-lines.js:241`) |
+| Control+T | `transpose:` | `insertText` over `[6,8]` | the browser's: its range is the two letters at the caret. An insert that carries no text does nothing (`edit-lines.js`) |
 | Control+O | `insertNewlineIgnoringFieldEditor:` then `moveBackward:` | `insertParagraph` at 7, then the caret back one | the browser's |
 | Control+Y, Control+L | `yank:`, `centerSelectionInVisibleArea:` | a keydown; nothing | nothing to answer |
 | Home, End | `scrollToBeginningOfDocument:`, `scrollToEndOfDocument:` | a keydown; no move | the row's ends, as in the first round (choice 19) |
@@ -1067,8 +1067,8 @@ macOS was only read about. The app's window is WebKit.
 - What was wrong: `penAt` searched the clusters back from the last one for
   every offset, and `xOn` walked the stops.
 - Now: `bodyPens` makes a line's pens in one pass over its clusters
-  (`flat-caret.js:150`); `xOn` and `stopNear` search by halves (`193`,
-  `268`). The same run: 4.8 ms for 20,000 and 2.6 ms for 40,000. In the
+  (`flat-caret.js`); `xOn` searches the offsets by halves; `stopNear` walks the
+  row once because negative spacing can make positions nonmonotonic. The same run: 4.8 ms for 20,000 and 2.6 ms for 40,000. In the
   browser the rows of the 20,000 letter line are 6.0 to 7.0 ms.
 - Test: "its rows are made in one pass over its clusters, not one pass a
   letter" (it counts the reads of the cluster list). Mutation: Q1.
@@ -1081,12 +1081,12 @@ macOS was only read about. The app's window is WebKit.
   second pointer's move changed the selection from `[1,1]` to `[1,13]`, and
   its release ended the first pointer's drag.
 - What was wrong: the handlers on the overlay acted on any pointer's event.
-- Now: a drag knows its pointer (`TextBox.svelte:2295`); its move and its
-  end are that pointer's alone (`2297`, `2313`); another pointer's press
-  while it is down is not a press of the text (`2282`); it ends on that
+- Now: a drag knows its pointer (`TextBox.svelte`); its move and its
+  end are that pointer's alone (`pointer move`, `pointer end`); another pointer's press
+  while it is down is not a press of the text (`onTypePointerDown`); it ends on that
   pointer's `pointerup`, `pointercancel` or `lostpointercapture`
-  (`2325-2328`), and when the edit ends (`1852`). On a curve that is a
-  picture the same (`2125`); with the switch off a curve's handlers are as
+  (`drag listeners`), and when the edit ends (`editField teardown`). On a curve that is a
+  picture the same (`onCurvePointerDown`); with the switch off a curve's handlers are as
   they were.
 - Tests: "a drag is the pointer's that began it" (3). Browser: a drag that
   leaves the picture goes on selecting, `[2,6]` then `[2,23]`. A second
@@ -1104,10 +1104,10 @@ during an edit.**
   engine drawing (a value read once).
 - Now: it is a child of the editable's redraw effect, which reads the flag,
   so it is made whenever the engine is drawing and unmade when it is not
-  (`TextBox.svelte:1875-1898`). The reverse: a box that stops being a
+  (`TextBox.svelte`). The reverse: a box that stops being a
   picture in the middle of an edit (the paint throws, the model has no
-  answer) has the distance taken back (`1878-1885`), and so has the switch
-  going off (`1899-1904`) and the edit ending (`1848-1858`).
+  answer) has the distance taken back (`alignment fallback`), and so has the switch
+  going off (`alignment switch-off`) and the edit ending (`editField teardown`).
 - Tests: "the editable's own caret is kept under the drawn one" (4).
   Browser (`type2`, the synthesised bold): the engine switched on in the
   middle of an edit, the native caret is 0 px from the drawn one and the
@@ -1129,13 +1129,13 @@ during an edit.**
 - Now: fixed in the picture, not sent back to DOM text. Neither row has a
   stop on that side. The upper row says where its half ends and the offset
   after the whole letter (`trail`), the lower where its half starts and the
-  offset before it (`lead`): `flat-caret.js:554-555`. A selection of the
-  letter covers both halves (`227-228`); a press on a half goes to the
-  nearer side of the whole letter (`263-264`); three presses take the row
-  with the whole letter; the upper row is not shared. A row that would be
-  nothing but the middle of one letter has no stop: `mapRows` answers null
-  (`552`) and the box is typed into as DOM text (`type-rows.js:131`); no
-  casing known makes one.
+  offset before it (`lead`): `flat-caret.js`. A selection of the
+  letter covers both halves (`selectionRects`); a press on a half goes to the
+  nearer side of the whole letter (`offsetAt`); three presses take the row
+  with the whole letter; the upper row is not shared. **Third round:** a row that holds only the middle of one grapheme
+  has no stop but stays in the picture, with both `lead` and `trail`. The
+  selection covers it; a press and vertical motion reach a legal stop on
+  another row. Narrow flags, families and jamo can make such rows.
 - Tests: `flat-caret.test.js` "a letter drawn as two, and the line broken
   between them" (7); `type-rows.engine.test.js` "the real breaker makes it,
   and neither row has a caret between the halves". Browser (`type2`, box
@@ -1153,9 +1153,9 @@ during an edit.**
 - What was wrong: the curve's overlay ignored every button but the left.
   With the switch off such a box is flat DOM text and has the system's menu.
 - Now: the right button on a curve that is a picture takes the path
-  straight text has (`TextBox.svelte:2114`, `typeMenu`, `2356-2401`): the
+  straight text has (`TextBox.svelte`, `typeMenu`, `typeMenu`): the
   word under the nearest glyph is selected unless the press is on the
-  selection, and the overlay steps aside (`styles.css:816-817`).
+  selection, and the overlay steps aside (`styles.css`).
 - One thing more was needed, for straight text too. The system offers its
   menu at the pointer and acts on what the editable has THERE, and the
   hidden editable's letters are not where the picture's are: a curve's are
@@ -1163,11 +1163,11 @@ during an edit.**
   Chromium: a right press on a word outside the frame had the box layer
   for its target, not the editable, and the selection collapsed. So while
   the overlay stands aside the editable is moved to put its own selection's
-  rectangle under the pointer (`menuShift`, `TextBox.svelte:2378-2386`,
-  through the box's turn and flip, `2498`), is not clipped (`styles.css:817`),
+  rectangle under the pointer (`menuShift`, `TextBox.svelte`,
+  through the box's turn and flip, `boxDelta`), is not clipped (`styles.css`),
   and is put back, its caret under the drawn one again, after the menu event
-  or 1 s (`2387-2396`). The caret's alignment stands still meanwhile
-  (`2504`).
+  or 1 s (`menu cleanup`). The caret's alignment stands still meanwhile
+  (`alignNative`).
 - Tests: "the right button on a curve that is a picture" (2), "while the
   editable is moved for the menu its caret is not brought back" (1).
   Browser (`type2`): on `upper-arc` (`STRASSE ÜBER UNS`, a mapped curve) the
@@ -1185,7 +1185,7 @@ dragging.**
 - Reproduced: yes (the review read it from the code): in the component a
   drag after the second press left `[5,8]`.
 - Built: the drag the press began goes on, by words after two presses and
-  by rows after three (`TextBox.svelte:2341`, `2302-2309`): from the far end
+  by rows after three (`TextBox.svelte`, `word/row drag`): from the far end
   of the word or row the press took to the far end of the one under the
   pointer; back inside it, the word or row itself.
 - Tests: "and a drag from there goes by words, the word the press took
@@ -1203,9 +1203,9 @@ dragging.**
 - Reproduced: yes: the cargo test written first failed with `left: 1`,
   `right: -5` (`node_modules/.cache/p7b/repro-9.log`).
 - Now: a size or a letter spacing that is not finite is `BadSpec`, as the
-  other exports answer a bad number (`text-engine/src/abi.rs:572`, in the
+  other exports answer a bad number (`text-engine/src/abi.rs`, in the
   function at the end of the file). In JS a position, an offset or an
-  advance that is not finite is thrown on (`linePens`, `type-rows.js:58-66`),
+  advance that is not finite is thrown on (`linePens`, `type-rows.js`),
   which leaves the box typed into as DOM text.
 - Tests: `carets.rs`
   `a_size_or_a_spacing_that_is_no_number_is_an_error_and_not_a_line_of_them`;
@@ -1236,12 +1236,11 @@ session's scratch directory, not the repository). 67 mutations of
 files (144 tests, 0 failing unmutated), and 2 of `mt_line_carets` against
 `cargo test --test carets`. Every one fails at least one test. The first
 pass left four alive (L3, K6, K7, C5); a test was added for each
-(`d32b28f`) and they were run again. One more candidate was dropped as no
-mutation at all: `typeModel` passing no raw graphemes to `mapRows` changes
-nothing the real engine can make, because the cased text's own graphemes
-and the exact match of stops already leave the same offsets out
-(**inferred** from the two rules; the unit test G1 holds the raw rule
-itself).
+(`d32b28f`) and they were run again. One more candidate was dropped in the second round: passing no raw
+graphemes to the mapper. That round inferred that the drawn boundaries
+were enough. **Third-round correction:** forced row ends can stand inside
+a raw grapheme, so the raw rule is required. This old inference is not a
+proof; section 13 records the new rule and its narrow-cluster coverage.
 
 | Id | Mutation | Tests failing | The first of them |
 |---|---|---|---|
@@ -1264,7 +1263,7 @@ itself).
 | L9 | three presses leave the split letter out (start) | 1 | casing that changes the length a letter drawn as two, and the line broken between them three presses take the row with the whole letter; Down lands... |
 | L10 | three presses leave the split letter out (end) | 1 | casing that changes the length a letter drawn as two, and the line broken between them three presses take the row with the whole letter; Down lands... |
 | L11 | Down lands on the nearest stop of ANY row | 1 | casing that changes the length a letter drawn as two, and the line broken between them three presses take the row with the whole letter; Down lands... |
-| L12 | a row with no stop is kept | 1 | casing that changes the length a letter drawn as two, and the line broken between them a row that is nothing but the middle of one letter has no st... |
+| L12 | second-round rejection of a row with no stop is removed | 1 (historical) | Obsolete in the third round: retaining a stopless row is now intended. Its `lead`/`trail`, click and movement rules have new tests and mutations (section 13). |
 | Q1 | the pens of a line are made again for every letter | 1 | a line as long as a paste makes it its rows are made in one pass over its clusters, not one pass a letter |
 | K1 | Control+A is End | 5 | the keys a Mac binds to a move or a cut by lines Control with a letter is the key the system binds it to, and Shift extends |
 | K2 | Control+Shift+K is a cut | 2 | the keys a Mac binds to a move or a cut by lines Control with a letter is the key the system binds it to, and Shift extends |
@@ -1390,3 +1389,409 @@ longer holds (section 7). What is still not measured there is in 12.8.
 - The first round's tree at 1x beside this one (the 2x pair is in item 9).
 - The five review mutations and the round's 69 were run against the unit and
   component tests, not against the browser check.
+
+
+## 13. Third round
+
+The brief is `tp-data/briefs/p7c-typing-small.md`. The pause left five code
+commits on `788af55`, ending at `1120341`; this section closes the missing
+write-up and records the fresh review work. Code references above now use
+file and function names, so they remain useful when lines move. The older
+proof tables are historical, not results for the resumed final candidate.
+Every number here is marked by who measured it and on which tree.
+
+### 13.1 The five paused fixes
+
+| Finding | Final rule | Commits and coverage |
+|---|---|---|
+| Keys and line deletes during composition can omit `isComposing` | A Rust edit's local composition flag protects every pictured key and raw edit, even after DOM fallback. Shared Cmd+Z/Escape behavior is deferred. | `11b0ab9`, strengthened by `2935b9d`; mounted flat and curve keys, line deletes, fallback, paste and cut |
+| A forced row end lies inside a raw grapheme | `caretStops(raw)` alone decides legal stops; `stopRows` filters forced ends and keeps split pieces with `lead`/`trail`. | `c96a3dd`, `0e9770b`; hard-text property cases with the real engine and mounted narrow jamo |
+| Uppercase trailing half names an offset before the raw combining mark | The trailing half names the next raw grapheme boundary, including the accent. | `c96a3dd`; uppercase `aß` plus U+0301 plus `b`, width55 |
+| Curve capture loss leaves a drag listening | The pictured drag owns its pointer and ends on capture loss, own up/cancel, mode change, composition start or edit teardown. | `11b0ab9`, strengthened by `2935b9d`; mounted pointer ownership and all lifecycle exits |
+| Finite inputs produce nonfinite output positions | `mt_line_carets` rejects any nonfinite pen or advance with `BadSpec`, and clears all partial output. | `946bd44`, `1120341`, `69e6704`; natural overflow and independent finite-advance/nonfinite-pen behavior |
+
+A row that holds only the inside of one grapheme stays in the picture with
+no legal stop. It has both `lead` and `trail`. Its selected geometry remains
+visible, and a click or vertical move reaches a legal stop on another row.
+Section12 finding6, choice21 and mutationL12 above are corrected for that
+rule. The narrow-cluster checks are Node/real-wasm and mounted jsdom checks;
+the ordinary Chromium/WebKit typing check has no such narrow Unicode box.
+No narrow-cluster browser result is claimed.
+
+### 13.2 Six findings from the fresh Codex review
+
+Read-only review of `1120341`: `p7c-codex-findings.md`, under
+`tp-data/reports/resume-20261009/`. All six were accepted. The helper and
+then the coordinator independently reproduced them on that pinned tree.
+The coordinator's13 probes also compare the port base: five defects were
+retained from `788af55`, and the boundary-search regression was new.
+Those are **coordinator measurements**, not this worker's executions.
+
+| Finding | Change | Behavioral regression |
+|---|---|---|
+| Composition teardown/reentry loses original text | Clear composition state owned by a Rust edit at teardown/blur and start a new Rust edit clean. Cancel delayed completion and check its editable/version owner. | Blur and programmatic end/reentry preserve original text; an already-queued old completion cannot clear a later composition. |
+| DOM fallback removes local composition protection | Guards use the edit's `pictureEdit` lifetime, rather than only live `typing`. Paste and cut obey the same open-composition rule. | Remove `lineCarets` during composition on flat and curve boxes; End and a line delete leave offsets/text unchanged. |
+| One grapheme across many narrow rows causes quadratic boundary scans | Precompute legal offsets and nearest predecessor/successor once, then map each row. | At100/200/400/800 rows, the unit regression permits at most n+1 predicate calls. The bound is deterministic work, not a timing claim. |
+| An old menu callback clears a later menu shift | One owned cleanup cancels both expiry/completion timers and removes the exact listener. Teardown, switching and replacement menus use it. A stale callback can clear only its own shift. | Close/reopen/menu before old expiry; invoke the saved old callback; later transform and `ctx` stay. Closure/unmount remove listeners immediately. |
+| A curve drag survives switch/composition | Pictured pointer identity is captured when the drag starts. Own the drag and end it on mode change, composition and teardown; never resume it after switch/composition ends. The flat drag follows the same lifetime. | Own/other up/cancel, switch, missing model, composition end and edit reentry. Old overlays cannot move the later selection. |
+| `rowExtent` misses interior extrema under negative spacing | Read every row coordinate and preserve full pre-filter extent when raw illegal offsets are removed. | Unit nonmonotonic pens and real Comic Neue `iMMMMi`, size40/spacing-20, require both interior extrema. |
+
+These are component/geometry proofs. A real IME candidate window, native menu,
+pen, dictation and Tauri keyboard behavior still need the user's checks in
+section9 and12.8. The system WebKit self-check is a separate browser proof.
+The known default-only composition teardown behavior was not changed.
+An edit that has used Rust retains its protection if the switch goes off
+before composition ends. A default-only edit keeps the previous path.
+
+### 13.2.1 Four remaining findings at the next review
+
+The next read-only Codex review, pinned to source `69e6704`, is recorded in
+`p7c-final-codex-findings.md`. Its four executed defects were accepted.
+Those reproductions are **reviewer measurements**, not this worker's runs.
+The original six probes passed on that candidate, but the following gaps
+prevented acceptance. `b57dde3` fixes all four; `c6b61d4` corrects only the
+new mounted fixture loader. The worker's focused regression results below
+are measured on that resulting source. Independent old/fixed comparisons,
+final full proofs and a fresh read-only review still belong to the coordinator.
+
+| Review finding | Final change | New behavioral regression |
+|---|---|---|
+| Browser `getTargetRanges()` can give a nonempty span inside a raw grapheme | For pictured flat edits, `editStops` expands a nonempty replacement to the raw graphemes it touches; a collapsed offset stands at the preceding legal boundary. Copy/cut clipboard text uses the same span. Curve, composing and default-only input paths retain their behavior. | Real tracked Comic Neue/wasm, size40/width25, jamo rows `[0] / [] / [3]`, legal caret3, supplied nonempty raw `[2,3]` range. Backspace deletes the whole syllable; word deletion, replacement, paste/cut also keep it whole. Composition and switch-off controls preserve their prior path. Actual browser generation of this range remains inferred. |
+| A default-start curve drag survives incoming Rust ownership and composition | Privately retain every default gesture's cleanup without changing its listeners or pointer rules. End them when Rust takes an edit, a Rust edit starts, or an owned Rust lifecycle exits. | Start with Rust off; retain the same overlay after switch-on; set legal caret4; composition plus old-pointer movement leaves `[4,4]`. Separate cases check immediate incoming ownership and a later Rust editable. The unchanged default-only listener assertion remains. |
+| An old menu callback removes a newer menu's `ctx` on the same overlay | Check the menu owner before any visible cleanup; stale contextmenu callbacks also cannot schedule new expiry work. | Open two menus on the same overlay; manually replay the saved first callback; the second keeps `ctx`, transform and its single listener. This models an already-queued callback; native timer occurrence remains suspected. |
+| Selection rectangles use endpoints and miss negative-spacing interior extrema | Include only the selected run's interior stops. Preserve extents of filtered drawn pieces, owned by raw grapheme intervals, so selected split graphemes retain every piece. | Real Comic Neue `iMMMMi`, size40/spacing-20, whole and two partial selections cover their own interior extrema and exclude the other end's. Independent unit coordinates cover nonmonotonic partial runs, filtered jamo, uppercase `ß`/`ﬃ` with combining marks, and a stopless middle row surrounded by unselected neighbours. |
+
+The review also executed a menu-mode coverage control: removing mode cleanup
+left one listener on switch-off while older expiry/teardown assertions passed.
+The new mounted switch/model cases require immediate listener0 and removal of
+`ctx`. The new `M-mode` mutation definition targets that behavior directly.
+The piece ownership mapping uses the existing ceiling lookup `rawAtDrawn`,
+backs up when the drawn start lies inside an uppercase expansion, and reads
+precomputed raw predecessor/successor boundaries. It adds no new calls to the
+raw-boundary predicate; the existing n+1 operation-bound regressions remain.
+
+### 13.2.2 Final selection consistency and the multiple-drag coverage gap
+
+The repair review at `c6b61d4` is `p7c-four-fixes-codex-findings.md`.
+It found one remaining P2 interaction defect: native raw selections `[2,3]`,
+reversed `[3,2]` and interior `[1,2]` in the same real narrow jamo box draw
+zero marks, although Cut copies and deletes all three units. This is
+**reviewer-measured** with controlled native selections; actual browser
+creation of such selections remains inferred. Existing piece extents are
+correct, but `selectionRects` rejects these rows before considering them.
+The review independently checked5040 legal forward/reversed selections,
+126 mounted range/clipboard cases and268 segmentation spans without finding
+another geometry/edit defect. Its multi-drag and stale-menu probes also
+passed the unmutated candidate.
+
+The final delta normalizes only the noncomposition flat picture's displayed
+anchor/focus span through the same `editStops` rule used by edits. Focus
+keeps its side for reverse selections; a collapsed interior offset shows
+the same legal insertion boundary. The browser's actual anchor/focus is
+left intact. An active composition or pending composed text retains its
+previous mark path, as do default-only and curve edits. Filtering and
+negative-spacing extents remain scoped to the selected raw graphemes.
+Mounted real-wasm regressions check four partial directions/interiors,
+three marks with the actual per-row extent before Cut, unchanged native
+selection direction, the pictured focus side, whole-grapheme clipboard/text,
+an interior collapsed caret, and composition/default controls. A separate
+real-engine oracle reads painter placement and direct `lineCarets` output
+without consulting the filtered piece metadata.
+
+A reviewer-executed in-memory mutation cleared the private default-drag set
+before registering each new drag. Single-drag assertions still passed, but
+a second default drag left three old listeners and allowed an old pointer
+to change selection during composition. The candidate itself passed that
+probe: this is a coverage gap, not another source defect. The added mounted
+regression starts two gestures, measures six listeners before Rust ownership
+and zero after, and requires both old pointers to leave the composition and
+postcomposition selection unchanged. Mutation `T2-multiple` reproduces the
+reviewer's exact clear-then-add change. `S1-shown-span`, `S1-direction` and
+`S1-compose` separately target visible-span agreement, reverse focus and
+IME ownership. The coordinator later measured these named mutations killed
+as part of the frozen 47 current catalog; the exact results are in section 13.4.
+
+The worker prepared this delta without tests while the coordinator reserved
+the machine for P9's model run. The coordinator subsequently ran the bounded
+pinned-source `p7c-review-repros/partial-selection.mjs` on old `c6b61d4` and
+fixed `0a001247`. The old source drew zero marks yet cut the whole grapheme;
+the fixed source drew three marks with x=5/width=20.16 on rows at y=5/53/101.
+All four native directions/interiors stayed intact; pictured focus moved to
+the correct end, and Cut still copied/deleted the whole grapheme. Logs are
+`p7c-partial-c6b61d49.log` and `p7c-partial-0a001247.log`. These are controlled
+mounted/real-wasm measurements, not native-browser range-generation proof.
+The real-engine oracle reads direct pens/painter placement and is a numerical
+control, not a failing old-source defect reproduction on its own.
+
+### 13.2.3 Pending composition coverage only
+
+The final delta review, `p7c-last-delta-codex-findings.md`, found no production
+defect. It independently measured 236 real-wasm selection checks, 32 edits,
+33 composition/pending/default/curve controls and 20 native-caret alignment
+checks. Actual browser generation of controlled raw ranges and desktop IME
+placement remain inferred. The review's clear-then-add drag mutation failed
+the new multiple-drag assertion, while unmutated candidate behavior passed.
+
+One P3 coverage gap remained: deleting only `composeText == null` from the
+pictured span guard still passed the nine newly added cases. In a composition
+that expands one jamo syllable to two, raw selection `[4,5]` belongs to the
+pending double-syllable text after `compositionend`, while the stored box
+still has three units. The reviewer measured the guard-removal mutation
+moving the hidden caret to an earlier row and making it visible during the
+held completion interval. Production source at `0a001247` behaves correctly.
+
+The added mounted regression composes the double text with real wasm, holds
+the actual completion callback, repeats the native selection notification,
+and checks that the pending selection direction, hidden caret row/geometry,
+six composed marks and original stored box text persist. Running completion
+then commits the double text and clears composition marks. This is test and
+report work only: production source remains exactly `0a001247`. The coordinator
+subsequently ran the pending assertion at test/report HEAD `12ac49f`: one named
+baseline passed, and removing only the `composeText == null` guard failed that
+same assertion without collection/runtime errors. Production was restored and
+all frozen 47 hashes remained unchanged. Exact evidence is
+`p7c-pending-compose-mutation/run-12ac49fd8926-root/results.json`.
+
+The coordinator measured 47/47 named assertion kills in the existing catalog
+at `0a001247`. Those scripts, definitions and result files remain byte-for-byte
+frozen; hashes are recorded separately. The new one-guard mutation has its own
+`p7c-pending-compose-mutation/` directory, exact source strings, pinned archive
+runner and named pending test. Its one measured kill is separate from the
+current 47 catalog. Existing 47 evidence is never rewritten into a 48-result claim.
+
+### 13.2.4 Historical replay status and test-quality follow-up
+
+The coordinator's exact historical 107 replay at `0a001247` measured
+77 named assertion kills, 22 obsolete textual targets, 4 test-errors and
+4 surviving substitutions. These statuses are retained verbatim. A parse,
+compile, runtime or test-body TypeError is not an assertion kill. There is
+no 107-pass claim, and separately measured current-catalog kills are not
+substituted for any historical nonkill. Exact provenance and explanations
+are in `p7c-historical-followups/SURVIVOR-AUDIT.md`.
+
+Historical C1/M6/M7 included behavioral assertion failures together with
+body TypeErrors, so their broad statuses remain test-error. The coordinator
+ran a separate clean selected-test runner for the same exact source
+substitutions at `0a001247`: its four distinct baseline tests passed, then
+C1/M6/M7 each failed their two exact named behavioral assertions with no
+runtime/import/compile/timeout error. These three measured follow-up kills
+are separate from the unchanged original test-error statuses. Evidence is
+`p7c-historical-followups/runs/0a001247edd0683608823be5de3e02d04f7c33b6/latest-results.json`.
+Historical T3 produced a missing `.tpad` and a TypeError at the old test's
+style dereference. The test-only change now explicitly requires that
+necessary overflow pointer pad before measuring it. The exact old T3
+substitution now fails a named behavioral assertion in the coordinator's
+separate `12ac49f` full mounted-file follow-up: 107 baseline cases passed,
+then the exact historical T3 produced 106 passes/1 named assertion failure,
+with no runtime/import/compile/timeout error. Its evidence is
+`p7c-t3-followup-12ac/runs/12ac49fd8926ce31ee23d2fbf4f08d49f6ab053f/latest-results.json`.
+The original broad T3 status remains test-error and is not relabelled.
+
+The four historical survivors have a static domain explanation, not an
+invented kill. M18/M19 remove inequalities from lead/trail selection predicates;
+valid `stopRows` outputs and existing row/range guards make them redundant
+for the covered domain. They are not cleanup substitutions. Reconstructed
+RustR1/R2 remove initial finite-input checks, while downstream finite pen/
+advance checks still refuse the covered malformed numeric requests. This
+explains the measured covered error-status survival, not universal malformed
+input equivalence; combined-fault precedence/side effects are not proved.
+
+By comparison, current 47 `F4-close`/`F5-close` target redundant menu/curve
+lifecycle cleanup routes together, and current RustR1/R2 remove downstream
+pen/advance guards. The coordinator measured all four killed by their named
+assertions, as part of 47/47 current results. Those are different definitions
+with separate evidence and retain their identities. The source-only
+finite-advance/nonfinite-pen test proves the pen check independently.
+
+Commit `12ac49f` changes only mounted tests and this report. All production
+files remain byte-identical to `0a001247`, the measured 47 scripts/catalog/
+results remain frozen, and the new pending-text mutation stays in its
+separate directory. No test, build, browser, capture or mutation executed in
+this worker's final test/report pass.
+
+### 13.3 The ABI coverage gap
+
+The natural overflow test alone still passes when only the pen guard is
+removed: its overflowing advance causes the refusal instead. That survival
+was **coordinator-measured at1120341**, and the old worker's Rust mutation
+log also records it. It is a coverage gap, not proof of a separate code defect.
+
+`69e6704` adds `a_nonfinite_pen_with_finite_advance_is_refused_and_cleared`.
+It alters the existing tracked Comic Neue fixture in memory: all advances
+are zero, and a real GPOS single-position lookup gives A an x offset32767.
+For `BA` at finite `f64::MAX`, the test first requires advance0, a finite
+first pen and a nonfinite second pen. Then it requires ABI `BadSpec`, output
+length0, and a following sound call. No new font file is written, committed,
+downloaded or shipped. The natural test also now checks empty output
+immediately after negative-spacing overflow.
+
+### 13.4 Verification and mutations
+
+**Coordinator baseline at1120341, before the six fresh fixes:** engine
+141 tests (45 without default features), full Vitest 127 files/3600 tests,
+Tauri 301 tests, all 3 clippy feature sets/fmt/builds passed. Both captures
+matched their references except `manifest.json`. Chromium at1x/2x passed
+1072 type and 84 type2 checks each, pageErrors0; WebKit passed614 presses,
+wrong offsets 0 and picture byte differences 0. The coordinator viewed pictures.
+Exact commands, logs and JSON: `tp-data/reports/resume-20261009/CHECKPOINT.md`.
+These baseline results do not verify the new source commits.
+
+**This worker measured on the resumed source:**
+
+| Command | Result / scope |
+|---|---|
+| `./node_modules/.bin/vitest run src/lib/flat-caret.test.js src/lib/type-rows.engine.test.js src/lib/TextBox-engine-typing.dom.test.js src/lib/TextBox-switch-off.dom.test.js` |4 files,224 tests pass:80 unit,42 real-engine,84 mounted typing,18 unchanged switch-off. Before the final sharpening of delayed-completion and resumed-drag assertions. |
+| `./node_modules/.bin/vitest run src/lib/TextBox-engine-typing.dom.test.js` |84 pass after the queued-completion assertion; before the last two drag cases were sharpened to finish composition before moving the old pointer. |
+| `cargo fmt --check`, after `cargo fmt` | Clean. Formatting touched only the new test code. |
+| `cargo test --test carets` in `text-engine` |10 pass, including the independent in-memory pen fixture. |
+| `git -C /Users/caved/dev/manga-typesetter-wt/tp-editor diff --check` | Clean. |
+
+Worker logs: `p7c-worker-focused.log`, `p7c-worker-dom-repeat.log`,
+`p7c-worker-fmt-first.log`, `p7c-worker-fmt.log`, `p7c-worker-carets.log`,
+under that private resume report directory. The initial fmt check requested
+formatting; it was applied and the check repeated. No full worker suite,
+Tauri, rebuild, browser run or capture was started in this resume worker.
+The machine's external load rose above the HANDOFF limit; the coordinator
+schedules final runs on the committed source.
+
+The coordinator's earlier bounded mutation replay at1120341 killed16/16
+named assertions in49 tests, including a scratch generated zero-advance
+font. This is **historical coordinator evidence**. It does not mean the
+full older mutation tables were repeated. The105 recovered old definitions
+include rewritten/obsolete targets; their results must keep those labels.
+The coordinator executed the 47 current source substitutions at `0a001247`
+after 259 selected JavaScript and 10 Rust carets baseline tests passed. All 47
+failed their named behavioral assertions; collection/compile/runtime errors
+were excluded. They cover the six fresh fixes, pointercancel, clipboard
+protection, independent pen validation, negative-spacing output clearing,
+the four next-review fixes, menu-mode cleanup, visible-span agreement and
+multiple default-drag ownership. Exact commands, substitutions and names are
+in `p7c-worker-mutations/run-0a001247edd0-root/results.json`. Scripts, catalog
+and results are preserved with hashes. This is current-definition evidence, separate
+from the historical 107 statuses and the new pending-text assertion mutation.
+
+**Coordinator repeated at69e6704:** full Vitest 127 files passed/1 skipped,
+3622 tests passed/7 skipped; engine 142 default/45 no-default tests passed;
+fmt and all 3 clippy feature sets are clean; Tauri 301 and the application build
+also passed. Rebuilt wasm is unchanged:
+1605271 bytes, SHA256
+`475d90f497f44ec1489e1d41270fd2fd2c5867f54f1f2f2b2af85f108d84bf8d`.
+These are coordinator measurements in `p7c-final-coordinator-*` logs. The
+final sharpened pointer assertions are included in that passing full suite.
+These tests predate the four additional fixes in section13.2.1 and do not
+verify them. At that earlier commit the later proof/review gates had not run.
+The next review found the four accepted defects described above; its completion
+was not merge approval. Final coordinator evidence is recorded below.
+
+**This worker measured on `b57dde3` plus the DOM loader correction committed
+as `c6b61d4`:** the authorized four-file Vitest process, with
+`--maxWorkers 1 --no-file-parallelism`, passed91 caret unit cases,43 real-engine
+cases and18 unchanged switch-off cases. The mounted typing file failed at
+collection: the engine-lane file-URL fixture helper received the DOM lane's
+http `import.meta.url`. No behavioral assertion failed in that run. The new
+mounted loader now reads the same tracked Comic Neue and built wasm through
+the existing adapter, resolved from Vitest's project root. Repeating only
+`TextBox-engine-typing.dom.test.js` with the same worker limits passed98 cases.
+Combined, the four files contain250 passing cases. This combined figure is
+from the first process plus the affected-file repeat, not a second four-file
+process. Production source did not change after the first process. Startup
+one-minute loads were2.63 and2.30, respectively. Logs are
+`p7c-worker-final-focused.log` and `p7c-worker-final-dom-repeat.log` under the
+private resume directory. `git diff --check` was clean. No full suite,
+engine rebuild, browser, capture or mutation process ran in this fix pass.
+
+**Coordinator repeated at source `c6b61d4`/report HEAD `1ae9603`:** wasm
+hash unchanged;142 default/45 no-default engine tests, fmt/all 3 clippy sets,
+3648 Vitest cases plus 7 skips across127 passing files, Tauri 301 plus1 ignored,
+and build all passed. Logs are `p7c-final2-*`. The coordinator also copied
+this candidate's mounted/engine tests onto old `69e6704`: five named
+assertion failures proved all four defects, with no import/collection errors.
+Those are coordinator measurements, and they precede section13.2.2's final
+delta. They are not final-source acceptance or mutation evidence.
+
+**Final production verification, coordinator-measured at `0a001247`:**
+engine 142 default/45 no-default tests passed; fmt and all 3 clippy feature
+sets are clean; Tauri 301 passed/1 ignored and the application build passed.
+Full Vitest 3657 cases passed plus 7 skips, and 8 earlier plus 6 final bounded
+independent probes passed. Exact commands, environments and logs are in
+`p7c-final3-coordinator-proofs.json`. The final focused production review
+found no defect, only the pending-text coverage gap recorded above.
+
+Both coordinator Node captures at `0a001247` matched their frozen references
+except `manifest.json`: ref-sk/base and Rust new/r4. Each contains 64718 metric
+records, 17538 layouts and 3732 pictures, with 0 errors. The default capture
+recorded 7856 skips; Rust recorded 0. The capture run IDs and exact
+commands/comparisons are in `p7c-final3-coordinator-captures.json`. This proves
+capture correspondence; it does not establish native IME/menu behavior.
+
+**Final test/report verification at `12ac49f`, coordinator-measured:** full
+Vitest 127 files passed/1 skipped, 3658 cases passed/7 skipped. The only paths
+changed from production `0a001247` are the mounted test and this report;
+production and wasm remain identical. Metadata is
+`p7c-final4-coordinator-js.json`; wasm remains 1605271 bytes, SHA256
+`475d90f497f44ec1489e1d41270fd2fd2c5867f54f1f2f2b2af85f108d84bf8d`.
+The separate pending baseline/kill passed as recorded above. Current47 and
+three clean historical follow-up kills are separate measured evidence.
+The historical 107 statuses remain 77 kills/22 obsolete/4 test-error/4 survivors.
+
+The pinned `12ac49f` static Codex test review found two P3 assertion-quality
+gaps, with no production source change requested: resetting selection after
+`compositionend` could heal a synchronous ownership loss, and missing caret
+elements could cause a body TypeError. Test-only `b5e0664` now asserts raw
+`[4,5]` immediately after compositionend, dispatches only selectionchange,
+and asserts initial/pending caret existence before reading either. The
+coordinator inspected that exact delta and repeated full JavaScript: 127 files
+passed/1 skipped, 3658 cases passed/7 skipped (`p7c-final5-root-vitest.log`).
+Production remains byte-identical to the reviewed `0a001247`.
+
+The coordinator separately repeated the pending assertion and same one-guard
+mutation at `b5e0664`: one baseline passed, one named assertion failed, no
+collection/runtime errors, production restored, and both original proof sets'
+hashes unchanged. Evidence is
+`p7c-pending-test-quality/run-b5e066456508-root/results.json`. The original
+`12ac49f` pending proof and current 47 catalog/results remain immutable.
+This repeat is a sharpened-assertion follow-up, not another unique mutation.
+
+**Fresh browser proof, coordinator-measured on unchanged `0a001247` production:**
+Chromium 1x and 2x each passed 1072 type and 84 type2 checks, with 0 failures and
+0 pageErrors. System WebKit checked 13 boxes/614 presses, wrong offsets 0,
+picture byte differences 0, maximum native caret error 0.23 CSS px, errors [].
+Exact summaries and timing records are in `p7c-final4-browser-summary.json`.
+The coordinator viewed `type-2x-03.png`, `type-2x-edges.png` and `type-1x-03.png`:
+rotated/flipped/arc selection marks and carets followed the text. This is
+Chromium automation and a system WKView, not a desktop IME candidate-window,
+Tauri keyboard or native-menu proof. Narrow-grapheme and controlled partial
+native-range cases remain real-wasm/jsdom proofs, not browser-harness cases.
+
+The browser timing record includes normal key tasks over 16 ms: Rust-on
+page-wide 100% at 1x had a 20 ms median and 32 ms maximum over 24 real-key tasks.
+The 20000-glyph line's synthetic key median was 50.1 ms at 1x and 58.9 ms at 2x
+(at 100% zoom). Those measured costs are retained; no universal frame-budget
+claim is made. Quiet-machine comparisons remain deferred to user-approved
+P10 work. The coordinator stopped the proof servers and verified ports 5199,
+8791 and 9377 clear.
+
+P7c feature-branch proofs and review repairs are complete. Only the
+coordinator's merge into `text-port` and post-merge integration checks remain.
+P8 owns uniform rejection of an unknown/freed fallback chain; it is separate
+from the caret arithmetic fix and is not implemented here. No P10 began.
+
+### 13.5 Commits and deferred limits
+
+Paused commits: `946bd44`, `c96a3dd`, `11b0ab9`, `0e9770b`, `1120341`.
+Resumed source commits: `2935b9d` (editing lifetimes), `746b827` (boundary
+work and full extent), `69e6704` (independent ABI proof), `b57dde3` (whole
+grapheme edits, incoming gesture/menu ownership and selected-piece extents),
+`c6b61d4` (mounted real-fixture loader), `0a001247` (visible-span consistency
+and multiple-drag coverage), `12ac49f` (pending-composition and required-pad
+assertions; production unchanged), `b5e0664` (selection observation without resetting
+and explicit caret existence; tests only). Report-only commits record the
+completed third-round findings, corrections and proof provenance. Nothing
+was pushed or merged by this worker.
+No main files, P8 source files, private data or font files were committed.
+No attribution trailers were added.
+
+Deferred: Cmd+Z/Escape during composition remain shared default behavior;
+curve motion remains by code point; no real desktop IME/menu/pen/dictation
+is claimed; the20,000-glyph paint cost remains the painter's. The user must
+approve before P10 cut-over, any push or any merge to main.

@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // The paint is the real one, on the lane's stand-in canvas, wrapped so a case
 // can count it, read what it was asked to paint, and make it throw.
@@ -24,6 +26,7 @@ import { rawOffset, domPoint } from './edit-lines.js';
 import { isMacKeyboard, setMacKeyboard } from './shortcuts.svelte.js';
 import { caretAt as curveCaretAt } from './curve-caret.js';
 import { installFakeCanvas } from '../test/fake-canvas.js';
+import { createRustTextEngine } from './text-engine/rust.js';
 
 // ===========================================================================
 // A box typed into while the Rust engine draws: still its picture
@@ -1416,5 +1419,832 @@ describe('while keys are coming a large box is painted within a smaller budget',
     await tick();
     expect(m.box.text).toBe('S');
     expect(set.mock.calls.filter((c) => c[1] === 150)).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
+// Third round
+// ===========================================================================
+
+describe('while an IME composes, nothing the picture answers moves the caret or changes the text', () => {
+  let was;
+  beforeEach(() => {
+    was = isMacKeyboard();
+    setMacKeyboard(true);
+  });
+  afterEach(() => setMacKeyboard(was));
+  const composition = (m, type) => m.editable().dispatchEvent(new CompositionEvent(type, { bubbles: true }));
+  // Every key the picture's rows, or a curve's glyphs, answer. Each arrives
+  // WITHOUT `isComposing`, as a key can in the middle of a composition: the
+  // one thing that says so is that a composition was started and has not ended.
+  const KEYS = [
+    ['k', { ctrlKey: true }], ['e', { ctrlKey: true }], ['a', { ctrlKey: true }], ['n', { ctrlKey: true }], ['p', { ctrlKey: true }],
+    ['f', { ctrlKey: true }], ['b', { ctrlKey: true }], ['v', { ctrlKey: true }], ['ArrowLeft', { ctrlKey: true }],
+    ['ArrowDown', { altKey: true }], ['ArrowUp', { altKey: true }], ['PageDown', { altKey: true }], ['ArrowDown', { altKey: true, shiftKey: true }],
+    ['ArrowUp', {}], ['ArrowDown', {}], ['ArrowLeft', {}], ['ArrowRight', {}], ['Home', {}], ['End', {}], ['End', { shiftKey: true }],
+    ['ArrowLeft', { metaKey: true }], ['ArrowDown', { metaKey: true }], ['PageUp', {}],
+  ];
+
+  it.each(['arc', 'upperArc', 'wrapped', 'plain'])('%s: no key, no line delete, no press', async (id) => {
+    const m = await typing(id);
+    const text = m.box.text;
+    nativeSel(m, 4);
+    await tick();
+    composition(m, 'compositionstart');
+    for (const [k, more] of KEYS) {
+      const ev = key(m, k, more);
+      const say = `${Object.keys(more).join('+')} ${k}`;
+      expect(ev.defaultPrevented, say).toBe(false);
+      expect(m.sel(), say).toEqual([4, 4]);
+      await tick();
+      expect(m.box.text, say).toBe(text);
+    }
+    // A delete to the line's start or end is not cut from the picture's rows
+    // either: it is the browser's, in the text it is composing in.
+    for (const t of ['deleteSoftLineBackward', 'deleteHardLineBackward', 'deleteSoftLineForward', 'deleteHardLineForward']) {
+      expect(input(m, t).defaultPrevented, t).toBe(false);
+      await tick();
+      expect(m.box.text, t).toBe(text);
+      expect(m.sel(), t).toEqual([4, 4]);
+    }
+    // Nor does a press, a double press or the right button.
+    const el = m.q('.curve-edit, .type-edit');
+    for (const [type, more] of [['pointerdown', {}], ['pointerdown', { button: 2 }], ['mousedown', { detail: 2 }], ['dblclick', {}]]) {
+      el.dispatchEvent(ptr(type, m, 150, 30, 1, more));
+      expect(m.sel(), type).toEqual([4, 4]);
+      expect(el.classList.contains('ctx'), type).toBe(false);
+    }
+    el.dispatchEvent(ptr('pointerup', m, 150, 30, 1));
+    // The composition over, the keys are the picture's again.
+    vi.useFakeTimers();
+    try {
+      composition(m, 'compositionend');
+      vi.runAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
+    await tick();
+    nativeSel(m, 4);
+    const ev = key(m, 'e', { ctrlKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.sel()[0]).toBeGreaterThan(4);
+    expect(m.box.text).toBe(text);
+  });
+
+  it('with the switch off a curve takes its keys as it did, composing or not', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    expect(key(m, 'End').defaultPrevented).toBe(true);
+    expect(m.sel()).toEqual([11, 11]);
+  });
+
+  it.each(['blur', 'endEdit'])('composition ends with its editable on %s; reentry keeps all the original text', async (way) => {
+    const m = await typing('plain');
+    const original = m.box.text;
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    if (way === 'blur') m.editable().dispatchEvent(new Event('blur'));
+    else endEdit(original);
+    await tick();
+    beginEdit(m.box.id);
+    await tick();
+    expect(m.editable().textContent).toBe(original);
+    nativeSel(m, 4);
+    expect(input(m, 'insertText', 'X').defaultPrevented).toBe(true);
+    await tick();
+    expect(m.box.text).toBe('WAITX FOR ME\nOVER THERE');
+  });
+
+  it('an old composition completion cannot end a composition in a later edit', async () => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const m = await typing('plain');
+      nativeSel(m, 4);
+      composition(m, 'compositionstart');
+      composition(m, 'compositionend');
+      const oldFinish = timers.mock.calls.find((c) => c[0].name === 'finish')[0];
+      endEdit(m.box.text);
+      await tick();
+      beginEdit(m.box.id);
+      await tick();
+      nativeSel(m, 4);
+      composition(m, 'compositionstart');
+      const node = m.editable().querySelector('.el').firstChild;
+      node.data = 'WAITに FOR ME';
+      m.editable().dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      await tick();
+      // A browser task already queued before cancellation must also check
+      // its editable owner; it cannot clear the new composing range.
+      oldFinish();
+      vi.advanceTimersByTime(0);
+      await tick();
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      expect(m.all('.tcomp')).toHaveLength(1);
+      expect(input(m, 'deleteHardLineForward').defaultPrevented).toBe(false);
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      composition(m, 'compositionend');
+      vi.advanceTimersByTime(0);
+      await tick();
+      expect(m.box.text).toBe('WAITに FOR ME\nOVER THERE');
+    } finally {
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['arc', 'plain'])('%s: losing the model during composition keeps the open composition protected', async (id) => {
+    const m = await typing(id);
+    const original = m.box.text;
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    const { lineCarets, ...withoutCarets } = half;
+    setTextEngine(withoutCarets);
+    clearLayoutMemo();
+    app.fontsVersion++;
+    await tick();
+    expect(engineSwitch.painting).toBe(true);
+    expect(m.q('.type-edit')).toBeNull();
+    expect(key(m, 'End').defaultPrevented).toBe(false);
+    expect(m.sel()).toEqual([4, 4]);
+    expect(input(m, 'deleteHardLineForward').defaultPrevented).toBe(false);
+    expect(m.box.text).toBe(original);
+  });
+
+  it('paste and cut leave an open picture composition to the browser too', async () => {
+    const m = await typing('plain');
+    nativeSel(m, 0, 4);
+    composition(m, 'compositionstart');
+    for (const type of ['paste', 'cut']) {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: { getData: () => 'X', setData: vi.fn() } });
+      m.editable().dispatchEvent(ev);
+      await tick();
+      expect(ev.defaultPrevented).toBe(false);
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      expect(m.sel()).toEqual([0, 4]);
+    }
+  });
+});
+
+describe('a curve drag whose pointer the browser took back is over', () => {
+  it('a curve drag begun with Rust off cannot move a later Rust composition', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1));
+    engineSwitch.painting = true;
+    await tick();
+    expect(m.q('.curve-edit')).toBe(el);
+    expect(typeModel(m.box, m.box.text).kind).toBe('curve');
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    nativeSel(m, 4);
+    await tick();
+    m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[0]), 1));
+    expect(m.sel()).toEqual([4, 4]);
+    m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 1));
+    expect(m.sel()).toEqual([4, 4]);
+  });
+
+  it('a curve drag begun with Rust off is already over when Rust takes the edit', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1));
+    engineSwitch.painting = true;
+    await tick();
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    nativeSel(m, 4);
+    await tick();
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[0]), 1));
+    expect(m.sel()).toEqual([4, 4]);
+  });
+
+  it('Rust takes ownership of every default curve drag, including older concurrent gestures', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const add = vi.spyOn(el, 'addEventListener');
+    const remove = vi.spyOn(el, 'removeEventListener');
+    const kinds = ['pointermove', 'pointerup', 'pointercancel'];
+    const left = () => add.mock.calls.filter(([type, fn]) => kinds.includes(type) && !remove.mock.calls.some(([t, f]) => t === type && f === fn)).length;
+    try {
+      el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1));
+      el.dispatchEvent(ptr('pointerdown', m, 90, 30, 2));
+      expect(add.mock.calls.filter(([type]) => kinds.includes(type))).toHaveLength(6);
+      expect(left()).toBe(6);
+      engineSwitch.painting = true;
+      await tick();
+      expect(m.q('.curve-edit')).toBe(el);
+      expect(left()).toBe(0);
+      const glyphs = typeModel(m.box, m.box.text).glyphs;
+      nativeSel(m, 4);
+      await tick();
+      m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      for (const id of [1, 2]) {
+        el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[0]), id));
+        expect(m.sel()).toEqual([4, 4]);
+      }
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      for (const id of [1, 2]) {
+        el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), id));
+        expect(m.sel()).toEqual([4, 4]);
+      }
+      expect(left()).toBe(0);
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
+  it('a default curve overlay cannot move the selection of a later Rust edit', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const old = m.q('.curve-edit');
+    old.dispatchEvent(ptr('pointerdown', m, 60, 30, 1));
+    endEdit(m.box.text);
+    await tick();
+    engineSwitch.painting = true;
+    beginEdit(m.box.id);
+    await tick();
+    nativeSel(m, 4);
+    await tick();
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    old.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[0]), 1));
+    expect(m.sel()).toEqual([4, 4]);
+  });
+
+  it.each(['pointerup', 'pointercancel'])('%s ends only the pointer that began the pictured curve drag', async (type) => {
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, glyphs[2]), 1));
+    const start = m.sel();
+    el.dispatchEvent(ptr(type, m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[6]), 1));
+    const moved = m.sel();
+    expect(moved[0]).toBe(start[0]);
+    expect(moved[1]).toBeGreaterThan(start[1]);
+    el.dispatchEvent(ptr(type, m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 1));
+    expect(m.sel()).toEqual(moved);
+  });
+
+  it.each(['switch', 'model', 'composition', 'endEdit'])('a pictured curve drag ends on %s and never reaches the next edit/mode', async (way) => {
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, glyphs[2]), 1));
+    const start = m.sel();
+    if (way === 'switch') engineSwitch.painting = false;
+    if (way === 'model') {
+      const { lineCarets, ...withoutCarets } = half;
+      setTextEngine(withoutCarets);
+      clearLayoutMemo();
+      app.fontsVersion++;
+    }
+    if (way === 'composition') m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    if (way === 'endEdit') endEdit(m.box.text);
+    await tick();
+    if (way !== 'endEdit') {
+      el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 2));
+      expect(m.sel()).toEqual(start);
+    }
+    if (way === 'switch') engineSwitch.painting = true;
+    if (way === 'model') {
+      setTextEngine(half);
+      clearLayoutMemo();
+      app.fontsVersion++;
+    }
+    if (way === 'endEdit') beginEdit(m.box.id);
+    await tick();
+    if (way === 'composition') {
+      // Ignoring moves only while composing is not enough: the old gesture
+      // must remain ended when the composition has finished.
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    }
+    const held = m.sel();
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 1));
+    expect(m.sel()).toEqual(held);
+  });
+  it('nothing goes on selecting after the capture is lost, and another pointer losing its own ends nothing', async () => {
+    const m = await typing('arc');
+    const g = typeModel(m.box, boxText(m.box)).glyphs;
+    const el = m.q('.curve-edit');
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, g[2]), 1));
+    const from = m.sel();
+    // Another pointer's capture going is not this drag's.
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[6]), 1));
+    const held = m.sel();
+    expect(held[0]).toBe(from[0]);
+    expect(held[1]).toBeGreaterThan(from[1] + 2);
+    // Its own: the button is let go somewhere the curve never hears of.
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[9]), 1));
+    expect(m.sel()).toEqual(held);
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[1]), 1));
+    expect(m.sel()).toEqual(held);
+  });
+
+  it('and so is one on straight text', async () => {
+    const m = await typing('plain');
+    const rows = rowsOf(m.box);
+    const el = m.q('.type-edit');
+    el.dispatchEvent(ptr('pointerdown', m, rows[0].xs[1] + 1, rows[0].top + 5, 1));
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, rows[0].xs[6] + 1, rows[0].top + 5, 1));
+    expect(m.sel()).toEqual([1, 6]);
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, rows[1].xs[3] + 1, rows[1].top + 5, 1));
+    expect(m.sel()).toEqual([1, 6]);
+  });
+
+  it('with the switch off a curve has the listeners it had, and no other', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const add = vi.spyOn(el, 'addEventListener');
+    try {
+      el.dispatchEvent(ptr('pointerdown', m, 150, 30, 1));
+      expect(add.mock.calls.map((c) => c[0]).sort()).toEqual(['pointercancel', 'pointermove', 'pointerup']);
+    } finally {
+      add.mockRestore();
+    }
+  });
+});
+
+describe('the system\'s menu leaves nothing listening', () => {
+  // Every listener for the menu event put on the window and not taken off again.
+  function listening() {
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    const same = (a, b) => a[0] === b[0] && a[1] === b[1] && !!(a[2]?.capture ?? a[2]) === !!(b[2]?.capture ?? b[2]);
+    return {
+      added: () => add.mock.calls.filter((c) => c[0] === 'contextmenu').length,
+      left: () => add.mock.calls.filter((c) => c[0] === 'contextmenu' && !remove.mock.calls.some((r) => same(c, r))).length,
+      restore: () => (add.mockRestore(), remove.mockRestore()),
+    };
+  }
+
+  it.each(['plain', 'arc'])('%s: an old menu callback cannot uncover the newer menu on the same overlay', async (id) => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const on = listening();
+    const restore = geometry({ native: { left: 100.75, top: 50, width: 0, height: 24 }, mark: { left: 100, top: 50, width: 1.5, height: 24 }, selection: { left: 300, top: 400, width: 40, height: 20 } });
+    try {
+      const m = await typing(id);
+      const el = m.q('.curve-edit, .type-edit');
+      el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      const oldBack = timers.mock.calls.find((c) => c[1] === 1000)[0];
+      el.dispatchEvent(ptr('pointerdown', m, 90, 30, 1, { button: 2 }));
+      expect(m.q('.curve-edit, .type-edit')).toBe(el);
+      expect(el.classList.contains('ctx')).toBe(true);
+      const moved = m.editable().style.transform;
+      expect(moved).not.toBe('');
+      expect(on.left()).toBe(1);
+      oldBack();
+      await tick();
+      expect(el.classList.contains('ctx')).toBe(true);
+      expect(m.editable().style.transform).toBe(moved);
+      expect(on.left()).toBe(1);
+    } finally {
+      cleanup();
+      restore();
+      on.restore();
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['switch', 'model'])('a menu ends immediately when its picture loses the %s', async (way) => {
+    vi.useFakeTimers();
+    const on = listening();
+    try {
+      const m = await typing('plain');
+      const el = m.q('.type-edit');
+      el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      expect(on.left()).toBe(1);
+      expect(el.classList.contains('ctx')).toBe(true);
+      if (way === 'switch') engineSwitch.painting = false;
+      else {
+        const { lineCarets, ...withoutCarets } = half;
+        setTextEngine(withoutCarets);
+        clearLayoutMemo();
+        app.fontsVersion++;
+      }
+      await tick();
+      expect(on.left()).toBe(0);
+      expect(el.classList.contains('ctx')).toBe(false);
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+    } finally {
+      cleanup();
+      on.restore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['plain', 'arc'])('%s: an old edit/menu owns neither the later shift nor any surviving listener', async (id) => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const on = listening();
+    const restore = geometry({ native: { left: 100.75, top: 50, width: 0, height: 24 }, mark: { left: 100, top: 50, width: 1.5, height: 24 }, selection: { left: 300, top: 400, width: 40, height: 20 } });
+    try {
+      const m = await typing(id);
+      const old = m.q('.curve-edit, .type-edit');
+      old.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      const oldBack = timers.mock.calls.find((c) => c[1] === 1000)[0];
+      expect(on.left()).toBe(1);
+      endEdit(m.box.text);
+      await tick();
+      expect(on.left()).toBe(0);
+      expect(old.classList.contains('ctx')).toBe(false);
+      beginEdit(m.box.id);
+      await tick();
+      const later = m.q('.curve-edit, .type-edit');
+      later.dispatchEvent(ptr('pointerdown', m, 90, 30, 1, { button: 2 }));
+      const moved = m.editable().style.transform;
+      expect(moved).not.toBe('');
+      expect(on.left()).toBe(1);
+      // Even a callback already queued by the browser owns only its old menu.
+      oldBack();
+      await tick();
+      expect(later.classList.contains('ctx')).toBe(true);
+      expect(m.editable().style.transform).toBe(moved);
+      expect(on.left()).toBe(1);
+      window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      m.view.unmount();
+      expect(on.left()).toBe(0);
+      expect(later.classList.contains('ctx')).toBe(false);
+      vi.runAllTimers();
+      expect(on.left()).toBe(0);
+    } finally {
+      restore();
+      on.restore();
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['plain', 'arc'])('%s: none after the menu event, and none after the second it waits when no menu comes', async (id) => {
+    vi.useFakeTimers();
+    const on = listening();
+    try {
+      const m = await typing(id);
+      const el = m.q('.curve-edit, .type-edit');
+      el.dispatchEvent(ptr('pointerdown', m, 150, 30, 1));
+      el.dispatchEvent(ptr('pointerup', m, 150, 30, 1));
+      const menu = () => el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      // The menu comes.
+      menu();
+      expect(on.added()).toBe(1);
+      expect(on.left()).toBe(1);
+      window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      vi.runAllTimers();
+      expect(on.left()).toBe(0);
+      // No menu comes: the second passes.
+      menu();
+      expect(on.added()).toBe(2);
+      expect(on.left()).toBe(1);
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      // Two right presses, one after the other, before either is over.
+      menu();
+      menu();
+      expect(on.added()).toBe(4);
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      // And the edit ending while it stands aside.
+      menu();
+      endEdit(m.editable().textContent);
+      await tick();
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      expect(on.added()).toBe(5);
+    } finally {
+      on.restore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('a flat picture drag ends with its mode or composition', () => {
+  it.each(['switch', 'composition'])('%s cannot leave a flat drag to resume later', async (way) => {
+    const m = await typing('plain');
+    const el = m.q('.type-edit');
+    const rows = rowsOf(m.box);
+    el.dispatchEvent(ptr('pointerdown', m, rows[0].xs[1] + 1, rows[0].top + 5, 1));
+    const start = m.sel();
+    if (way === 'switch') engineSwitch.painting = false;
+    else m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    await tick();
+    if (way === 'switch') engineSwitch.painting = true;
+    await tick();
+    if (way === 'composition') m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    el.dispatchEvent(ptr('pointermove', m, rows[0].xs[6] + 1, rows[0].top + 5, 1));
+    expect(m.sel()).toEqual(start);
+  });
+});
+
+describe('a box narrower than one grapheme, typed into as its picture', () => {
+  // A syllable written in three jamo, in a box narrower than one of them:
+  // three rows, and one grapheme. The plain wrapper is the engine's own here
+  // (jsdom lays nothing out): it breaks wherever the width is used up, in the
+  // middle of anything, as the real one does (type-rows.engine.test.js).
+  const SYLLABLE = '\u1100\u1161\u11A8';
+  async function jamo() {
+    setTextEngine({
+      ...half,
+      wrapPlain: (face, text, { width }) => {
+        const n = Math.max(1, Math.floor(width / (face.size * 0.5)));
+        const out = [];
+        for (let i = 0; i < text.length; i += n) out.push(text.slice(i, i + n));
+        return out.length ? out : [''];
+      },
+    });
+    clearLayoutMemo();
+    KINDS.jamo = box('jamo', { shape: 'off' }, { text: SYLLABLE, w: 12, h: 120 });
+    try {
+      return await typing('jamo');
+    } finally {
+      delete KINDS.jamo;
+    }
+  }
+
+  it('its rows break inside the grapheme, and the caret, the selection and the pointer do not', async () => {
+    const m = await jamo();
+    const rows = rowsOf(m.box);
+    expect(rows.map((r) => r.offs)).toEqual([[0], [], [3]]);
+    // All of it is selected on the first focus: a rectangle on each row.
+    expect(m.sel()).toEqual([0, 3]);
+    const sel = m.all('.tsel').map(px);
+    expect(sel).toHaveLength(3);
+    expect(sel.map((r) => r.top)).toEqual(rows.map((r) => r.top));
+    expect(sel.every((r) => r.width === 10)).toBe(true);
+    // A press on any row is before it or after it; the caret is drawn on the
+    // row that has that stop, never on the row between.
+    const el = m.q('.type-edit');
+    for (const [i, x, want, row] of [[0, 1, 0, 0], [0, 9, 3, 2], [1, 2, 0, 0], [1, 8, 3, 2], [2, 2, 0, 0], [2, 9, 3, 2]]) {
+      el.dispatchEvent(ptr('pointerdown', m, rows[i].lead?.x ?? rows[i].xs[0], rows[i].top + 5, 1));
+      el.dispatchEvent(ptr('pointerup', m, 0, 0, 1));
+      el.dispatchEvent(ptr('pointerdown', m, (rows[i].lead?.x ?? rows[i].xs[0]) + x, rows[i].top + 5, 1));
+      el.dispatchEvent(ptr('pointerup', m, 0, 0, 1));
+      await tick();
+      expect(m.sel(), `row ${i}, ${x} px in`).toEqual([want, want]);
+      expect(px(m.q('.tcaret')).top, `row ${i}, ${x} px in`).toBe(rows[row].top);
+    }
+    // Down from its start is its end; a letter typed there leaves it whole.
+    nativeSel(m, 0);
+    await tick();
+    key(m, 'ArrowDown');
+    expect(m.sel()).toEqual([3, 3]);
+    key(m, 'ArrowLeft');
+    expect(m.sel()).toEqual([0, 0]);
+    key(m, 'ArrowRight');
+    expect(m.sel()).toEqual([3, 3]);
+    input(m, 'insertText', 'X');
+    await tick();
+    expect(m.box.text).toBe('각X');
+  });
+
+  it('what takes the pointer past the frame reaches as far as the parts of it the rows draw', async () => {
+    const m = await jamo();
+    const rows = rowsOf(m.box);
+    // Each row draws a letter 10 wide from the inset, in a box 12 wide; the
+    // middle row has no stop at all, and the last has its one at its far end.
+    const far = Math.max(...rows.map((r) => r.trail?.x ?? r.xs[r.xs.length - 1]));
+    const near = Math.min(...rows.map((r) => r.lead?.x ?? r.xs[0]));
+    expect(far - near).toBe(10);
+    expect(far).toBeGreaterThan(m.box.w);
+    const padEl = m.q('.tpad');
+    expect(padEl, 'overflowing pictured rows have a pointer pad').not.toBeNull();
+    const pad = px(padEl);
+    expect(pad.left).toBe(Math.min(0, near));
+    expect(pad.left + pad.width).toBe(far);
+    expect(Number.isFinite(pad.width) && Number.isFinite(pad.height)).toBe(true);
+  });
+});
+
+describe('browser ranges on a real picture broken inside a raw grapheme', () => {
+  const SYLLABLE = '\u1100\u1161\u11A8';
+  async function realJamo() {
+    // The DOM lane gives import.meta.url an http origin. Resolve these tracked
+    // fixtures from Vitest's project root instead of using the engine lane's
+    // file-URL loader; the adapter and built wasm are still the real ones.
+    const rust = await createRustTextEngine(readFileSync(resolve('text-engine/js/generated/mt_text.wasm')));
+    rust.addFace('Comic Neue', 'regular', readFileSync(resolve('src/test/fonts/ComicNeue-Regular.ttf')));
+    setTextEngine(rust);
+    clearLayoutMemo();
+    KINDS.realJamo = box('realJamo', { size: 40, shape: 'off' }, { text: SYLLABLE, w: 25, h: 120 });
+    try {
+      return await typing('realJamo');
+    } finally {
+      delete KINDS.realJamo;
+    }
+  }
+  function ranged(m, inputType, data) {
+    const [a, ai] = domPoint(m.editable(), 2);
+    const [b, bi] = domPoint(m.editable(), 3);
+    const ranges = [{ startContainer: a, startOffset: ai, endContainer: b, endOffset: bi }];
+    const ev = new InputEvent('beforeinput', { inputType, data, bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'getTargetRanges', { value: () => ranges });
+    expect(ranges).toHaveLength(1);
+    expect([rawOffset(m.editable(), a, ai), rawOffset(m.editable(), b, bi)]).toEqual([2, 3]);
+    m.editable().dispatchEvent(ev);
+    return ev;
+  }
+
+  it('a supplied browser deletion range removes the whole real wrapped grapheme from a legal caret', async () => {
+    const m = await realJamo();
+    expect(rowsOf(m.box).map((r) => r.offs)).toEqual([[0], [], [3]]);
+    expect([...m.editable().querySelectorAll('.el:not(.edge)')].map((el) => el.textContent)).toEqual(['ᄀ', 'ᅡ', 'ᆨ']);
+    nativeSel(m, 3);
+    await tick();
+    expect(m.sel()).toEqual([3, 3]);
+    const ev = ranged(m, 'deleteContentBackward');
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.box.text).toBe('');
+    expect(m.sel()).toEqual([0, 0]);
+  });
+
+  it.each([[2, 3], [3, 2], [1, 2], [2, 1]])('native partial selection [%i,%i] shows every touched grapheme piece before Cut', async (a, f) => {
+    const m = await realJamo();
+    const rows = rowsOf(m.box);
+    expect(rows.map((r) => r.offs)).toEqual([[0], [], [3]]);
+    nativeSel(m, a, f);
+    await tick();
+    // Native anchor/focus remains the browser's, including its direction.
+    // The picture shows the whole grapheme that copy/cut actually takes.
+    expect(m.sel()).toEqual([a, f]);
+    const marks = m.all('.tsel').map(px);
+    expect(marks).toHaveLength(3);
+    for (const [i, row] of rows.entries()) {
+      const from = row.lead?.x ?? row.xs[0];
+      const to = row.trail?.x ?? row.xs.at(-1);
+      expect(marks[i].left).toBeCloseTo(Math.min(from, to), 8);
+      expect(marks[i].width).toBeCloseTo(Math.abs(to - from), 8);
+      expect(marks[i].top).toBe(row.top);
+    }
+    expect(px(m.q('.tcaret')).top).toBe(rows[a > f ? 0 : 2].top);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(clipboardData.setData).toHaveBeenCalledWith('text/plain', SYLLABLE);
+    expect(m.box.text).toBe('');
+    expect(m.sel()).toEqual([0, 0]);
+  });
+
+  it('an interior collapsed native caret shows the legal insertion boundary on the real picture', async () => {
+    const m = await realJamo();
+    const rows = rowsOf(m.box);
+    nativeSel(m, 2);
+    await tick();
+    expect(m.sel()).toEqual([2, 2]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    expect(px(m.q('.tcaret')).top).toBe(rows[0].top);
+    expect(px(m.q('.tcaret')).left).toBe(rows[0].xs[0]);
+    expect(input(m, 'insertText', 'X').defaultPrevented).toBe(true);
+    await tick();
+    expect(m.box.text).toBe(`X${SYLLABLE}`);
+    expect(m.sel()).toEqual([1, 1]);
+  });
+
+  it('pending composed text keeps its hidden caret row after compositionend until completion', async () => {
+    const m = await realJamo();
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const composed = SYLLABLE.repeat(2);
+      m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      m.editable().textContent = composed;
+      m.editable().dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      await tick();
+      const rows = typeModel(m.box, composed).rows;
+      expect(rows).toHaveLength(6);
+      expect(m.box.text).toBe(SYLLABLE);
+      nativeSel(m, 4, 5);
+      await tick();
+      const initialCaret = m.q('.tcaret');
+      expect(initialCaret, 'the composing picture keeps its caret element').not.toBeNull();
+      const before = px(initialCaret);
+      expect(initialCaret.classList.contains('off')).toBe(true);
+      expect(before.top).toBe(rows.at(-1).top);
+      expect(m.sel()).toEqual([4, 5]);
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      expect(m.sel(), 'compositionend must preserve native anchor/focus before any notification').toEqual([4, 5]);
+      const finish = timers.mock.calls.find(([fn]) => fn.name === 'finish')?.[0];
+      expect(finish).toBeTypeOf('function');
+      // Hold the real completion task. A selection notification in this gap
+      // must still use the pending composed text, not the shorter box text.
+      document.dispatchEvent(new Event('selectionchange'));
+      await tick();
+      expect(m.box.text).toBe(SYLLABLE);
+      expect(m.editable().textContent).toBe(composed);
+      expect(m.sel()).toEqual([4, 5]);
+      expect(m.all('.tcomp')).toHaveLength(6);
+      const pendingCaret = m.q('.tcaret');
+      expect(pendingCaret, 'pending composed text keeps its caret element').not.toBeNull();
+      expect(pendingCaret.classList.contains('off')).toBe(true);
+      expect(px(pendingCaret)).toEqual(before);
+      finish();
+      await tick();
+      expect(m.box.text).toBe(composed);
+      expect(m.all('.tcomp')).toHaveLength(0);
+    } finally {
+      cleanup();
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a composing partial native selection keeps its existing picture and browser ownership', async () => {
+    const m = await realJamo();
+    m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    nativeSel(m, 2, 3);
+    await tick();
+    expect(m.sel()).toEqual([2, 3]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(false);
+    expect(clipboardData.setData).not.toHaveBeenCalled();
+    expect(m.box.text).toBe(SYLLABLE);
+    expect(m.sel()).toEqual([2, 3]);
+  });
+
+  it('a partial native selection with Rust off retains partial clipboard and text behavior', async () => {
+    engineSwitch.painting = false;
+    const m = await realJamo();
+    nativeSel(m, 3, 2);
+    await tick();
+    expect(m.sel()).toEqual([3, 2]);
+    expect(m.all('.tsel')).toHaveLength(0);
+    const clipboardData = { setData: vi.fn() };
+    const ev = new Event('cut', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(clipboardData.setData).toHaveBeenCalledWith('text/plain', 'ᆨ');
+    expect(m.box.text).toBe('가');
+  });
+
+  it.each(['deleteWordBackward', 'insertReplacementText'])('%s also replaces the whole touched grapheme', async (inputType) => {
+    const m = await realJamo();
+    nativeSel(m, 3);
+    await tick();
+    const ev = ranged(m, inputType, 'X');
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.box.text).toBe(inputType === 'insertReplacementText' ? 'X' : '');
+  });
+
+  it.each(['paste', 'cut'])('%s with a partial native selection acts on the whole grapheme', async (type) => {
+    const m = await realJamo();
+    nativeSel(m, 2, 3);
+    await tick();
+    const clipboardData = { getData: vi.fn(() => 'X'), setData: vi.fn() };
+    const ev = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: clipboardData });
+    m.editable().dispatchEvent(ev);
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.box.text).toBe(type === 'paste' ? 'X' : '');
+    if (type === 'cut') expect(clipboardData.setData).toHaveBeenCalledWith('text/plain', SYLLABLE);
+  });
+
+  it('a supplied browser range leaves a composing real grapheme to the browser', async () => {
+    const m = await realJamo();
+    nativeSel(m, 3);
+    await tick();
+    m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    const ev = ranged(m, 'deleteContentBackward');
+    await tick();
+    expect(ev.defaultPrevented).toBe(false);
+    expect(m.box.text).toBe(SYLLABLE);
+    expect(m.sel()).toEqual([3, 3]);
+  });
+
+  it('with Rust off the supplied partial browser range keeps the old edit behavior', async () => {
+    engineSwitch.painting = false;
+    const m = await realJamo();
+    nativeSel(m, 3);
+    await tick();
+    const ev = ranged(m, 'deleteContentBackward');
+    await tick();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.box.text).toBe('가');
   });
 });
