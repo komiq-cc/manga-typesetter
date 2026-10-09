@@ -1443,6 +1443,33 @@ The known default-only composition teardown behavior was not changed.
 An edit that has used Rust retains its protection if the switch goes off
 before composition ends. A default-only edit keeps the previous path.
 
+### 13.2.1 Four remaining findings at the next review
+
+The next read-only Codex review, pinned to source `69e6704`, is recorded in
+`p7c-final-codex-findings.md`. Its four executed defects were accepted.
+Those reproductions are **reviewer measurements**, not this worker's runs.
+The original six probes passed on that candidate, but the following gaps
+prevented acceptance. `b57dde3` fixes all four; `c6b61d4` corrects only the
+new mounted fixture loader. The worker's focused regression results below
+are measured on that resulting source. Independent old/fixed comparisons,
+final full proofs and a fresh read-only review still belong to the coordinator.
+
+| Review finding | Final change | New behavioral regression |
+|---|---|---|
+| Browser `getTargetRanges()` can give a nonempty span inside a raw grapheme | For pictured flat edits, `editStops` expands a nonempty replacement to the raw graphemes it touches; a collapsed offset stands at the preceding legal boundary. Copy/cut clipboard text uses the same span. Curve, composing and default-only input paths retain their behavior. | Real tracked Comic Neue/wasm, size40/width25, jamo rows `[0] / [] / [3]`, legal caret3, supplied nonempty raw `[2,3]` range. Backspace deletes the whole syllable; word deletion, replacement, paste/cut also keep it whole. Composition and switch-off controls preserve their prior path. Actual browser generation of this range remains inferred. |
+| A default-start curve drag survives incoming Rust ownership and composition | Privately retain every default gesture's cleanup without changing its listeners or pointer rules. End them when Rust takes an edit, a Rust edit starts, or an owned Rust lifecycle exits. | Start with Rust off; retain the same overlay after switch-on; set legal caret4; composition plus old-pointer movement leaves `[4,4]`. Separate cases check immediate incoming ownership and a later Rust editable. The unchanged default-only listener assertion remains. |
+| An old menu callback removes a newer menu's `ctx` on the same overlay | Check the menu owner before any visible cleanup; stale contextmenu callbacks also cannot schedule new expiry work. | Open two menus on the same overlay; manually replay the saved first callback; the second keeps `ctx`, transform and its single listener. This models an already-queued callback; native timer occurrence remains suspected. |
+| Selection rectangles use endpoints and miss negative-spacing interior extrema | Include only the selected run's interior stops. Preserve extents of filtered drawn pieces, owned by raw grapheme intervals, so selected split graphemes retain every piece. | Real Comic Neue `iMMMMi`, size40/spacing-20, whole and two partial selections cover their own interior extrema and exclude the other end's. Independent unit coordinates cover nonmonotonic partial runs, filtered jamo, uppercase `ß`/`ﬃ` with combining marks, and a stopless middle row surrounded by unselected neighbours. |
+
+The review also executed a menu-mode coverage control: removing mode cleanup
+left one listener on switch-off while older expiry/teardown assertions passed.
+The new mounted switch/model cases require immediate listener0 and removal of
+`ctx`. The new `M-mode` mutation definition targets that behavior directly.
+The piece ownership mapping uses the existing ceiling lookup `rawAtDrawn`,
+backs up when the drawn start lies inside an uppercase expansion, and reads
+precomputed raw predecessor/successor boundaries. It adds no new calls to the
+raw-boundary predicate; the existing n+1 operation-bound regressions remain.
+
 ### 13.3 The ABI coverage gap
 
 The natural overflow test alone still passes when only the pen guard is
@@ -1493,22 +1520,43 @@ named assertions in49 tests, including a scratch generated zero-advance
 font. This is **historical coordinator evidence**. It does not mean the
 full older mutation tables were repeated. The105 recovered old definitions
 include rewritten/obsolete targets; their results must keep those labels.
-Fresh35 source substitutions and named tests are prepared separately in
+Fresh43 source substitutions and named tests are prepared separately in
 `tp-data/reports/resume-20261009/p7c-worker-mutations/`. They include all six
 fresh fixes, pointercancel, clipboard protection, pen-only guard removal and
-negative-spacing partial-output clearing. Only named assertion failures
+negative-spacing partial-output clearing, all four next-review fixes and the
+menu-mode coverage control. Their exact strings validate on source `c6b61d4`;
+preparing them executed no mutation tests. Only named assertion failures
 count as kills; parse/compile/load errors are not successful mutations.
 
 **Coordinator repeated at69e6704:** full Vitest127 files passed/1 skipped,
 3622 tests passed/7 skipped; engine142 default/45 no-default tests passed;
-fmt and all3 clippy feature sets are clean. Rebuilt wasm is unchanged:
+fmt and all3 clippy feature sets are clean; Tauri301 and the application build
+also passed. Rebuilt wasm is unchanged:
 1605271 bytes, SHA256
 `475d90f497f44ec1489e1d41270fd2fd2c5867f54f1f2f2b2af85f108d84bf8d`.
 These are coordinator measurements in `p7c-final-coordinator-*` logs. The
 final sharpened pointer assertions are included in that passing full suite.
-Tauri/build/capture/browser/WebKit/mutation and review gates remain pending
-at this report commit. Fresh review of69e6704 is still running; emerging
-findings are not yet adjudicated. This is not merge approval.
+These tests predate the four additional fixes in section13.2.1 and do not
+verify them. Capture/browser/WebKit/mutation and final review gates remain
+pending. The next review found the four accepted defects described above;
+its completion was not merge approval.
+
+**This worker measured on `b57dde3` plus the DOM loader correction committed
+as `c6b61d4`:** the authorized four-file Vitest process, with
+`--maxWorkers 1 --no-file-parallelism`, passed91 caret unit cases,43 real-engine
+cases and18 unchanged switch-off cases. The mounted typing file failed at
+collection: the engine-lane file-URL fixture helper received the DOM lane's
+http `import.meta.url`. No behavioral assertion failed in that run. The new
+mounted loader now reads the same tracked Comic Neue and built wasm through
+the existing adapter, resolved from Vitest's project root. Repeating only
+`TextBox-engine-typing.dom.test.js` with the same worker limits passed98 cases.
+Combined, the four files contain250 passing cases. This combined figure is
+from the first process plus the affected-file repeat, not a second four-file
+process. Production source did not change after the first process. Startup
+one-minute loads were2.63 and2.30, respectively. Logs are
+`p7c-worker-final-focused.log` and `p7c-worker-final-dom-repeat.log` under the
+private resume directory. `git diff --check` was clean. No full suite,
+engine rebuild, browser, capture or mutation process ran in this fix pass.
 
 Remaining gates: finish all relevant proofs on the accepted final source,
 view the new pictures, obtain a fresh read-only Codex review, fix any real
@@ -1520,7 +1568,9 @@ from the caret arithmetic fix and is not implemented here. No P10 began.
 
 Paused commits: `946bd44`, `c96a3dd`, `11b0ab9`, `0e9770b`, `1120341`.
 Resumed source commits: `2935b9d` (editing lifetimes), `746b827` (boundary
-work and full extent), `69e6704` (independent ABI proof).
+work and full extent), `69e6704` (independent ABI proof), `b57dde3` (whole
+grapheme edits, incoming gesture/menu ownership and selected-piece extents),
+`c6b61d4` (mounted real-fixture loader).
 This report commit corrects the stale second-round claims and writes the
 missing third-round account. Nothing was pushed or merged by this worker.
 No main files, P8 source files, private data or font files were committed.
