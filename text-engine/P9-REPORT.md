@@ -1029,13 +1029,17 @@ from the paused worker**, not new measurements by this worker.
 
 The model now reads both chapter.json and translations.json and checks
 chapter mode and typesetting mode. It has two distinct pages, page-order
-and unmarked-handle/mode events, an empty chapter event, and held/failing
-translation writes. Named boundary probes change each durable field after
+and unmarked-handle/mode/style/fit/filename events, an empty chapter event,
+and held/failing translation writes. Named boundary probes change each durable field after
 an old snapshot, let that snapshot finish, and require the next debounce's
 actual bytes without a rescue flush. An untouched version1 must retain both
 original byte strings and have zero chapter writes. Version2's existing
 leave-save is permitted. A deadline test checks the disk while the font is
-still held, before allowing its eventual fit.
+still held, before allowing its eventual fit. Named model sequences also
+check every previously surviving style/fit/filename/chapter omission and
+page order; the offscreen-font check observes the attempted number before
+the write lands. A known-geometry deadline boundary requires Keep to write
+even when the document bytes and old number have not moved.
 
 ### Keep and the notice
 
@@ -1126,10 +1130,35 @@ The other failure was a strict -0/+0 match in the rule3 decomposition;
 zero is now normalized without changing the independent expectation.
 Neither failure was classified as a timing flake.
 
+The affected-file focused repeat passed105/105 tests (61 first-fit,
+16 model with20 sequences,28 dry-run). The first6000-sequence run found90
+failing seeds: all shrank to an empty chapter Keep after a previous chapter's
+font request was still held. The harness had treated every old request as
+waiting for the current chapter. Its waiting oracle now checks engine turn
+and the families actually used by the current chapter. The random empty
+chapter/Keep cases were retained, and a named boundary still holds the old
+request while proving the new empty Keep completes at version2.
+
+The corrected run passed17/17 tests and6000 sequences (measured,22.12s):
+32542 attempted chapter writes,524 intentionally failed writes,3396 Keeps,
+2076 as-opened checks,12700 current-document checks,9823 leaves. Intentional
+write failures are not sequence failures. Seven additional mutation-sensitive
+sequences, four generated unmarked-field events, an attempted-number oracle,
+and the known-geometry deadline boundary were added after that run loaded its
+source. **A final-source model repeat is still required.** The earlier
+successful seed probe with a temporary visible-only Keep guard is superseded;
+the retained empty-Keep eligibility passed its own seed repeat and the6000 run.
+
 Syntax checks and parsing of the generated metric page passed (measured).
-The private p9c-mutations.py runner is prepared, with untouched source hashes,
-clean controls and scratch-only mutations. **Mutations, full suites,
-6000-sequence model, engine/native tests, browser check, direct metric
-capture, both captures, repeated real dry run and final Codex review are
-still pending.** They will be scheduled below load8 and recorded here before
-acceptance. The existing reports/p9/check directory has not been touched.
+The private p9c-mutations.py runner requires a full candidate commit SHA and
+clean worktree, archives that commit's tracked files, and makes scratch-only
+mutations. Each control/mutant checks load below8 at its own start. Private
+Vite/dot caches avoid another worktree's transforms. JSON records archive
+hash, exact source changes, command/environment, failed test names/messages,
+and separate killed/survived/invalid/error/timeout classes. A positive control
+must actually select and pass tests before its mutant runs. Source hashes
+are compared at the end. **The16 mutation replay, final-source model repeat,
+full suites, engine/native tests, browser check, direct metric capture, both
+captures, repeated real dry run and final Codex review remain pending.**
+They will be scheduled below load8 and recorded here before acceptance. The
+existing reports/p9/check directory has not been touched.

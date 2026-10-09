@@ -464,11 +464,11 @@ describe('a change to the document that nobody marked', () => {
     const b = by('same');
     change(b);
     expect(app.saved).toBe(true);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(value(saves[0].pages[0].boxes[0])).toEqual(expected);
     await useTextEngine('browser');
     expect(value(b)).toEqual(expected);
-    expect(app.saved).toBe(false);
-    await flushSave();
-    expect(value(saves[0].pages[0].boxes[0])).toEqual(expected);
   });
 
   it.each(['file', 'cleanedFile'])('a durable %s changed without a mark reaches disk', async (field) => {
@@ -476,6 +476,15 @@ describe('a change to the document that nobody marked', () => {
     await flushSave();
     expect(saves).toHaveLength(1);
     expect(saves[0].pages[0][field]).toBe('replacement.png');
+  });
+
+  it('the same page objects in a new order reach disk on the Rust flush without a dirty mark', async () => {
+    const order = app.pages.map((p) => p.id).reverse();
+    app.pages.reverse();
+    expect(app.saved).toBe(true);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages.map((p) => p.id)).toEqual(order);
   });
 
   it('the same page objects in a new order are written and not restored over', async () => {

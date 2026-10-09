@@ -159,17 +159,19 @@ const hand = {
   startHeld: false,
   starts: [],
 };
+let engineTurn = 0;
 const invoke = async (cmd, args) => {
   if (cmd === 'system_font_coverage') return { families: [], none: args.codePoints };
   if (cmd === 'font_to_sfnt') return SFNT().buffer;
   if (cmd !== 'system_font_face') throw new Error(`unexpected command ${cmd}`);
-  if (args.family === 'Zapfino' && hand.fontHeld) await new Promise((resolve) => hand.fonts.push(resolve));
+  if (args.family === 'Zapfino' && hand.fontHeld) await new Promise((resolve) => hand.fonts.push(Object.assign(resolve, { family: args.family, turn: engineTurn })));
   const file = (FILES[args.family] ?? []).find((f) => args.slot in f.slots);
   if (!file) throw new Error(`no system font '${args.family}'`);
   return systemFaceAnswer(file.slots, file.bytes, { known: args.known });
 };
 const createEngine = async () => {
   if (hand.startHeld) await new Promise((resolve) => hand.starts.push(resolve));
+  engineTurn++;
   return fakeRustEngine();
 };
 
@@ -211,7 +213,7 @@ const textOnDisk = () => fsx._tree.files.get(translationsPath);
 const rustFitting = () => engineSwitch.phase === 'on' && textEngine()?.id === 'rust';
 // Whether a box of the open chapter is still without its font: the engine is
 // starting, or a request for the slow family has not been answered.
-const waiting = () => engineSwitch.phase === 'starting' || hand.fonts.length > 0;
+const waiting = () => engineSwitch.phase === 'starting' || hand.fonts.some((f) => f.turn === engineTurn && app.pages.some((pg) => pg.boxes.some((b) => b.style?.font === f.family)));
 
 const canon = (v) =>
   JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
@@ -269,6 +271,8 @@ beforeAll(async () => {
     if (path !== chapterPath) return undefined;
     hand.began.push({ version: JSON.parse(text).typesetting?.version ?? null, at: Date.now() });
     seen.writes++;
+    const number = hand.began.at(-1).version;
+    if (waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
     // Keep is one write, and it happens when its wait is over: not while a
     // font is still on its way and the wait has time left.
     if (state.keep?.alone && waiting() && Date.now() - state.keep.at < KEEP_WAIT_MS) {
@@ -452,7 +456,8 @@ const EVENTS = {
     w?.fail(new Error('disk full'));
   },
   keep() {
-    if (!state.open || !firstFitChanges() || firstFitChanges().kept) return;
+    const changes = firstFitChanges();
+    if (!state.open || !changes || changes.kept) return;
     // Whether this Keep is all that asks for a write: nothing of the user's
     // is unsaved when it is pressed.
     if (!state.keep) state.keep = { alone: !state.touched && app.saved, began: hand.began.length, at: Date.now(), waited: waiting() };
@@ -506,7 +511,14 @@ const UNMARKED = {
   typesetting() { app.typesetting.mode = app.typesetting.mode === 'smart' ? 'plain' : 'smart'; },
 };
 
-const TOUCHING = new Set(['edit', 'editLate', 'editLine', 'reversePages', 'unmarkedHandle', 'unmarkedMode', 'leave', 'open1', 'open2', 'openEmpty', 'switchOff', 'switchOn', 'writeFails', 'keep']);
+for (const [field, change] of Object.entries(UNMARKED)) {
+  EVENTS[`unmarked_${field}`] = () => {
+    if (!state.open || !app.pages[0].boxes.length) return;
+    change();
+    state.touched = true;
+  };
+}
+const TOUCHING = new Set(['edit', 'editLate', 'editLine', 'reversePages', 'unmarkedHandle', 'unmarkedMode', 'leave', 'open1', 'open2', 'openEmpty', 'switchOff', 'switchOn', 'writeFails', 'keep', ...Object.keys(UNMARKED).map((field) => `unmarked_${field}`)]);
 
 // Everything comes to rest: the fonts land, the engine starts, the writes
 // land, the clock runs past every debounce and every wait. A save that failed
@@ -593,6 +605,7 @@ function rng(seed) {
   };
 }
 const WEIGHTS = [
+  ['unmarked_style', 1], ['unmarked_fit', 1], ['unmarked_file', 1], ['unmarked_cleaned', 1],
   ['reversePages', 3], ['unmarkedHandle', 3], ['unmarkedMode', 2], ['holdTranslations', 1],
   ['edit', 6], ['editLate', 6], ['editLine', 6], ['fontLands', 7], ['debounce', 10], ['wait', 2], ['holdWrites', 5], ['writeLands', 9], ['writeFails', 2],
   ['keep', 6], ['switchOff', 2], ['switchOn', 3], ['engineStarts', 5], ['leave', 1], ['open1', 2], ['open2', 1], ['openEmpty', 1],
@@ -690,6 +703,33 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     }
   });
 
+  it('an empty chapter Keep does not wait for the previous chapter’s held font', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      expect(hand.fonts.length).toBeGreaterThan(0);
+      await EVENTS.openEmpty();
+      expect(hand.fonts.length).toBeGreaterThan(0);
+      expect(waiting()).toBe(false);
+      expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, relaid: 0 });
+      const before = hand.began.length;
+      const kept = keepFirstFit();
+      state.touched = true;
+      await until(kept);
+      expect(hand.began).toHaveLength(before + 1);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      checkFile('empty chapter Keep, unrelated font still held');
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
   it('a translations write failing after chapter.json cannot claim the whole save landed', async () => {
     resetHand();
     state.open = false;
@@ -755,10 +795,46 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     }
   });
 
-  // The three sequences the third round's review found by reading, each as
-  // the model shrinks it; kept by name so that they are run whatever the
-  // seeds are.
+  it('Keep writes at its timeout even when the known geometry and saved number are unchanged', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      const raw = JSON.parse(V1);
+      for (const pg of raw.pages) for (const b of pg.boxes) b.h = 500;
+      await open(JSON.stringify(raw));
+      expect(waiting()).toBe(true);
+      expect(canon(JSON.parse(onDisk()).pages)).toBe(canon(documentNow()));
+      const before = hand.began.length;
+      const kept = keepFirstFit();
+      state.touched = true;
+      await pass(KEEP_WAIT_MS - 1);
+      expect(hand.began).toHaveLength(before);
+      await pass(1);
+      expect(hand.began).toHaveLength(before + 1);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(1);
+      await until(kept);
+      expect(waiting()).toBe(true);
+      checkFile('unchanged geometry Keep deadline, font never arrived');
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
+  // Review findings and mutation-sensitive boundaries, kept by name so they
+  // run even when the generator's seed count is zero.
   const FOUND = {
+    'an unmarked style reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_style', 'leave'],
+    'an unmarked fit reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_fit', 'leave'],
+    'an unmarked raw filename reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_file', 'leave'],
+    'an unmarked cleaned filename reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_cleaned', 'leave'],
+    'an unmarked page order reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_order', 'leave'],
+    'an offscreen font cannot be stamped ready': ['switchOn', 'engineStarts', 'open1', 'reversePages', 'debounce'],
+    'a stale Keep cannot write the next open': ['switchOn', 'engineStarts', 'open1', 'keep', 'openEmpty', 'wait', 'fontLands'],
     'a font lands while a save is in flight': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'writeLands'],
     'a save while the engine is still starting, which then grows boxes': ['switchOn', 'open1', 'editLine', 'debounce', 'engineStarts'],
     'Keep while a font is on its way, and the debounce': ['switchOn', 'engineStarts', 'open1', 'keep', 'debounce', 'fontLands'],
