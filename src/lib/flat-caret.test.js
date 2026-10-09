@@ -30,6 +30,33 @@ function rowsFor(text, lines, { x0 = [], clusters = null, bounds = null, cased =
 }
 const stops = (r) => r.offs.map((o, k) => [o, r.xs[k]]);
 
+describe('boundary searches and the full row geometry', () => {
+  it.each([100, 200, 400, 800])('one grapheme spanning %i rows asks for each raw boundary once', (n) => {
+    let checks = 0;
+    const bounds = (o) => {
+      checks++;
+      return o === 0 || o === n;
+    };
+    const rows = Array.from({ length: n }, (_, i) => ({ top: i * H, height: H, offs: [i, i + 1], xs: [0, W], soft: i + 1 < n, hard: false, line: i }));
+    const mapped = stopRows(rows, null, bounds);
+    expect(checks).toBeLessThanOrEqual(n + 1);
+    expect(mapped[0].offs).toEqual([0]);
+    expect(mapped.at(-1).offs).toEqual([n]);
+    expect(mapped.slice(1, -1).every((r) => r.offs.length === 0 && r.lead.o === 0 && r.trail.o === n)).toBe(true);
+    expect(selectionRects(mapped, 0, n)).toHaveLength(n);
+  });
+
+  it('negative spacing can put interior stops beyond both row ends', () => {
+    const row = { top: 0, height: H, offs: [0, 1, 2, 3], xs: [2, -9, 45, 34], soft: false, hard: false, line: 0 };
+    expect(rowExtent(row)).toEqual([-9, 45]);
+    // Even a grapheme whose interior offsets are not legal keeps that geometry
+    // for the target outside the frame, without making those offsets stops.
+    const [whole] = stopRows([row], null, (o) => o === 0 || o === 3);
+    expect(whole.offs).toEqual([0, 3]);
+    expect(rowExtent(whole)).toEqual([-9, 45]);
+  });
+});
+
 describe('a caret at every raw offset', () => {
   it('one line: the stop before character k is at the line start plus its pen', () => {
     const rows = rowsFor('HELLO', ['HELLO'], { x0: [7] });

@@ -288,10 +288,12 @@ export function selectionRects(rows, a, b, nl = 0) {
 export function rowExtent(r) {
   let from = Infinity;
   let to = -Infinity;
-  for (const x of [r.xs[0], r.xs[r.xs.length - 1], r.lead?.x, r.trail?.x]) {
-    if (x == null) continue;
-    from = Math.min(from, x);
-    to = Math.max(to, x);
+  for (const values of [r.xs, r.extent ?? [], [r.lead?.x, r.trail?.x]]) {
+    for (const x of values) {
+      if (x == null) continue;
+      from = Math.min(from, x);
+      to = Math.max(to, x);
+    }
   }
   return [from, to];
 }
@@ -609,6 +611,22 @@ export function stopRows(rows, map, stops = null) {
   const ok = stops ?? ((o) => o === 0 || t[o] !== t[o - 1]);
   // The raw text's length: the last place of the last row, as a raw offset.
   const end = t ? t.length - 1 : rows.reduce((n, r) => Math.max(n, last(r)), 0);
+  // A single grapheme may span every row of a narrow box. Find its neighbours
+  // once, rather than walking the same grapheme back and forth on every row.
+  const legal = new Uint8Array(end + 1);
+  const before = new Uint32Array(end + 1);
+  const after = new Uint32Array(end + 1);
+  let near = 0;
+  for (let o = 0; o <= end; o++) {
+    legal[o] = ok(o) ? 1 : 0;
+    if (legal[o]) near = o;
+    before[o] = near;
+  }
+  near = end;
+  for (let o = end; o >= 0; o--) {
+    if (legal[o]) near = o;
+    after[o] = near;
+  }
   const out = [];
   for (const r of rows) {
     const offs = [];
@@ -618,7 +636,7 @@ export function stopRows(rows, map, stops = null) {
     let k = 0;
     let o = lo;
     for (; o <= end && drawn(o) <= to; o++) {
-      if (!ok(o)) continue;
+      if (!legal[o]) continue;
       while (k < r.offs.length && r.offs[k] < drawn(o)) k++;
       if (r.offs[k] !== drawn(o)) continue;
       offs.push(o);
@@ -630,16 +648,15 @@ export function stopRows(rows, map, stops = null) {
     if (!offs.length || drawn(offs[0]) !== first(r)) {
       let p = Math.min(lo, end);
       if (drawn(p) >= first(r)) p--;
-      while (p > 0 && !ok(p)) p--;
-      lead = { x: r.xs[0], o: Math.max(p, 0) };
+      lead = { x: r.xs[0], o: before[Math.max(p, 0)] };
     }
     let trail = null;
     if (!offs.length || drawn(offs[offs.length - 1]) !== to) {
-      let q = o;
-      while (q < end && !ok(q)) q++;
-      trail = { x: r.xs[r.xs.length - 1], o: Math.min(q, end) };
+      trail = { x: r.xs[r.xs.length - 1], o: after[Math.min(o, end)] };
     }
-    out.push({ ...r, offs, xs, soft: r.soft && !trail, ...(lead ? { lead } : null), ...(trail ? { trail } : null) });
+    // Keep the full geometry before illegal stops are removed: with negative
+    // spacing, an interior pen may reach beyond either legal endpoint.
+    out.push({ ...r, offs, xs, extent: rowExtent(r), soft: r.soft && !trail, ...(lead ? { lead } : null), ...(trail ? { trail } : null) });
   }
   return out;
 }

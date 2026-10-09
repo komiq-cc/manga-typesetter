@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { typeModel, canType, linePens } from './type-rows.js';
-import { caretAt, rowOf, offsetAt, selectionRects, moveCaret } from './flat-caret.js';
+import { caretAt, rowOf, rowExtent, offsetAt, selectionRects, moveCaret } from './flat-caret.js';
 import { rawEdit } from './edit-lines.js';
 import { renderBoxTexture } from './exporter.js';
 import { boxCandidate, placeBlock } from './contain.js';
@@ -60,6 +60,22 @@ afterAll(() => {
 const style = (over = {}) => normalizeStyle({ ...defaultStyle(), font: 'Comic Neue', size: 60, strokes: [], autoHeight: false, shape: 'off', ...over });
 const boxOf = (text, over = {}, geom = {}) => ({ id: 'b', lineN: null, text, x: 40, y: 40, w: 900, h: 120, ...geom, style: style({ align: 'left', valign: 'top', ...over }) });
 const pageOf = (box) => ({ id: 1, w: 1600, h: 1200, lines: [], boxes: [box] });
+
+it('the full row extent includes real interior extrema under negative spacing', () => {
+  const text = 'iMMMMi';
+  const box = boxOf(text, { size: 40, letterSpacing: -20 });
+  const model = typeModel(box, text);
+  expect(model.kind).toBe('flat');
+  expect(model.rows).toHaveLength(1);
+  const row = model.rows[0];
+  const near = Math.min(...row.xs);
+  const far = Math.max(...row.xs);
+  expect(near).toBeLessThan(0);
+  expect(far).toBeGreaterThan(Math.max(row.xs[0], row.xs.at(-1)));
+  expect(rowExtent(row)).toEqual([near, far]);
+  // A pointer on the overflowing part still answers a legal raw stop.
+  expect(row.offs).toContain(offsetAt(model.rows, near, row.top + 1).o);
+});
 
 const SS = 2;
 // The box painted at `SS`, as alpha by box-local device column: `col(x)` is
@@ -566,4 +582,3 @@ describe('a caret never stands inside a grapheme of the text typed', () => {
     expect(rust.lineCarets({ ...face, size: 1e9 }, 'MMMM').x.every(Number.isFinite)).toBe(true);
   });
 });
-
