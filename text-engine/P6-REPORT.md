@@ -214,9 +214,13 @@ capped at 32 MB regardless.
 memory (glyph layers, compositor tiles) is not visible to a page and was not
 measured; the element count is the only figure I have for it.
 
-Not released: the Rust painter keeps a scratch canvas of at most 2048 x 2048
-and a tile cache. Releasing them needs an edit to `rust-painter.js`, which I
-did not make. A new painter is created each time the switch goes on and the
+Not released: the Rust painter keeps a scratch canvas and a tile cache.
+(Corrected in P6b. This said "of at most 2048 x 2048", which was false: the
+bound was on each raster and the canvas was raised to the widest and the
+tallest seen, so one wide line and one tall column left 8739 x 6306, 210 MB,
+measured. Since P6b the kept canvas holds at most 2048 x 2048 pixels in
+area, whatever its shape; see `P6B-REPORT.md`, item 1.) Releasing them needs
+an edit to `rust-painter.js`, which I did not make. A new painter is created each time the switch goes on and the
 reference is dropped when it goes off, so they are collectable; when they are
 collected was not observed.
 

@@ -4,7 +4,7 @@ import { rustEngine } from '../../test/rust-engine.js';
 import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture } from './box-picture.js';
 import { renderBoxTexture, warpTexture } from '../exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../text-engine/index.js';
-import { createRustGlyphPainter } from '../text-engine/rust-painter.js';
+import { createRustGlyphPainter, SCRATCH_KEEP_PX } from '../text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from '../measure.js';
 import { defaultStyle, normalizeStyle } from '../data.js';
 
@@ -134,7 +134,24 @@ describe('what it holds', () => {
     expect(made.length).toBeGreaterThan(Object.keys(KINDS).length);
     const held = made.filter((r) => !r.released);
     expect(held.length).toBeLessThanOrEqual(1);
-    for (const r of held) expect(r.c.width * r.c.height).toBeLessThanOrEqual(2048 * 2048);
+    for (const r of held) expect(r.c.width * r.c.height).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+  });
+
+  it('and the bound holds for boxes that could break it: one line across a page, then one column down it', () => {
+    // The outside review's pair, at 300% on a 2x display. Each raster is
+    // small; a scratch raised to the widest and the tallest seen was 8739 x
+    // 6306, 210 MB, kept until the engine was switched off.
+    const wide = boxOf({ size: 12 }, 'W'.repeat(140), { w: 1600, h: 30 });
+    const tall = boxOf({ size: 12 }, Array(80).fill('WWW').join('\n'), { w: 60, h: 1200 });
+    const small = boxOf({ size: 12 }, 'W');
+    for (const box of [wide, tall, small]) {
+      const el = createCanvas(1, 1);
+      paintBoxPicture(el, box, pageOf(box), 6, null);
+      expect(inked(bytes(el))).toBeGreaterThan(100);
+      const held = made.filter((r) => !r.released);
+      expect(held.length).toBeLessThanOrEqual(1);
+      for (const r of held) expect(r.c.width * r.c.height).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+    }
   });
 
   it('a box over the budget is painted to the budget and still spans its footprint', () => {

@@ -16,9 +16,11 @@ import { patternTileCanvas, patternTilePx, TILE_SS } from '../text-paint.js';
 // `boldAdvance` rule decides both, in the engine: its ink box is measured for
 // the drawing its painter makes, so nothing is chosen here.
 
-// A scratch canvas this large is not kept: one page-sized box would otherwise
-// hold its megabytes for the rest of the session.
-const KEEP_PX = 2048 * 2048;
+// The most pixels the scratch canvas kept between paints may hold: 16 MB of
+// RGBA. A raster larger than this is copied through a canvas of its own that
+// is given back at once - one page-sized box would otherwise hold its
+// megabytes for the rest of the session.
+export const SCRATCH_KEEP_PX = 2048 * 2048;
 
 /**
  * @param {object} rust the engine `createRustTextEngine` made; it holds the faces a job names
@@ -61,10 +63,25 @@ export function createRustGlyphPainter(rust, options = {}) {
     });
     if (!raster) return;
     const { x, y, width, height } = raster;
-    const keep = width * height <= KEEP_PX;
+    // The scratch is judged by what it would BE after this raster, not by the
+    // raster: grown to the widest and the tallest seen, one wide line and one
+    // tall column - each small - made a canvas of their product and kept it.
+    // So it grows only while the grown canvas is within the bound; past that
+    // it is cut to this raster, which is within it. A canvas given a size is
+    // a new backing store either way, and the next ordinary raster then finds
+    // a scratch of an ordinary shape, where a one-off here would leave the
+    // odd one standing and every raster after it making a canvas of its own.
+    const keep = width * height <= SCRATCH_KEEP_PX;
     const cnv = (keep && scratch) || document.createElement('canvas');
-    if (cnv.width < width) cnv.width = width;
-    if (cnv.height < height) cnv.height = height;
+    const grownW = Math.max(cnv.width, width);
+    const grownH = Math.max(cnv.height, height);
+    if (cnv !== scratch || grownW * grownH > SCRATCH_KEEP_PX) {
+      cnv.width = width;
+      cnv.height = height;
+    } else {
+      if (cnv.width < width) cnv.width = width;
+      if (cnv.height < height) cnv.height = height;
+    }
     const sctx = cnv.getContext('2d');
     const image = sctx.createImageData(width, height);
     image.data.set(raster.data);
