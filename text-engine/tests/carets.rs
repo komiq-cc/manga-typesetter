@@ -146,7 +146,10 @@ fn a_letter_from_the_fallback_chain_stands_where_its_part_is_placed() {
         ..Face::new(own_comic, 30.0)
     };
     let run = shape_run(&mut e, face, text, 0.0).unwrap();
-    assert_eq!(run.glyphs[1].font, own_sans, "the middle letter is borrowed");
+    assert_eq!(
+        run.glyphs[1].font, own_sans,
+        "the middle letter is borrowed"
+    );
     for (x, g) in c.x.iter().zip(&run.glyphs) {
         assert_eq!(*x, g.x);
     }
