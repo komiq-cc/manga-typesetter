@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { renderBoxTexture, renderBoxLayer } from './exporter.js';
@@ -24,6 +24,12 @@ import { defaultStyle, normalizeStyle } from './data.js';
 // the footprint every box had. Every raster the painter puts on a canvas is
 // recorded, so "cut" is read off the copy itself: pixels with ink whose place
 // is outside the canvas they were copied to.
+
+// These tests paint large type for real and read every pixel back, some of
+// them twice over. The slowest is two seconds alone and was over the default
+// five with two other suites and a capture running beside it, so the file has
+// the limit the suite's other heavy tests state (solver-answers.test.js).
+vi.setConfig({ testTimeout: 30_000 });
 
 const hadDocument = 'document' in globalThis;
 const oldDocument = globalThis.document;
@@ -235,13 +241,15 @@ describe('the old picture is the new one, cropped', () => {
     return { old, now, dx, dy, unlike, outside };
   };
 
-  it('plain ink: identical inside the old canvas, the cut ink outside it', () => {
-    for (const name of ['italic J at 300, left-aligned (the review\'s box)', 'upright J at 300, left-aligned', 'faux italic filling its box, leaning out on the right', 'tall type on a tight line at the top of its box']) {
+  // One box a test: each is two paints of 300 px type at the editor's scale
+  // and a walk over every pixel of both, most of a second on a quiet machine.
+  for (const name of ['italic J at 300, left-aligned (the review\'s box)', 'upright J at 300, left-aligned', 'faux italic filling its box, leaning out on the right', 'tall type on a tight line at the top of its box']) {
+    it(`plain ink: identical inside the old canvas, the cut ink outside it: ${name}`, () => {
       const r = overlap(OVERHANGS[name], 2);
-      expect(r.unlike, name).toBe(0);
-      expect(r.outside, name).toBeGreaterThan(50);
-    }
-  });
+      expect(r.unlike).toBe(0);
+      expect(r.outside).toBeGreaterThan(50);
+    });
+  }
 });
 
 describe('everything that places the picture still places it where it was', () => {
