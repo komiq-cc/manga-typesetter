@@ -273,6 +273,32 @@ describe('an export waits for the fonts its pages need', () => {
       expect(downloaded).toEqual(['ch01-11.png']);
     });
 
+    it('another engine put in while the first one’s fonts are waited for: that one’s fonts are waited for too, and then it is written', async () => {
+      const first = stand();
+      setTextEngine(first.engine);
+      setGlyphPainter(first.painter);
+      const g1 = gate();
+      neverReady();
+      const done = exportImages('PNG', 'current');
+      await flush();
+      expect(g1.asked).toHaveLength(1);
+      // Off and on again while that wait is open: a new engine, a new
+      // painter, and a gate of its own that knows nothing of the first.
+      const second = stand();
+      setTextEngine(second.engine);
+      setGlyphPainter(second.painter);
+      const g2 = gate();
+      g1.open();
+      await flush();
+      // Not painted on the strength of the wait that was for the other one.
+      expect(g2.asked).toHaveLength(1);
+      expect(made).toEqual([]);
+      expect(downloaded).toEqual([]);
+      g2.open();
+      expect(await done).toBe(true);
+      expect(downloaded).toEqual(['ch01-22.png']);
+    });
+
     it('switched ON while the browser’s fonts are waited for: the engine’s gate is waited for too, and then it is written', async () => {
       let ready;
       Object.defineProperty(globalThis.document.fonts, 'ready', { get: () => new Promise((resolve) => (ready = resolve)) });
