@@ -246,10 +246,13 @@
     maskH = h;
   };
   $effect(() => {
-    // Not while the box is the engine's picture: the mask is in those pixels
-    // (as it is in a warped box's), and an image nobody applies is megabytes
-    // held for nothing. It is built again when the box is typed into.
-    if (!clipActive(s.clip) || engineShown) {
+    // Kept while the box is the engine's picture, though the mask is in those
+    // pixels and nothing applies this image then. The encode below answers a
+    // task later, so an image built when an edit starts leaves the editable
+    // on screen unmasked - excluded text shown - until it lands; standing, it
+    // is there on the edit's first frame. What stands is a blob URL: the
+    // encoded PNG of a flat mask, which nothing decodes until CSS applies it.
+    if (!clipActive(s.clip)) {
       maskKey = '';
       maskSeq++;
       setMask('', 0, 0);

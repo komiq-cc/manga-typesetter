@@ -28,9 +28,15 @@ function context(canvas) {
   });
 }
 
-export function installFakeCanvas() {
+// `asyncBlob` gives the canvas a `toBlob` that answers a task later, as a
+// browser's does, and the URL a blob is given: for the cases that are about
+// what a component shows BETWEEN asking for an encode and getting it. Opt-in,
+// because without it a component takes the path it keeps for a host with no
+// `toBlob` and its result is there on the next line (the switch-off snapshot
+// holds that path's `mask-image:url(data:,)`).
+export function installFakeCanvas({ asyncBlob = false } = {}) {
   const proto = globalThis.HTMLCanvasElement.prototype;
-  const before = { getContext: proto.getContext, toDataURL: proto.toDataURL, toBlob: proto.toBlob, revoke: URL.revokeObjectURL };
+  const before = { getContext: proto.getContext, toDataURL: proto.toDataURL, toBlob: proto.toBlob, revoke: URL.revokeObjectURL, create: URL.createObjectURL };
   const made = new WeakMap();
   proto.getContext = function (kind) {
     if (kind !== '2d') return null;
@@ -38,15 +44,25 @@ export function installFakeCanvas() {
     return made.get(this);
   };
   proto.toDataURL = () => 'data:,';
-  // No `toBlob`, so a component that encodes takes the path it keeps for a
-  // host without one and its result is there on the next line, not a task
-  // later; and a URL it then hands back is handed to something.
-  proto.toBlob = undefined;
+  if (asyncBlob) {
+    let n = 0;
+    proto.toBlob = function (cb) {
+      const size = `${this.width}x${this.height}`;
+      setTimeout(() => cb({ size: 1, type: 'image/png', of: size }), 0);
+    };
+    URL.createObjectURL = () => `blob:fake/${++n}`;
+  } else {
+    // No `toBlob`, so a component that encodes takes the path it keeps for a
+    // host without one and its result is there on the next line, not a task
+    // later; and a URL it then hands back is handed to something.
+    proto.toBlob = undefined;
+  }
   URL.revokeObjectURL ??= noop;
   return () => {
     proto.getContext = before.getContext;
     proto.toDataURL = before.toDataURL;
     proto.toBlob = before.toBlob;
     URL.revokeObjectURL = before.revoke;
+    URL.createObjectURL = before.create;
   };
 }
