@@ -274,6 +274,34 @@ function wrap(instance) {
       return { advance: pen * scale, glyphs, clusters }
     },
 
+    /** Whether this wasm has `lineCarets` (it is newer than the ABI number). */
+    hasLineCarets: typeof ex.mt_line_carets === 'function',
+
+    /**
+     * Where a caret stands on a painted line: the pen of every cluster, from
+     * the painter's own shaping of the line (`paint::shape_run`), letter
+     * spacing included.
+     * @returns {{ at: number[], x: number[], length: number, advance: number }}
+     *   `at[k]` the UTF-16 offset of cluster k in `text` and `x[k]` its pen in
+     *   pixels from the line's start, in drawing order; `advance` what the
+     *   painter aligns the line by.
+     */
+    lineCarets(face, text, letterSpacing = 0) {
+      if (!ex.mt_line_carets) throw new Error('mt-text: this wasm has no mt_line_carets; run npm run build:engine')
+      const n = check(ex.mt_line_carets(face.font, face.size, face.flags, putText(text), letterSpacing), 'lineCarets')
+      const ptr = ex.mt_out_ptr()
+      // Read through a view of its own: the out buffer is bytes and need not
+      // sit on an 8-byte boundary.
+      const view = new DataView(memory.buffer, ptr, (n + 1) * 16)
+      const at = new Array(n)
+      const x = new Array(n)
+      for (let i = 0; i < n; i++) {
+        at[i] = view.getFloat64(i * 16, true)
+        x[i] = view.getFloat64(i * 16 + 8, true)
+      }
+      return { at, x, length: view.getFloat64(n * 16, true), advance: view.getFloat64(n * 16 + 8, true) }
+    },
+
     /**
      * Greedy UAX #14 wrapping (CSS `white-space: pre-wrap; overflow-wrap: break-word`).
      * @returns {Array<[number, number]>} [start, end) of every line, end excludes the newline
