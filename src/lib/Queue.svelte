@@ -44,6 +44,7 @@
   import { modKey } from './format.js';
   import ReviewList from './ReviewList.svelte';
   import FontNotice from './FontNotice.svelte';
+  import EngineNotice from './EngineNotice.svelte';
   import ColorPicker from './ColorPicker.svelte';
 
   const p = $derived(page());
@@ -283,6 +284,7 @@
       {/if}
     </div>
   {/if}
+  <EngineNotice />
   <ReviewList />
   <FontNotice />
   {#if p.lines.length === 0}
