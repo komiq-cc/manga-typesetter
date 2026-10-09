@@ -1234,6 +1234,28 @@ export function refitPage(p) {
 // box and marked nothing - and a save skipped on its word, or a box put back
 // over the user's hand, is work lost.
 //
+// THE INVARIANT this block holds while the switch is on, and `settleDisk` is
+// the one function that holds it:
+//
+//   When nothing is in motion - no save in flight, no debounce armed, no box
+//   waiting for a font, the engine not starting - exactly one of these is
+//   true:
+//   (a) the chapter is untouched and unkept, and the file on disk is the
+//       file that was opened, byte for byte;
+//   (b) the file on disk is the document in memory, and its version is 2 if
+//       and only if the Rust engine has fitted every box in it.
+//   And while things are in motion, leaving, quitting or the switch going
+//   off ends in one of the two.
+//
+// Nothing about it is remembered from an earlier moment. What the file holds
+// is kept (`disk`: the document and the number of the last save that landed,
+// or of the open), and whether the file is behind is worked out from that,
+// the document and what is waiting, each time something stops moving: a save
+// landing, a font landing, the engine starting, Keep, Keep's wait running
+// out. A save that lands does not make the chapter saved; the file not being
+// behind does. src/lib/first-fit.model.test.js drives every order of those
+// events it can draw and reads the file.
+//
 // How its lines broke before is not in the file. It is asked of the engine
 // that measured before the switch (`linesBefore`) for as long as there is
 // one: AT CUT-OVER, when the browser's measuring goes, that question has
@@ -1243,20 +1265,25 @@ export const firstFit = $state({
   // The open chapter has boxes noted: it is at version 1 and the Rust engine
   // is, or is about to be, the one fitting it.
   open: false,
-  // What the engine changed has reached disk, by a save of any kind that
-  // landed (`markSaved`).
+  // What the engine changed has reached disk: a save taken while the Rust
+  // engine measured has landed (`landed`).
   kept: false,
-  // The user has answered the notice.
+  // The user has pressed Keep and its write has not landed yet: it waits for
+  // the fonts still on their way, for `KEEP_WAIT_MS` at most.
+  keeping: false,
+  // The user has answered the notice, and what they answered is done.
   dismissed: false,
   // Raised when something kept beside a box changes - its lines found to
   // have moved, a fit of the engine's, an edit of the user's - since that is
   // where no signal sees it.
   seen: 0,
 });
-// box -> its note (`noteBox`), page -> everything of it but its boxes.
+// box -> its note (`noteBox`); and the pages in their order, each as
+// everything of it but its boxes.
 let noted = new WeakMap();
-let notedPages = new WeakMap();
-let notedCount = 0;
+let notedPages = [];
+let notedTypesetting = null;
+let notedMode = null;
 // `firstFit.seen` is written from inside fits, and a fit can run inside an
 // effect: counted here, so that raising it reads no signal.
 let seenCount = 0;
@@ -1267,22 +1294,42 @@ const sawFirstFit = () => {
 // (`loadProjectPages`), and for no other reason: lowered by the next thing
 // that says whether the document is saved.
 let loaderDirty = false;
-// The version a save has written and not yet landed (`stampTypesetting`), and
-// whether a save of a chapter the Rust engine is fitting went out without the
-// engine's number because a box was still waiting for its font.
+// What a save took as the saver took its snapshot, until it lands or fails
+// (`stampTypesetting`): the number it wrote, the document it wrote (with a
+// font source; null without), and whether the Rust engine was measuring.
 let stamping = null;
-let stampOwed = false;
+// What the file holds, with a font source and a chapter loaded: the document
+// (`docText`) and the number of the last save that landed, or of the open;
+// and whether it is still the file that was opened. Null with the browser
+// measuring, where none of this is asked.
+let disk = null;
+// Keep's wait: how long it lasts, its timer, whether it has run out, and the
+// promise `keepFirstFit` handed back.
+export const KEEP_WAIT_MS = 4000;
+let keepT = null;
+let keepOver = false;
+let keepAnswer = null;
+function endKeep(error = null) {
+  clearTimeout(keepT);
+  keepT = null;
+  keepOver = false;
+  const answer = keepAnswer;
+  keepAnswer = null;
+  if (firstFit.keeping) firstFit.keeping = false;
+  if (error) answer?.reject(error);
+  else answer?.resolve();
+}
 
 function resetFirstFit() {
   stamping = null;
-  stampOwed = false;
-  if (!firstFit.open && !firstFit.kept && !firstFit.dismissed) return;
+  endKeep();
   firstFit.open = false;
   firstFit.kept = false;
   firstFit.dismissed = false;
   noted = new WeakMap();
-  notedPages = new WeakMap();
-  notedCount = 0;
+  notedPages = [];
+  notedTypesetting = null;
+  notedMode = null;
 }
 
 // Whether the Rust engine is the one measuring: the switch is on and its
@@ -1342,16 +1389,21 @@ function noteBox(b, p, lines) {
 
 function beginFirstFit() {
   resetFirstFit();
-  if (!fontSource || app.typesetting.version >= LAYOUT_VERSION_RUST) return;
+  // The file, as far as this session knows it: the document that has just
+  // been read from it (or that the browser has open, when the switch comes
+  // on over a chapter), before the engine fits anything.
+  disk = fontSource ? { doc: docText(), version: app.typesetting.version, mode: app.chapterMode, asOpened: true } : null;
+  if (!fontSource) return;
   noted = new WeakMap();
-  notedPages = new WeakMap();
-  notedCount = app.pages.length;
-  const lines = linesBefore();
-  for (const p of app.pages) {
-    notedPages.set(p, pageRest(p));
+  notedTypesetting = JSON.stringify({ ...app.typesetting, version: 0 });
+  notedMode = app.chapterMode;
+  const first = app.typesetting.version < LAYOUT_VERSION_RUST;
+  const lines = first ? linesBefore() : null;
+  notedPages = app.pages.map((p) => {
     for (const b of p.boxes) noted.set(b, noteBox(b, p, lines));
-  }
-  firstFit.open = true;
+    return pageRest(p);
+  });
+  firstFit.open = first;
 }
 
 // Every box's lines as the engine that measured before the switch breaks
@@ -1497,12 +1549,14 @@ export function firstFitChanges(pages = app.pages) {
       if (!first && ((now && !was.flagged) || was.relaid)) first = { pageId: pg.id, boxId: b.id };
     }
   }
-  return { grew, flagged, cleared, relaid, laid, first, kept: firstFit.kept };
+  return { grew, flagged, cleared, relaid, laid, first, kept: firstFit.kept, keeping: firstFit.keeping };
 }
 
 // Whether the open document is what was noted plus what the engine did, and
-// nothing else: no save has carried it, nothing has said it is unsaved, and
-// every page and every box compares equal to its note - the same boxes in the
+// nothing else: the file is still the file that was opened (no save has
+// landed, none is in flight), nothing has said the chapter is unsaved, the
+// user has not asked for it to be kept, and every page and every box compares
+// equal to its note - the same pages in the same order, the same boxes in the
 // same order, each as noted in everything a fit may not write and as the
 // engine last left it in what a fit may.
 //
@@ -1515,13 +1569,14 @@ export function firstFitChanges(pages = app.pages) {
 //
 // Untracked: it reads the whole document, and whoever asks is not to be run
 // again for every change to it.
-const firstFitUntouched = () => untrack(documentAsFitted);
+const firstFitUntouched = () => firstFit.open && !firstFit.keeping && untrack(documentAsFitted);
 function documentAsFitted() {
-  if (!firstFit.open || firstFit.kept) return false;
+  if (!fontSource || !disk?.asOpened || stamping) return false;
   if (!app.saved && !loaderDirty) return false;
-  if (app.pages.length !== notedCount) return false;
-  for (const p of app.pages) {
-    if (notedPages.get(p) !== pageRest(p)) return false;
+  if (notedMode !== app.chapterMode || notedTypesetting !== JSON.stringify({ ...app.typesetting, version: 0 })) return false;
+  if (app.pages.length !== notedPages.length) return false;
+  for (const [i, p] of app.pages.entries()) {
+    if (notedPages[i] !== pageRest(p)) return false;
     for (const b of p.boxes) {
       const was = noted.get(b);
       if (!was || fitOwn(b, was.pending) !== was.own || fitRest(b, was.pending) !== was.rest) return false;
@@ -1540,6 +1595,10 @@ function documentAsFitted() {
 // of it, and a box stored as 'pending' everything its solve wrote: no box is
 // left half the file's and half the engine's.
 function endFirstFit() {
+  // What the browser's rules will not write by themselves: a chapter whose
+  // file is behind, or that the user asked to keep, goes to disk as it
+  // stands. Asked before anything is put back or forgotten.
+  const owed = !!app.chapterRef && app.loaded && (firstFit.keeping || fileBehind(true));
   if (firstFitUntouched()) {
     for (const p of app.pages) {
       for (const b of p.boxes) {
@@ -1558,52 +1617,84 @@ function endFirstFit() {
     }
   }
   resetFirstFit();
+  disk = null;
+  if (owed) markUnsaved();
 }
 
 /**
- * The notice's answer: what the engine changed is kept. Written now - the
+ * The notice's answer: what the engine changed is kept. ONE write - the
  * grown heights, the flags, and the file's version - unless a save has
- * already carried it, and the notice goes.
+ * already carried it, and the notice goes when that write has landed.
  *
- * From the press on it is the user's wish, so the chapter is marked unsaved
- * at once: leaving in the next moment writes it. The write itself waits for
- * the boxes still waiting for a font, so that what is kept is everything the
- * engine has to say and the file can be stamped (`stampTypesetting`); when
- * that wait gives up, what there is is written.
+ * The write happens when its wait is over (`settleDisk`): at once when no
+ * box is waiting for a font, otherwise when the fonts have landed, so that
+ * what is kept is everything the engine has to say and the file can be
+ * stamped (`stampTypesetting`). Until then the notice says it is waiting
+ * (`firstFit.keeping`). The wait has an end: after `KEEP_WAIT_MS` what there
+ * is is written, at the number the file had, and if the font does come later
+ * the box it fits and the number follow by themselves.
  *
- * A write that fails brings the notice back: nothing was kept. The rejection
- * is handed on for the notice to say.
+ * The press marks nothing unsaved while it waits - the ordinary debounce
+ * would write before the wait is over - and loses nothing either: leaving,
+ * quitting or the switch going off writes a chapter the user asked to keep
+ * (`flushSave`, `endFirstFit`).
+ *
+ * A write that fails brings the notice back with Keep to press again:
+ * nothing was kept. The rejection is handed on for the notice to say.
  */
 export function keepFirstFit() {
   if (!firstFit.open) return Promise.resolve();
-  firstFit.dismissed = true;
-  if (firstFit.kept || !rustMeasuring()) return Promise.resolve();
-  const mine = noted;
-  const ref = app.chapterRef;
-  markUnsaved();
-  const write = () => (noted === mine && app.chapterRef === ref ? flushSave() : undefined);
-  const settling = fontsSettling();
-  return (settling ? settling.then(write, write) : flushSave()).catch((e) => {
-    if (noted === mine) firstFit.dismissed = false;
-    throw e;
-  });
+  if (firstFit.kept) {
+    firstFit.dismissed = true;
+    return Promise.resolve();
+  }
+  if (!rustMeasuring()) return Promise.resolve();
+  if (!firstFit.keeping) {
+    firstFit.keeping = true;
+    keepOver = false;
+    keepT = setTimeout(() => {
+      keepOver = true;
+      settleDisk();
+    }, KEEP_WAIT_MS);
+    const answer = {};
+    answer.promise = new Promise((resolve, reject) => Object.assign(answer, { resolve, reject }));
+    // Handed back for whoever wants to say why it failed; not an unhandled
+    // rejection when nobody does.
+    answer.promise.catch(() => {});
+    keepAnswer = answer;
+  }
+  const { promise } = keepAnswer;
+  settleDisk();
+  return promise;
 }
 
 // Whether any box of the open chapter is waiting for its font, or for a
 // letter's (`faceArriving`): it has not been fitted by the engine yet.
 const anyBoxWaiting = () => app.pages.some((p) => p.boxes.some((b) => b.style && boxFaceArriving(b, p)));
 
+// The open document as a save writes it, in one string: the chapter's
+// typesetting but for its number, and every page in its order with its
+// pictures' names, its space, its lines, what was detected on it and its
+// boxes (`writeOpenChapter`, library.svelte.js). Two of these being equal is
+// what "the file is the document" means here.
+const docText = () =>
+  untrack(() =>
+    JSON.stringify([
+      app.chapterMode,
+      { ...app.typesetting, version: 0 },
+      app.pages.map((p) => [p.id, p.file ?? null, p.cleanedFile ?? null, p.w, p.h, !!p.needsRespace, p.lines ?? null, p.detect ?? null, p.boxes]),
+    ]),
+  );
+
 /**
- * The chapter's typesetting as a save writes it, stamped with the engine
- * that fitted the boxes going to disk with it. Three cases, not two:
+ * The number a save taken now writes: which engine has fitted the boxes
+ * going to disk with it. Three cases, not two:
  *
  *   the Rust engine measures   2, when every box of the chapter has been
  *                              fitted by it. While a box still waits for its
  *                              font the file's own number is written: 2 says
  *                              every box in the file is the Rust engine's,
- *                              and the save is not held up for it. The stamp
- *                              follows with the save the font's arrival then
- *                              causes (`relayoutAll`).
+ *                              and the save is not held up for it.
  *   the browser measures       what the chapter had - except that a 2 becomes
  *   (no font source)           a 1 again, since its boxes are the browser's
  *                              now, and the Rust engine is to say what it
@@ -1612,33 +1703,98 @@ const anyBoxWaiting = () => app.pages.some((p) => p.boxes.some((b) => b.style &&
  *                              starting: every fit is held, so nobody has
  *                              fitted this document since it was read, and
  *                              the number the file had is written.
- *
- * Called by the saver as it takes its snapshot, and by nothing else: this is
- * the one place the number is decided. The open chapter takes it, and the
- * first fit counts as kept, when that save lands (`markSaved`) and not
- * before: a write that fails has stamped nothing.
+ */
+function versionNow() {
+  const had = app.typesetting.version;
+  if (rustMeasuring()) return anyBoxWaiting() ? had : LAYOUT_VERSION_RUST;
+  return !fontSource && had === LAYOUT_VERSION_RUST ? LAYOUT_VERSION : had;
+}
+
+/**
+ * The chapter's typesetting as a save writes it, stamped with `versionNow`.
+ * Called by the saver in the breath it takes its snapshot of the pages, and
+ * by nothing else: this is the one place the number is decided, and the one
+ * moment the store learns what a save carries. The open chapter takes the
+ * number, the file is known to hold that document, and the first fit counts
+ * as kept, when that save lands (`landed`) and not before: a write that
+ * fails has stamped nothing.
  */
 export function stampTypesetting() {
-  const had = app.typesetting.version;
-  let version = had;
-  let owed = false;
-  if (rustMeasuring()) {
-    if (anyBoxWaiting()) owed = had < LAYOUT_VERSION_RUST;
-    else version = LAYOUT_VERSION_RUST;
-  } else if (!fontSource && had === LAYOUT_VERSION_RUST) version = LAYOUT_VERSION;
-  stamping = { version, owed };
+  const version = versionNow();
+  stamping = { version, doc: fontSource ? docText() : null, mode: app.chapterMode, byRust: rustMeasuring() };
   return { ...app.typesetting, version };
 }
-// That save is owed, and can be made: nothing waits any more.
-const stampDue = () => stampOwed && rustMeasuring() && !anyBoxWaiting();
-// The save that took that stamp has landed.
-function stampLanded() {
-  if (!stamping) return;
-  const { version, owed } = stamping;
+
+// The save that took that snapshot has landed (`markSaved`, from the saver).
+// The open chapter takes its number, and with a font source the file is now
+// known to hold what it took. Then, whoever said the disk is current - a
+// save, or the loader that has just read the file - whether it is so is
+// looked at (`settleDisk`), not taken on their word.
+function landed() {
+  const took = stamping;
   stamping = null;
-  stampOwed = owed;
-  if (app.typesetting.version !== version) app.typesetting = { ...app.typesetting, version };
-  if (firstFit.open) firstFit.kept = true;
+  if (took) {
+    if (app.typesetting.version !== took.version) app.typesetting = { ...app.typesetting, version: took.version };
+    if (fontSource) disk = { doc: took.doc, version: took.version, mode: took.mode, asOpened: false };
+    if (firstFit.open && took.byRust) {
+      firstFit.kept = took.doc === docText() && took.version === versionNow();
+      if (firstFit.keeping && !keepWaits() && firstFit.kept) {
+        firstFit.dismissed = true;
+        endKeep();
+      }
+    }
+    // A save taken with the switch on that lands after it went off: the
+    // browser's rules know nothing of what changed after its snapshot.
+    if (!fontSource && took.doc != null && took.doc !== docText()) markUnsaved();
+  }
+  settleDisk();
+}
+
+// Whether the file is behind the document: not (a), and not yet (b).
+// `leaving` is for the switch going off, which is not a moment to wait in.
+function fileBehind(leaving = false) {
+  if (!fontSource || !disk || !app.loaded || !app.chapterRef) return false;
+  // (a): only what was noted and what the engine did, and nobody asked
+  // for more. The notes also cover a version2 chapter, whose notice stays
+  // off: a grow-only fit there still must not arm a save by itself.
+  if (untrack(documentAsFitted) && (!firstFit.keeping || (!leaving && keepWaits()))) return false;
+  return (firstFit.keeping && (leaving || !keepWaits())) || disk.doc !== docText() || disk.version !== versionNow() || (disk.mode != null && disk.mode !== app.chapterMode);
+}
+// Keep's wait: a box is still waiting for its font, and the time is not up.
+const keepWaits = () => !keepOver && anyBoxWaiting();
+
+/**
+ * Holds the invariant at the head of this block. Called whenever something
+ * stops moving - a save lands or the loader says the disk is current
+ * (`markSaved`), a font lands or the engine starts (`relayoutAll`), Keep is
+ * pressed or its wait runs out - and asks one question of the state as it
+ * stands: is the file behind the document? If it is, a save is armed, or for
+ * Keep made at once. Nothing is carried over from an earlier answer.
+ *
+ * A save in flight needs no thought here: when it lands this is asked again,
+ * of what it carried.
+ */
+function settleDisk() {
+  if (!fileBehind()) return;
+  if (firstFit.kept) firstFit.kept = false;
+  if (firstFit.keeping && !keepWaits()) {
+    const answer = keepAnswer;
+    // Several fonts may land while the same Keep write is held. They all
+    // owe the latest document, not one queued write per arrival. When this
+    // write ends, settle again if its snapshot is behind.
+    if (answer.writing) {
+      loaderDirty = false;
+      app.saved = false;
+      return;
+    }
+    answer.writing = true;
+    markUnsaved();
+    flushSave().then(() => {
+      if (keepAnswer !== answer) return;
+      answer.writing = false;
+      settleDisk();
+    }, () => {});
+  } else if (app.saved) markUnsaved();
 }
 
 // ---------- a font arriving changes every measurement ----------
@@ -1690,34 +1846,24 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  let edited = 0;
-  for (const p of app.pages) {
-    const landed = landPage(p);
-    n += landed.n;
-    edited += landed.edited;
-  }
+  for (const p of app.pages) n += landPage(p).n;
   if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
   //
-  // With the Rust engine switched on (a font source), only when what moved was
-  // an edit's own fit landing late or a box being laid out for the first time.
-  // A height the grow-only pass grew is not written for its own sake: the
-  // engine coming on, a system family's bytes arriving a moment after a
-  // chapter opened, a letter's font being found - none is the user's doing,
-  // and each would otherwise put the file on disk 800ms after a chapter was
-  // merely opened. The height is worked out again, the same, at every open;
-  // it reaches disk with the next save the user's own edit causes.
-  //
-  // Nor is a box laid out for the first time, in a chapter that is otherwise
-  // only what the engine did to it (`firstFitUntouched`): that solve is the
-  // open's doing as well, and is redone at the next one.
-  //
-  // And one save more, owed from before: a save that went out while a box was
-  // still waiting for its font could not say the file is the Rust engine's
-  // (`stampTypesetting`). With nothing waiting any more, it can.
-  if (fontSource ? (edited > 0 && !firstFitUntouched()) || stampDue() : n) markUnsaved();
+  // With the Rust engine switched on (a font source) that is not the
+  // question. A height the grow-only pass grew is not written for its own
+  // sake: the engine coming on, a system family's bytes arriving a moment
+  // after a chapter opened, a letter's font being found - none is the user's
+  // doing, and each would otherwise put the file on disk 800ms after a
+  // chapter was merely opened. Whether anything is to be written is whether
+  // the file is behind the document (`settleDisk`): it is not for a chapter
+  // nobody has touched, and it is when an edit's own fit has just landed,
+  // when a save went out before this font came, or when the user asked for
+  // the chapter to be kept and this was what it waited for.
+  if (fontSource) settleDisk();
+  else if (n) markUnsaved();
   return n;
 }
 
@@ -2179,10 +2325,12 @@ export function setSaver(fn) {
 // `Promise.all` hands on the first rejection untouched - flushSave's caller
 // reads that reason to decide whether the user may leave the chapter.
 const runSavers = () => Promise.resolve().then(() => Promise.all(savers.notify()));
-// A save that failed has stamped nothing (`stampTypesetting`).
+// A save that failed has stamped nothing (`stampTypesetting`), and a Keep
+// that was waiting on it has kept nothing: the notice offers it again.
 const saveFailed = (e) => {
   stamping = null;
   app.saveFailed = true;
+  if (firstFit.keeping) endKeep(e);
   return e;
 };
 export function markUnsaved() {
@@ -2213,9 +2361,13 @@ export function markSaved() {
   // "already written" path already calls.
   clearTimeout(saveT);
   loaderDirty = false;
-  // The write that was stamped is on disk: the open chapter takes its number.
-  stampLanded();
   app.saved = true;
+  // The write that was stamped is on disk: the open chapter takes its number.
+  // And with the Rust engine switched on, "saved" is not this caller's to
+  // say: a document that changed after the save's snapshot was taken - an
+  // edit, a font landing, the engine starting - is unsaved again at once
+  // (`landed`, `settleDisk`).
+  landed();
 }
 export function flushSave() {
   clearTimeout(saveT);

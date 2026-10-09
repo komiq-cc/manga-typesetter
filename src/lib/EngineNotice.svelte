@@ -78,7 +78,9 @@
     <div class="en-what">{what}</div>
     <div class="en-note">
       {changes.laid ? 'No other box' : 'No box'} changed its width, size or place.
-      {#if changes.kept}
+      {#if changes.keeping}
+        Keep is waiting for fonts. After four seconds it saves what is ready; a font that arrives later is saved too.
+      {:else if changes.kept}
         These are saved with the chapter.
       {:else}
         Nothing is saved until you edit the chapter or keep these.
@@ -89,11 +91,11 @@
       <button class="en-btn" disabled={!changes.first} title="Go to the first box that is newly flagged or has new line breaks" onclick={show}>Show first</button>
       <button
         class="en-btn primary"
-        disabled={busy}
+        disabled={busy || changes.keeping}
         title={changes.kept ? 'Close this notice' : 'Save the chapter with these changes and close this notice'}
         onclick={keep}
       >
-        {changes.kept ? 'Got it' : 'Keep'}
+        {changes.keeping ? 'Waiting for fonts…' : changes.kept ? 'Got it' : 'Keep'}
       </button>
     </div>
   </div>

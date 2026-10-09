@@ -1,13 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import EngineNotice from './EngineNotice.svelte';
 import ReviewList from './ReviewList.svelte';
-import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, placeActiveAt } from './store.svelte.js';
+import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, placeActiveAt, KEEP_WAIT_MS, firstFit, keepFirstFit } from './store.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { contentWidth, setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
-import { fakeRustEngine, SFNT } from '../test/fake-rust-engine.js';
+import { fakeRustEngine, fakeNative, SFNT, TTC } from '../test/fake-rust-engine.js';
+import { systemFontEntry } from './fonts.js';
 import { emptyFaces } from './data.js';
 
 // The queue's notice for a chapter the Rust engine fits for the first time,
@@ -43,7 +44,7 @@ const made = () => [
   },
 ];
 
-const original = { engine: textEngine(), typeset: typesetEnabled() };
+const original = { engine: textEngine(), typeset: typesetEnabled(), system: app.fonts.system };
 let saves;
 let unhook;
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -101,6 +102,8 @@ afterEach(() => {
   _resetEngineSwitch();
   _setEngineSwitchDeps(null);
   app.fonts.user = [];
+  app.fonts.system = original.system;
+  vi.useRealTimers();
   setTextEngine(original.engine);
   setTypesetEnabled(original.typeset);
   clearLayoutMemo();
@@ -237,6 +240,82 @@ describe('the first-fit notice', () => {
     expect(saves).toEqual([{ mode: 'smart', version: 2 }]);
     expect(notice(view)).toBe(null);
     app.saveFailed = false;
+  });
+
+  it('shows Keep waiting during a held font, then reports a timed-out save failure and allows retry', async () => {
+    const file = lettered();
+    const native = fakeNative({
+      'Helvetica Neue': [{ slots: { regular: 0, bold: 1, italic: 2, boldItalic: 3 }, bytes: TTC() }],
+      Zapfino: [{ slots: { regular: 0 }, bytes: SFNT() }],
+    }, { hold: true });
+    app.fonts.system = [
+      systemFontEntry({ name: 'Helvetica Neue', faces: { regular: true, bold: true, italic: true, boldItalic: true } }),
+      systemFontEntry({ name: 'Zapfino', faces: { regular: true } }),
+    ];
+    _setEngineSwitchDeps({
+      available: () => true, createEngine: async () => fakeRustEngine(), invoke: async () => native, booted: async () => {},
+      records: async () => [{ name: 'AnimeAce', slot: 'regular', file: 'AnimeAce.ttf', data: SFNT() }, { name: 'Narrow', slot: 'regular', file: 'Narrow.ttf', data: SFNT() }],
+      watch: () => {}, os: () => 'macos',
+    });
+    const on = useTextEngine('rust');
+    while (engineSwitch.phase !== 'on') { native.release(); await new Promise((resolve) => setTimeout(resolve, 0)); }
+    await on;
+    file.pages[0].boxes.push(box('late', 'Zapfino', 'AAAA BBBB', 60, 400));
+    open(file);
+    const view = render(EngineNotice);
+    unhook();
+    unhook = setSaver(async () => { stampTypesetting(); throw new Error('disk full'); });
+    vi.useFakeTimers();
+    await fireEvent.click(button(view, 'Keep'));
+    await tick();
+    expect(firstFit.keeping).toBe(true);
+    expect(notice(view).textContent).toContain('Keep is waiting for fonts.');
+    expect(notice(view).textContent).toContain('After four seconds it saves what is ready');
+    expect(button(view, 'Waiting for fonts…').disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS - 1);
+    expect(saves).toHaveLength(0);
+    expect(app.saved).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    await tick();
+    expect(firstFit.keeping).toBe(false);
+    expect(app.toast.msg).toBe('Could not save: disk full');
+    expect(button(view, 'Keep').disabled).toBe(false);
+    expect(notice(view).textContent).not.toContain('These are saved with the chapter.');
+    unhook();
+    unhook = setSaver(async () => { saves.push(stampTypesetting()); markSaved(); });
+    await fireEvent.click(button(view, 'Keep'));
+    await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS);
+    await tick();
+    expect(saves).toEqual([{ mode: 'smart', version: 1 }]);
+    expect(firstFit.keeping).toBe(false);
+    expect(notice(view)).toBe(null);
+    vi.useRealTimers();
+    native.release();
+  });
+
+  it('does not claim a newer fit is kept when an older snapshot lands', async () => {
+    const file = lettered();
+    await rustOn();
+    open(file);
+    const view = render(EngineNotice);
+    let land;
+    unhook();
+    unhook = setSaver(async () => { stampTypesetting(); await new Promise((resolve) => { land = resolve; }); markSaved(); });
+    markUnsaved();
+    const writing = flushSave();
+    await tick();
+    await Promise.resolve();
+    app.pages[1].boxes[0].h += 20;
+    land();
+    await writing;
+    await tick();
+    expect(app.saved).toBe(false);
+    expect(firstFit.kept).toBe(false);
+    expect(notice(view).textContent).not.toContain('These are saved with the chapter.');
+    // Cancel the pending test debounce with the real saver before cleanup.
+    unhook();
+    unhook = setSaver(async () => { saves.push(stampTypesetting()); markSaved(); });
+    await flushSave();
   });
 
   it('a box stored as never laid out is said to have been laid out, and only the others to have kept their width, size and place', async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   app, loadProjectPages, page, autoFitBox, reviewOf, flaggedBoxes, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave,
-  firstFit, firstFitChanges, keepFirstFit, stampTypesetting, fitBoxNow, placeActiveAt, relayoutAll,
+  firstFit, firstFitChanges, keepFirstFit, KEEP_WAIT_MS, stampTypesetting, fitBoxNow, placeActiveAt, relayoutAll,
 } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
@@ -178,7 +178,7 @@ describe('opened with the Rust engine on', () => {
 
   it('says what changed, counted against the file, and which box to look at first', () => {
     expect(firstFit).toMatchObject({ open: true, kept: false, dismissed: false });
-    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false, keeping: false });
   });
 
   it('lists a box whose lines moved in the review list, beside the flagged ones, without flagging it', () => {
@@ -281,7 +281,7 @@ describe('a version 1 chapter with no boxes, opened with the Rust engine on', ()
   it('is not written by leaving either, has nothing to say, and is stamped 2 by the first edit', async () => {
     await useTextEngine('rust');
     open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
-    expect(firstFitChanges()).toEqual({ grew: 0, flagged: 0, cleared: 0, relaid: 0, laid: 0, first: null, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 0, flagged: 0, cleared: 0, relaid: 0, laid: 0, first: null, kept: false, keeping: false });
     await flushSave();
     expect(saves).toHaveLength(0);
     // A box the user adds is theirs: it is not counted, and its save is the stamp.
@@ -300,7 +300,7 @@ describe('the switch turned on over an open chapter', () => {
     open(file);
     expect(firstFit.open).toBe(false);
     await useTextEngine('rust');
-    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false });
+    expect(firstFitChanges()).toEqual({ grew: 1, flagged: 1, cleared: 1, relaid: 2, laid: 0, first: { pageId: 1, boxId: 'relaid' }, kept: false, keeping: false });
     expect(app.saved).toBe(true);
     await wait(900);
     expect(saves).toHaveLength(0);
@@ -438,7 +438,7 @@ describe('a change to the document that nobody marked', () => {
     const b = by('same');
     b.h += 50;
     relayoutAll();
-    expect(app.saved).toBe(true);
+    expect(app.saved).toBe(false);
     expect(firstFitChanges()).toMatchObject({ grew: before.grew, flagged: before.flagged });
     await flushSave();
     expect(saves).toHaveLength(1);
@@ -455,6 +455,38 @@ describe('a change to the document that nobody marked', () => {
     app.pages[0].lines[0].tr = 'AB';
     await flushSave();
     expect(saves).toHaveLength(1);
+  });
+
+  it.each([
+    ['a style field besides rotation', (b) => { b.style.color = '#ff0000'; }, (b) => b.style.color, '#ff0000'],
+    ['the fitted balloon shape', (b) => { b.fit = { kind: 'rect', x: 1, y: 2, w: 100, h: 80 }; }, (b) => b.fit, { kind: 'rect', x: 1, y: 2, w: 100, h: 80 }],
+  ])('%s changed without a mark is written and never restored over', async (_, change, value, expected) => {
+    const b = by('same');
+    change(b);
+    expect(app.saved).toBe(true);
+    await useTextEngine('browser');
+    expect(value(b)).toEqual(expected);
+    expect(app.saved).toBe(false);
+    await flushSave();
+    expect(value(saves[0].pages[0].boxes[0])).toEqual(expected);
+  });
+
+  it.each(['file', 'cleanedFile'])('a durable %s changed without a mark reaches disk', async (field) => {
+    app.pages[0][field] = 'replacement.png';
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0][field]).toBe('replacement.png');
+  });
+
+  it('the same page objects in a new order are written and not restored over', async () => {
+    const order = app.pages.map((p) => p.id).reverse();
+    app.pages.reverse();
+    expect(app.saved).toBe(true);
+    await useTextEngine('browser');
+    expect(app.pages.map((p) => p.id)).toEqual(order);
+    expect(app.saved).toBe(false);
+    await flushSave();
+    expect(saves[0].pages.map((p) => p.id)).toEqual(order);
   });
 
   it('undone by hand, there is nothing to write again, and the switch going off puts the boxes back', async () => {
@@ -731,12 +763,99 @@ describe('a save taken while a box still waits for its font', () => {
     const kept = keepFirstFit();
     await wait(0);
     expect(saves).toHaveLength(0);
-    expect(app.saved).toBe(false);
+    expect(app.saved).toBe(true);
+    expect(firstFit).toMatchObject({ keeping: true, kept: false, dismissed: false });
+    await wait(900);
+    expect(saves).toHaveLength(0);
     await land();
     await kept;
     expect(saves).toHaveLength(1);
     expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
     expect(saves[0].pages[0].boxes[1].h).toBeGreaterThan(20);
+  });
+
+  it('Keep waits for an offscreen font too, and stamps only after it lands', async () => {
+    const file = late(LAYOUT_VERSION);
+    const slow = file.pages[0].boxes.pop();
+    file.pages.push({ id: 2, w: 800, h: 1200, lines: [], boxes: [slow] });
+    open(file);
+    expect(app.pageIndex).toBe(0);
+    const kept = keepFirstFit();
+    await wait(900);
+    expect(saves).toHaveLength(0);
+    expect(firstFit.keeping).toBe(true);
+    await land();
+    await kept;
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[0].pages[1].boxes[0].h).toBeGreaterThan(20);
+  });
+
+  it('Keep has an end when a font never answers, and a later answer saves the fitted result', async () => {
+    open(late(LAYOUT_VERSION));
+    vi.useFakeTimers();
+    try {
+      const kept = keepFirstFit();
+      let done = false;
+      kept.then(() => { done = true; });
+      await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS - 1);
+      expect(saves).toHaveLength(0);
+      expect(app.saved).toBe(true);
+      expect(firstFit).toMatchObject({ keeping: true, kept: false, dismissed: false });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(saves).toHaveLength(1);
+      expect(firstFit.keeping).toBe(false);
+      await kept;
+      expect(done).toBe(true);
+      expect(saves).toHaveLength(1);
+      expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION);
+      expect(saves[0].pages[0].boxes[1].h).toBe(20);
+      expect(firstFit).toMatchObject({ keeping: false, kept: true, dismissed: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    await land();
+    await wait(900);
+    expect(saves).toHaveLength(2);
+    expect(saves[1].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(saves[1].pages[0].boxes[1].h).toBeGreaterThan(20);
+  });
+
+  it('Keep still writes at its deadline when all known heights and flags are unchanged', async () => {
+    const file = late(LAYOUT_VERSION);
+    for (const b of file.pages[0].boxes) b.h = 500;
+    open(file);
+    vi.useFakeTimers();
+    try {
+      const kept = keepFirstFit();
+      await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS - 1);
+      expect(saves).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(saves).toHaveLength(1);
+      expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION);
+      expect(firstFit.keeping).toBe(false);
+      await kept;
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a Keep from a closed chapter cannot write, stamp or answer the next chapter', async () => {
+    open(late(LAYOUT_VERSION));
+    const kept = keepFirstFit();
+    await wait(0);
+    await flushSave();
+    close();
+    const next = late(LAYOUT_VERSION);
+    next.pages[0].boxes[0].text = 'NEXT';
+    open(next);
+    const before = copy(firstFit);
+    const writes = saves.length;
+    await land();
+    await kept;
+    await wait(900);
+    expect(saves).toHaveLength(writes);
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+    expect(firstFit).toMatchObject({ kept: before.kept, dismissed: before.dismissed, keeping: false });
+    expect(app.saved).toBe(true);
   });
 
   it('a version 2 chapter stays one, and a fit an edit was owed is saved when it lands', async () => {
