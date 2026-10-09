@@ -1,6 +1,7 @@
 // What changed for one box between the file and the app's open under the Rust
 // engine. Pure: the dry run's lane decides from it which boxes to paint, and
 // the report is counted from it, so the two cannot disagree.
+import { predictMiddle } from './dry-metrics.mjs';
 import { safeId } from './common.mjs';
 
 /** A box's id, the same string the capture corpus gives it (build-corpus.mjs). */
@@ -120,21 +121,10 @@ export function changeOf({ stored, rust, wk, font, id = 'a box' }) {
     }
   }
   const moved = (blockDy != null && Math.abs(blockDy) > MOVED_PX) || (blockDx != null && Math.abs(blockDx) > MOVED_PX);
-  // What the two engines' ink boxes say the block's top should have moved by.
-  // A block set in the middle of its box is centred on its ink (`blockInk`,
-  // measure.js): its top is `(boxH - blockH) / 2 + blockH / 2 - (inkTop +
-  // inkBottom) / 2`, the ink's edges taken from the block's top. With the
-  // same lines in the same box, the top therefore moves by minus half of what
-  // the ink's top and bottom moved against the line boxes, and by nothing
-  // else. Each engine's ink box is its own measurement (Safari's is in its
-  // capture, the engine's is taken at the open), so this is a prediction
-  // that can fail.
-  let ink = null;
-  if (compared && !lines && wk.ink && lay.ink && wk.blockY != null && lay.blockY != null) {
-    const top = lay.ink.t - lay.blockY - (wk.ink.t - wk.blockY);
-    const bottom = lay.ink.b - lay.blockY - (wk.ink.b - wk.blockY);
-    ink = { top, bottom, predictedDy: -(top + bottom) / 2 };
-  }
+  // These metrics were measured directly, before any placement. An altered
+  // font-box baseline must not be attributed to ink, and altering blockY or
+  // positioned ink cannot alter this prediction.
+  const ink = compared && !lines ? predictMiddle(wk.directMetrics, lay.directMetrics) : null;
   const out = {
     x, w, size, dy: y, dh: h,
     grew: h > 0, shrank: h < 0,

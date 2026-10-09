@@ -43,7 +43,7 @@ import { flags, root, dataDir } from './lib/common.mjs';
 import { writeReport } from './lib/dry-report.mjs';
 
 try {
-  const args = flags(['--data', '--out', '--legacy-mode', '--report-only', '--load-fixtures']);
+  const args = flags(['--data', '--out', '--legacy-mode', '--report-only', '--load-fixtures', '--webkit-metrics']);
   if (!args.out) throw new Error('--out <dir> is required');
   const data = dataDir(args.data);
   const out = resolve(args.out);
@@ -54,7 +54,7 @@ try {
     const run = spawnSync(
       `${root}node_modules/.bin/vitest`,
       ['run', '--project', 'realfont', 'src/lib/text-port-dryrun.realfont.test.js'],
-      { cwd: root, env: { ...process.env, TP_DRYRUN: '1', TP_DATA: data, TP_OUT: out, TP_LEGACY_MODE: args['legacy-mode'] ?? '', TP_LOAD_FIXTURES: args['load-fixtures'] === 'yes' ? '1' : '' }, stdio: 'inherit' },
+      { cwd: root, env: { ...process.env, TP_DRYRUN: '1', TP_DATA: data, TP_OUT: out, TP_LEGACY_MODE: args['legacy-mode'] ?? '', TP_WEBKIT_METRICS: args['webkit-metrics'] ?? '', TP_LOAD_FIXTURES: args['load-fixtures'] === 'yes' ? '1' : '' }, stdio: 'inherit' },
     );
     if (run.error) throw run.error;
     if (run.status !== 0) throw new Error(`the dry run's lane failed (exit ${run.status})`);

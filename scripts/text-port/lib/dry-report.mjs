@@ -12,6 +12,7 @@
 // there is no cause of last resort.
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { guardedPath } from './common.mjs';
+import { directBlock, metricKey, readReferenceMetrics } from './dry-metrics.mjs';
 import { changeOf, MOVED_PX, INK_TOL_PX } from './dry-compare.mjs';
 
 const KINDS = [
@@ -98,6 +99,8 @@ export function explain(row, c, wk) {
     if (missing) say('moved', missing, 'D2b');
     else if (c.lines) say('moved', 'follows from the new line breaks', 'see lines');
     else if (borrowed) say('moved', borrowed, 'rules 10, 11');
+    else if (lineMoved(row, c)) say('moved', `direct font-box metrics predict ${px(c.ink.lineDy)} px down from the line-box baseline; the block moved ${px(c.blockDy)} px down`, 'rule 3');
+    else if (combinedMoved(row, c)) say('moved', `direct metrics predict ${px(c.ink.lineDy)} px from the line-box baseline plus ${px(c.ink.inkDy)} px from glyph ink, together ${px(c.ink.predictedDy)} px down; the block moved ${px(c.blockDy)} px down`, 'rules 3, 4');
     else if (inkMoved(row, c)) say('moved', `the block is set in the middle of its box, so it is centred on its ink, and the two engines' ink boxes differ: against the line boxes the engine's ink is ${px(c.ink.top)} px lower at the top and ${px(c.ink.bottom)} px lower at the bottom than WebKit's, which puts the block ${px(c.ink.predictedDy)} px down; it is ${px(c.blockDy)} px down`, 'rule 4');
     else say('moved', null);
   }
@@ -109,7 +112,29 @@ export function explain(row, c, wk) {
 export function inkMoved(row, c) {
   if (row.valign !== 'middle' || !c.ink || c.blockDy == null) return false;
   if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
-  return Math.abs(c.ink.predictedDy - c.blockDy) <= INK_TOL_PX;
+  return Math.abs(c.ink.lineDy) <= INK_TOL_PX && Math.abs(c.ink.inkDy - c.blockDy) <= INK_TOL_PX;
+}
+
+export function lineMoved(row, c) {
+  if (row.valign !== 'middle' || !c.ink || c.blockDy == null) return false;
+  if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
+  return Math.abs(c.ink.inkDy) <= INK_TOL_PX && Math.abs(c.ink.lineDy - c.blockDy) <= INK_TOL_PX;
+}
+
+export function combinedMoved(row, c) {
+  if (row.valign !== 'middle' || !c.ink || c.blockDy == null) return false;
+  if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
+  return Math.abs(c.ink.lineDy) > INK_TOL_PX && Math.abs(c.ink.inkDy) > INK_TOL_PX && Math.abs(c.ink.predictedDy - c.blockDy) <= INK_TOL_PX;
+}
+
+// The lane's own completed verdict is required even in --report-only mode.
+// Re-check its recorded failure lists too: a caller cannot label a failed
+// paint/layout lane passed and thereby manufacture a signable report.
+export function assertLanePassed(run) {
+  const v = run.verdict;
+  if (v?.complete !== true || v?.passed !== true || !Array.isArray(v.layoutFailures) || !Array.isArray(v.paintFailures) || v.layoutFailures.length || v.paintFailures.length || (run.chapters ?? []).some((c) => c.paintFailures?.length)) {
+    throw new Error('the dry run lane is missing a completed passing verdict; no report can be written');
+  }
 }
 
 // Two tops this near are one top: what `(y + top) - top` loses.
@@ -133,7 +158,7 @@ const blank = () => ({
   x: 0, w: 0, size: 0, shrank: 0,
   grew: 0, grewNotEngine: 0, grewMax: 0, grewSum: 0, yMoved: 0, yAlone: 0,
   newlyFlagged: 0, newlyFlaggedNotEngine: 0, unflagged: 0, unflaggedNotEngine: 0, flaggedBefore: 0, flaggedAfter: 0,
-  lines: 0, moved: 0, movedOver2: 0, movedAlone: 0, movedByInk: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
+  lines: 0, moved: 0, movedOver2: 0, movedAlone: 0, movedByInk: 0, movedByLine: 0, movedByBoth: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
   // The same open as a long strip: boxes that come out differently, and G6 there.
   stripDiffers: 0, stripNoise: 0, stripBreach: 0, idsRepaired: 0,
   back: { run: 0, grew: 0, newlyFlagged: 0, unflagged: 0, x: 0, w: 0, size: 0 },
@@ -152,8 +177,10 @@ function add(total, t) {
  * @returns {{ total: object, chapters: object }}
  */
 export async function writeReport({ data, out }) {
-  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
   const run = JSON.parse(readFileSync(`${out}/raw/run.json`, 'utf8'));
+  assertLanePassed(run);
+  const direct = readReferenceMetrics(data, `${out}/raw/direct-webkit.json`);
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
   const rows = readFileSync(`${out}/raw/boxes.jsonl`, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const wk = new Map();
   const wkFile = guardedPath(data, 'runs/ref-wk/base/layout.jsonl');
@@ -201,6 +228,7 @@ export async function writeReport({ data, out }) {
     const lettered = !!row.rust.lay;
     if (lettered) t.lettered++;
     const w = wk.get(row.id) ?? null;
+    if (w) w.directMetrics = directBlock(row.metricStyle, w.lines, (style, text) => direct.get(metricKey(style, text)));
     const c = changeOf({ id: row.id, stored: row, rust: row.rust, wk: w, font: row.fontFacts });
     // The same file opened as a long strip.
     const a = row.rust.state;
@@ -224,6 +252,8 @@ export async function writeReport({ data, out }) {
     if (c.moved && !c.grew && !c.dy) {
       t.movedAlone++;
       if (!c.missing && !c.lines && !c.borrows && inkMoved(row, c)) t.movedByInk++;
+      if (!c.missing && !c.lines && !c.borrows && lineMoved(row, c)) t.movedByLine++;
+      if (!c.missing && !c.lines && !c.borrows && combinedMoved(row, c)) t.movedByBoth++;
     }
     // Back under the browser: the stand-in's own run, and what Safari's check says.
     if (row.back) {
@@ -366,7 +396,7 @@ export async function writeReport({ data, out }) {
 const DESIGN = [
   ['What the version number is', 'Every chapter file carries `typesetting.version`. It is 1 in every chapter written so far (or absent, which reads as 1), and until now nothing read it. From here on: **1** means the boxes were last fitted by the browser, **2** means they were last fitted by the Rust engine. It is the only thing in the file that changes meaning; no field is added.'],
   ['Opening a version 1 chapter with the Rust engine', 'The standing rule is applied in memory: no box changes its width, size or place; a height may grow; a box whose text no longer fits gets the review flag. The queue shows one notice, above the "needs review" list: how many boxes have new line breaks, how many are newly flagged, how many are no longer flagged, how many grew taller. A flagged box is in the "needs review" list as always. A box whose lines moved and that still fits is listed there too, as "Line breaks changed with the new text engine", until you answer the notice. So the boxes are stepped through with the list the app already has, and "Show first" on the notice goes to the first of them. A chapter the engine changes nothing in shows no notice. The notice counts what the engine did: a box you have since edited is no longer counted. One kind of box is laid out by an open, under either engine: a box placed while its font was still loading and never laid out. The notice counts it as "laid out for the first time".'],
-  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. "Untouched" is decided by comparing the chapter with what was read from the file, not by a flag: anything of yours that differs is written when you leave, a handle still held down included. The file is written, with the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before. That save sets the version to 2 when every box has been fitted by the engine. While a box still waits for its font, your edit is written at once at the version the file had, and the 2 follows with a save of its own when the font is in. "Keep" waits for the fonts. Every save writes `chapter.json` and, as every save always has, the `translations.json` beside it. The version number is the only thing in the file that is new: which boxes had their lines moved is not stored. If the write fails, nothing was kept: the notice stays, and the save indicator says the chapter is not saved.'],
+  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. "Untouched" is decided by comparing the chapter with what was read from the file, not by a flag: anything of yours that differs is written when you leave, a handle still held down included. The file is written, with the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before. That save sets the version to 2 when every box has been fitted by the engine. While a box still waits for its font, your edit is written at once at the version the file had, and the 2 follows with a save of its own when the font is in. "Keep" waits for the fonts with a visible waiting notice, for at most four seconds. At the deadline it writes what is ready at the file’s number; a later font writes its fit and the new number. The press itself arms no edit debounce. Every save writes `chapter.json` and, as every save always has, the `translations.json` beside it. The version number is the only thing in the file that is new: which boxes had their lines moved is not stored. If the write fails, nothing was kept: the notice stays, and the save indicator says the chapter is not saved.'],
   ['Going back to the browser engine', 'A version 2 chapter opens under the browser engine as any chapter does today: heights may grow, flags are checked again by the browser, and leaving the chapter saves it, as it always has. That save sets the version back to 1, so the Rust engine tells you again the next time. A build of the app from before this change reads a 2 as it reads a 1 and writes it back unchanged.'],
 ];
 
@@ -379,7 +409,7 @@ function summaryLines(t) {
   lines.push(`Boxes that grew taller: **${t.total.grew}** (${t.total.grewNotEngine} of them not because of the engine: the stored height was already under what today's app gives the box on open). Largest growth ${px(t.total.grewMax)} px.`);
   lines.push(`Boxes newly flagged "needs review": **${t.total.newlyFlagged}** (${t.total.newlyFlaggedNotEngine} of them already overflow in Safari today and only lacked the flag in the file). Boxes no longer flagged: **${t.total.unflagged}** (${t.total.unflaggedNotEngine} of them pass Safari's check today as well).`);
   lines.push(`Boxes whose line breaks changed: **${t.total.lines}** of ${t.total.compared} compared.`);
-  lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px). In ${t.total.movedAlone} of them nothing else of the box changed; ${t.total.movedByInk} of those moved by the two engines' ink boxes, each checked: the shift the ink boxes predict is the shift seen, within ${INK_TOL_PX} px.`);
+  lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px). In ${t.total.movedAlone} of them nothing else of the box changed; ${t.total.movedByBoth} moved by both direct line-box and ink metrics (rules 3, 4); ${t.total.movedByLine} of those moved by direct line-box metrics (rule 3); ${t.total.movedByInk} moved by the two engines' ink boxes, each checked: the shift the ink boxes predict is the shift seen, within ${INK_TOL_PX} px.`);
   lines.push(`The same files opened as a long strip (the project's layout is not in the copies; it decides how far a box may grow): ${t.total.stripDiffers} boxes come out differently (listed below). ${t.total.stripNoise} more differ by less than ${STRIP_NOISE_PX} px, in the last bits of a number: a top edge worked out in the strip's coordinates and brought back. Width, size or position across changed, a height lost, or a top edge moved without its height, as a long strip: **${t.total.stripBreach}**.`);
   lines.push(`Boxes whose id the load repairs (none, or one another box has): ${t.total.idsRepaired}. Every stored box is matched to the box the open made of it by its place in the file.`);
   lines.push(`Boxes set in a font this machine does not have: **${t.fontsToLoad.reduce((n, f) => n + f.boxes, 0)}** (${t.fontsToLoad.reduce((n, f) => n + f.withText, 0)} with text), in ${t.fontsToLoad.length} families (listed below: these are the font files to load). Boxes that borrow a letter from another font: ${t.total.borrows}.`);
@@ -443,7 +473,7 @@ function stripTable(t) {
   return { head, rows };
 }
 const STRIP_WORDS = "The project's layout decides how far a box may grow on open: to the foot of its page, or, in a long strip, over the seam into the next. The copies do not say which layout their project has, so every chapter was opened under both. Everything else in this report is the open as pages. The boxes that come out differently as a long strip:";
-const INK_WORDS = `A block set in the middle of its box is centred on its ink, so it moves when the two engines measure the ink of the same lines differently, by minus half of what the ink's top and bottom moved against the line boxes. Both ink boxes are measurements (Safari's is in its capture, the engine's was taken at the open), so the shift they predict can be set beside the shift seen. A moved block is given this cause only when the two agree within ${INK_TOL_PX} px; otherwise it is unexplained.`;
+const INK_WORDS = `A block set in the middle is centred on its ink. Direct system-WebKit and Rust font-box and per-line ink measurements predict that centring shift without reading either placement or its positioned ink. A font-box baseline change is rule 3; a glyph-ink change with an unchanged baseline is rule 4; a checked sum of both names both rules. Missing independent metrics or a disagreement over ${INK_TOL_PX} px is unexplained. The table below contains rule 4 only.`;
 
 const mdTable = ({ head, rows }) => [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.join(' | ')} |`)].join('\n');
 

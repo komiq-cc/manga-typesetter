@@ -50,12 +50,13 @@
 // home and no random number goes into what is written, so a second run gives
 // the same bytes.
 import { it, expect } from 'vitest';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { homedir } from 'node:os';
 import { GlobalFonts } from '@napi-rs/canvas';
 import { dataDir, guardedPath, safeId, sha256, root } from '../../scripts/text-port/lib/common.mjs';
 import { scanInstalled, systemList, nativeStandIn } from '../../scripts/text-port/lib/installed-fonts.mjs';
+import { directBlock, metricKey, readReferenceMetrics } from '../../scripts/text-port/lib/dry-metrics.mjs';
 import { at, storedIds, assertPartners, unrepairedPages, changeOf } from '../../scripts/text-port/lib/dry-compare.mjs';
 
 const FIXTURE_SOURCE = /^src\/test\/fonts\//;
@@ -67,6 +68,11 @@ if (process.env.TP_DRYRUN !== '1') {
     const data = dataDir();
     const out = process.env.TP_OUT;
     if (!out) throw new Error('TP_OUT is not set');
+    mkdirSync(`${out}/raw`, { recursive: true });
+    writeFileSync(`${out}/raw/run.json`, JSON.stringify({ verdict: { complete: false, passed: false }, chapters: [] }) + '\n');
+    const directPath = process.env.TP_WEBKIT_METRICS || `${data}/reports/p9-direct-metrics.json`;
+    const direct = readReferenceMetrics(data, directPath);
+    copyFileSync(directPath, `${out}/raw/direct-webkit.json`);
     const legacyMode = process.env.TP_LEGACY_MODE || '';
     const wasmPath = `${root}text-engine/js/generated/mt_text.wasm`;
     if (!existsSync(wasmPath)) throw new Error(`${wasmPath} is missing; run npm run build:engine`);
@@ -204,6 +210,10 @@ if (process.env.TP_DRYRUN !== '1') {
             const k = contain.boxInkRect(cand, place);
             return k ? { l: k.x, t: k.y, r: k.x + k.w, b: k.y + k.h } : null;
           })(),
+          directMetrics: place.isCurve ? null : directBlock(cand.s, place.lines, (s, text) => {
+            const face = measure.faceFor(s, s.size);
+            return { font: seam.textEngine().fontBox(face), ink: seam.textEngine().lineInk(face, text) };
+          }),
           curve: !!place.isCurve,
           fits: v.fits,
           overflow: v.overflow,
@@ -272,6 +282,7 @@ if (process.env.TP_DRYRUN !== '1') {
           ...geom(b), review: review ? { reason: review.reason, overflow: review.overflow, stored: true } : null,
           auto: b.auto ? b.auto.status ?? 'none' : null,
           font: b.style?.font ?? null, bold: !!b.style?.bold, italic: !!b.style?.italic, valign: b.style?.valign ?? null, align: b.style?.align ?? null,
+          metricStyle: { font: b.style?.font, bold: !!b.style?.bold, italic: !!b.style?.italic, size: b.style?.size, letterSpacing: b.style?.letterSpacing ?? 0, lineHeight: b.style?.lineHeight ?? 1.1 },
           pageIndex: pi, pageId: p.id ?? pi, boxId: b.id ?? null,
         });
       }));
@@ -293,6 +304,7 @@ if (process.env.TP_DRYRUN !== '1') {
         let implied = null;
         for (let n = 1; n <= 60 && implied == null; n++) if (Math.abs(typeset.neededHeight(n, b.style, inset) - b.h) < 0.01) implied = n;
         const w = wk.get(ids.get(at(pi, bi)));
+        if (w) w.directMetrics = directBlock(b.style, w.lines, (style, text) => direct.get(metricKey(style, text)));
         heights.set(at(pi, bi), { impliedLines: implied, safariNeeds: Array.isArray(w?.lines) ? typeset.neededHeight(w.lines.length, b.style, inset) : null, autoHeight: b.style.autoHeight !== false });
       }));
       close();
@@ -444,6 +456,7 @@ if (process.env.TP_DRYRUN !== '1') {
       lastResort, systemFacesServed: served, lettersAsked: asked,
       builtinInstalled: builtinNames.filter((n) => installed.has(n)),
       wkCases: wk.size, chapters,
+      verdict: { complete: true, passed: !layFailures.length && !chapters.some((c) => c.paintFailures?.length), layoutFailures: layFailures, paintFailures: chapters.flatMap((c) => c.paintFailures ?? []) },
     }, null, 2) + '\n');
     // A box either has a layout under each engine it is read from, or the run
     // is wrong: named here, and no report is written from it.

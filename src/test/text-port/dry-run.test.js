@@ -1,6 +1,11 @@
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import { at, storedIds, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
-import { explain, inkMoved, stripAgainst } from '../../../scripts/text-port/lib/dry-report.mjs';
+import { explain, inkMoved, stripAgainst, assertLanePassed } from '../../../scripts/text-port/lib/dry-report.mjs';
 
 // The dry run of P9 (scripts/text-port/dry-run.mjs) says "0 boxes changed
 // their width" and "0 changes unexplained" of the user's chapters. These are
@@ -10,9 +15,10 @@ import { explain, inkMoved, stripAgainst } from '../../../scripts/text-port/lib/
 const geom = { x: 10, y: 20, w: 100, h: 200, size: 30, review: null };
 const font = { missing: false, kind: 'user', drawnIn: 'A', borrowed: [], none: [], unread: [], fauxBold: false };
 const LINES = ['ONE', 'TWO'];
+const directOf = (inkShift = 0, ascent = 24) => ({ font: { ascent, descent: 6 }, inks: [{ ascent: 22 + inkShift, descent: 3 - inkShift }, { ascent: 22 + inkShift, descent: 3 - inkShift }], lineH: 33 });
 // A block of two lines in the middle of its box, as each engine placed it.
-const wkOf = (over = {}) => ({ lines: LINES, lineX: [50, 50], blockY: 60, blockH: 66, ink: { l: 12, t: 64, r: 88, b: 122 }, verdict: { fits: true, overflow: { l: 0, t: 0, r: 0, b: 0 } }, ...over });
-const layOf = (over = {}) => ({ lines: LINES, lineX: [50, 50], blockY: 60, blockH: 66, ink: { l: 12, t: 64, r: 88, b: 122 }, curve: false, fits: true, overflow: { l: 0, t: 0, r: 0, b: 0 }, ...over });
+const wkOf = (over = {}) => ({ directMetrics: directOf(), lines: LINES, lineX: [50, 50], blockY: 60, blockH: 66, ink: { l: 12, t: 64, r: 88, b: 122 }, verdict: { fits: true, overflow: { l: 0, t: 0, r: 0, b: 0 } }, ...over });
+const layOf = (over = {}) => ({ directMetrics: directOf(), lines: LINES, lineX: [50, 50], blockY: 60, blockH: 66, ink: { l: 12, t: 64, r: 88, b: 122 }, curve: false, fits: true, overflow: { l: 0, t: 0, r: 0, b: 0 }, ...over });
 const rowOf = (lay, over = {}) => ({ ...geom, font: 'A', mode: 'smart', valign: 'middle', fontFacts: font, rust: { state: { ...geom }, lay }, browser: null, ...over });
 
 describe('a stored box and the box the open made of it', () => {
@@ -59,7 +65,7 @@ describe('a box whose layout threw', () => {
 describe('a block that moved and nothing else did', () => {
   // The engine's ink sits 1.5 px higher against the line boxes, top and
   // bottom: a block centred on its ink is then 1.5 px lower.
-  const moved = (dy, ink = dy) => layOf({ blockY: 60 + dy, ink: { l: 12, t: 64 + dy - ink, r: 88, b: 122 + dy - ink } });
+  const moved = (dy, ink = dy) => layOf({ directMetrics: directOf(ink), blockY: 60 + dy, ink: { l: 12, t: 64 + dy - ink, r: 88, b: 122 + dy - ink } });
   const cause = (row, wk = wkOf()) => {
     const c = changeOf({ stored: row, rust: row.rust, wk, font: row.fontFacts });
     return { c, moved: explain(row, c, wk).find((x) => x.what === 'moved') };
@@ -87,11 +93,35 @@ describe('a block that moved and nothing else did', () => {
     expect(cause(rowOf(moved(1.5), { valign: 'bottom' })).moved.cause).toBe(null);
   });
 
-  it('is unexplained when it moved sideways, or when either ink box was not recorded', () => {
+  it('is unexplained when it moved sideways, or when either direct metric record was not recorded', () => {
     expect(cause(rowOf({ ...moved(1.5), lineX: [53, 50] })).moved.cause).toBe(null);
-    expect(cause(rowOf({ ...moved(1.5), ink: null })).moved.cause).toBe(null);
-    expect(cause(rowOf(moved(1.5)), wkOf({ ink: null })).moved.cause).toBe(null);
+    expect(cause(rowOf({ ...moved(1.5), directMetrics: null })).moved.cause).toBe(null);
+    expect(cause(rowOf(moved(1.5)), wkOf({ directMetrics: null })).moved.cause).toBe(null);
     expect(inkMoved({ valign: 'middle' }, { ink: null, blockDy: 1.5, blockDx: 0 })).toBe(false);
+  });
+
+  it('names a changed line-box baseline as rule 3, even with unchanged ink', () => {
+    const changed = moved(-100, 0);
+    changed.directMetrics = directOf(0, 224);
+    const { c, moved: m } = cause(rowOf(changed));
+    expect(c.ink).toMatchObject({ lineDy: -100, inkDy: 0, predictedDy: -100 });
+    expect(m.rule).toBe('rule 3');
+    expect(inkMoved(rowOf(changed), c)).toBe(false);
+  });
+
+  it('names both rules when both direct metric contributions predict the shift', () => {
+    const changed = moved(-98.5, 1.5);
+    changed.directMetrics = directOf(1.5, 224);
+    expect(cause(rowOf(changed)).moved.rule).toBe('rules 3, 4');
+  });
+
+  it('predicts independently of positioned ink and blockY', () => {
+    const corrupted = moved(100, 1.5);
+    // If this positioned rectangle feeds prediction, the fault explains itself.
+    corrupted.ink = { l: 0, t: -900, r: 50, b: 1200 };
+    const { c, moved: m } = cause(rowOf(corrupted));
+    expect(c.ink.predictedDy).toBeCloseTo(1.5, 10);
+    expect(m.cause).toBe(null);
   });
 
   it('a missing font is still said first, since that is a recorded fact', () => {
@@ -149,5 +179,47 @@ describe('the same box opened as a long strip', () => {
   });
   it('differs when the flag does, whatever the numbers', () => {
     expect(stripAgainst(pages, { ...pages, review: { reason: 'overflow' } })).toBe('differs');
+  });
+});
+
+
+describe('a report needs the lane’s own passing verdict', () => {
+  const pass = () => ({ verdict: { complete: true, passed: true, layoutFailures: [], paintFailures: [] }, chapters: [{ paintFailures: [] }] });
+  it.each([
+    ['missing', {}],
+    ['incomplete', { verdict: { complete: false, passed: false } }],
+    ['failed', { verdict: { complete: true, passed: false, layoutFailures: [], paintFailures: [] } }],
+    ['layout failed', { ...pass(), verdict: { ...pass().verdict, layoutFailures: ['box failed'] } }],
+    ['paint failed', { ...pass(), verdict: { ...pass().verdict, paintFailures: ['box failed'] } }],
+    ['paint metadata contradicts the verdict', { ...pass(), chapters: [{ paintFailures: ['box failed'] }] }],
+  ])('refuses a %s lane', (_, run) => {
+    expect(() => assertLanePassed(run)).toThrow('no report can be written');
+  });
+  it('accepts only a completed passing lane', () => {
+    expect(() => assertLanePassed(pass())).not.toThrow();
+  });
+  it.each(['layout', 'paint'])('--report-only exits 1 and creates no signable report for a failed %s lane', (kind) => {
+    const scratch = mkdtempSync(join(tmpdir(), 'p9-report-refusal-'));
+    try {
+      mkdirSync(join(scratch, 'raw'));
+      const run = { ...pass(), chapters: [], wasm: 'synthetic', legacyMode: 'smart', userFamilies: 0, installedFamilies: 0, lastResort: null, wkCases: 0, lettersAsked: {}, systemFacesServed: {} };
+      const sources = {};
+      for (const file of ['fonts/fonts.json', 'corpus/layout.json', 'runs/ref-wk/base/layout.jsonl']) {
+        const path = join(scratch, file);
+        mkdirSync(path.slice(0, path.lastIndexOf('/')), { recursive: true });
+        const content = file.endsWith('.jsonl') ? '' : '{}';
+        writeFileSync(path, content);
+        sources[file] = createHash('sha256').update(content).digest('hex');
+      }
+      writeFileSync(join(scratch, 'raw/direct-webkit.json'), JSON.stringify({ schema: 1, engine: 'system-webkit', complete: true, errors: [], sources, records: [] }));
+      writeFileSync(join(scratch, 'raw/boxes.jsonl'), '');
+      run.verdict[`${kind}Failures`].push('synthetic failure');
+      writeFileSync(join(scratch, 'raw/run.json'), JSON.stringify(run));
+      const child = spawnSync(process.execPath, ['scripts/text-port/dry-run.mjs', '--data', scratch, '--out', scratch, '--report-only', 'yes'], { encoding: 'utf8' });
+      expect(child.status, child.stdout + child.stderr).toBe(1);
+      expect(child.stderr).toContain('no report can be written');
+      expect(existsSync(join(scratch, 'report.html'))).toBe(false);
+      expect(existsSync(join(scratch, 'report.md'))).toBe(false);
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
 });
