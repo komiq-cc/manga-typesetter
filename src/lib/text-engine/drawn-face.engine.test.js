@@ -207,10 +207,9 @@ describe('a font whose PostScript name is only spaces', () => {
       clearLayoutMemo();
       const style = { font: 'Blank Name', size: 30, bold: true, italic: false, lineHeight: 1.1, align: 'center', valign: 'top', color: '#000000', strokes: [] };
       const layer = textLayerFor({ lines: [] }, { id: 'b', lineN: null, text: 'WAIT', x: 10, y: 10, w: 300, h: 100, style }, null);
-      // The name the writer constructs when a font states none (`postScriptName`
-      // in psd.js: the family's CSS name with its spaces out; here, where the
-      // app's own font list does not hold the family, the default family's).
-      expect(layer.text.style.font.name).toBe('ComicNeue');
+      // The engine's fallback names the actual family/source, even when the
+      // app's CSS font list would have substituted its default family.
+      expect(layer.text.style.font.name).toMatch(/^MTFallback-BlankName-[0-9A-F]{32}\.\.\.$/);
       expect(layer.text.style.fauxBold).toBe(true);
     } finally {
       setTextEngine(before.engine);

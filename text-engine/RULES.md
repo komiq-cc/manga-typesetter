@@ -714,9 +714,14 @@ instance's.
   `ABC`, and `_1` + `1abc` is `_11` + `abc`: such a font's instances get the
   last-resort form, hashed over the tags as the file has them. [M:
   tests/instance.rs, historical.] Engine PSD fallback names after missing or
-  invalid ID6 are sanitized and capped to127 bytes with a full-identity hash
-  when altered; this applies to primary and borrowed runs. The browser keeps
-  its earlier constructor. [I: fresh PSD regression pending.]
+  invalid ID6 use a generated namespace capped to127 bytes. Its hash includes
+  the unsanitized family, real slot, bytes fingerprint, collection index and
+  actual variable place; display normalization only changes the prefix.
+  Parsed/generated names reachable by all real style requests are checked
+  before assigning a deterministic salted fallback, independent of request
+  order. Primary and borrowed runs share the same actual-source identity.
+  Size and faux flags do not change the real font name. The browser keeps
+  its earlier constructor. [I: new PSD identity regressions pending.]
 - **An axis that is not a range is not an axis.** A file whose `fvar` gives
   an axis a minimum above its maximum, a default outside the two, or a
   number that is not one, is a font without that axis: it is not listed,

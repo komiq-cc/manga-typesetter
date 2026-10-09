@@ -284,19 +284,26 @@ function postScriptName(family) {
 // PostScript name keeps the constructed one, from the face that was drawn.
 const SLOT_SUFFIX = { regular: '', bold: '-Bold', italic: '-Italic', boldItalic: '-BoldItalic' };
 
-// A rejected/missing ID 6 still needs a valid PSD identity. Keep the browser's
-// historical constructor above; the engine fallback hashes the complete raw
-// name whenever sanitizing or capping it, so different families stay distinct.
-function engineFallbackName(family, slot) {
-  const raw = postScriptName(family) + SLOT_SUFFIX[slot];
+// Missing ID6 gets its own namespace and a hash of the COMPLETE identity,
+// before any display normalization. The readable prefix is only decoration.
+// A declared/generated name may already occupy that namespace; retry the hash
+// with a deterministic salt against the complete reachable name set.
+function engineFallbackName(engine, drawn) {
+  const { family, slot, sourceIdentity } = drawn;
+  const raw = String(family ?? '') + SLOT_SUFFIX[slot];
   const clean = [...raw].filter((c) => c.charCodeAt(0) >= 33 && c.charCodeAt(0) <= 126 && !'[](){}<>/%'.includes(c)).join('');
-  if (clean === raw && raw.length <= 127) return raw;
-  let hash = 0x6c62272e07bb014262b821756295c58dn;
-  for (const byte of new TextEncoder().encode(raw)) {
-    hash = BigInt.asUintN(128, (hash ^ BigInt(byte)) * 0x0000000001000000000000000000013bn);
+  const names = engine.postScriptNames();
+  let salt = 0;
+  while (true) {
+    const identity = JSON.stringify(['mt-psd-fallback-v1', family, slot, sourceIdentity, salt]);
+    let hash = 0x6c62272e07bb014262b821756295c58dn;
+    for (const byte of new TextEncoder().encode(identity)) {
+      hash = BigInt.asUintN(128, (hash ^ BigInt(byte)) * 0x0000000001000000000000000000013bn);
+    }
+    const name = `MTFallback-${(clean || 'Font').slice(0, 80)}-${hash.toString(16).toUpperCase().padStart(32, '0')}...`;
+    if (!names.has(name)) return name;
+    salt++;
   }
-  const prefix = clean || 'MyriadPro-Regular';
-  return `${prefix.slice(0, 91)}-${hash.toString(16).toUpperCase().padStart(32, '0')}...`;
 }
 
 // The engine's own account of the face `s` is drawn in, or null when it is
@@ -305,10 +312,10 @@ function engineFontRequest(s) {
   if (!engineDraws()) return null;
   const engine = textEngine();
   if (typeof engine.resolveFace !== 'function') return null;
-  const drawn = drawnFace(engine, faceFor(s, s.size));
+  const drawn = drawnFace(engine, faceFor(s, s.size), { source: true });
   if (!drawn) return null;
   return {
-    name: drawn.postScriptName || engineFallbackName(drawn.family, drawn.slot),
+    name: drawn.postScriptName || engineFallbackName(engine, drawn),
     fauxBold: drawn.fauxBold,
     fauxItalic: drawn.fauxItalic,
   };
@@ -495,14 +502,14 @@ function borrowedRuns(s, content) {
   if (!engineDraws()) return null;
   const engine = textEngine();
   if (typeof engine.lenders !== 'function') return null;
-  const runs = drawnRuns(engine, faceFor(s, s.size), content);
+  const runs = drawnRuns(engine, faceFor(s, s.size), content, { source: true });
   if (!runs || runs.every((r) => r.own)) return null;
   return runs.map((r) => ({
     length: r.end - r.start,
     style: r.own
       ? {}
       : {
-          font: { name: r.postScriptName || engineFallbackName(r.family, r.slot) },
+          font: { name: r.postScriptName || engineFallbackName(engine, r) },
           fauxBold: r.fauxBold,
           fauxItalic: r.fauxItalic,
         },

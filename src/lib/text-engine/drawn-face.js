@@ -34,17 +34,20 @@ export function postScriptNameOf(engine, font) {
  * The face a request is drawn in, as `{ family, slot, fauxBold, fauxItalic,
  * postScriptName }`: the slot the engine resolved, whether it emboldened or
  * slanted that face itself, and the font's own name. Null for a family the
- * engine does not hold.
+ * engine does not hold. `{ source: true }` adds a stable sourceIdentity for
+ * PSD fallback naming; the default public shape stays the same.
  */
-export function drawnFace(engine, face) {
+export function drawnFace(engine, face, { source = false } = {}) {
   const resolved = engine.resolveFace(face);
   if (!resolved) return null;
+  const font = engine.handle(face).font;
   return {
+    ...(source ? { sourceIdentity: engine.sourceIdentity(font) } : {}),
     family: face.name,
     slot: resolved.slot,
     fauxBold: resolved.fauxBold,
     fauxItalic: resolved.fauxItalic,
-    postScriptName: postScriptNameOf(engine, engine.handle(face).font),
+    postScriptName: postScriptNameOf(engine, font),
   };
 }
 
@@ -72,10 +75,11 @@ const LINE_END = /\r\n|\r|\n/g;
  *
  * Null for a family the engine does not hold. From an engine that cannot say
  * (`lineParts` absent or null) the whole text is the face's own run: nothing
- * is claimed that was not asked.
+ * is claimed that was not asked. `{ source: true }` includes the actual
+ * source identity on primary and borrowed runs, otherwise it is omitted.
  */
-export function drawnRuns(engine, face, text) {
-  const own = drawnFace(engine, face);
+export function drawnRuns(engine, face, text, { source = false } = {}) {
+  const own = drawnFace(engine, face, { source });
   if (!own) return null;
   const whole = [{ start: 0, end: text.length, own: true, ...own }];
   if (typeof engine.lineParts !== 'function') return whole;
@@ -92,7 +96,7 @@ export function drawnRuns(engine, face, text) {
     const key = `${part.font}/${part.bold ? 'b' : ''}${part.italic ? 'i' : ''}`;
     if (!named.has(key)) {
       const from = lender(part.font);
-      named.set(key, { family: from?.family ?? null, slot: from?.slot ?? 'regular', fauxBold: part.bold, fauxItalic: part.italic, postScriptName: postScriptNameOf(engine, part.font) });
+      named.set(key, { ...(source ? { sourceIdentity: engine.sourceIdentity(part.font) } : {}), family: from?.family ?? null, slot: from?.slot ?? 'regular', fauxBold: part.bold, fauxItalic: part.italic, postScriptName: postScriptNameOf(engine, part.font) });
     }
     return named.get(key);
   };

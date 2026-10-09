@@ -879,6 +879,59 @@ both the preserved original25 and the new13 chain-policy definitions.
 No mutation was executed; every future kill requires its exact-revision log
 and named failed assertion.
 
+### Final PSD identity interaction correction [I: new source; proofs pending]
+
+The seven-fix review, pinned to `2b186101`, found three further measured
+collisions in the final fallback path: family normalization aliased `Bad []`
+and `Bad[]`; an invalid defaultID6 fell back to `Test`, also the valid named700
+identity; real bold `Foo` and regular `Foo-Bold` shared one fallback string.
+`p8c-seven-fixes-codex-findings.md` records **[M] request collisions**;
+Photoshop substitution consequences remain **[I]**. The earlier source and
+focused proofs do not establish this correction.
+
+The new fallback always has a generated namespace and hashes the complete
+unsanitized `[family, real slot, source identity, salt]` tuple. Normalization
+only makes its readable prefix legal, and the complete name fits127 bytes.
+The adapter's source identity contains a compact FNV-1a128 bytes fingerprint,
+collection index and actual clamped variable place. It excludes reusable wasm
+IDs, paint size and faux flags. No second font-byte copy is retained.
+The fingerprint uses uint32 limbs instead of per-byte BigInt work; an
+independent BigInt reference test covers carries and byte/view boundaries.
+Hash collision freedom is not mathematically promised. [I]
+
+Before returning a fallback, the adapter builds a complete set of parsed and
+generated names reachable by the app's real regular/bold requests, including
+variable instances not requested yet. A direct declared/generated alias moves
+the fallback to a deterministic salted hash. The set is cached for the
+registration state; any newly made instances share bytes and are removed with
+their source slot. This prevents font-request order from changing names. [I]
+
+`drawnFace`/`drawnRuns` expose source metadata only when called with
+`{ source: true }`; raw default shapes and raw `fontInfo` names remain the
+existing API. Primary and borrowed PSD fallback paths consume the same
+metadata and retain their actual faux flags. The browser constructor remains
+on its existing path. [I]
+
+New tracked-fixture-only regressions in `psd-identity.engine.test.js` cover
+all three collision reproducers, raw-family distinctions on identical bytes,
+bytes replacement, shared collection indices, reloading/reallocation and
+engine replacement, actual clamped locations, optional metadata, cleanup of
+precomputed instances and direct named aliases in both request orders.
+Existing PSD fallback validity/cap/borrowed/browser assertions are retained,
+with the old bare engine fallback assertion updated to the generated name.
+No tests/builds/probes ran in this repair window; the coordinator must pin and
+verify the committed candidate before fresh review. [I]
+
+This next candidate will stay frozen through its review. The previous
+assertion-only package test follow-up moved HEAD during the seven-fix review;
+that review is therefore evidence for the pinned production source and not
+acceptance of its drifted test tree.
+
+Fresh PSD-specific mutation definitions are prepared separately; original25,
+chain13, seven-gap14 and changed-source retarget catalogs remain untouched.
+Their changed fallback substitutions must be reported as obsolete or explicitly
+retargeted, never silently counted as original-source kills.
+
 ### Final verification [not yet run]
 
 The coordinator will fill this table from exact-revision logs after P7 is
