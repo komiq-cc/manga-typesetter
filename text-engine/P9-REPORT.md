@@ -679,14 +679,18 @@ Second round:
 
 ## 11. Exactly what is written to the user's files, and when
 
-Rewritten for the third round. These are the current contracts. Section14
+Rewritten for the third round. These are the implementation contracts;
+final proof is pending, as section15 records. Section14
 records the previous implementation and its then-measured proofs. In
 particular, its remembered stamp debt and its immediate dirty flag on Keep
 are superseded.
 
-With the switch **off**: saving and loading behave as before this phase,
-except that a chapter at version2 is saved as version1. The old browser
-save race described in section15 remains.
+With the switch **off**, a chapter that has never used Rust follows the
+existing browser save/load policy; saving a version2 writes version1. The
+old browser race described in section15 remains. A chapter Rust owned
+retains its actual landed and in-flight snapshots across off/on. Outstanding
+cross-switch work still settles after an older write lands, and that
+ownership retires once the current browser document has actually landed.
 
 With the switch **on**, a version1 chapter is untouched when its durable
 chapter mode, typesetting settings, pages in order, and boxes equal the open
@@ -704,9 +708,11 @@ leave-save contract is retained.
 | leaving/quitting/switch off after an unmarked durable change (a held handle, style/fit/text, picture association, translation, page order or mode) | the two document files as the user's document stands; no restore over the change |
 | an edit save while a font is still held or the engine still starts | chapter.json and translations.json from one snapshot; the file's current version remains (1 or2) |
 | the engine starts/a font lands after a save snapshot | settlement compares the actual current document/version to the landed snapshot; a newer document arms a follow-up save, even if the older write cancelled a debounce |
+| an older Rust write lands after off/on, or a browser write already in flight lands after Rust is turned on | the original snapshot remains owned; the newer document cannot become an opened baseline; its natural follow-up debounce writes both files |
 | ready Rust save, with no box waiting on any page | the whole document at version2 |
 | Keep while a font waits | one deferred write; no ordinary debounce from the press; saved state can remain true while the visible notice says Keep is waiting |
 | Keep's fonts land, or four-second deadline expires | write what is ready once; if any font still waits, retain the file's version; close the notice only after both document files land |
+| edits reduce all five notice counts to zero during Keep or after its failure | the waiting or retry notice stays visible until the choice finishes |
 | a font finally arrives after that deadline | save the fitted document and its ready version2 |
 | leaving/quitting/switch off during Keep's wait | honor the choice by writing what is ready; Keep's waiting state belongs to that chapter and is cleared when it ends |
 | chapter.json lands but translations.json fails | the whole save has failed: indicator stays failed/unsaved, no new ledger snapshot or kept claim; retry writes both files |
@@ -1022,13 +1028,28 @@ the newer document is saved. The note comparison sees page position and
 mode/settings as well as every durable box/page field. Notes for version2
 preserve its engine-only grow policy while keeping its notice off.
 
+The review of `dffafec94d4728244dc381082e4e2375d6079bba` contradicted this
+round's earlier switch-off claim: reset erased the pending stamp and restart
+treated newer memory as the opened file. The reviewer measured disk height48
+against memory70, saved=true, and no quit write; it also measured an older
+browser translations snapshot incorrectly adopted by Rust. The source now
+records browser snapshots too, retains the last actual disk snapshot across
+engine turns, and settles debt Rust acquired after switch-off. A chapter
+change clears that ledger, while a simple engine change does not. Settings changes the same
+chapter’s breaker without clearing the pending snapshot or document identity;
+a held-write mode-switch probe checks the independent chosen mode and both files.
+**These review fixes have not yet passed their new tests.**
+
 The three original bad orders are retained as named real-store/real-saver
 model sequences. The old unpatched store's seeds20261102,20261268 and
 20261024, and84 failures in1500 sequences, are **historical measured evidence
 from the paused worker**, not new measurements by this worker.
 
 The model now reads both chapter.json and translations.json and checks
-chapter mode and typesetting mode. It has two distinct pages, page-order
+chapter mode and typesetting mode. Literal version1/version2 fixtures replace
+fixtures previously made by running the same implementation. Three distinct
+chapter directories each have two pages; opens use the real library transition
+while old chapter/translation writes can remain held. It has page-order
 and unmarked-handle/mode/style/fit/filename events, an empty chapter event,
 and held/failing translation writes. Named boundary probes change each durable field after
 an old snapshot, let that snapshot finish, and require the next debounce's
@@ -1041,12 +1062,32 @@ page order; the offscreen-font check observes the attempted number before
 the write lands. A known-geometry deadline boundary requires Keep to write
 even when the document bytes and old number have not moved.
 
+The reviewer removed restoration's ownership guard and found that the old
+model accepted loss of a user's height33 back to26. Expected user text,
+translation, minimum chosen height, style, fit, filenames, order and modes are
+now retained independently before automatic operations. They are checked in
+memory immediately after the operation, then against both physical files
+before cleanup. The diagnostic records both serialized byte strings. Switch-on
+does not release writes, drain or flush; at-rest assertion has no final browser
+rescue flush. Explicit held Rust off/off-on and held browser-to-Rust cases
+observe both files after only the natural debounce and before leaving. A real
+second-chapter probe checks that each path retains its own choices.
+
+The at-rest Rust invariant includes chapters that crossed back to the browser.
+Pure never-Rust browser autosave loss is separately deferred; actual leave/open
+boundaries still check both files under either engine. Generated unmarked
+actions finish with the same real `relayoutAll` boundary as the original
+unmarkedHandle action. The ten raw post-snapshot probes still call their
+mutations directly, with no relayout or rescue flush.
+
 ### Keep and the notice
 
 Keep owns one bounded wait, at most4000ms. The press does not arm the ordinary
 800ms edit debounce. The waiting state is visible in EngineNotice, including
 what happens at the deadline and after a later font arrives. After failure,
 the notice offers Keep again and the save indicator/toast state remains.
+Waiting and failure keep it visible even when user edits remove every count;
+the DOM probe reaches that state through the real store's ownership tracking.
 The timeout writes even if known geometry is unchanged. Multiple arrivals
 while one Keep write is in flight are coalesced; a newer snapshot is written
 when that write finishes. A close clears the chapter's wait and promise.
@@ -1110,6 +1151,14 @@ exit1 and no new signable HTML/Markdown. A mutation removing that guard must
 reach a fully supplied synthetic report fixture, not fail because inputs
 are missing.
 
+The reviewer supplied a passing verdict declaring one box with zero raw
+records and obtained a zero-box report. Each non-refused chapter now declares
+its stored box IDs. The reporter checks the exact chapter/ID denominator,
+duplicates, missing/foreign/extra rows and complete finite Rust/strip geometry
+before writing any HTML. A missing-font or changed-wrap attribution also
+requires an independent numerical placement prediction; metadata cannot hide
+an unrelated100px move. The final real39-box division remains pending.
+
 ### Old default-mode defect (read only)
 
 `library.svelte.js` calls markSaved at the end of writeOpenChapter only when
@@ -1118,14 +1167,16 @@ write can arm an800ms timer without yet making such a call. If the old write
 lands before that timer, its markSaved clears the timer and says saved;
 the newer edit was absent from that snapshot. This order also exists with
 the switch off (inferred from code, not reproduced on user data). It is an
-old browser defect. Default mode is unchanged in this round.
+old browser defect, read only. The Rust-owned cross-switch cases are repaired;
+the pure never-Rust browser behavior is deferred.
 
 ### Proof record
 
 Measured first focused run:115/117 tests passed; first-fit and DOM files
 passed. The model's new held-translation gate was not released by its leave
 helper, so a leave-created translation write remained held; this was a
-harness defect, fixed by releasing that same gate at leave/switch-on.
+harness defect. Its initial gate-draining workaround is superseded by real
+non-draining transitions and explicitly scheduled write events in this model.
 The other failure was a strict -0/+0 match in the rule3 decomposition;
 zero is now normalized without changing the independent expectation.
 Neither failure was classified as a timing flake.
@@ -1149,15 +1200,33 @@ source. **A final-source model repeat is still required.** The earlier
 successful seed probe with a temporary visible-only Keep guard is superseded;
 the retained empty-Keep eligibility passed its own seed repeat and the6000 run.
 
+The coordinator independently ran the later `dffafec` source:87 focused tests
+passed, but the6000-sequence generated invariant failed with223 seeds while24
+named probes passed. Of those223,175 incorrectly counted held fonts after the
+switch was off;48 ended with a new unmarked event missing the original action's
+settlement boundary. The off-phase waiting oracle is corrected and those
+unmarked actions now have an explicit boundary. All6000 seeds, event choices
+and the223 original failures/shrunk orders are retained; no raw held-snapshot
+probe was given a rescue flush. The private preserved log and extracted
+p9c-dffafec-223-failures.json are the prior failing record. The review's actual
+cross-switch save losses are separate source defects and receive direct tests.
+
+The coordinator captured7243 direct WebKit metric records on `dffafec`, with
+complete=true and no errors, in private p9c-direct-root-dffafec.json. Final
+candidate repeats and the canonical local reference installation are pending.
+
 Syntax checks and parsing of the generated metric page passed (measured).
 The private p9c-mutations.py runner requires a full candidate commit SHA and
 clean worktree, archives that commit's tracked files, and makes scratch-only
 mutations. Each control/mutant checks load below8 at its own start. Private
 Vite/dot caches avoid another worktree's transforms. JSON records archive
 hash, exact source changes, command/environment, failed test names/messages,
-and separate killed/survived/invalid/error/timeout classes. A positive control
+and separate killed/survived/invalid/error/timeout classes. The original16
+catalog and ten review-fix mutations are separately labeled and selectable
+with --group original or --group review; the old pre-review runner bytes and
+hash are preserved. A positive control
 must actually select and pass tests before its mutant runs. Source hashes
-are compared at the end. **The16 mutation replay, final-source model repeat,
+are compared at the end. **Both mutation groups, final-source model repeat,
 full suites, engine/native tests, browser check, direct metric capture, both
 captures, repeated real dry run and final Codex review remain pending.**
 They will be scheduled below load8 and recorded here before acceptance. The

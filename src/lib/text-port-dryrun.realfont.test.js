@@ -437,7 +437,7 @@ if (process.env.TP_DRYRUN !== '1') {
       }
       chapters.push({
         chapter: stem, mode, modeFrom: hasMode ? 'file' : 'legacy', version, pages: (record.pages ?? []).length, boxes: stored.size,
-        idsRepaired: named.repaired,
+        idsRepaired: named.repaired, boxIds: [...ids.values()],
         minted, savedAtOpen, savedAfterFonts, writesByOpening: beforeLeave - writesBefore, writesOnLeave,
         notice, writesOnKeep, versionOnKeep, versionBack,
         browserRun: !!browser, paintFailures: painted.filter((p) => p.includes(' FAILED ')),

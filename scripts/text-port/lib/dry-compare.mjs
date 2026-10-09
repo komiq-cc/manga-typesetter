@@ -125,6 +125,7 @@ export function changeOf({ stored, rust, wk, font, id = 'a box' }) {
   // font-box baseline must not be attributed to ink, and altering blockY or
   // positioned ink cannot alter this prediction.
   const ink = compared && !lines ? predictMiddle(wk.directMetrics, lay.directMetrics) : null;
+  const placement = compared ? predictMiddle(wk.directMetrics, lay.directMetrics) : null;
   const out = {
     x, w, size, dy: y, dh: h,
     grew: h > 0, shrank: h < 0,
@@ -132,7 +133,7 @@ export function changeOf({ stored, rust, wk, font, id = 'a box' }) {
     unflagged: !flaggedAfter && flaggedBefore,
     flagChanged: flaggedAfter && flaggedBefore && JSON.stringify(after.review.overflow) !== JSON.stringify(stored.review.overflow),
     flaggedBySafari,
-    compared, lines, blockDy, blockDx, moved, ink,
+    compared, lines, blockDy, blockDx, moved, ink, placement,
     missing: !!font?.missing,
     borrows: !!(font && (font.borrowed.length || font.none.length || font.unread.length)),
   };

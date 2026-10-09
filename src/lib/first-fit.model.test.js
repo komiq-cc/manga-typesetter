@@ -15,6 +15,11 @@
 //   (b) the file is the document in memory, and its version is 2 if and only
 //       if the Rust engine has fitted every box in it.
 //   And leaving, while things are in motion, ends in one of the two.
+// This at-rest invariant covers chapters that Rust has owned. The known
+// never-Rust browser autosave race remains deferred; real leave/open
+// boundaries still check both files under either engine. Independently
+// retained user choices must survive automatic fits/restoration in memory
+// and in chapter.json AND translations.json, across distinct chapter paths.
 //
 // And one thing more that the file alone cannot show: Keep is ONE write.
 //
@@ -28,7 +33,7 @@
 //
 // The engines are the stand-ins of first-fit.test.js: what is tested is an
 // order of events, and a measurement only has to differ between the two.
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 
 vi.mock('./fsx.js', () => {
   const tree = { dirs: new Set(), files: new Map() };
@@ -91,7 +96,7 @@ vi.mock('./fsx.js', () => {
 const { fsx } = await import('./fsx.js');
 const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
-const { app, autoFitBox, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, DOC_SAVE_MS } = store;
+const { app, autoFitBox, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
 const { buildTextJson } = await import('./text-json.js');
 const { initHistory } = await import('./editor/history.svelte.js');
 const { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } = await import('./engine-switch.svelte.js');
@@ -204,6 +209,7 @@ async function until(promise) {
 
 let p;
 let c;
+let chapters;
 let chapterPath;
 let translationsPath;
 let V1;
@@ -215,7 +221,7 @@ const textOnDisk = () => fsx._tree.files.get(translationsPath);
 const rustFitting = () => engineSwitch.phase === 'on' && textEngine()?.id === 'rust';
 // Whether a box of the open chapter is still without its font: the engine is
 // starting, or a request for the slow family has not been answered.
-const waiting = () => engineSwitch.phase === 'starting' || hand.fonts.some((f) => f.turn === engineTurn && app.pages.some((pg) => pg.boxes.some((b) => b.style?.font === f.family)));
+const waiting = () => engineSwitch.phase === 'starting' || (rustFitting() && hand.fonts.some((f) => f.turn === engineTurn && app.pages.some((pg) => pg.boxes.some((b) => b.style?.font === f.family))));
 
 const canon = (v) =>
   JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
@@ -262,19 +268,23 @@ beforeAll(async () => {
   await until(addFontFile(fontFile('AnimeAce.ttf')));
   await until(addFontFile(fontFile('Narrow.ttf')));
   p = await until(createProject('Model'));
-  c = await until(createChapter({ projectId: p.id, number: 1, title: 'Old', files: [{ name: 'a.png', arrayBuffer: async () => new Uint8Array([1]).buffer }], translations: [] }));
+  chapters = [];
+  for (const [number, title] of [[1, 'Old'], [2, 'Other'], [3, 'Empty']]) {
+    chapters.push(await until(createChapter({ projectId: p.id, number, title, files: ['a.png', 'b.png'].map((name) => ({ name, arrayBuffer: async () => new Uint8Array([1]).buffer })), translations: [] })));
+  }
+  c = chapters[0];
   chapterPath = `${c.dir}/chapter.json`;
   translationsPath = `${c.dir}/translations.json`;
   fsx._before = (path, text) => {
-    if (path === translationsPath) {
+    if (chapters.some((ch) => path === `${ch.dir}/translations.json`)) {
       if (!hand.holdTranslations) return undefined;
       return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
     }
-    if (path !== chapterPath) return undefined;
-    hand.began.push({ version: JSON.parse(text).typesetting?.version ?? null, at: Date.now() });
+    if (!chapters.some((ch) => path === `${ch.dir}/chapter.json`)) return undefined;
+    hand.began.push({ path, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now() });
     seen.writes++;
     const number = hand.began.at(-1).version;
-    if (waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
+    if (path === chapterPath && waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
     // Keep is one write, and it happens when its wait is over: not while a
     // font is still on its way and the wait has time left.
     if (state.keep?.alone && waiting() && Date.now() - state.keep.at < KEEP_WAIT_MS) {
@@ -284,29 +294,23 @@ beforeAll(async () => {
     return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
   };
 
-  // The two files a sequence opens. Version 1: the chapter as the browser
-  // fitted and saved it. Version 2: the same, kept under the Rust engine.
+  // Literal fixture geometry, not a fixture produced by this implementation's
+  // fit/save path: browser line boxes are 22px plus4px padding (26/48/70).
+  // The second file is independently numbered2 with ample 500px boxes.
   const raw = JSON.parse(onDisk());
-  raw.pages[0] = { ...raw.pages[0], w: 800, h: 1200, lines: LINES(), boxes: BOXES() };
-  raw.pages.push({ ...raw.pages[0], id: 2, file: 'b.png', lines: [{ n: 2, text: 'BB', tr: 'BB', tags: [] }], boxes: [box('second', 'AnimeAce', 'SECOND', 200, 100)] });
+  raw.mode = 'typeset';
+  raw.pages[0] = { ...raw.pages[0], w: 800, h: 1200, lines: LINES(), detect: null, boxes: BOXES().map((b, i) => ({ ...b, h: [26, 70, 26, 48][i] })) };
+  raw.pages[1] = { ...raw.pages[0], id: 2, file: 'b.png', lines: [{ n: 2, text: 'BB', tr: 'BB', tags: [] }], boxes: [box('second', 'AnimeAce', 'SECOND', 200, 100)] };
+  raw.pages[1].boxes[0].h = 26;
   raw.typesetting = { mode: 'smart', version: 1 };
-  fsx._tree.files.set(chapterPath, JSON.stringify(raw));
-  await until(openChapter(p.id, c.id));
-  await until(flushBeforeLeaving('editor'));
-  closeChapter();
-  V1 = onDisk();
-  hand.fontHeld = false;
-  await until(useTextEngine('rust'));
-  await until(openChapter(p.id, c.id));
-  await pass(0);
-  app.pages[0].boxes[0].text = 'AB';
-  autoFitBox(app.pages[0].boxes[0], app.pages[0]);
-  markUnsaved();
-  await until(flushBeforeLeaving('editor'));
-  closeChapter();
-  V2 = onDisk();
-  await until(useTextEngine('browser'));
-  if (JSON.parse(V1).typesetting.version !== 1 || JSON.parse(V2).typesetting.version !== 2) throw new Error('the model could not make its two files');
+  raw.pages = raw.pages.slice(0, 2);
+  V1 = JSON.stringify(raw);
+  const kept = JSON.parse(V1);
+  kept.typesetting.version = 2;
+  for (const pg of kept.pages) for (const b of pg.boxes) b.h = 500;
+  kept.pages[0].boxes[0].text = 'AB';
+  V2 = JSON.stringify(kept);
+  resetFiles();
 });
 
 afterAll(async () => {
@@ -325,24 +329,95 @@ afterAll(async () => {
   vi.useRealTimers();
 });
 
+beforeEach(() => {
+  state.transition++;
+  resetFiles();
+});
+
 // ---------- the events ----------
 // Each is something that happens to the app from outside it. One that cannot
 // happen in the state it finds (Keep with no chapter open) does nothing.
 class Broken extends Error {}
 // What the sequences did, over a whole run.
-const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0 };
-const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null };
+const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0 };
+const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), transition: 0, pending: new Set() };
+const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
+const copy = (v) => JSON.parse(JSON.stringify(v));
+const paths = (ch) => ({ chapter: `${ch.dir}/chapter.json`, text: `${ch.dir}/translations.json` });
+function adopt(ch) {
+  c = ch;
+  ({ chapter: chapterPath, text: translationsPath } = paths(ch));
+}
+function resetFiles() {
+  state.choices.clear();
+  state.rustChapters.clear();
+  for (const [i, ch] of chapters.entries()) {
+    const raw = JSON.parse(i === 1 ? V2 : V1);
+    raw.id = ch.id;
+    raw.number = i + 1;
+    if (i === 2) for (const pg of raw.pages) pg.boxes = [];
+    const path = paths(ch);
+    fsx._tree.files.set(path.chapter, JSON.stringify(raw));
+    fsx._tree.files.set(path.text, buildTextJson(raw.pages));
+  }
+  adopt(chapters[0]);
+}
+// Retained before any automatic fit/restoration. These are user choices, not
+// values copied from whatever memory remains after an operation under test.
+function choose(kind, value, pg = app.pages[0], b = pg?.boxes[0], ln = pg?.lines[0]) {
+  const id = app.chapterRef?.chapterId;
+  if (!id) return;
+  const choices = state.choices.get(id) ?? new Map();
+  state.choices.set(id, choices);
+  const key = ['order', 'mode', 'typesetting'].includes(kind) ? kind : `${kind}/${pg?.id}/${b?.id}/${ln?.n}`;
+  choices.set(key, { kind, value: copy(value), page: pg?.id, box: b?.id, line: ln?.n });
+}
+function choicesIn(id, record, text, when) {
+  for (const want of state.choices.get(id)?.values() ?? []) {
+    const pg = record.pages.find((p) => p.id === want.page);
+    const b = pg?.boxes.find((b) => b.id === want.box);
+    const ln = pg?.lines.find((l) => l.n === want.line);
+    const tp = text.pages.find((p) => p.page === want.page);
+    const extraIndex = pg?.boxes.filter((b) => b.lineN == null).findIndex((b) => b.id === want.box);
+    const extra = extraIndex >= 0 ? tp?.extraBoxes[extraIndex] : null;
+    const got = {
+      text: b?.text, height: b?.h, style: b?.style?.color, fit: b?.fit,
+      file: pg?.file, cleaned: pg?.cleaned ?? pg?.cleanedFile ?? null,
+      translation: ln?.tr, order: record.pages.map((p) => p.id),
+      mode: record.mode, typesetting: record.typesetting?.mode,
+    }[want.kind];
+    const okay = want.kind === 'height' ? got >= want.value : canon(got) === canon(want.value);
+    const second = want.kind === 'translation' ? tp?.lines.find((l) => l.n === want.line)?.en
+      : want.kind === 'text' ? extra?.text
+      : want.kind === 'height' ? extra?.h
+      : want.kind === 'order' ? text.pages.map((p) => p.page) : undefined;
+    const secondOkay = second === undefined && !['translation', 'text', 'height', 'order'].includes(want.kind)
+      ? true : want.kind === 'height' ? second >= want.value : canon(second) === canon(want.value);
+    if (!okay || !secondOkay) throw new Broken(`${when}: user ${want.kind} choice ${canon(want.value)} was lost (chapter ${id}; chapter.json ${canon(got)}; translations.json ${canon(second)})`);
+  }
+}
+function choicesLive(when) {
+  if (!live()) return;
+  choicesIn(c.id, { pages: app.pages, mode: app.chapterMode, typesetting: app.typesetting }, JSON.parse(buildTextJson(app.pages)), when);
+}
+function choicesOnDisk(ch, when) {
+  const path = paths(ch);
+  choicesIn(ch.id, JSON.parse(fsx._tree.files.get(path.chapter)), JSON.parse(fsx._tree.files.get(path.text)), when);
+}
 
 function checkFile(when) {
   const bytes = onDisk();
   const rec = JSON.parse(bytes);
-  const asOpened = bytes === state.opened && textOnDisk() === state.openedText && !state.touched;
+  const chapterAsOpened = bytes === state.opened;
+  const textAsOpened = textOnDisk() === state.openedText;
+  const asOpened = chapterAsOpened && textAsOpened && !state.touched;
   const same = canon(rec.pages) === canon(documentNow()) && rec.mode === app.chapterMode && rec.typesetting?.mode === app.typesetting.mode && textOnDisk() === buildTextJson(app.pages);
   const inMotion = waiting();
   const version = rec.typesetting?.version;
-  const say = (what) => new Broken(`${when}: ${what} (file version ${version}; ${asOpened ? 'file as opened' : 'file written'}; ${state.touched ? 'touched' : 'untouched'}; app.saved ${app.saved}; ${rustFitting() ? 'Rust measuring' : `switch ${engineSwitch.phase}`}${inMotion ? '; a box still waiting' : ''})`);
+  const say = (what) => new Broken(`${when}: ${what} (file version ${version}; chapter bytes ${chapterAsOpened ? 'as opened' : 'changed'}; translation bytes ${textAsOpened ? 'as opened' : 'changed'}; ${state.touched ? 'touched' : 'untouched'}; app.saved ${app.saved}; ${rustFitting() ? 'Rust measuring' : `switch ${engineSwitch.phase}`}${inMotion ? '; a box still waiting' : ''})\n  serialized chapter.json: ${bytes}\n  serialized translations.json: ${textOnDisk()}\n  retained user choices: ${JSON.stringify([...state.choices.get(c.id)?.values() ?? []])}`);
   seen[asOpened ? 'asOpened' : 'asDocument']++;
   if (!state.touched && (JSON.parse(state.opened).typesetting?.version ?? 1) < 2 && engineSwitch.mode === 'rust' && (!asOpened || hand.began.length !== state.openedWrites)) throw say('an untouched, unkept chapter was written: both document files and the write count must stay as opened');
+  choicesOnDisk(c, when);
   if (asOpened) return;
   if (!same) throw say('the file is neither the file that was opened nor the document in memory');
   // (b): what its number may be. At rest under the Rust engine every box is
@@ -355,11 +430,6 @@ function checkFile(when) {
 
 async function leave() {
   if (!state.open) return;
-  // Leaving waits for its write: nothing is held back from here.
-  hand.hold = false;
-  hand.holdTranslations = false;
-  for (const w of hand.writes.splice(0)) w.ok();
-  await pass(0);
   const went = await until(flushBeforeLeaving('editor'));
   if (went !== true) throw new Broken('leaving: the flush did not let the user go');
   await pass(0);
@@ -384,58 +454,112 @@ async function open(bytes) {
   state.openedWrites = hand.began.length;
   state.touched = false;
   state.keep = null;
+  if (engineSwitch.mode === 'rust') state.rustChapters.add(c.id);
+}
+
+// Real library transitions can wait behind a held write. Request them without
+// draining it; subsequent writeLands/writeFails/time events decide their order.
+async function requestOpen(index) {
+  const target = chapters[index];
+  const outgoing = live() ? c : null;
+  const generation = ++state.transition;
+  const held = hand.hold || hand.holdTranslations || hand.writes.length > 0;
+  const request = openChapter(p.id, target.id);
+  state.pending.add(request);
+  state.lastOpen = request;
+  request.then(() => {
+    if (generation !== state.transition || app.chapterRef?.chapterId !== target.id) return;
+    if (outgoing && outgoing.id !== target.id) choicesOnDisk(outgoing, 'after opening another chapter');
+    adopt(target);
+    state.open = true;
+    state.opened = onDisk();
+    state.openedText = textOnDisk();
+    state.openedWrites = hand.began.length;
+    state.touched = (state.choices.get(target.id)?.size ?? 0) > 0;
+    state.keep = null;
+    if (engineSwitch.mode === 'rust') state.rustChapters.add(c.id);
+  }).catch((error) => {
+    if (error instanceof Broken) hand.broke ??= error.message;
+    // A failed leave-save makes the actual open refuse; the old document stays.
+    else if (!app.saveFailed) hand.broke ??= `opening: ${error.message}`;
+  }).finally(() => state.pending.delete(request));
+  await pass(0);
+  if (!held) await until(request).catch(() => {});
+}
+async function requestLeave() {
+  if (!live()) return;
+  const ref = app.chapterRef;
+  const held = hand.hold || hand.holdTranslations || hand.writes.length > 0;
+  const request = flushBeforeLeaving('editor');
+  state.pending.add(request);
+  request.then((went) => {
+    if (!went || app.chapterRef !== ref) return;
+    checkFile('after leaving');
+    seen.left++;
+    closeChapter();
+    state.open = false;
+    state.keep = null;
+  }).catch((error) => { hand.broke ??= `leaving: ${error.message}`; }).finally(() => state.pending.delete(request));
+  await pass(0);
+  if (!held) await until(request).catch(() => {});
 }
 
 const EVENTS = {
-  open1: () => open(V1),
-  open2: () => open(V2),
-  openEmpty: () => open(JSON.stringify({ ...JSON.parse(V1), pages: JSON.parse(V1).pages.map((pg) => ({ ...pg, boxes: [] })) })),
-  leave,
+  open1: () => requestOpen(0),
+  open2: () => requestOpen(1),
+  openEmpty: () => requestOpen(2),
+  leave: requestLeave,
   // An edit whose fit runs at once (a font the engine has), one whose fit is
   // held while its font is on its way, and one that fits nothing: a line of
   // the queue that is not placed.
   edit() {
-    if (!state.open) return;
+    if (!live()) return;
     const b = app.pages[0].boxes[0];
     if (!b) return;
     b.text = `${b.text} AA`;
+    choose('text', b.text, app.pages[0], b);
     autoFitBox(b, app.pages[0]);
     markUnsaved();
     state.touched = true;
   },
   editLate() {
-    if (!state.open) return;
+    if (!live()) return;
     const pg = app.pages.find((pg) => pg.id === 1);
     const b = pg?.boxes[3];
     if (!b) return;
     b.text = `${b.text} CC`;
+    choose('text', b.text, pg, b);
     autoFitBox(b, pg);
     markUnsaved();
     state.touched = true;
   },
   reversePages() {
-    if (!state.open) return;
+    if (!live()) return;
     app.pages.reverse();
+    choose('order', app.pages.map((p) => p.id));
     state.touched = true;
     relayoutAll();
   },
   unmarkedHandle() {
-    if (!state.open) return;
+    if (!live()) return;
     if (!app.pages[0].boxes[0]) return;
     app.pages[0].boxes[0].h += 7;
+    choose('height', app.pages[0].boxes[0].h);
     state.touched = true;
     relayoutAll();
   },
   unmarkedMode() {
-    if (!state.open) return;
+    if (!live()) return;
     app.chapterMode = app.chapterMode === 'translate' ? 'typeset' : 'translate';
+    choose('mode', app.chapterMode);
     state.touched = true;
     relayoutAll();
   },
   holdTranslations() { hand.holdTranslations = true; },
   editLine() {
-    if (!state.open) return;
+    if (!live()) return;
     app.pages[0].lines[0].tr += 'A';
+    choose('translation', app.pages[0].lines[0].tr);
     markUnsaved();
     state.touched = true;
   },
@@ -459,7 +583,7 @@ const EVENTS = {
   },
   keep() {
     const changes = firstFitChanges();
-    if (!state.open || !changes || changes.kept) return;
+    if (!live() || !changes || changes.kept) return;
     // Whether this Keep is all that asks for a write: nothing of the user's
     // is unsaved when it is pressed.
     if (!state.keep) state.keep = { alone: !state.touched && app.saved, began: hand.began.length, at: Date.now(), waited: waiting() };
@@ -471,27 +595,11 @@ const EVENTS = {
     await until(useTextEngine('browser'));
     if (state.keep) state.keep.alone = false;
   },
-  // The switch on. Before it, the chapter the browser has open is written if
-  // it is unsaved: with the switch off a save armed while a write is in
-  // flight is cancelled when that write lands (an old defect, pinned at the
-  // foot of this file), and what the model is after is the switch on.
+  // The real switch: no write release, forced save or ledger re-baseline.
+  // Rust must acquire whatever browser snapshot is still in flight.
   async switchOn() {
     if (engineSwitch.mode === 'rust') return;
-    if (state.open) {
-      hand.hold = false;
-      hand.holdTranslations = false;
-      for (const w of hand.writes.splice(0)) w.ok();
-      await pass(0);
-      await until(flushSave());
-      await pass(0);
-      // From here the file the switch came on over is "the file that was
-      // opened", and nobody has touched the chapter the engine is about to fit.
-      state.opened = onDisk();
-      state.openedText = textOnDisk();
-      state.openedWrites = hand.began.length;
-      state.touched = false;
-      state.keep = null;
-    }
+    if (live()) state.rustChapters.add(c.id);
     hand.startHeld = true;
     useTextEngine('rust').catch(() => {});
   },
@@ -501,31 +609,34 @@ const EVENTS = {
   },
 };
 const UNMARKED = {
-  text() { app.pages[0].boxes[0].text += ' UNMARKED'; },
-  height() { app.pages[0].boxes[0].h += 7; },
-  style() { app.pages[0].boxes[0].style.color = '#123456'; },
-  fit() { app.pages[0].boxes[0].fit = { kind: 'rect', x: 0, y: 0, w: 120, h: 80 }; },
-  file() { app.pages[0].file = 'changed.png'; },
-  cleaned() { app.pages[0].cleanedFile = 'changed-cleaned.png'; },
-  translation() { app.pages[0].lines[0].tr += ' UNMARKED'; },
-  order() { app.pages.reverse(); },
-  mode() { app.chapterMode = app.chapterMode === 'typeset' ? 'translate' : 'typeset'; },
-  typesetting() { app.typesetting.mode = app.typesetting.mode === 'smart' ? 'plain' : 'smart'; },
+  text() { app.pages[0].boxes[0].text += ' UNMARKED'; choose('text', app.pages[0].boxes[0].text); },
+  height() { app.pages[0].boxes[0].h += 7; choose('height', app.pages[0].boxes[0].h); },
+  style() { app.pages[0].boxes[0].style.color = '#123456'; choose('style', '#123456'); },
+  fit() { app.pages[0].boxes[0].fit = { kind: 'rect', x: 0, y: 0, w: 120, h: 80 }; choose('fit', app.pages[0].boxes[0].fit); },
+  file() { app.pages[0].file = 'changed.png'; choose('file', 'changed.png'); },
+  cleaned() { app.pages[0].cleanedFile = 'changed-cleaned.png'; choose('cleaned', 'changed-cleaned.png'); },
+  translation() { app.pages[0].lines[0].tr += ' UNMARKED'; choose('translation', app.pages[0].lines[0].tr); },
+  order() { app.pages.reverse(); choose('order', app.pages.map((p) => p.id)); },
+  mode() { app.chapterMode = app.chapterMode === 'typeset' ? 'translate' : 'typeset'; choose('mode', app.chapterMode); },
+  typesetting() { app.typesetting.mode = app.typesetting.mode === 'smart' ? 'plain' : 'smart'; choose('typesetting', app.typesetting.mode); },
 };
 
 for (const [field, change] of Object.entries(UNMARKED)) {
   EVENTS[`unmarked_${field}`] = () => {
-    if (!state.open || !app.pages[0].boxes.length) return;
+    if (!live() || !app.pages[0].boxes.length) return;
     change();
     state.touched = true;
+    // A completed unmarked action has the same real settlement boundary as
+    // unmarkedHandle. The held-snapshot probes above call change() directly,
+    // with no relayout, to test a genuinely unannounced mutation at landing.
+    relayoutAll();
   };
 }
 const TOUCHING = new Set(['edit', 'editLate', 'editLine', 'reversePages', 'unmarkedHandle', 'unmarkedMode', 'leave', 'open1', 'open2', 'openEmpty', 'switchOff', 'switchOn', 'writeFails', 'keep', ...Object.keys(UNMARKED).map((field) => `unmarked_${field}`)]);
 
 // Everything comes to rest: the fonts land, the engine starts, the writes
 // land, the clock runs past every debounce and every wait. A save that failed
-// is tried again, as leaving tries it; and with the switch off the chapter is
-// left, which is when the browser's saves are certain to have happened.
+// is tried again, as leaving tries it. No final flush repairs a lost debounce.
 async function rest() {
   for (let i = 0; i < 14; i++) {
     hand.hold = false;
@@ -544,6 +655,7 @@ async function run(events) {
   resetHand();
   state.open = false;
   state.keep = null;
+  resetFiles();
   let at = '';
   try {
     for (const [i, name] of events.entries()) {
@@ -551,17 +663,19 @@ async function run(events) {
       if (state.keep && TOUCHING.has(name) && name !== 'keep') state.keep.alone = false;
       await EVENTS[name]();
       await pass(0);
+      choicesLive(`after ${name}`);
       if (hand.broke) throw new Broken(hand.broke);
     }
     at = 'coming to rest';
     await rest();
     if (hand.broke) throw new Broken(hand.broke);
-    if (state.open) {
-      if (engineSwitch.phase === 'off') {
-        await until(flushSave());
-        await pass(0);
-      }
-      checkFile('at rest');
+    if (live()) {
+      // No final rescue flush. The invariant belongs to chapters Rust has
+      // owned. The old pure-browser autosave race remains deferred; actual
+      // leave/open boundaries still assert both files for every engine.
+      if (state.rustChapters.has(c.id) || engineSwitch.mode === 'rust') checkFile('at rest');
+      else seen.browserDeferred++;
+      choicesLive('at rest');
       // Keep is one write: pressed over a chapter with nothing of the user's
       // unsaved, and with nothing but time, fonts and the disk happening
       // after, the file is written once. Once more only when the wait ran
@@ -573,25 +687,31 @@ async function run(events) {
         if (wrote.length !== 1 && !late) throw new Broken(`Keep wrote the chapter ${wrote.length} times, at version ${wrote.map((w) => w.version).join(' then ')}; it is one write`);
       }
     }
+    for (const ch of chapters) if (ch.id !== app.chapterRef?.chapterId) choicesOnDisk(ch, 'inactive chapter at rest');
     return null;
   } catch (e) {
     if (!(e instanceof Broken)) throw new Error(`${at}: ${e?.stack ?? e}`);
     return `${e.message}`;
   } finally {
-    // Whatever state the sequence ended in, the next starts from none.
+    // Assertions have already run. Cleanup may drain/flush, but it cannot
+    // make a failed sequence pass. Supersede pending opens before the next
+    // sequence installs its literal fixture files.
+    state.transition++;
     resetHand();
     await pass(0);
-    if (state.open) {
+    if (app.chapterRef && app.loaded) {
       await until(flushBeforeLeaving('editor')).catch(() => {});
-      closeChapter();
-      state.open = false;
     }
+    closeChapter();
+    state.open = false;
+    for (const pending of [...state.pending]) await until(pending).catch(() => {});
     hand.fontHeld = false;
     await until(useTextEngine('browser'));
     resetHand();
     await pass(3000);
     resetSaveFailures();
     app.saveFailed = false;
+    state.choices.clear();
   }
 }
 
@@ -697,6 +817,167 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       state.touched = true;
       checkFile('after the follow-up debounce, with the slow font still held');
       expect(hand.fonts.length).toBeGreaterThan(0);
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
+  it.each([false, true])('an older Rust write lands after switch-off (restart %s) and the fitted edit reaches both files before leaving', async (restart) => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      hand.hold = true;
+      await EVENTS.editLate();
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      expect(hand.writes).toHaveLength(1);
+      expect(JSON.parse(onDisk()).pages[0].boxes[3].h).toBe(48);
+      await EVENTS.fontLands();
+      await pass(0);
+      // Literal fake-engine measurement, recorded before switch restoration;
+      // never use the potentially restored post-switch document as the oracle.
+      const fittedHeight = 70;
+      expect(app.pages[0].boxes[3].h).toBe(fittedHeight);
+      const wantedTranslation = 'AAA';
+      const wantedText = 'AAAA BBBB CC';
+      await EVENTS.switchOff();
+      expect(app.pages[0].boxes[3].h).toBe(fittedHeight);
+      if (restart) {
+        await EVENTS.switchOn();
+        await EVENTS.engineStarts();
+        await pass(0);
+      }
+      hand.hold = false;
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(app.saved, 'the older snapshot did not contain the fitted edit').toBe(false);
+      await pass(DOC_SAVE_MS);
+      const chapter = JSON.parse(onDisk());
+      const translations = JSON.parse(textOnDisk());
+      expect(chapter.pages[0].boxes[3]).toMatchObject({ h: fittedHeight, text: wantedText });
+      expect(translations.pages[0].extraBoxes[3]).toMatchObject({ h: fittedHeight, text: wantedText });
+      expect(chapter.pages[0].lines[0].tr).toBe(wantedTranslation);
+      expect(translations.pages[0].lines[0].en).toBe(wantedTranslation);
+      checkFile('switch debt settled by its natural debounce, before leaving');
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
+  it('an older browser translations snapshot cannot become Rust’s opened baseline, with no rescue flush', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await open(V1);
+      hand.holdTranslations = true;
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      expect(hand.writes[0].path).toBe(translationsPath);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe('AAA');
+      await EVENTS.editLine();
+      const intended = 'AAAA';
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await pass(0);
+      hand.holdTranslations = false;
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(app.saved).toBe(false);
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe(intended);
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe(intended);
+      checkFile('browser snapshot acquired by Rust, before leaving');
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
+  it('opening the actual second chapter waits behind both old files and preserves each chapter’s choices', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      const first = paths(chapters[0]);
+      const second = paths(chapters[1]);
+      const secondBefore = fsx._tree.files.get(second.chapter);
+      const secondTextBefore = fsx._tree.files.get(second.text);
+      hand.hold = true;
+      hand.holdTranslations = true;
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      await EVENTS.editLine();
+      await EVENTS.open2();
+      expect(app.chapterRef.chapterId).toBe(chapters[0].id);
+      expect(fsx._tree.files.get(second.chapter)).toBe(secondBefore);
+      expect(fsx._tree.files.get(second.text)).toBe(secondTextBefore);
+      // Release only the old chapter snapshot, then its derived file. The
+      // leave flush queued by the real open still waits for its newer snapshot.
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(hand.writes[0].path).toBe(first.text);
+      expect(app.chapterRef.chapterId).toBe(chapters[0].id);
+      hand.hold = false;
+      hand.holdTranslations = false;
+      hand.writes.shift().ok();
+      await until(state.lastOpen);
+      await pass(0);
+      expect(app.chapterRef.chapterId).toBe(chapters[1].id);
+      expect(JSON.parse(fsx._tree.files.get(first.chapter)).pages[0].lines[0].tr).toBe('AAAA');
+      expect(JSON.parse(fsx._tree.files.get(first.text)).pages[0].lines[0].en).toBe('AAAA');
+      choicesOnDisk(chapters[0], 'old files after the real second open');
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(fsx._tree.files.get(second.chapter)).pages[0].lines[0].tr).toBe('AAA');
+      expect(JSON.parse(fsx._tree.files.get(second.text)).pages[0].lines[0].en).toBe('AAA');
+      choicesOnDisk(chapters[1], 'second files after their own debounce');
+      checkFile('second chapter independently saved');
+    } finally {
+      await rest();
+      await leave();
+      await until(useTextEngine('browser'));
+      resetHand();
+    }
+  });
+
+  it('a Settings breaker change during a held write keeps this chapter’s ledger and both durable files current', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      const id = app.chapterRef.chapterId;
+      hand.holdTranslations = true;
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      expect(hand.writes[0].path).toBe(translationsPath);
+      await EVENTS.editLine();
+      choose('typesetting', 'plain');
+      setChapterTypesetMode('plain');
+      expect(app.chapterRef.chapterId).toBe(id);
+      hand.holdTranslations = false;
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(app.saved).toBe(false);
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).typesetting.mode).toBe('plain');
+      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe('AAAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
+      checkFile('same-chapter Settings change settled before leaving');
     } finally {
       await rest();
       await leave();
@@ -830,6 +1111,11 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
   // Review findings and mutation-sensitive boundaries, kept by name so they
   // run even when the generator's seed count is zero.
   const FOUND = {
+    'switching off cannot restore over an independently retained handle choice': ['switchOn', 'engineStarts', 'open1', 'unmarkedHandle', 'switchOff'],
+    'a held Rust save remains owed after switching off': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'switchOff', 'writeLands'],
+    'a held Rust save remains owed across off and on': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'switchOff', 'switchOn', 'engineStarts', 'writeLands'],
+    'Rust acquires an older browser translations snapshot without a pre-switch flush': ['open1', 'holdTranslations', 'editLine', 'debounce', 'editLine', 'switchOn', 'engineStarts', 'writeLands'],
+    'a held old chapter save cannot erase the second chapter’s independent choices': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLine', 'debounce', 'editLine', 'open2', 'writeLands', 'writeLands', 'editLine', 'debounce'],
     'an unmarked style reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_style', 'leave'],
     'an unmarked fit reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_fit', 'leave'],
     'an unmarked raw filename reaches disk on leaving': ['switchOn', 'engineStarts', 'open1', 'unmarked_file', 'leave'],

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import EngineNotice from './EngineNotice.svelte';
 import ReviewList from './ReviewList.svelte';
-import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, placeActiveAt, KEEP_WAIT_MS, firstFit, keepFirstFit } from './store.svelte.js';
+import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, placeActiveAt, KEEP_WAIT_MS, firstFit, firstFitChanges, autoFitBox, keepFirstFit } from './store.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { contentWidth, setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
@@ -242,7 +242,7 @@ describe('the first-fit notice', () => {
     app.saveFailed = false;
   });
 
-  it('shows Keep waiting during a held font, then reports a timed-out save failure and allows retry', async () => {
+  it('shows Keep waiting with zero remaining change counts, then keeps a timed-out failure and retry visible', async () => {
     const file = lettered();
     const native = fakeNative({
       'Helvetica Neue': [{ slots: { regular: 0, bold: 1, italic: 2, boldItalic: 3 }, bytes: TTC() }],
@@ -272,6 +272,17 @@ describe('the first-fit notice', () => {
     expect(notice(view).textContent).toContain('Keep is waiting for fonts.');
     expect(notice(view).textContent).toContain('After four seconds it saves what is ready');
     expect(button(view, 'Waiting for fonts…').disabled).toBe(true);
+    // Each counted box becomes user-owned while the font stays held. This
+    // removes every count, without ending Keep or inventing a rendered state.
+    for (const pg of app.pages) for (const b of pg.boxes) {
+      b.text += ' USER';
+      autoFitBox(b, pg);
+    }
+    await tick();
+    expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, cleared: 0, relaid: 0, laid: 0, keeping: true });
+    expect(notice(view), 'zero counts cannot hide a pending Keep').not.toBe(null);
+    expect(notice(view).textContent).toContain('Keep is waiting for fonts.');
+    expect(notice(view).querySelector('.en-what')).toBe(null);
     await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS - 1);
     expect(saves).toHaveLength(0);
     expect(app.saved).toBe(true);
@@ -279,10 +290,11 @@ describe('the first-fit notice', () => {
     await tick();
     expect(firstFit.keeping).toBe(false);
     expect(app.toast.msg).toBe('Could not save: disk full');
+    expect(notice(view), 'zero counts cannot hide a failed Keep retry').not.toBe(null);
     expect(button(view, 'Keep').disabled).toBe(false);
     expect(notice(view).textContent).not.toContain('These are saved with the chapter.');
     unhook();
-    unhook = setSaver(async () => { saves.push(stampTypesetting()); markSaved(); });
+    unhook = setSaver(async () => { saves.push(stampTypesetting()); app.saveFailed = false; markSaved(); });
     await fireEvent.click(button(view, 'Keep'));
     await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS);
     await tick();

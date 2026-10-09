@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import { at, storedIds, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
-import { explain, inkMoved, stripAgainst, assertLanePassed } from '../../../scripts/text-port/lib/dry-report.mjs';
+import { explain, inkMoved, stripAgainst, assertLanePassed, assertReportRecords } from '../../../scripts/text-port/lib/dry-report.mjs';
+import { predictMiddle } from '../../../scripts/text-port/lib/dry-metrics.mjs';
 
 // The dry run of P9 (scripts/text-port/dry-run.mjs) says "0 boxes changed
 // their width" and "0 changes unexplained" of the user's chapters. These are
@@ -124,9 +125,27 @@ describe('a block that moved and nothing else did', () => {
     expect(m.cause).toBe(null);
   });
 
-  it('a missing font is still said first, since that is a recorded fact', () => {
-    const row = rowOf(moved(100, 1.5), { fontFacts: { ...font, missing: true, kind: 'builtin', drawnIn: 'Helvetica Neue' } });
+  it('a missing font explains only the placement independently predicted by its direct metrics', () => {
+    const row = rowOf(moved(1.5, 1.5), { fontFacts: { ...font, missing: true, kind: 'builtin', drawnIn: 'Helvetica Neue' } });
     expect(cause(row).moved.rule).toBe('D2b');
+  });
+
+  it('a missing font cannot hide an unrelated 100 px placement error', () => {
+    const row = rowOf(moved(100, 1.5), { fontFacts: { ...font, missing: true, kind: 'builtin', drawnIn: 'Helvetica Neue' } });
+    expect(cause(row).moved.cause).toBe(null);
+    expect(cause(rowOf(moved(100, 0), { fontFacts: { ...font, missing: true, borrowed: [{ family: 'Elsewhere' }] } })).moved.cause).toBe(null);
+  });
+
+  it('different line counts have a placement prediction without calling their wrapping rule 4', () => {
+    const shorter = { ...directOf(), inks: directOf().inks.slice(0, 1) };
+    expect(predictMiddle(directOf(), shorter).predictedDy).toBe(16.5);
+    const changed = moved(16.5, 0);
+    changed.lines = ['ONE'];
+    changed.lineX = [50];
+    changed.directMetrics = shorter;
+    expect(cause(rowOf(changed)).moved.rule).toBe('see lines');
+    changed.blockY += 100;
+    expect(cause(rowOf(changed)).moved.cause).toBe(null);
   });
 });
 
@@ -198,7 +217,7 @@ describe('a report needs the lane’s own passing verdict', () => {
   it('accepts only a completed passing lane', () => {
     expect(() => assertLanePassed(pass())).not.toThrow();
   });
-  it.each(['layout', 'paint'])('--report-only exits 1 and creates no signable report for a failed %s lane', (kind) => {
+  it.each(['layout', 'paint', 'record completeness'])('--report-only exits 1 and creates no signable report for failed %s', (kind) => {
     const scratch = mkdtempSync(join(tmpdir(), 'p9-report-refusal-'));
     try {
       mkdirSync(join(scratch, 'raw'));
@@ -213,7 +232,8 @@ describe('a report needs the lane’s own passing verdict', () => {
       }
       writeFileSync(join(scratch, 'raw/direct-webkit.json'), JSON.stringify({ schema: 1, engine: 'system-webkit', complete: true, errors: [], sources, records: [] }));
       writeFileSync(join(scratch, 'raw/boxes.jsonl'), '');
-      run.verdict[`${kind}Failures`].push('synthetic failure');
+      if (kind === 'record completeness') run.chapters = [{ chapter: 'one', boxes: 1, boxIds: ['a'], pages: 1, mode: 'smart', modeFrom: 'file', version: 1, idsRepaired: [], paintFailures: [] }];
+      else run.verdict[`${kind}Failures`].push('synthetic failure');
       writeFileSync(join(scratch, 'raw/run.json'), JSON.stringify(run));
       const child = spawnSync(process.execPath, ['scripts/text-port/dry-run.mjs', '--data', scratch, '--out', scratch, '--report-only', 'yes'], { encoding: 'utf8' });
       expect(child.status, child.stdout + child.stderr).toBe(1);
@@ -221,5 +241,33 @@ describe('a report needs the lane’s own passing verdict', () => {
       expect(existsSync(join(scratch, 'report.html'))).toBe(false);
       expect(existsSync(join(scratch, 'report.md'))).toBe(false);
     } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+});
+
+describe('a report accounts for every declared stored box exactly once', () => {
+  const run = () => ({ chapters: [{ chapter: 'one', boxes: 2, boxIds: ['a', 'b'] }, { chapter: 'two', boxes: 1, boxIds: ['c'] }] });
+  const row = (id, chapter = 'one') => ({ id, chapter, rust: { state: geom, lay: null }, strip: geom });
+  const complete = () => [row('a'), row('b'), row('c', 'two')];
+  it('accepts exact records from two distinct chapters', () => {
+    expect(() => assertReportRecords(run(), complete())).not.toThrow();
+  });
+  it.each([
+    ['empty', () => []],
+    ['truncated', () => complete().slice(0, 2)],
+    ['duplicate with matching total', () => [row('a'), row('a'), row('c', 'two')]],
+    ['foreign chapter', () => [row('a'), row('b'), row('c', 'other')]],
+    ['extra ID with matching total', () => [row('a'), row('d'), row('c', 'two')]],
+    ['missing Rust partner', () => [{ ...row('a'), rust: null }, row('b'), row('c', 'two')]],
+    ['missing strip partner', () => [{ ...row('a'), strip: null }, row('b'), row('c', 'two')]],
+    ['empty Rust geometry', () => [{ ...row('a'), rust: { state: {} } }, row('b'), row('c', 'two')]],
+    ['missing strip size', () => [{ ...row('a'), strip: { ...geom, size: undefined } }, row('b'), row('c', 'two')]],
+    ['nonfinite partner geometry', () => [{ ...row('a'), strip: { ...geom, h: NaN } }, row('b'), row('c', 'two')]],
+  ])('refuses %s box records', (_, rows) => {
+    expect(() => assertReportRecords(run(), rows())).toThrow('no report can be written');
+  });
+  it('refuses a missing or contradictory ID denominator', () => {
+    expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 1 }] }, [])).toThrow('no report can be written');
+    expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 1, boxIds: [] }] }, [])).toThrow('no report can be written');
+    expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 2, boxIds: ['a', 'a'] }] }, complete())).toThrow('no report can be written');
   });
 });

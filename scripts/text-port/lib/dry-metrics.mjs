@@ -27,10 +27,11 @@ export function directBlock(style, lines, measure) {
 }
 
 // Decompose the centring rule into the line-box baseline and ink around it.
-// With equal lines and line heights, a font-box change is rule3 and a change
-// of glyph ink around the baseline is rule4. Neither reads the actual shift.
+// Equal lines isolate rule3/rule4. Different line sets also permit a checked
+// placement prediction, but do not isolate the glyph-ink rule from wrapping.
+// Neither case reads the actual shift.
 export function predictMiddle(wk, rust) {
-  if (!wk || !rust || wk.inks.length !== rust.inks.length || Math.abs(wk.lineH - rust.lineH) > 1e-9) return null;
+  if (!wk || !rust || !wk.inks?.length || !rust.inks?.length || !(wk.lineH > 0) || !(rust.lineH > 0)) return null;
   const bounds = (m) => ({
     top: Math.min(...m.inks.flatMap((k, i) => k ? [i * m.lineH - k.ascent] : [])),
     bottom: Math.max(...m.inks.flatMap((k, i) => k ? [i * m.lineH + k.descent] : [])),

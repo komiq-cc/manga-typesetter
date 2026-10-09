@@ -1295,14 +1295,17 @@ const sawFirstFit = () => {
 // that says whether the document is saved.
 let loaderDirty = false;
 // What a save took as the saver took its snapshot, until it lands or fails
-// (`stampTypesetting`): the number it wrote, the document it wrote (with a
-// font source; null without), and whether the Rust engine was measuring.
+// (`stampTypesetting`): the number it wrote, the document it wrote under
+// either engine, and whether the Rust engine was measuring. Browser snapshots
+// are recorded too: turning Rust on during one must not call newer memory disk.
 let stamping = null;
-// What the file holds, with a font source and a chapter loaded: the document
+// What the file holds with a chapter loaded: the document
 // (`docText`) and the number of the last save that landed, or of the open;
-// and whether it is still the file that was opened. Null with the browser
-// measuring, where none of this is asked.
+// and whether it is still the file that was opened. `owned` settles save debt
+// acquired by Rust, including a pending snapshot across an off/on transition.
+// A fresh browser chapter records its snapshot without acquiring that policy.
 let disk = null;
+let documentTurn = 0;
 // Keep's wait: how long it lasts, its timer, whether it has run out, and the
 // promise `keepFirstFit` handed back.
 export const KEEP_WAIT_MS = 4000;
@@ -1321,7 +1324,6 @@ function endKeep(error = null) {
 }
 
 function resetFirstFit() {
-  stamping = null;
   endKeep();
   firstFit.open = false;
   firstFit.kept = false;
@@ -1392,8 +1394,13 @@ function beginFirstFit() {
   // The file, as far as this session knows it: the document that has just
   // been read from it (or that the browser has open, when the switch comes
   // on over a chapter), before the engine fits anything.
-  disk = fontSource ? { doc: docText(), version: app.typesetting.version, mode: app.chapterMode, asOpened: true } : null;
+  const opened = !disk;
+  disk ??= { doc: docText(), version: app.typesetting.version, mode: app.chapterMode, asOpened: true, owned: false };
   if (!fontSource) return;
+  // Engine turns own save debt, not a fresh disk snapshot. A browser write
+  // still in flight (or an unsaved browser edit) is already behind this memory.
+  disk.owned = true;
+  disk.asOpened = opened || (!stamping && (app.saved || loaderDirty) && disk.doc === docText() && disk.version === app.typesetting.version);
   noted = new WeakMap();
   notedTypesetting = JSON.stringify({ ...app.typesetting, version: 0 });
   notedMode = app.chapterMode;
@@ -1617,7 +1624,9 @@ function endFirstFit() {
     }
   }
   resetFirstFit();
-  disk = null;
+  // A pending Rust-owned save must survive off/on. If there is no debt and no
+  // snapshot in flight, hand this chapter back to the ordinary browser policy.
+  if (disk && !owed && !stamping) disk.owned = false;
   if (owed) markUnsaved();
 }
 
@@ -1721,7 +1730,7 @@ function versionNow() {
  */
 export function stampTypesetting() {
   const version = versionNow();
-  stamping = { version, doc: fontSource ? docText() : null, mode: app.chapterMode, byRust: rustMeasuring() };
+  stamping = { version, doc: docText(), mode: app.chapterMode, byRust: rustMeasuring(), turn: documentTurn, owned: !!fontSource || !!disk?.owned };
   return { ...app.typesetting, version };
 }
 
@@ -1733,9 +1742,9 @@ export function stampTypesetting() {
 function landed() {
   const took = stamping;
   stamping = null;
-  if (took) {
+  if (took && took.turn === documentTurn) {
     if (app.typesetting.version !== took.version) app.typesetting = { ...app.typesetting, version: took.version };
-    if (fontSource) disk = { doc: took.doc, version: took.version, mode: took.mode, asOpened: false };
+    disk = { doc: took.doc, version: took.version, mode: took.mode, asOpened: false, owned: !!fontSource || !!disk?.owned || took.owned };
     if (firstFit.open && took.byRust) {
       firstFit.kept = took.doc === docText() && took.version === versionNow();
       if (firstFit.keeping && !keepWaits() && firstFit.kept) {
@@ -1743,9 +1752,10 @@ function landed() {
         endKeep();
       }
     }
-    // A save taken with the switch on that lands after it went off: the
-    // browser's rules know nothing of what changed after its snapshot.
-    if (!fontSource && took.doc != null && took.doc !== docText()) markUnsaved();
+  } else if (!disk?.owned && app.loaded) {
+    // The loader marks the browser document saved without a stamped write.
+    // Retain its snapshot for a later Rust turn, but do not change browser saves.
+    disk = { doc: docText(), version: app.typesetting.version, mode: app.chapterMode, asOpened: true, owned: false };
   }
   settleDisk();
 }
@@ -1753,7 +1763,7 @@ function landed() {
 // Whether the file is behind the document: not (a), and not yet (b).
 // `leaving` is for the switch going off, which is not a moment to wait in.
 function fileBehind(leaving = false) {
-  if (!fontSource || !disk || !app.loaded || !app.chapterRef) return false;
+  if ((!fontSource && !disk?.owned) || !disk || !app.loaded || !app.chapterRef) return false;
   // (a): only what was noted and what the engine did, and nobody asked
   // for more. The notes also cover a version2 chapter, whose notice stays
   // off: a grow-only fit there still must not arm a save by itself.
@@ -1775,7 +1785,12 @@ const keepWaits = () => !keepOver && anyBoxWaiting();
  * of what it carried.
  */
 function settleDisk() {
-  if (!fileBehind()) return;
+  if (!fileBehind()) {
+    // Once the work crossing Rust's switch-off has landed, ordinary browser
+    // autosaves resume their existing policy. Pure never-Rust races are deferred.
+    if (!fontSource && disk) disk.owned = false;
+    return;
+  }
   if (firstFit.kept) firstFit.kept = false;
   if (firstFit.keeping && !keepWaits()) {
     const answer = keepAnswer;
@@ -1941,6 +1956,9 @@ function solveOnePending(b, p) {
 // field before the pages load - their refit already measures under it - and
 // with nothing when the chapter closes.
 export function useChapterTypesetting(raw) {
+  documentTurn++;
+  stamping = null;
+  disk = null;
   app.typesetting = normalizeTypesetting(raw);
   setTypesetEnabled(app.typesetting.mode === 'smart');
   // Another chapter, or none: what was noted of the last one goes with it.
@@ -1953,7 +1971,11 @@ export function setChapterTypesetMode(mode) {
   if (!app.chapterRef) return;
   const next = normalizeTypesetting({ ...app.typesetting, mode });
   if (next.mode === app.typesetting.mode) return;
-  useChapterTypesetting(next);
+  // Settings changes this document, not its identity. Preserve an older save's
+  // snapshot/ownership while dropping the old breaker's first-fit notice.
+  app.typesetting = next;
+  setTypesetEnabled(next.mode === 'smart');
+  resetFirstFit();
   relayoutAll();
   markUnsaved();
 }

@@ -31,7 +31,7 @@
   // Null with the browser measuring, at version 2, and once answered: then
   // nothing below reads a box.
   const changes = $derived(firstFitChanges(app.pages));
-  const any = $derived(!!changes && changes.grew + changes.flagged + changes.cleared + changes.relaid + changes.laid > 0);
+  const any = $derived(!!changes && (changes.keeping || app.saveFailed || changes.grew + changes.flagged + changes.cleared + changes.relaid + changes.laid > 0));
   const what = $derived(
     changes
       ? [
@@ -75,7 +75,7 @@
       <span class="en-mark" aria-hidden="true">i</span>
       <span class="en-title">Fitted by the new text engine for the first time</span>
     </div>
-    <div class="en-what">{what}</div>
+    {#if what}<div class="en-what">{what}</div>{/if}
     <div class="en-note">
       {changes.laid ? 'No other box' : 'No box'} changed its width, size or place.
       {#if changes.keeping}

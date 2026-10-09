@@ -96,7 +96,10 @@ export function explain(row, c, wk) {
     else say('grew', null);
   }
   if (c.moved && !c.grew && !c.dy) {
-    if (missing) say('moved', missing, 'D2b');
+    // Metadata describes a font choice, not an arbitrary placement. Even a
+    // fallback or changed wrap must independently predict this numerical move.
+    if (!placementMatches(row, c)) say('moved', null);
+    else if (missing) say('moved', missing, 'D2b');
     else if (c.lines) say('moved', 'follows from the new line breaks', 'see lines');
     else if (borrowed) say('moved', borrowed, 'rules 10, 11');
     else if (lineMoved(row, c)) say('moved', `direct font-box metrics predict ${px(c.ink.lineDy)} px down from the line-box baseline; the block moved ${px(c.blockDy)} px down`, 'rule 3');
@@ -105,6 +108,12 @@ export function explain(row, c, wk) {
     else say('moved', null);
   }
   return out;
+}
+
+export function placementMatches(row, c) {
+  if (row.valign !== 'middle' || !c.placement || c.blockDy == null) return false;
+  if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
+  return Math.abs(c.placement.predictedDy - c.blockDy) <= INK_TOL_PX;
 }
 
 // Whether a block that moved, and nothing else of its box did, moved because
@@ -135,6 +144,34 @@ export function assertLanePassed(run) {
   if (v?.complete !== true || v?.passed !== true || !Array.isArray(v.layoutFailures) || !Array.isArray(v.paintFailures) || v.layoutFailures.length || v.paintFailures.length || (run.chapters ?? []).some((c) => c.paintFailures?.length)) {
     throw new Error('the dry run lane is missing a completed passing verdict; no report can be written');
   }
+}
+
+// A passing lane's declared stored IDs are the denominator of the report.
+// Counts alone cannot catch replacing a missing row with a duplicate or an
+// unrelated box; every expected box has exactly one complete partner record.
+export function assertReportRecords(run, rows) {
+  const fail = (why) => { throw new Error(`report records are incomplete (${why}); no report can be written`); };
+  if (!Array.isArray(run.chapters) || !Array.isArray(rows)) fail('missing chapter or box records');
+  const chapters = new Map();
+  const expected = new Map();
+  for (const c of run.chapters) {
+    if (typeof c.chapter !== 'string' || chapters.has(c.chapter) || !Number.isInteger(c.boxes) || c.boxes < 0) fail('invalid or duplicate chapter metadata');
+    chapters.set(c.chapter, c);
+    if (c.refused) continue;
+    if (!Array.isArray(c.boxIds) || c.boxIds.length !== c.boxes || new Set(c.boxIds).size !== c.boxes) fail(`${c.chapter}: stored IDs do not match declared ${c.boxes} boxes`);
+    for (const id of c.boxIds) {
+      if (typeof id !== 'string' || !id || expected.has(id)) fail('invalid or duplicate stored ID');
+      expected.set(id, c.chapter);
+    }
+  }
+  const seen = new Set();
+  for (const row of rows) {
+    if (!chapters.has(row.chapter) || chapters.get(row.chapter).refused || expected.get(row.id) !== row.chapter || seen.has(row.id)) fail(`${row.id}: duplicate, extra or foreign box`);
+    if (!row.rust?.state || !row.strip) fail(`${row.id}: missing Rust or strip partner`);
+    if ([row.rust.state, row.strip].some((partner) => ['x', 'y', 'w', 'h', 'size'].some((k) => !Number.isFinite(partner[k])))) fail(`${row.id}: malformed Rust or strip geometry`);
+    seen.add(row.id);
+  }
+  if (seen.size !== expected.size) fail(`${expected.size - seen.size} stored boxes have no record`);
 }
 
 // Two tops this near are one top: what `(y + top) - top` loses.
@@ -180,8 +217,9 @@ export async function writeReport({ data, out }) {
   const run = JSON.parse(readFileSync(`${out}/raw/run.json`, 'utf8'));
   assertLanePassed(run);
   const direct = readReferenceMetrics(data, `${out}/raw/direct-webkit.json`);
-  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
   const rows = readFileSync(`${out}/raw/boxes.jsonl`, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assertReportRecords(run, rows);
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
   const wk = new Map();
   const wkFile = guardedPath(data, 'runs/ref-wk/base/layout.jsonl');
   if (existsSync(wkFile)) {
