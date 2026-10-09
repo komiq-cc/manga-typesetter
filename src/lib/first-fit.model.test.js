@@ -17,8 +17,9 @@
 //   And leaving, while things are in motion, ends in one of the two.
 // This at-rest invariant covers Rust and its actual outstanding save debt.
 // Once both current browser files land, ordinary browser ownership resumes.
-// The known browser autosave race remains deferred; real leave/open
-// boundaries still check both files under either engine. Independently
+// Real leave/open boundaries check both files under either engine. A fully
+// observed instance of the known browser autosave race stops its order and
+// records the executed prefix and unexecuted tail separately. Independently
 // retained user choices must survive automatic fits/restoration in memory
 // and in chapter.json AND translations.json, across distinct chapter paths.
 //
@@ -31,10 +32,14 @@
 //
 // replays one seed; MODEL_SEQUENCES and MODEL_STEPS change how many and how
 // long; MODEL_REPORT=1 lists every failing seed instead of stopping at five.
+// MODEL_WITNESS_OUT writes full browser witnesses to an explicit fresh private
+// reports file. Completed invariant orders and witness prefixes are separate.
 //
 // The engines are the stand-ins of first-fit.test.js: what is tested is an
 // order of events, and a measurement only has to differ between the two.
 import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 vi.mock('./fsx.js', () => {
   const tree = { dirs: new Set(), files: new Map() };
@@ -277,6 +282,34 @@ beforeAll(async () => {
   });
   vi.stubGlobal('document', { fonts: { add() {}, delete() {} } });
   vi.stubGlobal('indexedDB', fontLibrary);
+  const schedule = globalThis.setTimeout.bind(globalThis);
+  const cancel = globalThis.clearTimeout.bind(globalThis);
+  vi.stubGlobal('setTimeout', (callback, ms, ...args) => {
+    const id = schedule(callback, ms, ...args);
+    if (ms !== DOC_SAVE_MS) return id;
+    for (const window of state.finalWindows) {
+      if (window.ref !== app.chapterRef || !window.laterChoices.size || !hand.writes.includes(window.heldWriter)) continue;
+      const stack = new Error('observed final-window timer').stack;
+      if (!/\bmarkUnsaved\b/.test(stack ?? '')) continue;
+      window.timer = { id, ms, at: Date.now(), event: state.event,
+        unsavedWhenArmed: !app.saved, setterStack: stack,
+        cancelledByMarkSaved: false, bothFilesAtCancellation: false };
+    }
+    return id;
+  });
+  vi.stubGlobal('clearTimeout', (id) => {
+    for (const window of state.finalWindows) {
+      if (!window.timer || window.timer.id !== id || window.ref !== app.chapterRef) continue;
+      const stack = new Error('observed final-window cancellation').stack;
+      if (!/\bmarkSaved\b/.test(stack ?? '')) continue;
+      const path = paths(window.chapter);
+      Object.assign(window.timer, { cancelledByMarkSaved: true,
+        cancelledAt: Date.now(), cancellationEvent: state.event, clearerStack: stack,
+        bothFilesAtCancellation: fsx._tree.files.get(path.chapter) === window.snapshot?.chapter &&
+          fsx._tree.files.get(path.text) === window.snapshot?.text });
+    }
+    return cancel(id);
+  });
   fsx._tree.dirs.add('/lib');
   await setRoot('/lib');
   library.projects = [];
@@ -300,11 +333,17 @@ beforeAll(async () => {
   translationsPath = `${c.dir}/translations.json`;
   fsx._before = (path, text) => {
     if (chapters.some((ch) => path === `${ch.dir}/translations.json`)) {
+      finalSnapshot(path, text);
       if (!hand.holdTranslations) return undefined;
-      return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
+      return new Promise((ok, fail) => {
+        const writer = { path, ok, fail };
+        finalSnapshot(path, text, writer);
+        hand.writes.push(writer);
+      });
     }
     if (!chapters.some((ch) => path === `${ch.dir}/chapter.json`)) return undefined;
     hand.began.push({ path, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now(), browser: engineSwitch.phase === 'off' });
+    finalSnapshot(path, text);
     seen.writes++;
     const number = hand.began.at(-1).version;
     if (path === chapterPath && waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
@@ -314,7 +353,11 @@ beforeAll(async () => {
       hand.broke ??= `Keep's write went out ${Date.now() - state.keep.at} ms after the press, at version ${hand.began.at(-1).version}, while a font was still on its way and its wait was not over`;
     }
     if (!hand.hold) return undefined;
-    return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
+    return new Promise((ok, fail) => {
+      const writer = { path, ok, fail };
+      finalSnapshot(path, text, writer);
+      hand.writes.push(writer);
+    });
   };
   fsx._after = (path, text) => {
     if (chapters.some((ch) => path === `${ch.dir}/chapter.json`)) hand.landed.push({ ...hand.began.findLast((w) => w.path === path), version: JSON.parse(text).typesetting?.version ?? null });
@@ -366,10 +409,14 @@ afterEach(cleanupModel);
 // Each is something that happens to the app from outside it. One that cannot
 // happen in the state it finds (Keep with no chapter open) does nothing.
 class Broken extends Error {}
+class DeferredBrowser extends Error {
+  constructor(witness) { super(witness.reason); this.witness = witness; }
+}
 // What the sequences did, over a whole run.
 const stageCounts = () => ({ eventsByStage: { closed: {}, rustOrStarting: {}, crossSwitchDebt: {}, browserAfterDebt: {} }, inapplicablePublicActions: {} });
-const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts() };
-const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set() };
+const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
+const classifiedWitnesses = [];
+const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [] };
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
 const copy = (v) => JSON.parse(JSON.stringify(v));
 const paths = (ch) => ({ chapter: `${ch.dir}/chapter.json`, text: `${ch.dir}/translations.json` });
@@ -400,10 +447,17 @@ function choose(kind, value, pg = app.pages[0], b = pg?.boxes[0], ln = pg?.lines
   const choices = state.choices.get(id) ?? new Map();
   state.choices.set(id, choices);
   const key = ['order', 'mode', 'typesetting'].includes(kind) ? kind : `${kind}/${pg?.id}/${b?.id}/${ln?.n}`;
-  choices.set(key, { kind, value: copy(value), page: pg?.id, box: b?.id, line: ln?.n });
+  const choice = { kind, value: copy(value), page: pg?.id, box: b?.id, line: ln?.n };
+  choices.set(key, choice);
+  for (const window of state.finalWindows) {
+    if (window.ref === app.chapterRef && window.heldWriter && hand.writes.includes(window.heldWriter)) {
+      window.laterChoices.set(key, { choice: copy(choice), event: state.event, at: Date.now() });
+    }
+  }
 }
-function choicesIn(id, record, text, when) {
-  for (const want of state.choices.get(id)?.values() ?? []) {
+function choicesIn(id, record, text, when, allowed = new Set()) {
+  for (const [key, want] of state.choices.get(id)?.entries() ?? []) {
+    if (allowed.has(key)) continue;
     const pg = record.pages.find((p) => p.id === want.page);
     const b = pg?.boxes.find((b) => b.id === want.box);
     const ln = pg?.lines.find((l) => l.n === want.line);
@@ -434,6 +488,74 @@ function choicesOnDisk(ch, when) {
   const path = paths(ch);
   choicesIn(ch.id, JSON.parse(fsx._tree.files.get(path.chapter)), JSON.parse(fsx._tree.files.get(path.text)), when);
 }
+
+function finalWindow(kind) {
+  if (!live()) return null;
+  const window = {
+    kind, chapter: c, ref: app.chapterRef, at: Date.now(), event: state.event,
+    browserAtRequest: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
+    debtAtRequest: state.rustDebt.has(c.id), acquiredRust: false,
+    snapshot: null, heldWriter: null, laterChoices: new Map(), timer: null, counted: false,
+  };
+  state.finalWindows.push(window);
+  return window;
+}
+
+// Capture the actual final writer's two serialized snapshot strings. A gate
+// belongs to that snapshot only, rather than any older write already held
+// when another final transition was requested.
+function finalSnapshot(path, text, writer = null) {
+  for (const window of state.finalWindows) {
+    if (window.ref !== app.chapterRef) continue;
+    const p = paths(window.chapter);
+    if (path === p.chapter && !window.snapshot) {
+      window.snapshot = { chapter: text, text: null, writeIndex: hand.began.length - 1,
+        startedBrowser: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
+        debtAtSnapshot: state.rustDebt.has(window.chapter.id), at: Date.now() };
+    }
+    if (!window.snapshot || window.snapshot.writeIndex !== hand.began.length - 1) continue;
+    if (path === p.text && window.snapshot.text == null) window.snapshot.text = text;
+    if (writer && (path === p.chapter || path === p.text)) window.heldWriter = writer;
+  }
+}
+
+function observedBrowserCancellation(window, ch) {
+  if (!window || window.chapter.id !== ch.id || !window.browserAtRequest || window.debtAtRequest || window.acquiredRust ||
+      !window.snapshot?.startedBrowser || window.snapshot.debtAtSnapshot || !window.heldWriter || !window.laterChoices.size ||
+      !window.timer?.cancelledByMarkSaved || !window.timer.bothFilesAtCancellation || !window.timer.unsavedWhenArmed ||
+      window.timer.cancelledAt < window.timer.at || window.timer.cancelledAt - window.timer.at >= DOC_SAVE_MS) return null;
+  const p = paths(ch);
+  const chapter = fsx._tree.files.get(p.chapter);
+  const text = fsx._tree.files.get(p.text);
+  if (chapter !== window.snapshot.chapter || text !== window.snapshot.text || JSON.parse(chapter).typesetting?.version !== 1) return null;
+  const allowed = new Set();
+  for (const [key, late] of window.laterChoices) {
+    // An unrelated subsequent user choice cannot inherit this exemption.
+    if (canon(state.choices.get(ch.id)?.get(key)) !== canon(late.choice)) return null;
+    allowed.add(key);
+  }
+  const rec = JSON.parse(chapter);
+  const tx = JSON.parse(text);
+  try { choicesIn(ch.id, rec, tx, 'known browser cancellation must actually lose a retained later choice'); }
+  catch (error) {
+    if (!(error instanceof Broken)) throw error;
+    choicesIn(ch.id, rec, tx, 'all earlier/unrelated choices remain mandatory', allowed);
+    return { chapterId: ch.id, kind: window.kind, requestEvent: window.event,
+      reason: error.message, startedBrowser: true, acquiredRust: false,
+      snapshot: window.snapshot, physical: { chapter, text },
+      laterChoices: [...window.laterChoices.entries()], timer: window.timer };
+  }
+  return null;
+}
+
+function deferExactBrowserCancellation(window, ch) {
+  const witness = observedBrowserCancellation(window, ch);
+  if (!witness) return false;
+  if (!window.counted) { window.counted = true; state.witnesses.push(witness); }
+  // A fully proven counterexample ends this order. Historical intent is not
+  // quarantined, and no later Rust stage inherits a broad browser exemption.
+  throw new DeferredBrowser(witness);
+}
 // A prior Rust turn is not ownership forever. Retirement requires actual
 // current bytes in BOTH files (or the permitted untouched opened bytes), no
 // held writer, and no outstanding unsaved choice. A false saved flag alone
@@ -446,7 +568,8 @@ function retireBrowserDebt() {
   if (current || untouched) state.rustDebt.delete(c.id);
 }
 
-function checkFile(when) {
+function checkFile(when, window = null) {
+  if (deferExactBrowserCancellation(window, c)) return;
   const bytes = onDisk();
   const rec = JSON.parse(bytes);
   const chapterAsOpened = bytes === state.opened;
@@ -503,6 +626,7 @@ async function open(bytes) {
 async function requestOpen(index) {
   const target = chapters[index];
   const outgoing = live() ? c : null;
+  const window = finalWindow('open');
   const generation = ++state.transition;
   const held = hand.hold || hand.holdTranslations || hand.writes.length > 0;
   const request = openChapter(p.id, target.id);
@@ -510,17 +634,20 @@ async function requestOpen(index) {
   state.lastOpen = request;
   request.then(() => {
     if (generation !== state.transition || app.chapterRef?.chapterId !== target.id) return;
-    if (outgoing && outgoing.id !== target.id) choicesOnDisk(outgoing, 'after opening another chapter');
+    if (outgoing && outgoing.id !== target.id && !deferExactBrowserCancellation(window, outgoing)) choicesOnDisk(outgoing, 'after opening another chapter');
     adopt(target);
     state.open = true;
     state.opened = onDisk();
     state.openedText = textOnDisk();
     state.openedWrites = hand.began.length;
-    state.touched = (state.choices.get(target.id)?.size ?? 0) > 0;
+    // Historical user choices remain mandatory, but opening their already
+    // saved bytes starts a fresh untouched first-fit cycle.
+    state.touched = false;
     state.keep = null;
     if (engineSwitch.mode === 'rust') { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
   }).catch((error) => {
-    if (error instanceof Broken) hand.broke ??= error.message;
+    if (error instanceof DeferredBrowser) state.deferred = error.witness;
+    else if (error instanceof Broken) hand.broke ??= error.message;
     // A failed leave-save makes the actual open refuse; the old document stays.
     else if (!app.saveFailed) hand.broke ??= `opening: ${error.message}`;
   }).finally(() => state.pending.delete(request));
@@ -530,17 +657,21 @@ async function requestOpen(index) {
 async function requestLeave() {
   if (!live()) return;
   const ref = app.chapterRef;
+  const window = finalWindow('leave');
   const held = hand.hold || hand.holdTranslations || hand.writes.length > 0;
   const request = flushBeforeLeaving('editor');
   state.pending.add(request);
   request.then((went) => {
     if (!went || app.chapterRef !== ref) return;
-    checkFile('after leaving');
+    checkFile('after leaving', window);
     seen.left++;
     closeChapter();
     state.open = false;
     state.keep = null;
-  }).catch((error) => { hand.broke ??= `leaving: ${error.message}`; }).finally(() => state.pending.delete(request));
+  }).catch((error) => {
+    if (error instanceof DeferredBrowser) state.deferred = error.witness;
+    else hand.broke ??= `leaving: ${error.message}`;
+  }).finally(() => state.pending.delete(request));
   await pass(0);
   if (!held) await until(request).catch(() => {});
 }
@@ -649,7 +780,10 @@ const EVENTS = {
   // Rust must acquire whatever browser snapshot is still in flight.
   async switchOn() {
     if (engineSwitch.mode === 'rust') return;
-    if (live()) { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
+    if (live()) {
+      for (const window of state.finalWindows) if (window.ref === app.chapterRef) window.acquiredRust = true;
+      state.rustChapters.add(c.id); state.rustDebt.add(c.id);
+    }
     hand.startHeld = true;
     useTextEngine('rust').catch(() => {});
   },
@@ -733,32 +867,44 @@ async function cleanupModel() {
   resetSaveFailures();
   app.saveFailed = false;
   state.choices.clear();
+  state.finalWindows = [];
+  state.witnesses = [];
 }
 
 async function run(events) {
   resetHand();
   state.open = false;
   state.keep = null;
+  state.deferred = null;
+  state.finalWindows = [];
+  state.witnesses = [];
   resetFiles();
   const stages = stageCounts();
   let at = '';
+  let executed = 0;
   try {
     for (const [i, name] of events.entries()) {
       at = `step ${i + 1} (${name})`;
+      state.event = name;
       const stage = !live() ? 'closed' : engineSwitch.mode === 'rust' ? 'rustOrStarting' : state.rustDebt.has(c.id) ? 'crossSwitchDebt' : 'browserAfterDebt';
       stages.eventsByStage[stage][name] = (stages.eventsByStage[stage][name] ?? 0) + 1;
       const ignoredBefore = seen.inapplicablePublicActions;
       if (state.keep && TOUCHING.has(name) && name !== 'keep') state.keep.alone = false;
       await EVENTS[name]();
+      executed = i + 1;
       const ignored = seen.inapplicablePublicActions - ignoredBefore;
       if (ignored) stages.inapplicablePublicActions[name] = (stages.inapplicablePublicActions[name] ?? 0) + ignored;
       await pass(0);
+      if (hand.broke) throw new Broken(hand.broke);
+      if (state.deferred) throw new DeferredBrowser(state.deferred);
       retireBrowserDebt();
       choicesLive(`after ${name}`);
       if (hand.broke) throw new Broken(hand.broke);
     }
     at = 'coming to rest';
     await rest();
+    if (hand.broke) throw new Broken(hand.broke);
+    if (state.deferred) throw new DeferredBrowser(state.deferred);
     retireBrowserDebt();
     if (hand.broke) throw new Broken(hand.broke);
     if (live()) {
@@ -782,10 +928,15 @@ async function run(events) {
     for (const ch of chapters) if (ch.id !== app.chapterRef?.chapterId) choicesOnDisk(ch, 'inactive chapter at rest');
     return null;
   } catch (e) {
+    if (e instanceof DeferredBrowser) return { deferred: e.witness };
     if (!(e instanceof Broken)) throw new Error(`${at}: ${e?.stack ?? e}`);
     return `${e.message}`;
   } finally {
     state.lastRunStages = stages;
+    state.lastRunProof = { fullOrder: [...events], executedPrefix: events.slice(0, executed), unexecutedTail: events.slice(executed),
+      windows: state.finalWindows.map((w) => ({ kind: w.kind, chapterId: w.chapter.id, browserAtRequest: w.browserAtRequest,
+        debtAtRequest: w.debtAtRequest, acquiredRust: w.acquiredRust, snapshot: w.snapshot,
+        laterChoices: [...w.laterChoices], timer: w.timer })), witnesses: [...state.witnesses] };
     await cleanupModel();
   }
 }
@@ -827,13 +978,14 @@ function sequence(seed, steps) {
 }
 
 // The fewest of its events that still break it, by taking one away at a time.
-async function shrink(events) {
+async function shrink(events, kind = 'unknown') {
   let now = events;
   for (let again = true; again; ) {
     again = false;
     for (let i = now.length - 1; i >= 0; i--) {
       const fewer = [...now.slice(0, i), ...now.slice(i + 1)];
-      if (await run(fewer)) {
+      const result = await run(fewer);
+      if (kind === 'witness' ? !!result?.deferred : typeof result === 'string') {
         now = fewer;
         again = true;
       }
@@ -854,6 +1006,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     for (const seed of seeds) {
       const events = sequence(seed, STEPS);
       const why = await run(events);
+      const proof = state.lastRunProof;
       // Only the original generated orders count here. Named probes and
       // shrink replays may increment the historical totals above, but cannot
       // inflate this per-event breakdown of the 6000 generated sequences.
@@ -862,10 +1015,28 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       }
       for (const [name, count] of Object.entries(state.lastRunStages.inapplicablePublicActions)) seen.generatedStages.inapplicablePublicActions[name] = (seen.generatedStages.inapplicablePublicActions[name] ?? 0) + count;
       seen.sequences++;
-      if (!why) continue;
+      seen.generatedEvents += events.length;
+      seen.executedEvents += proof.executedPrefix.length;
+      seen.unexecutedTailEvents += proof.unexecutedTail.length;
+      if (!why) { seen.completedInvariantOrders++; continue; }
+      if (why.deferred) {
+        seen.exactBrowserWitnessOrders++;
+        const least = await shrink(events, 'witness');
+        classifiedWitnesses.push({ seed, original: proof, shrunkOrder: least.events,
+          shrunkProof: state.lastRunProof, witness: least.why.deferred });
+        continue;
+      }
+      seen.unknownFailedOrders++;
       const least = await shrink(events);
       broken.push(`seed ${seed}: ${least.why}\n    the fewest events that do it: ${least.events.join(', ')}`);
       if (broken.length >= 5 && !process.env.MODEL_REPORT) break;
+    }
+    if (process.env.MODEL_WITNESS_OUT) {
+      const out = resolve(process.env.MODEL_WITNESS_OUT);
+      if (!out.startsWith('/Users/caved/dev/manga-typesetter-wt/tp-data/reports/')) throw new Error('MODEL_WITNESS_OUT must be a fresh private reports file');
+      writeFileSync(out, JSON.stringify({ summary: seen, witnesses: classifiedWitnesses }, null, 2), { flag: 'wx' });
+    } else if (classifiedWitnesses.length) {
+      console.log(`exact browser witness orders: ${classifiedWitnesses.length}; full order/prefix/tail and both-file records require explicit MODEL_WITNESS_OUT`);
     }
     if (process.env.MODEL_REPORT) console.log(`the model: ${JSON.stringify(seen)}`);
     expect(broken.join('\n'), `replay one with MODEL_SEED=<seed>`).toBe('');
@@ -1298,6 +1469,32 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(JSON.parse(onDisk()).typesetting.version).toBe(1);
       checkFile('completed public Inspector color edit under the browser');
     } finally { await cleanupModel(); }
+  });
+
+  it.each([
+    ['leave mode', ['open2', 'holdWrites', 'leave', 'unmarkedMode'], 'mode'],
+    ['open text', ['open1', 'holdTranslations', 'openEmpty', 'edit'], 'text'],
+  ])('the exact known browser cancellation witness is retained for %s, with both physical files and its timer', async (_, events, choice) => {
+    const result = await run(events);
+    expect(result?.deferred).toMatchObject({ startedBrowser: true, acquiredRust: false,
+      timer: { ms: DOC_SAVE_MS, unsavedWhenArmed: true, cancelledByMarkSaved: true, bothFilesAtCancellation: true } });
+    const witness = result.deferred;
+    expect(witness.reason).toContain(`user ${choice} choice`);
+    expect(witness.physical).toEqual({ chapter: witness.snapshot.chapter, text: witness.snapshot.text });
+    expect(witness.timer.cancelledAt - witness.timer.at).toBeLessThan(DOC_SAVE_MS);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.unexecutedTail).toEqual([]);
+  });
+
+  it('acquiring Rust during the same held final browser window never qualifies as a deferred browser witness', async () => {
+    const events = ['open1', 'holdWrites', 'leave', 'unmarkedMode', 'switchOn', 'engineStarts', 'writeLands'];
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.witnesses).toEqual([]);
+    expect(state.lastRunProof.windows.some((w) => w.browserAtRequest && w.acquiredRust)).toBe(true);
+  });
+
+  it('reopening a saved user choice starts an untouched first-fit cycle without forgetting the historical choice', async () => {
+    expect(await run(['switchOn', 'open1', 'editLate', 'open1'])).toBe(null);
   });
 
   it('an empty chapter Keep does not wait for the previous chapter’s held font', async () => {

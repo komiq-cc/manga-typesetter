@@ -1206,16 +1206,17 @@ before writing any HTML. A missing-font or changed-wrap attribution also
 requires an independent numerical placement prediction; metadata cannot hide
 an unrelated100px move. The final real39-box division remains pending.
 
-### Old default-mode defect (read only)
+### Old default-mode defect (source fix deferred)
 
 `library.svelte.js` calls markSaved at the end of writeOpenChapter only when
 no newer save CALL has incremented saveSeq. A user edit during the old
 write can arm an800ms timer without yet making such a call. If the old write
 lands before that timer, its markSaved clears the timer and says saved;
-the newer edit was absent from that snapshot. This order also exists with
-the switch off (inferred from code, not reproduced on user data). It is an
-old browser defect, read only. The Rust-owned cross-switch cases are repaired;
-the pure never-Rust browser behavior is deferred.
+the newer edit was absent from that snapshot. The code was first read only;
+later generated synthetic orders measured this defect while a final leave
+or open snapshot was held. No user chapter was modified. It is an old
+browser defect whose production source fix remains deferred. Rust-owned
+cross-switch cases remain strict and cannot inherit that exemption.
 
 ### Proof record
 
@@ -1297,6 +1298,47 @@ The coordinator captured7243 direct WebKit metric records on `dffafec`, with
 complete=true and no errors, in private p9c-direct-root-dffafec.json. Final
 candidate repeats and the canonical local reference installation are pending.
 
+The worker focused run on `d64dc9106fb35b910f469223b1f9227e6fb737be`
+finished in14.462s at load5.53:163 of164 tests passed. All named receipt,
+final boundary, workflow and raw snapshot probes passed. Only the generated
+20-order assertion failed, with three seeds. The coordinator independently
+repeated the same163/164 result at load4.99 in14.46s. Both logs and JSON
+records are preserved; the source stayed clean and unchanged.
+
+Seed20261024 shrank to `switchOn,open1,editLate,open1`. Its already saved
+historical choice made the next open falsely count as a current-cycle edit.
+The test oracle now starts every successful real open untouched while
+retaining and checking every historical independent choice in both files.
+Seeds20261019 and20261026 shrank to `open2,holdWrites,leave,unmarkedMode`
+and `open1,holdTranslations,openEmpty,edit`. They exposed the existing pure
+browser final-write cancellation. No production browser fix is made.
+
+The model now distinguishes one precisely measured deferred counterexample.
+A final-transition window must have begun under the browser with no Rust debt;
+it must capture the actual held chapter and translations snapshot. The user
+choice must occur while that exact gate is held. A pass-through fake-timer
+observer records the800ms markUnsaved timer and that exact ID's cancellation
+by markSaved before its deadline, with both old snapshot files already on
+disk and the same outgoing identity. Actual physical files must still equal
+that snapshot. No Rust ownership or acquisition may occur within the window.
+All earlier and unrelated choices remain mandatory. Unknown cases still fail.
+
+A fully proven browser witness stops its original order, just as a
+counterexample does. Its full order, executed prefix and unexecuted tail are
+retained. The historical wish is not deleted or quarantined, and a later
+Rust stage is not granted an exemption for inherited loss. All6000 original
+orders are attempted; final proof must report completed invariant orders,
+exact browser witness prefixes and unknown failures separately. Deferred
+tails make no safety claim. Event totals and ownership stages count only
+executed original prefixes. Witness shrink replays do not inflate these
+counts. Named known witnesses, a successful historical-choice reopen, and
+Rust acquisition during the same held window make this distinction falsifiable.
+These oracle changes have not yet run.
+
+Full witnesses are saved only when an explicit fresh private
+`MODEL_WITNESS_OUT` path is supplied. The console stays compact; no default
+filesystem writes or serialized witness dump is added to CI.
+
 Syntax checks and parsing of the generated metric page passed (measured).
 The private p9c-mutations.py runner requires a full candidate commit SHA and
 clean worktree, archives that commit's tracked files, and makes scratch-only
@@ -1324,3 +1366,12 @@ full suites, engine/native tests, browser check, direct metric capture, both
 captures, repeated real dry run and final Codex review remain pending.**
 They will be scheduled below load8 and recorded here before acceptance. The
 existing reports/p9/check directory has not been touched.
+
+The receipt runner `a7744b072af11b1b452de5f1b6a3213b40e0612f5242bd5bc2488488d27715c1`
+is preserved before classifier changes. The new classifier requires every
+failed named case to contain only an AssertionError, no suite/runtime/timeout
+errors, and exactly the selected control name set. Mixed TypeErrors or
+unknown Error/rejection failures cannot be called kills. Seven pure parser
+examples passed (measured; no mutation execution). A RESET_LEDGER mutation
+may now be redundant because the private actual receipt survives clearing
+the global stamp; a survivor must be recorded honestly, then investigated.
