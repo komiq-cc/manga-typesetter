@@ -726,7 +726,7 @@ window.__ec = {
     return out;
   },
   spec(name) {
-    return { limits: LIMITS_SPEC, mask: MASK_SPEC, type: TYPE_SPEC, typeEdge: TYPE_EDGE_SPEC, typeCost: TYPE_COST_SPEC }[name];
+    return { limits: LIMITS_SPEC, mask: MASK_SPEC, type: TYPE_SPEC, typeEdge: TYPE_EDGE_SPEC, typeCost: TYPE_COST_SPEC, type2: TYPE2_SPEC }[name];
   },
 
   // ---- typing into the picture (P7) ----
@@ -812,7 +812,7 @@ window.__ec = {
         kind: 'flat',
         zoom: z,
         lines: m.lines,
-        rows: m.rows.map((row) => ({ top: row.top, height: row.height, offs: row.offs, xs: row.xs, soft: row.soft, hard: row.hard, line: row.line, y: row.top + row.height / 2 })),
+        rows: m.rows.map((row) => ({ top: row.top, height: row.height, offs: row.offs, xs: row.xs, soft: row.soft, hard: row.hard, line: row.line, y: row.top + row.height / 2, lead: row.lead ? { ...row.lead, p: client(row.lead.x, row.top + row.height / 2) } : null, trail: row.trail ? { ...row.trail, p: client(row.trail.x, row.top + row.height / 2) } : null })),
         // A point of the box's own frame (page px from its corner) on screen.
         at: m.rows.map((row) => row.xs.map((x) => client(x, row.top + row.height / 2))),
         frame: { origin: client(0, 0), ex: client(1, 0), ey: client(0, 1) },
@@ -925,6 +925,34 @@ window.__ec = {
     r.canvas.height = 0;
     return out;
   },
+  // The selection put where the browser itself would put it (a word step, a
+  // key it kept): raw offsets, in the editable, and said as the browser says it.
+  async typeSelect(a, f = a) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    const [ac, ai] = domPoint(ed, a);
+    const [fc, fi] = domPoint(ed, f);
+    window.getSelection().setBaseAndExtent(ac, ai, fc, fi);
+    document.dispatchEvent(new Event('selectionchange'));
+    await settle(2);
+    return this.typeState();
+  },
+  // How long the rows of a box take to make, from its text: the model the
+  // caret and the selection are drawn by, `n` times.
+  timeModel(id, n = 5) {
+    const b = boxOf(id);
+    const text = boxText(b, page());
+    const ms = [];
+    let rows = 0;
+    let stops = 0;
+    for (let i = 0; i < n; i++) {
+      const t0 = performance.now();
+      const m = typeModel(b, text);
+      ms.push(performance.now() - t0);
+      rows = m?.rows?.length ?? 0;
+      stops = m?.rows?.reduce((sum, r) => sum + r.offs.length, 0) ?? 0;
+    }
+    return { letters: text.length, rows, stops, ms: stats(ms) };
+  },
   // A paste or a cut, as the event the browser sends, carrying its own
   // clipboard: the system's is the user's and is not read or written here.
   clip(type, text = null) {
@@ -950,6 +978,11 @@ window.__ec = {
     });
     ed.dispatchEvent(ev);
     return { prevented: ev.defaultPrevented };
+  },
+  // Every edit the browser has asked for since the last call: its kind, and
+  // the range it names as raw offsets and as the place in the document.
+  inputsSeen() {
+    return inputs.splice(0);
   },
   // The last request for the system's menu: what it was aimed at.
   menuSeen() {
@@ -1008,7 +1041,37 @@ window.__ec = {
       withFrame.push(performance.now() - t0);
     }
     const cnv = el.querySelector('canvas.warpl');
-    return { sync: stats(sync), toNextFrame: stats(withFrame), canvas: cnv ? [cnv.width, cnv.height] : null, pictured: cnv?.dataset.painter === 'engine', unseen: ed.classList.contains('unseen') };
+    // What the canvas holds while the keys are coming, and after the pause
+    // the full paint waits for (TextBox.svelte `keyed`). The full paint is
+    // timed where it can be made to happen: an edit that ends inside the
+    // pause paints it at once, so the edit is ended there, and begun again.
+    const during = cnv ? [cnv.width, cnv.height] : null;
+    const id = app.editingId;
+    const pictured = cnv?.dataset.painter === 'engine';
+    const unseen = ed.classList.contains('unseen');
+    const t0 = performance.now();
+    endEdit(id);
+    flushSync();
+    document.body.getBoundingClientRect();
+    const ending = performance.now() - t0;
+    await frame();
+    const settled = cnv?.isConnected ? [cnv.width, cnv.height] : null;
+    const soft = !!(during && settled && during[0] * during[1] < settled[0] * settled[1]);
+    await this.edit(id);
+    // And by the pause itself: a key, then nothing for twice the pause.
+    const again = document.querySelector('.tbox .txt.editable');
+    const cnv2 = again?.closest('.tbox').querySelector('canvas.warpl');
+    again?.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'A', bubbles: true, cancelable: true }));
+    flushSync();
+    const key1 = cnv2 ? [cnv2.width, cnv2.height] : null;
+    await new Promise((r) => setTimeout(r, 320));
+    await frame();
+    const afterPause = cnv2 ? [cnv2.width, cnv2.height] : null;
+    again?.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+    flushSync();
+    await new Promise((r) => setTimeout(r, 320));
+    await frame();
+    return { sync: stats(sync), toNextFrame: stats(withFrame), canvas: settled, during, soft, endingMs: ending, afterKey: key1, afterPause, pictured, unseen };
   },
   // The same from a real key: stamped when the page hears the key go down,
   // and again at the first frame after it. The driver sends the keys.
@@ -1094,7 +1157,28 @@ const minted = [];
 const boxOf = (id) => page().boxes.find((x) => String(x.id) === String(id));
 let menu = null;
 window.addEventListener('contextmenu', (e) => {
-  menu = { inEditable: !!e.target.closest?.('[contenteditable="true"]'), target: String(e.target.className ?? ''), prevented: e.defaultPrevented };
+  const ed = document.querySelector('.tbox .txt.editable');
+  const sel = window.getSelection();
+  const inside = ed && sel.rangeCount > 0 && ed.contains(sel.focusNode);
+  menu = {
+    inEditable: !!e.target.closest?.('[contenteditable="true"]'), target: String(e.target.className ?? ''), prevented: e.defaultPrevented,
+    // What is selected as the menu is asked for, and whether the pointer is on it.
+    sel: inside ? [rawOffset(ed, sel.anchorNode, sel.anchorOffset), rawOffset(ed, sel.focusNode, sel.focusOffset)] : null,
+    onSelection: inside ? [...sel.getRangeAt(0).getClientRects()].some((r) => e.clientX >= r.left - 0.5 && e.clientX <= r.right + 0.5 && e.clientY >= r.top - 0.5 && e.clientY <= r.bottom + 0.5) : false,
+    moved: ed?.style.transform ?? '',
+  };
+}, true);
+const inputs = [];
+window.addEventListener('beforeinput', (e) => {
+  const ed = e.target.closest?.('.txt.editable');
+  const r = e.getTargetRanges?.()[0];
+  const where = (n, o) => `${n.nodeType === 3 ? `"${n.data.replace(/\n/g, '\\n')}"` : `<${n.nodeName.toLowerCase()}${n.className ? `.${String(n.className).replace(/ /g, '.')}` : ''}>`}:${o}`;
+  inputs.push({
+    type: e.inputType,
+    range: r && ed ? [rawOffset(ed, r.startContainer, r.startOffset), rawOffset(ed, r.endContainer, r.endOffset)] : null,
+    from: r ? where(r.startContainer, r.startOffset) : null,
+    to: r ? where(r.endContainer, r.endOffset) : null,
+  });
 }, true);
 const keyStamps = [];
 function onKeyStamp(e) {
@@ -1136,6 +1220,23 @@ const TYPE_EDGE_SPEC = { pages: [{ w: 1560, h: 520, boxes: [
   { id: 'smear', x: 640, y: 300, w: 240, h: 120, over: { motionBlur: { on: true, x: 2, y: 0, amount: 6 } } },
   { id: 'warped', x: 940, y: 300, w: 240, h: 120, over: { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [252, 14], [-8, 128], [240, 120]] } } },
 ] }] };
+// The second round's boxes: three rows of a word each; a letter cased to two
+// with the line broken between the two; an uppercase curve with such a
+// letter; a box over the budget a key's paint is given, and one under it.
+const TYPE2_SPEC = { pages: [{ w: 1560, h: 900, boxes: [
+  { id: 'rows', x: 60, y: 60, w: 96, h: 150, over: { size: 26, align: 'left', valign: 'top' }, text: 'AAAA BBBB CCCC' },
+  { id: 'split', x: 300, y: 60, w: 60, h: 200, over: { size: 40, uppercase: true, align: 'left', valign: 'top', shape: 'off' }, text: 'aßb' },
+  { id: 'upper-arc', x: 480, y: 90, w: 320, h: 140, over: { curve: 45, uppercase: true }, text: 'straße über uns' },
+  { id: 'small', x: 900, y: 60, w: 220, h: 110 },
+  { id: 'bold', x: 1200, y: 60, w: 300, h: 120, over: { bold: true } },
+  { id: 'big', x: 60, y: 340, w: 640, h: 440, over: { size: 90, strokes: [{ color: '#d02020', width: 4, opacity: 1 }], shadows: [{ x: 4, y: 4, blur: 6, color: '#000000', opacity: 0.6 }], blur: 1 } },
+  // Text that runs out of its frame, straight and on a curve: where the
+  // editable under the picture is not.
+  { id: 'spill', x: 1240, y: 320, w: 80, h: 40, text: 'OVERFLOWING\nSIDEWAYS\nAND\nDOWN' },
+  { id: 'arc-out', x: 880, y: 460, w: 260, h: 60, over: { curve: 80 }, text: 'ALONG AN ARC WE GO' },
+] }] };
+// One line of twenty thousand letters, which nothing breaks.
+const LONG_LINE = 'A'.repeat(20000);
 // The three sizes of box the cost of a keystroke is taken on.
 const TYPE_COST_SPEC = { pages: [{ w: 1400, h: 1700, boxes: [
   { id: 'balloon', x: 60, y: 60, w: 220, h: 110 },

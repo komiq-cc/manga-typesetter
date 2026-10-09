@@ -4,7 +4,7 @@
 //
 //   npm run dev -- --port 5201 --strictPort          (in another shell)
 //   node scripts/editor-check.mjs --data <tp-data> [--url http://localhost:5201]
-//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,typecost]
+//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,type2,typecost]
 //        [--chapter tsukimichi__121] [--chrome <path>] [--port 9377]
 //
 // No dependency is added for this: the protocol is spoken over node's own
@@ -26,7 +26,7 @@ const args = Object.fromEntries(
 const URL_BASE = (args.url ?? 'http://localhost:5201').replace(/\/$/, '');
 const DATA = args.data ? resolve(args.data) : null;
 const OUT = resolve(args.out ?? (DATA ? join(DATA, 'reports', 'p6') : 'editor-check-out'));
-const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,typecost').split(','));
+const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,type2,typecost').split(','));
 const CHROME = args.chrome ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = Number(args.port ?? 9377);
 const CHAPTER = args.chapter ?? 'tsukimichi__121';
@@ -803,6 +803,53 @@ const middle = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // The stop of a row nearest an x, the later of two as near (flat-caret.js).
 const nearest = (row, x) => row.xs.reduce((best, v, j) => (Math.abs(v - x) <= Math.abs(row.xs[best] - x) ? j : best), 0);
+const cellFor = async (id, margin = 40) => {
+  const b = (await ec('boxesState')).boxes.find((x) => x.id === id);
+  return { box: b, cell: { x: b.rect.x - margin, y: b.rect.y - margin, w: b.rect.w + margin * 2, h: b.rect.h + margin * 2 } };
+};
+// A box brought to the middle of the window and left to settle there: the
+// app scrolls to a box it selects, and a box that was far off paints when
+// the observer says it is near.
+const bring = async (id) => {
+  await ec('select', id);
+  await ec('wait', 8);
+  await ec('reveal', id);
+  await ec('reveal', id);
+  for (let i = 0; i < 20; i++) {
+    const c = (await cellFor(id)).box.canvas;
+    if (c?.w > 0) break;
+    await ec('wait', 3);
+  }
+};
+// An edit begun as a user begins one: a double-click on the box.
+const begin = async (id) => {
+  const { box } = await cellFor(id);
+  await pressAt(middle(box.rect), { count: 2 });
+  return typeState(2);
+};
+// A stretch of time long enough that the next edit is a step of its own in
+// the field's undo (field-undo.svelte.js gathers typing into runs).
+const pause = () => sleep(700);
+const end = async () => {
+  await key('Escape');
+  await ec('wait', 2);
+  const editing = (await ec('state')).editing;
+  if (editing) await ec('endEdit');
+  return !editing;
+};
+
+// A box over the budget a key's paint is given is soft for 150 ms after a key
+// (TextBox.svelte `keyed`): what is compared with the exporter is then the
+// picture it settles to, and that it was soft is said (`wasSoft`).
+const typeSameSettled = async (id) => {
+  let r = await ec('typeSame', id);
+  if (r.painted && !same(r.editor, r.exporter)) {
+    await sleep(260);
+    await ec('wait', 2);
+    r = { ...(await ec('typeSame', id)), wasSoft: true };
+  }
+  return r;
+};
 if (ONLY.has('type')) {
   await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   await viewport(WINDOW.w, WINDOW.h);
@@ -814,41 +861,6 @@ if (ONLY.has('type')) {
     if (!ok) T.fails.push({ id, what, detail });
     return ok;
   };
-  const cellFor = async (id, margin = 40) => {
-    const b = (await ec('boxesState')).boxes.find((x) => x.id === id);
-    return { box: b, cell: { x: b.rect.x - margin, y: b.rect.y - margin, w: b.rect.w + margin * 2, h: b.rect.h + margin * 2 } };
-  };
-  // A box brought to the middle of the window and left to settle there: the
-  // app scrolls to a box it selects, and a box that was far off paints when
-  // the observer says it is near.
-  const bring = async (id) => {
-    await ec('select', id);
-    await ec('wait', 8);
-    await ec('reveal', id);
-    await ec('reveal', id);
-    for (let i = 0; i < 20; i++) {
-      const c = (await cellFor(id)).box.canvas;
-      if (c?.w > 0) break;
-      await ec('wait', 3);
-    }
-  };
-  // An edit begun as a user begins one: a double-click on the box.
-  const begin = async (id) => {
-    const { box } = await cellFor(id);
-    await pressAt(middle(box.rect), { count: 2 });
-    return typeState(2);
-  };
-  // A stretch of time long enough that the next edit is a step of its own in
-  // the field's undo (field-undo.svelte.js gathers typing into runs).
-  const pause = () => sleep(700);
-  const end = async () => {
-    await key('Escape');
-    await ec('wait', 2);
-    const editing = (await ec('state')).editing;
-    if (editing) await ec('endEdit');
-    return !editing;
-  };
-
   // -- what the browser selects today, with the switch off: measured, to match --
   await ec('engine', 'rust');
   await ec('openCustom', spec);
@@ -1537,6 +1549,457 @@ if (ONLY.has('type')) {
   T.verdict = { checks: T.checks, failed: T.fails.length };
   log(`type verdict (${DSF}x): ${T.checks - T.fails.length} of ${T.checks} checks passed, ${T.fails.length} failed`);
   for (const f of T.fails.slice(0, 60)) log('  FAILED', f.id, '-', f.what, JSON.stringify(f.detail)?.slice(0, 300));
+}
+
+// ---- typing into the picture, second round (P7b) ----
+// What the outside review found, each asked of the browser with real keys
+// and a real mouse: the keys macOS binds to a move or a cut by lines (sent
+// with the editing command the system attaches, which is what a browser runs
+// when the page does not take the key), a drag that leaves the picture, a
+// drag from a double and a triple press, the right button on a curve, the
+// engine coming on in the middle of an edit, a letter cased to two with the
+// line broken between the two, and the budget a key's paint is given.
+if (ONLY.has('type2')) {
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await viewport(WINDOW.w, WINDOW.h);
+  const spec = await ec('spec', 'type2');
+  const T = (report.type2 = { fails: [], checks: 0 });
+  const check = (ok, id, what, detail) => {
+    T.checks++;
+    if (!ok) T.fails.push({ id, what, detail });
+    return ok;
+  };
+  const textOf = (id) => spec.pages[0].boxes.find((b) => b.id === id).text ?? 'WAIT FOR ME\nOVER THERE!';
+  const open = async (mode, zoom = 1) => {
+    await ec('engine', mode);
+    await ec('openCustom', spec);
+    await ec('zoom', zoom);
+  };
+  const errorsBefore = cdp.errors.length;
+  const caretFromNative = (st) => (st.native && st.caret ? +far(middle(st.native), middle(st.caret)).toFixed(2) : null);
+
+  // -- 1. the keys the system binds --
+  // Every key from the same caret, in the middle of the second of three
+  // rows, with the switch off and with it on: the selection and the text
+  // after it are to be the same. Then, with the switch on, from the one
+  // place the editable cannot say: the upper side of a wrap.
+  const CTRL = MOD.ctrl;
+  const ALT = MOD.alt;
+  const SH = MOD.shift;
+  const KEYS = [
+    ['Control+A', 'a', CTRL, ['MoveToBeginningOfParagraph']],
+    ['Control+E', 'e', CTRL, ['MoveToEndOfParagraph']],
+    ['Control+N', 'n', CTRL, ['MoveDown']],
+    ['Control+P', 'p', CTRL, ['MoveUp']],
+    ['Control+F', 'f', CTRL, ['MoveForward']],
+    ['Control+B', 'b', CTRL, ['MoveBackward']],
+    ['Control+Shift+A', 'A', CTRL | SH, ['MoveToBeginningOfParagraphAndModifySelection']],
+    ['Control+Shift+E', 'E', CTRL | SH, ['MoveToEndOfParagraphAndModifySelection']],
+    ['Control+Shift+N', 'N', CTRL | SH, ['MoveDownAndModifySelection']],
+    ['Control+Shift+P', 'P', CTRL | SH, ['MoveUpAndModifySelection']],
+    ['Control+Left', 'ArrowLeft', CTRL, ['MoveToLeftEndOfLine']],
+    ['Control+Right', 'ArrowRight', CTRL, ['MoveToRightEndOfLine']],
+    ['Control+Shift+Right', 'ArrowRight', CTRL | SH, ['MoveToRightEndOfLineAndModifySelection']],
+    ['Option+Up', 'ArrowUp', ALT, ['MoveBackward', 'MoveToBeginningOfParagraph']],
+    ['Option+Down', 'ArrowDown', ALT, ['MoveForward', 'MoveToEndOfParagraph']],
+    ['Option+Shift+Up', 'ArrowUp', ALT | SH, ['MoveParagraphBackwardAndModifySelection']],
+    ['Option+Shift+Down', 'ArrowDown', ALT | SH, ['MoveParagraphForwardAndModifySelection']],
+    ['Control+V', 'v', CTRL, ['MovePageDown']],
+    ['Control+K', 'k', CTRL, ['DeleteToEndOfParagraph']],
+    ['Control+D', 'd', CTRL, ['DeleteForward']],
+    ['Control+H', 'h', CTRL, ['DeleteBackward']],
+    ['Cmd+Backspace', 'Backspace', MOD.meta, ['DeleteToBeginningOfLine']],
+    ['Cmd+Delete', 'Delete', MOD.meta, ['DeleteToEndOfLine']],
+    ['paragraph delete back', 'Backspace', MOD.meta | CTRL, ['DeleteToBeginningOfParagraph']],
+  ];
+  const sent = { browser: {}, rust: {} };
+  const runKeys = async (mode) => {
+    await open(mode);
+    await bring('rows');
+    const out = {};
+    for (const [name, k, mods, commands] of KEYS) {
+      await begin('rows');
+      await ec('typeSelect', 7);
+      await ec('inputsSeen');
+      await key(k, { mods, commands });
+      const st = await typeState(3);
+      out[name] = { sel: st.sel, text: st.text };
+      // What the browser asked for, when the page left the key to it.
+      sent[mode][name] = (await ec('inputsSeen')).map((i) => `${i.type} ${JSON.stringify(i.range)} (${i.from} to ${i.to})`);
+      await end();
+      // The text back, for the next key: the page is opened again.
+      if (st.text !== textOf('rows')) {
+        await ec('openCustom', spec);
+        await bring('rows');
+      }
+    }
+    return out;
+  };
+  const rowsModel = async () => (await ec('typeRows', 'rows')).rows.map((r) => [r.offs[0], r.offs.at(-1)]);
+  const off = await runKeys('browser');
+  const on = await runKeys('rust');
+  const shape = await rowsModel();
+  T.keys = { rows: shape, off, on, sent, unlike: KEYS.map(([name]) => name).filter((name) => !same(off[name], on[name])) };
+  for (const [name] of KEYS) if (sent.browser[name].length || sent.rust[name].length) log(`type2 keys: ${name}: switch off, the browser asks ${JSON.stringify(sent.browser[name])}; switch on ${JSON.stringify(sent.rust[name])}`);
+  check(same(shape, [[0, 5], [5, 10], [10, 14]]), 'rows', 'the box is three rows of a word each', shape);
+  // Three of them are not compared with the switch off. For a delete to the
+  // end of the line or of the paragraph, and for one to the paragraph's
+  // start, THIS browser's own range in the editable runs to the same column
+  // of the block after or before (it is logged above), and with the switch
+  // off the app cuts what the browser names. The system's WebKit names the
+  // row's end and start for the same keys (P7-REPORT, "Second round"), and
+  // that is the rule the picture's rows go by.
+  const BY_ROW = { 'Control+K': { sel: [7, 7], text: 'AAAA BBCCCC' }, 'Cmd+Delete': { sel: [7, 7], text: 'AAAA BBCCCC' }, 'paragraph delete back': { sel: [5, 5], text: 'AAAA BB CCCC' } };
+  T.keys.byRow = Object.keys(BY_ROW);
+  for (const [name] of KEYS) {
+    if (BY_ROW[name]) check(same(on[name], BY_ROW[name]), 'rows', `${name}: cut to the end of the row the caret is on`, { on: on[name], want: BY_ROW[name], thisBrowserWithTheSwitchOff: off[name] });
+    else check(same(off[name], on[name]), 'rows', `${name}: the same selection and text as with the switch off`, { off: off[name], on: on[name] });
+  }
+  // The upper side of a wrap: End on row one, then each key. The editable's
+  // own caret is at the start of row two there.
+  const UPPER = [
+    ['Control+A', 'a', CTRL, ['MoveToBeginningOfParagraph'], { sel: [0, 0] }],
+    ['Control+Left', 'ArrowLeft', CTRL, ['MoveToLeftEndOfLine'], { sel: [0, 0] }],
+    ['Control+Shift+A', 'A', CTRL | SH, ['MoveToBeginningOfParagraphAndModifySelection'], { sel: [5, 0] }],
+    ['Control+E', 'e', CTRL, ['MoveToEndOfParagraph'], { sel: [5, 5], row: 0 }],
+    ['Option+Up', 'ArrowUp', ALT, ['MoveBackward', 'MoveToBeginningOfParagraph'], { sel: [0, 0] }],
+    ['Option+Down', 'ArrowDown', ALT, ['MoveForward', 'MoveToEndOfParagraph'], { sel: [10, 10], row: 1 }],
+    ['Control+N', 'n', CTRL, ['MoveDown'], { sel: [10, 10], row: 1 }],
+    ['Control+K', 'k', CTRL, ['DeleteToEndOfParagraph'], { text: 'AAAA BBB CCCC' }],
+    ['Cmd+Delete', 'Delete', MOD.meta, ['DeleteToEndOfLine'], { text: 'AAAA BBB CCCC' }],
+    ['Cmd+Backspace', 'Backspace', MOD.meta, ['DeleteToBeginningOfLine'], { text: 'BBBB CCCC' }],
+    ['paragraph delete back', 'Backspace', MOD.meta | CTRL, ['DeleteToBeginningOfParagraph'], { text: 'BBBB CCCC' }],
+  ];
+  T.upper = {};
+  const model = await ec('typeRows', 'rows');
+  for (const [name, k, mods, commands, want] of UPPER) {
+    await begin('rows');
+    await pressAt(lerp(model.at[0][1], model.at[0][2], 0.2));
+    await key('End', { commands: ['moveToEndOfLine'] });
+    let st = await typeState(2);
+    const from = { sel: st.sel, row: st.caret ? model.rows.findIndex((r) => Math.abs(middle(st.caret).y - model.at[model.rows.indexOf(r)][0].y) < 2) : null };
+    await key(k, { mods, commands });
+    st = await typeState(3);
+    const got = { sel: st.sel, text: st.text, row: st.caret ? model.rows.findIndex((r, i) => Math.abs(middle(st.caret).y - model.at[i][0].y) < 2) : null };
+    T.upper[name] = { from, got, want };
+    check(same(from, { sel: [5, 5], row: 0 }), 'rows', `${name}: the caret begins on the upper side of the wrap`, from);
+    check((want.sel ? same(got.sel, want.sel) : true) && (want.text ? got.text === want.text : got.text === textOf('rows')) && (want.row == null || got.row === want.row), 'rows', `${name} from the upper side of a wrap goes by the drawn row`, { got, want });
+    await end();
+    if (st.text !== textOf('rows')) {
+      await ec('openCustom', spec);
+      await bring('rows');
+    }
+  }
+  log(`type2 keys: ${KEYS.length - T.keys.unlike.length} of ${KEYS.length} keys the same with the switch off and on (unlike: ${T.keys.unlike.join(', ') || 'none'}; ${T.keys.byRow.length} are held to the row instead); ${UPPER.length} from the upper side of a wrap`);
+
+  // -- 2. the pointer --
+  // The same gestures with the switch off, for what the browser selects.
+  await open('rust');
+  await bring('small');
+  const small = await ec('typeRows', 'small');
+  // "WAIT FOR ME" over "OVER THERE!": letters of FOR, ME, WAIT and THERE.
+  const P = { for: lerp(small.at[0][5], small.at[0][6], 0.5), me: lerp(small.at[0][9], small.at[0][10], 0.5), wait: lerp(small.at[0][1], small.at[0][2], 0.5), there: lerp(small.at[1][6], small.at[1][7], 0.5), over: lerp(small.at[1][1], small.at[1][2], 0.5) };
+  const dragFrom = async (count, from, tos) => {
+    for (let c = 1; c < count; c++) {
+      await mouse('mousePressed', from, { clickCount: c });
+      await mouse('mouseReleased', from, { buttons: 0, clickCount: c });
+    }
+    await mouse('mousePressed', from, { clickCount: count });
+    const out = [(await typeState()).sel];
+    for (const to of tos) {
+      await mouse('mouseMoved', lerp(from, to, 0.5));
+      await mouse('mouseMoved', to);
+      out.push((await typeState()).sel);
+    }
+    await mouse('mouseReleased', tos.at(-1), { buttons: 0, clickCount: count });
+    out.push((await typeState()).sel);
+    return out;
+  };
+  const pointer = async (mode) => {
+    await open(mode);
+    await bring('small');
+    await begin('small');
+    const out = { presses: {} };
+    // Where one press at each of the places goes, to read the drags by.
+    for (const [name, p] of Object.entries(P)) {
+      await pressAt(p);
+      out.presses[name] = (await typeState()).sel?.[1];
+      await sleep(450);
+    }
+    out.words = await dragFrom(2, P.for, [P.me, P.wait, P.there, P.for]);
+    await sleep(450);
+    out.lines = await dragFrom(3, P.wait, [P.there, P.wait]);
+    await sleep(450);
+    out.linesUp = await dragFrom(3, P.over, [P.wait, P.over]);
+    await sleep(450);
+    await end();
+    return out;
+  };
+  const pOff = await pointer('browser');
+  const pOn = await pointer('rust');
+  T.pointer = { off: pOff, on: pOn };
+  const span = (list) => list.map((sel) => (sel ? [Math.min(...sel), Math.max(...sel)] : null));
+  const within = (o, a, b) => o >= a && o <= b;
+  check(within(pOn.presses.for, 5, 8) && within(pOn.presses.me, 9, 11) && within(pOn.presses.wait, 0, 4) && within(pOn.presses.there, 17, 22) && within(pOn.presses.over, 12, 16), 'small', 'the places pressed are in FOR, ME, WAIT, THERE and OVER', pOn.presses);
+  check(same(pOn.words, [[5, 8], [5, 11], [8, 0], [5, 22], [5, 8], [5, 8]]), 'small', 'a drag from a double press goes by words', pOn.words);
+  check(same(span(pOn.words), span(pOff.words)), 'small', 'and selects what the browser selects for the same drag', { on: pOn.words, off: pOff.words });
+  check(same(span(pOn.lines), span(pOff.lines)) && same(span(pOn.linesUp), span(pOff.linesUp)), 'small', 'a drag from a triple press selects the rows the browser selects', { on: [pOn.lines, pOn.linesUp], off: [pOff.lines, pOff.linesUp] });
+  check(pOn.lines[1][1] > pOn.lines[0][1] && pOn.linesUp[1][1] < pOn.linesUp[0][0], 'small', 'a drag from a triple press goes by rows', [pOn.lines, pOn.linesUp]);
+  // A drag that leaves the picture: the pointer is the overlay's until it is
+  // let go, so the selection follows it over the page.
+  await sleep(450);
+  await bring('small');
+  await begin('small');
+  await sleep(450);
+  {
+    const { box } = await cellFor('small');
+    const from = lerp(small.at[0][2], small.at[0][3], 0.2);
+    await mouse('mousePressed', from);
+    const inside = lerp(small.at[0][6], small.at[0][7], 0.2);
+    await mouse('mouseMoved', inside);
+    const a = (await typeState()).sel;
+    // Well off the box, to its right and below its last row.
+    const outside = { x: box.rect.x + box.rect.w + 160, y: box.rect.y + box.rect.h + 90 };
+    await mouse('mouseMoved', lerp(inside, outside, 0.5));
+    await mouse('mouseMoved', outside);
+    const b = (await typeState()).sel;
+    await mouse('mouseReleased', outside, { buttons: 0 });
+    const c = (await typeState()).sel;
+    const len = textOf('small').length;
+    T.pointer.leaves = { inside: a, outside: b, released: c, want: [2, len] };
+    check(same(a, [2, 6]) && same(b, [2, len]) && same(c, [2, len]), 'small', 'a drag that leaves the picture goes on selecting, to the last row\'s end', T.pointer.leaves);
+  }
+  await end();
+  log(`type2 pointer: words ${JSON.stringify(pOn.words)} (browser ${JSON.stringify(pOff.words)}); rows ${JSON.stringify(pOn.lines)} ${JSON.stringify(pOn.linesUp)}; off the picture ${JSON.stringify(T.pointer.leaves)}`);
+
+  // -- 3. the right button on a curve --
+  await bring('upper-arc');
+  await begin('upper-arc');
+  {
+    const curve = await ec('typeRows', 'upper-arc');
+    // "straße über uns" is drawn STRASSE ÜBER UNS: glyph 9 is the B of ÜBER.
+    await pressAt(curve.glyphs[1].right);
+    await ec('menuSeen');
+    await pressAt(curve.glyphs[9].left, { button: 'right' });
+    let st = await typeState(3);
+    const menu = await ec('menuSeen');
+    T.menu = { drawn: curve.drawn, mapped: curve.mapped, ...menu, sel: st.sel, nudge: st.nudge };
+    check(curve.drawn === 'STRASSE ÜBER UNS' && curve.mapped, 'upper-arc', 'an uppercase curve with a letter cased to two', { drawn: curve.drawn, mapped: curve.mapped });
+    check(same(st.sel, [7, 11]), 'upper-arc', 'the right button on a curve selects the word under it, and the system leaves it selected', T.menu);
+    check(menu?.inEditable === true && menu.onSelection === true && same(menu.sel, [7, 11]), 'upper-arc', 'the menu is asked of the editable, with that word selected and the pointer on it', menu);
+    // On the selection: left alone.
+    await sleep(80);
+    await ec('menuSeen');
+    await pressAt(curve.glyphs[10].right, { button: 'right' });
+    st = await typeState(3);
+    const again = await ec('menuSeen');
+    check(same(st.sel, [7, 11]) && again?.inEditable === true, 'upper-arc', 'on the selection it leaves the selection alone', { sel: st.sel, again });
+    // And the editable is back where the caret wants it once the menu is gone.
+    await sleep(120);
+    await pressAt(curve.glyphs[3].left);
+    st = await typeState(3);
+    T.menu.after = { sel: st.sel, nativeFromDrawn: caretFromNative(st) };
+    check(same(st.sel, [3, 3]) && T.menu.after.nativeFromDrawn != null && T.menu.after.nativeFromDrawn <= 4, 'upper-arc', 'afterwards a press places the caret, with the browser\'s own under it', T.menu.after);
+  }
+  await end();
+  // Letters outside the frame, where the editable under the picture is not:
+  // the menu is still the editable's, and is for the word pressed.
+  T.menu.outside = {};
+  for (const id of ['spill', 'arc-out']) {
+    await bring(id);
+    await begin(id);
+    const m = await ec('typeRows', id);
+    const { box } = await cellFor(id);
+    const out = (p) => p.x < box.rect.x - 4 || p.x > box.rect.x + box.rect.w + 4 || p.y < box.rect.y - 4 || p.y > box.rect.y + box.rect.h + 4;
+    const pts = m.kind === 'flat' ? m.at.flatMap((row, i) => row.slice(0, -1).map((p, k) => ({ p: lerp(p, row[k + 1], 0.25), o: m.rows[i].offs[k] }))) : m.glyphs.map((g, i) => ({ p: g.left, o: i }));
+    const far = pts.filter((q) => out(q.p) && /\S/.test(textOf(id)[q.o] ?? ''));
+    const q = far[Math.floor(far.length / 2)];
+    await pressAt(pts[1].p);
+    await sleep(450);
+    await ec('menuSeen');
+    await pressAt(q.p, { button: 'right' });
+    const st = await typeState(3);
+    const menu = await ec('menuSeen');
+    const word = textOf(id).slice(Math.min(...st.sel), Math.max(...st.sel));
+    T.menu.outside[id] = { lettersOutsideTheFrame: far.length, of: pts.length, pressed: q.o, sel: st.sel, word, menu };
+    check(far.length > 0 && !/\s/.test(word) && word.length > 1 && Math.min(...st.sel) <= q.o && q.o < Math.max(...st.sel), id, 'the right button on a letter outside the frame selects its word', T.menu.outside[id]);
+    check(menu?.inEditable === true && menu.onSelection === true && same(menu.sel, st.sel), id, 'and the menu is asked of the editable, on that selection', menu);
+    await end();
+  }
+  log(`type2 menu: ${JSON.stringify(T.menu)}`);
+
+  // -- 4. the engine coming on, and going off, in the middle of an edit --
+  {
+    await open('browser');
+    await bring('bold');
+    await begin('bold');
+    const m0 = await typeState();
+    await ec('typeSelect', 9);
+    const offStyle = (await typeState()).nudge;
+    await ec('engine', 'rust');
+    await ec('wait', 6);
+    let st = await ec('typeSelect', 9);
+    const mid = { overlay: st.overlay, unseen: st.unseen, focused: st.focused, sel: st.sel, nativeFromDrawn: caretFromNative(st), nudge: st.nudge };
+    // And what an edit begun with the engine on has at the same offset.
+    await end();
+    await begin('bold');
+    st = await ec('typeSelect', 9);
+    const fresh = { nativeFromDrawn: caretFromNative(st), nudge: st.nudge };
+    // Off again in the middle of this one.
+    await ec('engine', 'browser');
+    await ec('wait', 6);
+    st = await ec('typeSelect', 9);
+    const back = { overlay: st.overlay, unseen: st.unseen, editable: st.editable, nudge: st.nudge };
+    await end();
+    T.midEdit = { beganAs: { overlay: m0.overlay, unseen: m0.unseen }, offStyle, mid, fresh, back };
+    check(m0.editable && !m0.unseen && m0.overlay == null, 'bold', 'the edit began as DOM text', T.midEdit.beganAs);
+    check(mid.overlay === 'flat' && mid.unseen && mid.focused, 'bold', 'the engine coming on makes it the picture, in the same edit', mid);
+    check(mid.nativeFromDrawn != null && mid.nativeFromDrawn <= 4, 'bold', 'and the browser\'s own caret is brought within 4 CSS px of the drawn one', mid);
+    check(mid.nudge !== '' && mid.nudge === fresh.nudge, 'bold', 'by the same distance as in an edit begun with the engine on', { mid: mid.nudge, fresh: fresh.nudge });
+    check(back.editable && !back.unseen && back.overlay == null && back.nudge === offStyle, 'bold', 'the switch going off mid-edit leaves the editable where it is with the switch off', { back, offStyle });
+    log(`type2 mid-edit: on ${JSON.stringify(mid)}; fresh ${JSON.stringify(fresh)}; off again ${JSON.stringify(back)} (switch-off style ${JSON.stringify(offStyle)})`);
+  }
+
+  // -- 5. a letter cased to two, the line broken between the two --
+  await open('rust');
+  await bring('split');
+  await begin('split');
+  {
+    const m = await ec('typeRows', 'split');
+    const rows = m.rows.map((r) => ({ offs: r.offs, lead: r.lead?.o ?? null, trail: r.trail?.o ?? null, soft: r.soft }));
+    const a = m.rows.findIndex((r) => r.trail);
+    const b = m.rows.findIndex((r) => r.lead);
+    T.split = { lines: m.lines, rows };
+    check(a >= 0 && b === a + 1, 'split', 'the line is broken between the two letters one is drawn as', T.split);
+    if (a >= 0 && b >= 0) {
+      const A = m.rows[a];
+      const B = m.rows[b];
+      const [lo, hi] = [B.lead.o, A.trail.o];
+      // The letter selected: a rectangle on each row.
+      let st = await ec('typeSelect', lo, hi);
+      T.split.selected = { sel: st.sel, marks: st.sels.map((r) => [Math.round(r.y), Math.round(r.w)]) };
+      check(st.sels.length === 2 && Math.abs(st.sels[0].y - st.sels[1].y) > 4 && st.sels.every((r) => r.w > 4), 'split', 'the letter selected is marked on both rows', T.split.selected);
+      // A caret at either side of it, on either side of the wrap: never
+      // between the halves.
+      const carets = [];
+      for (const o of [lo, hi]) {
+        st = await ec('typeSelect', o);
+        carets.push({ o, at: st.caret && [+(middle(st.caret).x).toFixed(1), +(middle(st.caret).y).toFixed(1)] });
+      }
+      const between = [A.trail.p, B.lead.p];
+      T.split.carets = carets;
+      T.split.between = between.map((p) => [+p.x.toFixed(1), +p.y.toFixed(1)]);
+      check(carets.every((c) => c.at && between.every((p) => Math.hypot(c.at[0] - p.x, c.at[1] - p.y) > 3)), 'split', 'no caret is drawn between the two halves', T.split);
+      // A press on each half goes to the nearer side of the whole letter.
+      const halfA = lerp(m.at[a][A.xs.length - 1], A.trail.p, 0.75);
+      const halfB = lerp(B.lead.p, m.at[b][0], 0.25);
+      await pressAt(halfA);
+      const pa = await typeState();
+      await pressAt(halfB);
+      const pb = await typeState();
+      T.split.presses = { rightOfFirst: pa.sel, leftOfSecond: pb.sel, want: [[hi, hi], [lo, lo]] };
+      check(same(pa.sel, [hi, hi]) && same(pb.sel, [lo, lo]), 'split', 'a press on a half goes to the nearer side of the whole letter', T.split.presses);
+      // And typing there goes where the caret is drawn.
+      await pressAt(halfA);
+      await key('x', { text: 'x' });
+      st = await typeState(3);
+      const text0 = textOf('split');
+      T.split.typed = st.text;
+      check(st.text === text0.slice(0, hi) + 'x' + text0.slice(hi), 'split', 'a letter typed after it goes after it', st.text);
+    }
+  }
+  await end();
+  log(`type2 split: ${JSON.stringify(T.split)}`);
+
+  // -- 6. the budget a key's paint is given --
+  // At 300%: the large box is over a megapixel, the balloon is not.
+  await open('rust', 3);
+  {
+    const B = (T.budget = {});
+    const mp = (c) => (c ? +((c.w * c.h) / 1e6).toFixed(3) : null);
+    // The balloon: the same bytes as the exporter's straight after a key,
+    // with no pause, and nothing painted after it.
+    await bring('small');
+    await begin('small');
+    await pressAt((await ec('typeHalves', 'small'))[6].p);
+    let st = await typeState();
+    const rest = st.canvas;
+    await key('q', { text: 'q' });
+    await ec('wait', 1);
+    const now = await ec('typeSame', 'small');
+    st = await ec('typeState');
+    const during = st.canvas;
+    await sleep(400);
+    const later = await ec('typeSame', 'small');
+    st = await typeState();
+    B.small = { atRestMP: mp(rest), afterKeyMP: mp(during), afterKey: now, afterPause: later, afterPauseMP: mp(st.canvas) };
+    check(now.painted && now.bytes === 0 && same(now.editor, now.exporter), 'small', 'a box under the budget is the exporter\'s bytes straight after a key', now);
+    check(mp(during) === mp(rest) && later.bytes === 0 && mp(st.canvas) === mp(rest), 'small', 'and is the same canvas after the pause', B.small);
+    await key('Backspace', { commands: ['deleteBackward'] });
+    await end();
+    // The large box.
+    await bring('big');
+    await begin('big');
+    await pressAt((await ec('typeHalves', 'big'))[6].p);
+    st = await typeState(2);
+    const big0 = st.canvas;
+    const caret0 = st.caret;
+    await key('q', { text: 'q' });
+    await ec('wait', 1);
+    st = await ec('typeState');
+    const soft = st.canvas;
+    const softSame = await ec('typeSame', 'big');
+    const caret1 = st.caret;
+    await sleep(400);
+    st = await typeState(2);
+    const sharp = st.canvas;
+    const sharpSame = await ec('typeSame', 'big');
+    const caret2 = st.caret;
+    B.big = { atRestMP: mp(big0), afterKeyMP: mp(soft), afterPauseMP: mp(sharp), afterPause: sharpSame, caret: [caret0, caret1, caret2].map((c) => c && [+c.x.toFixed(2), +c.y.toFixed(2), +c.h.toFixed(2)]) };
+    check(mp(big0) > 1.1, 'big', 'the large box is over the budget at rest', B.big);
+    check(mp(soft) <= 1.08 && !same(softSame.editor, softSame.exporter), 'big', 'while keys are coming it is painted within a megapixel', { soft: mp(soft), softSame });
+    check(mp(sharp) === mp(big0) && sharpSame.painted && sharpSame.bytes === 0, 'big', 'after the pause it is renderBoxTexture, byte for byte', sharpSame);
+    check(caret1 && caret2 && Math.abs(caret1.x - caret2.x) < 0.01 && Math.abs(caret1.y - caret2.y) < 0.01 && Math.abs(caret1.h - caret2.h) < 0.01, 'big', 'the caret does not move when the picture is painted in full', B.big.caret);
+    // A composition in the large box: soft while it is composed, in full
+    // after a pause with the composition still open, and it ends as it did.
+    const text1 = st.text;
+    const co = st.sel[1];
+    await sleep(700);
+    await cdp.send('Input.imeSetComposition', { text: 'かな', selectionStart: 2, selectionEnd: 2 });
+    await ec('wait', 1);
+    st = await ec('typeState');
+    const compSoft = st.canvas;
+    await sleep(400);
+    st = await typeState(2);
+    const compSame = await ec('typeSame', 'big');
+    const comp = { softMP: mp(compSoft), sharpMP: mp(st.canvas), held: st.held === text1.slice(0, co) + 'かな' + text1.slice(co), boxText: st.text === text1, underlines: st.comps.length, picture: compSame };
+    await cdp.send('Input.insertText', { text: '仮名' });
+    st = await typeState(3);
+    await sleep(400);
+    const done = await ec('typeSame', 'big');
+    st = await typeState();
+    comp.committed = st.text === text1.slice(0, co) + '仮名' + text1.slice(co) && st.comps.length === 0;
+    comp.committedPicture = done;
+    B.composition = comp;
+    check(comp.softMP <= 1.08 && comp.held && comp.boxText && comp.underlines > 0, 'big', 'a composition is painted within the budget while it is composed, and is not yet the box\'s text', comp);
+    check(comp.sharpMP === mp(big0) && compSame.painted && compSame.bytes === 0 && compSame.composing, 'big', 'and in full after the pause, from the composed text', compSame);
+    check(comp.committed && done.painted && done.bytes === 0 && !done.composing, 'big', 'the composition ended is the box\'s text and its picture', { committed: comp.committed, done });
+    // The edit ending inside the pause: in full at once.
+    await key('w', { text: 'w' });
+    await ec('wait', 1);
+    st = await ec('typeState');
+    const beforeEnd = st.canvas;
+    await ec('endEdit');
+    const ended = await ec('typeSame', 'big');
+    B.ending = { beforeMP: mp(beforeEnd), after: ended };
+    check(mp(beforeEnd) <= 1.08 && ended.painted && ended.bytes === 0 && same(ended.editor, ended.exporter), 'big', 'the edit ending inside the pause paints it in full at once', B.ending);
+    log(`type2 budget: balloon ${B.small.atRestMP} MP at rest, ${B.small.afterKeyMP} after a key (bytes unlike the exporter ${now.bytes}); large box ${B.big.atRestMP} MP at rest, ${B.big.afterKeyMP} after a key, ${B.big.afterPauseMP} after the pause (bytes unlike ${sharpSame.bytes}); composing ${comp.softMP} then ${comp.sharpMP} MP (bytes unlike ${compSame.bytes}); ended inside the pause: bytes unlike ${ended.bytes}`);
+  }
+  await ec('zoom', 1);
+  check(cdp.errors.length === errorsBefore, 'type2', 'no page error', cdp.errors.slice(errorsBefore));
+  T.verdict = { checks: T.checks, failed: T.fails.length };
+  log(`type2 verdict (${DSF}x): ${T.checks - T.fails.length} of ${T.checks} checks passed, ${T.fails.length} failed`);
+  for (const f of T.fails) log(`  FAILED ${f.id}: ${f.what} ${JSON.stringify(f.detail).slice(0, 600)}`);
 }
 
 if (ONLY.has('typecost')) {
