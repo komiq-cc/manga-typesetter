@@ -166,7 +166,7 @@ describe('a box whose font lacks a heart and a note', () => {
     // The box that waited was fitted, once, against those widths.
     expect(b.h).toBe(need(b));
     expect(b.h).toBeGreaterThan(20);
-    expect(boxesBorrowingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', borrowed: [{ family: 'DejaVu Sans', letters: [cp('♥'), cp('♪')] }], none: [] }]);
+    expect(boxesBorrowingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', borrowed: [{ family: 'DejaVu Sans', letters: [cp('♥'), cp('♪')] }], none: [], unread: [] }]);
   });
 
   it('keeps kana, which nothing here has, as the empty box and says so', async () => {
@@ -175,7 +175,7 @@ describe('a box whose font lacks a heart and a note', () => {
     const b = page().boxes[0];
     await fontsSettling(app.pages);
     expect(invoke.calls[0]).toBe('system_font_coverage 2665 3042');
-    expect(boxesBorrowingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', borrowed: [{ family: 'DejaVu Sans', letters: [cp('♥')] }], none: [cp('あ')] }]);
+    expect(boxesBorrowingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', borrowed: [{ family: 'DejaVu Sans', letters: [cp('♥')] }], none: [cp('あ')], unread: [] }]);
     expect(lineWidth('あ', b.style, SIZE)).toBe(alone.advance('Bangers', 'あ'));
     expect(b.h).toBe(need(b));
   });

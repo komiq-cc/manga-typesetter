@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createFontSync, COVERAGE_MAX } from './font-sync.js';
-import { fakeRustEngine, fakeNative, SFNT } from '../../test/fake-rust-engine.js';
+import { fakeRustEngine, fakeNative, SFNT, WOFF2 } from '../../test/fake-rust-engine.js';
 
 // A letter the face lacks, on a stand-in engine and a stand-in native side:
 // who is asked, how often, what the chain becomes and in what order, and what
@@ -57,7 +57,7 @@ describe('a letter the face lacks', () => {
   it('is not asked about when the face has every letter', async () => {
     const ctx = setup();
     const f = await withFace(ctx);
-    expect(ctx.sync.lettersOf(f, 'HELLO THERE')).toEqual({ borrowed: [], none: [], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'HELLO THERE')).toEqual({ borrowed: [], none: [], pending: [], unread: [] });
     expect(ctx.questions()).toEqual([]);
   });
 
@@ -65,7 +65,7 @@ describe('a letter the face lacks', () => {
     const ctx = setup();
     ctx.engine.cover('Helvetica Neue', 'Ω');
     const f = await withFace(ctx);
-    expect(ctx.sync.lettersOf(f, 'Ω')).toEqual({ borrowed: [{ family: 'Helvetica Neue', letters: [cp('Ω')] }], none: [], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'Ω')).toEqual({ borrowed: [{ family: 'Helvetica Neue', letters: [cp('Ω')] }], none: [], pending: [], unread: [] });
     expect(ctx.questions()).toEqual([]);
   });
 
@@ -73,7 +73,7 @@ describe('a letter the face lacks', () => {
     const ctx = setup({ hold: true });
     const f = await withFaceHeld(ctx);
     // The first look sends the question, and the letter is pending.
-    expect(ctx.sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [], none: [], pending: [cp('あ')] });
+    expect(ctx.sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [], none: [], pending: [cp('あ')], unread: [] });
     expect(ctx.questions()).toEqual([[cp('あ')]]);
     expect(ctx.engine.fallbacks()).toEqual(['Helvetica Neue']);
     expect(ctx.onArrival).not.toHaveBeenCalled();
@@ -90,7 +90,7 @@ describe('a letter the face lacks', () => {
     await ctx.sync.settled();
     expect(ctx.engine.fallbacks()).toEqual(['Helvetica Neue', 'Hiragino Sans']);
     expect(ctx.onArrival).toHaveBeenCalledTimes(1);
-    expect(ctx.sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ')] }], none: [], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ')] }], none: [], pending: [], unread: [] });
     expect(ctx.sync.snapshot().letters).toEqual({ [cp('あ')]: 'Hiragino Sans' });
   });
 
@@ -132,7 +132,7 @@ describe('a letter the face lacks', () => {
     expect(ctx.sync.lettersOf(f, '☃').pending).toEqual([cp('☃')]);
     await ctx.sync.settled();
     expect(ctx.onArrival).toHaveBeenCalledTimes(1);
-    for (let i = 0; i < 10; i++) expect(ctx.sync.lettersOf(f, '☃ ☃')).toEqual({ borrowed: [], none: [cp('☃')], pending: [] });
+    for (let i = 0; i < 10; i++) expect(ctx.sync.lettersOf(f, '☃ ☃')).toEqual({ borrowed: [], none: [cp('☃')], pending: [], unread: [] });
     expect(ctx.questions()).toEqual([[cp('☃')]]);
     expect(ctx.engine.fallbacks()).toEqual(['Helvetica Neue']);
     expect(ctx.sync.snapshot().letters).toEqual({ [cp('☃')]: null });
@@ -144,17 +144,23 @@ describe('a letter the face lacks', () => {
     expect(ctx.sync.lettersOf(f, 'あ').pending).toEqual([cp('あ')]);
     await ctx.sync.settled();
     expect(ctx.onArrival).toHaveBeenCalledTimes(1);
-    for (let i = 0; i < 10; i++) expect(ctx.sync.lettersOf(f, 'あ')).toEqual({ borrowed: [], none: [cp('あ')], pending: [] });
+    // Not asked again - and not said to be in no font: nobody looked.
+    for (let i = 0; i < 10; i++) expect(ctx.sync.lettersOf(f, 'あ')).toEqual({ borrowed: [], none: [], pending: [], unread: [{ family: null, letters: [cp('あ')] }] });
     await ctx.sync.settled();
     expect(ctx.questions()).toEqual([[cp('あ')]]);
   });
 
-  it('remembers a family that could not be read: its letters are ones nothing has', async () => {
+  it('remembers a family that could not be read: its letters are unread, and not ones no font has', async () => {
     const ctx = setup({ failing: ['Hiragino Sans'] });
     const f = await withFace(ctx);
     ctx.sync.lettersOf(f, 'あ한');
     await ctx.sync.settled();
-    expect(ctx.sync.lettersOf(f, 'あ한')).toEqual({ borrowed: [{ family: 'Apple SD Gothic Neo', letters: [cp('한')] }], none: [cp('あ')], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'あ한')).toEqual({
+      borrowed: [{ family: 'Apple SD Gothic Neo', letters: [cp('한')] }],
+      none: [],
+      pending: [],
+      unread: [{ family: 'Hiragino Sans', letters: [cp('あ')] }],
+    });
     expect(ctx.engine.fallbacks()).toEqual(['Helvetica Neue', 'Apple SD Gothic Neo']);
     // Nothing is sent for twice, and nothing is asked twice.
     for (let i = 0; i < 5; i++) ctx.sync.lettersOf(f, 'あ한');
@@ -170,7 +176,12 @@ describe('a letter the face lacks', () => {
     const f = await withFace(ctx);
     ctx.sync.lettersOf(f, 'あ→');
     await ctx.sync.settled();
-    expect(ctx.sync.lettersOf(f, 'あ→')).toEqual({ borrowed: [{ family: 'Lucida Grande', letters: [cp('→')] }], none: [cp('あ')], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'あ→')).toEqual({
+      borrowed: [{ family: 'Lucida Grande', letters: [cp('→')] }],
+      none: [],
+      pending: [],
+      unread: [{ family: 'Hiragino Sans', letters: [cp('あ')] }],
+    });
     expect(ctx.fetched()).toEqual(['Lucida Grande']);
   });
 
@@ -178,12 +189,68 @@ describe('a letter the face lacks', () => {
     const ctx = setup({ native: false });
     const f = await withFace(ctx);
     expect(ctx.sync.canAskLetters()).toBe(false);
-    expect(ctx.sync.lettersOf(f, 'あ')).toEqual({ borrowed: [], none: [cp('あ')], pending: [] });
+    expect(ctx.sync.lettersOf(f, 'あ')).toEqual({ borrowed: [], none: [cp('あ')], pending: [], unread: [] });
     expect(ctx.invoke.calls).toEqual([]);
   });
 });
 
+describe('a letter borrowed from a family the user has loaded a font of the same name as', () => {
+  it('waits for a face of that font still being decoded, as a box set in the font would', async () => {
+    // The native side names the installed "Hiragino Sans". The user's own
+    // font of that name has the name in the engine, and its bold is a WOFF2
+    // on its way through the decoder: until it is in, a bold line would
+    // borrow a regular made bold, and be fitted to it.
+    const engine = fakeRustEngine();
+    engine.cover('Hiragino Sans', '♥');
+    const names = ['Helvetica Neue', 'Hiragino Sans'];
+    const invoke = fakeNative(Object.fromEntries(names.map((name) => [name, [{ slots: { regular: 0 }, bytes: SFNT() }]])), { coverage: [['Hiragino Sans', '♥']] });
+    let decoded;
+    const sync = createFontSync({
+      engine,
+      fonts: { user: [], system: names.map((name) => sysEntry(name)) },
+      os: 'macos',
+      systemFace: (family, slot, known) => invoke('system_font_face', { family, slot, known }),
+      toSfnt: () => new Promise((resolve) => (decoded = resolve)),
+      systemCoverage: (codePoints) => invoke('system_font_coverage', { codePoints }),
+    });
+    sync.setUserFace('Wild Words', 'regular', SFNT());
+    sync.setUserFace('Hiragino Sans', 'regular', SFNT());
+    sync.setUserFace('Hiragino Sans', 'bold', WOFF2());
+    sync.refresh();
+    const f = face('Wild Words', { bold: true });
+    sync.lettersOf(f, '♥');
+    for (let i = 0; i < 6; i++) await flush();
+    expect(sync.lastResort()).toBe('Helvetica Neue');
+    expect(sync.snapshot().user['Hiragino Sans']).toEqual({ regular: 'ready', bold: 'decoding' });
+    // The family is not ready, and neither is the letter that comes from it.
+    expect(sync.ready('Hiragino Sans')).toBe(false);
+    expect(sync.lettersOf(f, '♥')).toEqual({ borrowed: [], none: [], pending: [cp('♥')], unread: [] });
+    decoded(SFNT().buffer);
+    await sync.settled();
+    expect(sync.ready('Hiragino Sans')).toBe(true);
+    expect(sync.lettersOf(f, '♥')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('♥')] }], none: [], pending: [], unread: [] });
+  });
+
+  it('says a letter is unread, not in its family, when that font has no face the engine can use', async () => {
+    const ctx = setup();
+    const f = await withFace(ctx);
+    // No decoder here: the user's WOFF2 "Hiragino Sans" is a name with no face.
+    ctx.sync.setUserFace('Hiragino Sans', 'regular', WOFF2());
+    ctx.sync.lettersOf(f, 'あ');
+    await ctx.sync.settled();
+    expect(ctx.sync.lettersOf(f, 'あ')).toEqual({ borrowed: [], none: [], pending: [], unread: [{ family: 'Hiragino Sans', letters: [cp('あ')] }] });
+  });
+});
+
 describe('the chain', () => {
+  it('lends every named family by its first face, and the last resort by the face CSS picks', async () => {
+    const ctx = setup();
+    const f = await withFace(ctx);
+    ctx.sync.lettersOf(f, 'あ한');
+    await ctx.sync.settled();
+    expect(ctx.engine.lenders()).toEqual(['Helvetica Neue', { family: 'Hiragino Sans', face: 'first' }, { family: 'Apple SD Gothic Neo', face: 'first' }]);
+  });
+
   it('is in the native side’s order, whichever family was asked for first', async () => {
     const order = async (texts) => {
       const ctx = setup();
@@ -213,7 +280,7 @@ describe('the chain', () => {
     expect(ctx.sync.lettersOf(f, '漢').pending).toEqual([cp('漢')]);
     await ctx.sync.settled();
     expect(ctx.engine.fallbacks()).toEqual(['Helvetica Neue', 'Hiragino Sans', 'Apple SD Gothic Neo']);
-    expect(ctx.sync.lettersOf(f, '漢')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('漢')] }], none: [], pending: [] });
+    expect(ctx.sync.lettersOf(f, '漢')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('漢')] }], none: [], pending: [], unread: [] });
   });
 
   it('is one chain for every face: a second family borrows the same letters from the same place', async () => {
@@ -223,7 +290,7 @@ describe('the chain', () => {
     ctx.sync.lettersOf(f, 'あ');
     await ctx.sync.settled();
     ctx.invoke.calls.length = 0;
-    expect(ctx.sync.lettersOf(face('Anime Ace'), 'あ')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ')] }], none: [], pending: [] });
+    expect(ctx.sync.lettersOf(face('Anime Ace'), 'あ')).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ')] }], none: [], pending: [], unread: [] });
     expect(ctx.invoke.calls).toEqual([]);
   });
 
@@ -265,7 +332,7 @@ describe('after another scan', () => {
     const f = await withFace(ctx);
     ctx.sync.lettersOf(f, 'あ☃한');
     await ctx.sync.settled();
-    expect(ctx.sync.lettersOf(f, 'あ☃한').none).toEqual([cp('あ'), cp('☃')]);
+    expect(ctx.sync.lettersOf(f, 'あ☃한')).toMatchObject({ none: [cp('☃')], unread: [{ family: 'Hiragino Sans', letters: [cp('あ')] }] });
     expect(ctx.questions()).toHaveLength(1);
     // The same list object is no scan at all.
     expect(ctx.sync.refresh()).toBe(false);

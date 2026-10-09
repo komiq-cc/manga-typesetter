@@ -1203,21 +1203,28 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  for (const p of app.pages) {
-    // Counted so a session with nothing waiting never walks the boxes for it.
-    const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
-    n += solvePending(p);
-    if (landing) n += fitLanding(p, landing);
-    n += refitPage(p);
-    // Last, with the box as all three left it: the edit that asked for the fit
-    // was recorded before the fit could run, and its undo entry is owed this.
-    if (landing) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
-  }
+  for (const p of app.pages) n += landPage(p);
   if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
   if (n) markUnsaved();
+  return n;
+}
+
+// One page, after a font landed: the fits that were held for it, the solves
+// that were pending, and the grow-only refit of everything else. `open` is
+// false for a page that is no longer in the document (`fontsSettling`): it has
+// no history, and a page of the chapter that is open now may carry its id.
+function landPage(p, open = true) {
+  // Counted so a session with nothing waiting never walks the boxes for it.
+  const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
+  let n = solvePending(p);
+  if (landing) n += fitLanding(p, landing);
+  n += refitPage(p);
+  // Last, with the box as all three left it: the edit that asked for the fit
+  // was recorded before the fit could run, and its undo entry is owed this.
+  if (landing && open) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
   return n;
 }
 
@@ -5136,8 +5143,22 @@ export function setFontSource(source) {
 // has asked for yet, so asking here is also what sends for them. Null with no
 // font source - the browser measuring - where there is nothing to wait for
 // and nothing is awaited.
+//
+// It answers for THESE pages. A font landing fits the pages that are open
+// (`relayoutAll`); the ones an export took may not be among them any more -
+// the chapter was closed, or another opened, while it waited - and nothing
+// would ever fit those. So they are fitted here, the same way, before the
+// export is let through to paint them.
+//
+// It rejects when the wait gives up (see `fontsSettled` in
+// engine-switch.svelte.js), and the export then fails and says so: it never
+// resolves over something still on its way.
 export function fontsSettling(pages = app.pages) {
-  return fontSource?.settle ? fontSource.settle(pages) : null;
+  const settling = fontSource?.settle ? fontSource.settle(pages) : null;
+  if (!settling) return null;
+  return settling.then(() => {
+    for (const p of pages ?? []) if (p?.boxes && !app.pages.includes(p)) landPage(p, false);
+  });
 }
 
 export function fontNameFor(name) {

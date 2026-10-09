@@ -122,7 +122,7 @@ describe('a line that mixes a Latin face with letters it lacks', () => {
     expect(before.heart).toEqual(alone.ink('Comic Neue', HEART));
 
     // Looking is what asks: one question, both letters.
-    expect(sync.lettersOf(f, TEXT)).toEqual({ borrowed: [], none: [], pending: [cp(HEART), cp(NOTE)] });
+    expect(sync.lettersOf(f, TEXT)).toEqual({ borrowed: [], none: [], pending: [cp(HEART), cp(NOTE)], unread: [] });
     expect(calls).toEqual(['coverage 2665 266a']);
     // Nothing moves while the answer and the file are on their way.
     release();
@@ -170,7 +170,7 @@ describe('a line that mixes a Latin face with letters it lacks', () => {
     expect(line.right).toBeCloseTo(head + alone.ink('DejaVu Sans', NOTE).right, 6);
     // Nothing is missing any more, and the look says where each letter came from.
     expect(engine.missing(f, TEXT)).toEqual([]);
-    expect(sync.lettersOf(f, TEXT)).toEqual({ borrowed: [{ family: 'DejaVu Sans', letters: [cp(HEART), cp(NOTE)] }], none: [], pending: [] });
+    expect(sync.lettersOf(f, TEXT)).toEqual({ borrowed: [{ family: 'DejaVu Sans', letters: [cp(HEART), cp(NOTE)] }], none: [], pending: [], unread: [] });
     // Asked once, read once a file.
     expect(calls).toEqual(['coverage 2665 266a', 'face DejaVu Sans/regular', 'face DejaVu Sans/italic']);
   });
@@ -211,7 +211,7 @@ describe('a line that mixes a Latin face with letters it lacks', () => {
     expect(engine.advance(f, GRIN)).toBe(alone.advance('DejaVu Sans', GRIN));
     expect(engine.lineInk(f, GRIN)).toEqual(alone.ink('DejaVu Sans', GRIN));
     expect(engine.advance(f, `HA ${GRIN}`)).toBeCloseTo(alone.advance('Bangers', 'HA ') + alone.advance('DejaVu Sans', GRIN), 9);
-    expect(sync.lettersOf(f, `HA ${GRIN}`)).toEqual({ borrowed: [{ family: 'DejaVu Sans', letters: [cp(GRIN)] }], none: [], pending: [] });
+    expect(sync.lettersOf(f, `HA ${GRIN}`)).toEqual({ borrowed: [{ family: 'DejaVu Sans', letters: [cp(GRIN)] }], none: [], pending: [], unread: [] });
   });
 
   it('keeps a letter no installed font has as the face’s empty box, and says so once', async () => {
@@ -220,7 +220,7 @@ describe('a line that mixes a Latin face with letters it lacks', () => {
     const before = engine.advance(f, 'あ!');
     expect(sync.lettersOf(f, 'あ!').pending).toEqual([cp('あ')]);
     await sync.settled();
-    for (let i = 0; i < 3; i++) expect(sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [], none: [cp('あ')], pending: [] });
+    for (let i = 0; i < 3; i++) expect(sync.lettersOf(f, 'あ!')).toEqual({ borrowed: [], none: [cp('あ')], pending: [], unread: [] });
     expect(calls).toEqual(['coverage 3042']);
     expect(engine.fallbacks()).toEqual(['Bangers']);
     expect(engine.advance(f, 'あ!')).toBe(before);
@@ -251,5 +251,141 @@ describe('a line that mixes a Latin face with letters it lacks', () => {
     expect(engine.missing(f, text)).toEqual([cp('あ')]);
     // Asking with a shorter chain leaves measuring on the whole one.
     expect(engine.advance(f, HEART)).toBe(alone.advance('DejaVu Sans', HEART));
+  });
+});
+
+// ===========================================================================
+// The face that was judged is the face that draws
+// ===========================================================================
+// The native side judges a family by ONE face, its regular. "Alpha" here has
+// a letter in its regular (DejaVu Sans Oblique's file) and not in its bold
+// (Bangers' file); "Beta" (DejaVu Sans) has the letter too, and an Arabic
+// letter Alpha lacks, so it is loaded for another box's sake. A bold box's
+// letter is Alpha's - its regular, made bold by the engine - whether Beta is
+// loaded or not and whichever of the two arrived first, and that is the
+// family the editor names. Lent by the face CSS matching picks, it was the
+// empty box (Alpha's bold has no such letter) until Beta happened to be
+// loaded, and Beta's letter from then on.
+//
+// The letter is a Cyrillic one: the heart this was found with is the same
+// drawing in both DejaVu files, and nothing would tell Alpha's from Beta's.
+// Ж is slanted in the one and upright in the other.
+describe('a bold box borrowing a letter the lending family has only in its regular', () => {
+  const ZHE = 'Ж';
+  const HAMZA = '\u0621';
+  const FILES = {
+    Alpha: [{ slots: { regular: 0 }, bytes: oblique }, { slots: { bold: 0 }, bytes: bangers }],
+    Beta: [{ slots: { regular: 0 }, bytes: dejavu }],
+  };
+  // What the native side would answer: the first family, by name, whose REGULAR has the letter.
+  const judged = [['Alpha', coverage(oblique).ranges], ['Beta', coverage(dejavu).ranges]];
+  let lone;
+
+  beforeAll(async () => {
+    // Each lending face by itself, asked for in bold: the engine makes the bold.
+    const e = await rustEngine({ fixtures: false });
+    e.addFace('Comic Neue', 'regular', comic);
+    e.addFace('Alpha regular', 'regular', oblique);
+    e.addFace('Alpha bold', 'regular', bangers);
+    e.addFace('Beta regular', 'regular', dejavu);
+    lone = { advance: (name, text, bold = true) => e.advance(face(name, { bold }), text), ink: (name, text) => e.lineInk(face(name, { bold: true }), text) };
+    // The premise.
+    expect(e.missing(face('Alpha regular'), `${ZHE}${HAMZA}`)).toEqual([cp(HAMZA)]);
+    expect(e.missing(face('Alpha bold'), ZHE)).toEqual([cp(ZHE)]);
+    expect(e.missing(face('Beta regular'), `${ZHE}${HAMZA}`)).toEqual([]);
+    // Told apart: the empty box by its width, the two letters by their ink.
+    expect(lone.advance('Comic Neue', ZHE)).not.toBe(lone.advance('Alpha regular', ZHE));
+    expect(lone.ink('Alpha regular', ZHE)).not.toEqual(lone.ink('Beta regular', ZHE));
+  });
+
+  function installed() {
+    const calls = [];
+    const fonts = { user: [], system: [] };
+    const sync = createFontSync({
+      engine,
+      fonts,
+      os: 'macos',
+      systemFace: async (family, slot, known) => {
+        const file = FILES[family].find((f) => slot in f.slots);
+        return systemFaceAnswer(file.slots, file.bytes, { known });
+      },
+      systemCoverage: async (codePoints) => {
+        calls.push(codePoints);
+        const families = judged.map(([name]) => ({ name, order: `1${name.toLowerCase()}\u0001${name}`, codePoints: [] }));
+        const none = [];
+        for (const c of codePoints) {
+          const at = judged.findIndex(([, ranges]) => covers(ranges, c));
+          (at < 0 ? none : families[at].codePoints).push(c);
+        }
+        return { families: families.filter((f) => f.codePoints.length), none };
+      },
+    });
+    sync.setUserFace('Comic Neue', 'regular', comic);
+    fonts.system = [sysEntry('Alpha', ['regular', 'bold']), sysEntry('Beta', ['regular'])];
+    sync.refresh();
+    expect(sync.lastResort()).toBe('Comic Neue');
+    return { sync, calls };
+  }
+
+  const bold = face('Comic Neue', { bold: true });
+  const regular = face('Comic Neue');
+  // The letter as a bold box and as a regular one measure and name it now.
+  function letter(sync) {
+    return {
+      bold: engine.advance(bold, ZHE),
+      ink: engine.lineInk(bold, ZHE),
+      regular: engine.advance(regular, ZHE),
+      named: [sync.lettersOf(bold, ZHE), sync.lettersOf(regular, ZHE)].map((l) => (l.pending.length ? 'pending' : l.borrowed.map((b) => b.family).join('+') || 'nothing')),
+    };
+  }
+  async function borrow(sync, text) {
+    sync.lettersOf(regular, text);
+    await sync.settled();
+  }
+
+  for (const [first, second] of [[ZHE, HAMZA], [HAMZA, ZHE]]) {
+    it(`is Alpha's letter made bold, with ${first === ZHE ? 'Alpha' : 'Beta'} the first to arrive`, async () => {
+      const { sync } = installed();
+      const want = {
+        bold: lone.advance('Alpha regular', ZHE),
+        ink: lone.ink('Alpha regular', ZHE),
+        regular: lone.advance('Alpha regular', ZHE, false),
+        named: ['Alpha', 'Alpha'],
+      };
+      await borrow(sync, first);
+      sync.lettersOf(bold, ZHE);
+      await sync.settled();
+      // Whatever was loaded on the way here, the letter is settled now.
+      expect(letter(sync)).toEqual(want);
+      await borrow(sync, second);
+      // Both families in, in the rule's order: nothing about the letter moved.
+      expect(engine.fallbacks()).toEqual(['Comic Neue', 'Alpha', 'Beta']);
+      expect(letter(sync)).toEqual(want);
+      expect(want.ink).not.toEqual(lone.ink('Beta regular', ZHE));
+      expect(want.bold).not.toBe(lone.advance('Comic Neue', ZHE));
+      // And the Arabic letter, which Alpha's regular lacks, is Beta's in both weights.
+      expect(engine.advance(bold, HAMZA)).toBe(lone.advance('Beta regular', HAMZA));
+      expect(sync.lettersOf(bold, HAMZA).borrowed).toEqual([{ family: 'Beta', letters: [cp(HAMZA)] }]);
+    });
+  }
+
+  it('lends the last resort by the face CSS picks: a real italic where it has one', async () => {
+    // The other half of the rule. Nobody judged the last resort by one face:
+    // the engine is asked, weight by weight, what it lacks.
+    const e = engine;
+    e.addFace('Comic Neue', 'regular', comic);
+    e.addFace('Resort', 'regular', dejavu);
+    e.addFace('Resort', 'italic', oblique);
+    e.setFallbacks(['Resort']);
+    const slanted = face('Comic Neue', { italic: true });
+    expect(e.advance(slanted, ZHE)).toBe(e.advance(face('Resort', { italic: true }), ZHE));
+    expect(e.resolveFace(face('Resort', { italic: true }))).toEqual({ slot: 'italic', fauxBold: false, fauxItalic: false });
+    // Listed to lend by its first face, the same family lends its regular, slanted by the engine.
+    e.setFallbacks([{ family: 'Resort', face: 'first' }]);
+    e.addFace('Upright', 'regular', dejavu);
+    expect(e.lineInk(slanted, ZHE)).toEqual(e.lineInk(face('Upright', { italic: true }), ZHE));
+    expect(e.lineInk(slanted, ZHE)).not.toEqual(e.lineInk(face('Resort', { italic: true }), ZHE));
+    expect(() => e.setFallbacks([{ family: 'Resort' }])).toThrow('fallbacks are a list of family names');
+    expect(() => e.setFallbacks([7])).toThrow('fallbacks are a list of family names');
   });
 });

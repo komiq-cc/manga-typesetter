@@ -162,7 +162,7 @@ describe('a box holding a letter its font lacks', () => {
     expect(engine.fallbacks()).toEqual(['Helvetica Neue', 'Hiragino Sans']);
     expect(b.h).toBe(need(b));
     expect(b.h).toBeGreaterThan(20);
-    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ'), cp('い'), cp('う')] }], none: [], pending: [] });
+    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ'), cp('い'), cp('う')] }], none: [], pending: [], unread: [] });
     // Asked once and read once, however often it was looked at meanwhile.
     expect(questions()).toHaveLength(1);
     expect(fetched()).toHaveLength(1);
@@ -176,7 +176,7 @@ describe('a box holding a letter its font lacks', () => {
     invoke.release();
     await _engineSwitchSync().settled();
     expect(b.h).toBe(need(b));
-    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [cp('☃')], pending: [] });
+    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [cp('☃')], pending: [], unread: [] });
     expect(fetched()).toEqual([]);
   });
 
@@ -214,7 +214,9 @@ describe('a box holding a letter its font lacks', () => {
       await _engineSwitchSync().settled();
     }
     expect(questions()).toHaveLength(1);
-    expect(lettersMissing(b.style, b.text)).toEqual([cp('あ'), cp('い'), cp('う')]);
+    // Nobody looked, so nobody says no installed font has them.
+    expect(lettersMissing(b.style, b.text)).toEqual([]);
+    expect(lettersOf(b.style, b.text).unread).toEqual([{ family: null, letters: [cp('あ'), cp('い'), cp('う')] }]);
   });
 
   it('is not asked about again after its family could not be read', async () => {
@@ -231,7 +233,7 @@ describe('a box holding a letter its font lacks', () => {
     }
     expect(questions()).toHaveLength(1);
     expect(fetched()).toEqual(['Hiragino Sans']);
-    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [cp('あ'), cp('い'), cp('う')], pending: [] });
+    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [], pending: [], unread: [{ family: 'Hiragino Sans', letters: [cp('あ'), cp('い'), cp('う')] }] });
   });
 
   it('placed while its letter is looked for is pending, and solved when the family lands', async () => {
@@ -292,7 +294,7 @@ describe('turned off while a letter is being looked for', () => {
     expect(engine.registered()).toEqual({});
     expect(app.fontsVersion).toBe(version);
     expect(b.h).toBe(fitted);
-    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [], pending: [] });
+    expect(lettersOf(b.style, b.text)).toEqual({ borrowed: [], none: [], pending: [], unread: [] });
     expect(fontsSettling()).toBe(null);
   });
 
@@ -322,11 +324,11 @@ describe('what the notice is told', () => {
     await _engineSwitchSync().settled();
     expect(boxesBorrowingLetters()).toEqual([
       {
-        pageIndex: 0, boxId: 'kana', none: [cp('☃')],
+        pageIndex: 0, boxId: 'kana', none: [cp('☃')], unread: [],
         borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ'), cp('い')] }, { family: 'Helvetica Neue', letters: [cp('Ω')] }],
       },
-      { pageIndex: 1, boxId: 'snow', borrowed: [], none: [cp('☃')] },
-      { pageIndex: 1, boxId: 'heart', borrowed: [{ family: 'Hiragino Sans', letters: [cp('♥')] }], none: [] },
+      { pageIndex: 1, boxId: 'snow', borrowed: [], none: [cp('☃')], unread: [] },
+      { pageIndex: 1, boxId: 'heart', borrowed: [{ family: 'Hiragino Sans', letters: [cp('♥')] }], none: [], unread: [] },
     ]);
     // The older list is the "nothing has" half of the same answer.
     expect(boxesMissingLetters()).toEqual([
@@ -432,7 +434,92 @@ describe('what an export waits for', () => {
     loadProjectPages(doc([box('WildWords', { text: 'あ☃' }), box('Zapfino', { id: 'b2', y: 200 })]));
     await fontsSettling(app.pages);
     expect(_engineSwitchSync().missing('Zapfino')).toBe(true);
-    expect(lettersOf(styleFor('WildWords'), 'あ☃').none).toEqual([cp('あ'), cp('☃')]);
+    expect(lettersOf(styleFor('WildWords'), 'あ☃')).toEqual({ borrowed: [], none: [cp('☃')], pending: [], unread: [{ family: 'Hiragino Sans', letters: [cp('あ')] }] });
+  });
+
+  it('the pages it was given: closed while it waited, they are fitted all the same', async () => {
+    await on({ hold: true });
+    loadProjectPages(doc([box('WildWords')]));
+    const pages = app.pages;
+    const b = pages[0].boxes[0];
+    expect(b.h).toBe(20);
+    const settling = fontsSettling(pages);
+    // Another chapter is opened before the answer is in: what lands will fit
+    // the pages that are open, and these are not among them any more.
+    loadProjectPages(doc([box('WildWords', { id: 'other', text: 'PLAIN' })]));
+    expect(app.pages[0]).not.toBe(pages[0]);
+    for (let i = 0; i < 4; i++) {
+      invoke.release();
+      await flush();
+    }
+    await settling;
+    expect(lettersOf(b.style, b.text).pending).toEqual([]);
+    expect(b.h).toBe(need(b));
+    expect(b.h).toBeGreaterThan(20);
+  });
+
+  it('lets go when the switch is turned off under it: the browser measures, and has fitted the pages', async () => {
+    await on({ hold: true });
+    loadProjectPages(doc([box('WildWords')]));
+    const b = page().boxes[0];
+    let outcome = null;
+    fontsSettling(app.pages).then(() => (outcome = 'released'), (error) => (outcome = error.message));
+    await flush();
+    expect(outcome).toBe(null);
+    await useTextEngine('browser');
+    await flush();
+    // The question it was waiting on is never answered, and it is not waited for.
+    expect(outcome).toBe('released');
+    expect(textEngine()).toBe(browser);
+    expect(b.h).toBe(need(b));
+  });
+
+  it('follows the engine when it is turned off and on again under it', async () => {
+    await on({ hold: true });
+    loadProjectPages(doc([box('WildWords')]));
+    const b = page().boxes[0];
+    let outcome = null;
+    const settling = fontsSettling(app.pages).then(() => (outcome = 'released'), (error) => (outcome = error.message));
+    await flush();
+    await useTextEngine('browser');
+    const again = useTextEngine('rust');
+    expect(engineSwitch.phase).toBe('starting');
+    expect(outcome).toBe(null);
+    for (let i = 0; i < 12 && !outcome; i++) {
+      invoke.release();
+      await flush();
+    }
+    await again;
+    await settling;
+    expect(outcome).toBe('released');
+    expect(engineSwitch.phase).toBe('on');
+    expect(lettersOf(b.style, b.text)).toMatchObject({ borrowed: [{ family: 'Hiragino Sans', letters: [cp('あ'), cp('い'), cp('う')] }], pending: [] });
+    expect(b.h).toBe(need(b));
+  });
+
+  it('fails, and says why, when the fonts never stop changing under it', async () => {
+    let watcher = null;
+    await on({
+      hold: true,
+      watch: (w) => {
+        watcher = w;
+        watchUserFaces(w);
+      },
+    });
+    loadProjectPages(doc([box('WildWords')]));
+    let outcome = null;
+    fontsSettling(app.pages).then(() => (outcome = 'released'), (error) => (outcome = error.message));
+    // Every answer is met by another scan, which throws away what was known
+    // of the letters: there is always something on its way.
+    for (let i = 0; i < 60 && !outcome; i++) {
+      invoke.release();
+      app.fonts.system = INSTALLED();
+      watcher.scanned();
+      await flush();
+    }
+    // Not "released": an export let through here would paint empty boxes.
+    expect(outcome).toBe('the fonts kept changing while it waited for them; nothing was written. Try again.');
+    expect(lettersOf(page().boxes[0].style, page().boxes[0].text).pending).not.toEqual([]);
   });
 
   it('the engine itself, when the export is asked for while it is starting', async () => {

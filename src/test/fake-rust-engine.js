@@ -44,6 +44,7 @@ export function fakeRustEngine() {
   const covers = new Map();
   const has = (family, cp) => cp <= 0xff || (covers.get(family) ?? '').includes(String.fromCodePoint(cp));
   const asked = [];
+  const nameOf = (entry) => (typeof entry === 'string' ? entry : entry.family);
   const changed = () => {
     for (const cb of [...listeners]) cb();
   };
@@ -82,7 +83,7 @@ export function fakeRustEngine() {
     // outside Latin-1 is a letter no fake face has until `cover` says it has.
     missing: (face, text, depth = Infinity) => {
       fam(face);
-      const chain = [face.name, ...fallbacks.slice(0, depth).filter((name) => families.has(name))];
+      const chain = [face.name, ...fallbacks.slice(0, depth).map(nameOf).filter((name) => families.has(name))];
       return [...new Set([...text].map((ch) => ch.codePointAt(0)).filter((cp) => !chain.some((name) => has(name, cp))))];
     },
     /** Gives a family letters beyond Latin-1, as a string of them. */
@@ -133,11 +134,16 @@ export function fakeRustEngine() {
     },
     hasFamily: (family) => families.has(family),
     facesOf: (family) => FACE_SLOTS.filter((s) => families.get(family)?.[s]),
-    setFallbacks(names) {
-      fallbacks = [...names];
+    // As the adapter: a name, or `{ family, face: 'first' }`. A fake family
+    // has the same letters in every face, so which face lends is not
+    // something this can show; what was asked for is kept to be looked at.
+    setFallbacks(list) {
+      fallbacks = [...list];
       changed();
     },
-    fallbacks: () => [...fallbacks],
+    fallbacks: () => fallbacks.map(nameOf),
+    /** The list as it was given, entry by entry. */
+    lenders: () => fallbacks.map((f) => (typeof f === 'string' ? f : { ...f })),
 
     // For the assertions.
     families,

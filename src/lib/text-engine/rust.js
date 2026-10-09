@@ -84,21 +84,27 @@ export async function createRustTextEngine(source, options = {}) {
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
-  // The chain is the same for every family asked in one weight and slant:
-  // each fallback family answers with the face CSS would pick from it, so a
-  // bold line borrows a bold letter where the fallback has one.
+  // The chain is the same for every family asked in one weight and slant.
+  // A fallback family answers with the face CSS would pick from it, so a
+  // bold line borrows a bold letter where the fallback has one - unless it
+  // was listed to lend by its first face (`setFallbacks`), and then it is
+  // that face whatever is asked, emboldened and slanted here.
   function chainFor(bold, italic, depth = Infinity) {
     const count = Math.max(0, Math.min(fallbacks.length, depth));
     const at = count * 4 + ((bold ? 1 : 0) | (italic ? 2 : 0));
     const have = chains.get(at);
     if (have !== undefined) return have;
-    const fams = fallbacks.slice(0, count).map((name) => families.get(name)).filter(Boolean);
+    const lenders = fallbacks.slice(0, count).filter((f) => families.has(f.family));
     // 0 is "no chain" to the engine: the face answers alone.
     let chain = 0;
-    if (fams.length) {
+    if (lenders.length) {
       chain = low.chainNew();
-      for (const fam of fams) {
-        const { slot, fauxBold, fauxItalic } = matchSlot(present(fam), bold, italic);
+      for (const { family, first } of lenders) {
+        const fam = families.get(family);
+        const slots = present(fam);
+        const { slot, fauxBold, fauxItalic } = first
+          ? { slot: slots[0], fauxBold: bold && !BOLD_SLOTS.has(slots[0]), fauxItalic: italic && !ITALIC_SLOTS.has(slots[0]) }
+          : matchSlot(slots, bold, italic);
         low.chainPush(chain, fam[slot], { bold: fauxBold, italic: fauxItalic });
       }
     }
@@ -342,14 +348,31 @@ export async function createRustTextEngine(source, options = {}) {
      * for it, most preferred first. A name that is not registered is skipped
      * until it is. With an empty list a missing letter is the face's own
      * `.notdef` box, and `missing` reports it.
+     *
+     * An entry is a family name, and the family then lends from the face CSS
+     * matching picks for the weight and slant asked. Or it is
+     * `{ family, face: 'first' }`, and the family lends from ONE face in
+     * every weight and slant: its regular, or the first slot it has (the
+     * app's slot order), synthesised to what is asked. That is for a family
+     * somebody chose by the letters of that one face (RULES.md rule 11): its
+     * bold may lack what its regular has.
      */
-    setFallbacks(names) {
-      if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) throw new Error('text engine: fallbacks are a list of family names');
-      fallbacks = [...new Set(names)];
+    setFallbacks(list) {
+      if (!Array.isArray(list)) throw new Error('text engine: fallbacks are a list of family names');
+      const next = new Map();
+      for (const item of list) {
+        const first = typeof item !== 'string';
+        if (first && (typeof item?.family !== 'string' || item.face !== 'first')) throw new Error('text engine: fallbacks are a list of family names');
+        const family = first ? item.family : item;
+        const key = `${first ? 1 : 0}${family}`;
+        if (!next.has(key)) next.set(key, { family, first });
+      }
+      fallbacks = [...next.values()];
       changed();
     },
+    /** The families of the list by name, in its order. */
     fallbacks() {
-      return [...fallbacks];
+      return fallbacks.map((f) => f.family);
     },
 
     /**
