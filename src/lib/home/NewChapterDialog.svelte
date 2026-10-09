@@ -145,6 +145,8 @@
       const bits = [];
       if (by('install').length) bits.push(`${by('install').length} to install`);
       if (by('present').length) bits.push(`${by('present').length} already here`);
+      // Only said with the Rust engine on (package-flow.js, `fontStatus`).
+      if (by('system').length) bits.push(`${by('system').length} installed on this computer`);
       if (bits.length) notes.push({ text: `Fonts - ${bits.join(', ')}`, warn: false });
       const missing = by('missing').map((f) => f.name);
       if (missing.length) {

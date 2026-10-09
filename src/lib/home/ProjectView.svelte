@@ -3,7 +3,7 @@
   import { route, goLibrary, goEditor } from '../route.svelte.js';
   import { toast } from '../store.svelte.js';
   import { relativeTime, plural } from '../format.js';
-  import { exportChapterPackage } from '../package-flow.js';
+  import { exportChapterPackage, stayingNote } from '../package-flow.js';
 
   let { onNewChapter, onSources } = $props();
 
@@ -44,8 +44,11 @@
     if (exportingId) return;
     exportingId = c.id;
     try {
-      const path = await exportChapterPackage(project.id, c.id);
-      if (path) toast(`Saved to ${path}`);
+      const saved = await exportChapterPackage(project.id, c.id);
+      // With the Rust engine on, also which fonts went without a file: a
+      // system font is not copied, and the other machine needs its own.
+      const note = stayingNote(saved?.staying);
+      if (saved) toast(note ? `Saved to ${saved.path}. ${note}` : `Saved to ${saved.path}`);
     } catch (e) {
       toast(`Could not export: ${e?.message ?? e}`);
     } finally {

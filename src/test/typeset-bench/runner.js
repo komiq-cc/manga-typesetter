@@ -56,6 +56,15 @@
 //
 // Not measured, and not measurable offline: manual correction rate and time per
 // bubble (TST-2). Those need real users on real pages.
+//
+// TWO ENGINES. The same cases run under either text engine (`runBench`'s
+// `engine`): 'browser' is this lane's canvas, Skia, measuring and painting as
+// it always has here; 'rust' is the Rust text engine (text-engine/, the wasm
+// `npm run build:engine` writes) measuring from the same fixture files and
+// painting its own glyphs, installed for the run and taken out after it.
+// `compareEngines` lists where the two came out differently. The approved
+// layouts (approved.json) are the browser engine's and are compared with its
+// run alone.
 import { createCanvas } from '@napi-rs/canvas';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -71,6 +80,7 @@ import {
   contentWidth,
 } from '../../lib/measure.js';
 import { renderBoxTexture } from '../../lib/exporter.js';
+import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../../lib/text-engine/index.js';
 import { systemFontEntry } from '../../lib/fonts.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
 
@@ -451,11 +461,108 @@ export async function runCase(c, { layout = storeLayout, setPixels, approved = {
   return result;
 }
 
+export const ENGINES = ['browser', 'rust'];
+
+// Runs `fn` with the named engine measuring and painting. 'browser' is what
+// is installed already and `fn` is simply called. 'rust' loads the wasm and
+// the fixture fonts (src/test/rust-engine.js - a missing wasm fails there,
+// saying how to build it), installs the engine and its painter, and puts
+// back what was there, however `fn` ends.
+export async function withEngine(name, fn) {
+  if (name === 'browser') return fn();
+  if (name !== 'rust') throw new Error(`typeset bench: no engine called '${name}' (${ENGINES.join(', ')})`);
+  const { rustEngine } = await import('../rust-engine.js');
+  const { createRustGlyphPainter } = await import('../../lib/text-engine/rust-painter.js');
+  const before = { engine: textEngine(), painter: glyphPainter() };
+  const rust = await rustEngine();
+  setTextEngine(rust);
+  setGlyphPainter(createRustGlyphPainter(rust));
+  clearLayoutMemo();
+  try {
+    return await fn();
+  } finally {
+    setTextEngine(before.engine);
+    setGlyphPainter(before.painter);
+    clearLayoutMemo();
+  }
+}
+
 export async function runBench(cases, opts) {
   prepareBench();
+  return withEngine(opts.engine ?? 'browser', async () => {
+    const out = [];
+    for (const c of cases) out.push(await runCase(c, opts));
+    return out;
+  });
+}
+
+// Where two runs of the same cases differ, case by case, as
+// `[{ id, changed, a, b, metrics }]`: `changed` is the fields of the layout
+// (size, box, lines) that are not the same, `a` and `b` the two layouts, and
+// `metrics` the ink numbers that moved by more than a tenth - a pixel of
+// overflow, a point of the share inside the balloon - as `[a, b]` pairs. A
+// case that came out the same in both is not in the list.
+const INK_METRICS = [
+  ['boxOverflow', 0.1],
+  ['glyphOverflow', 0.1],
+  ['inkInBalloon', 0.001],
+];
+export function compareEngines(a, b) {
   const out = [];
-  for (const c of cases) out.push(await runCase(c, opts));
+  for (const ra of a) {
+    const rb = b.find((r) => r.id === ra.id);
+    if (!rb) continue;
+    const changed = Object.keys(ra.layout).filter((k) => JSON.stringify(ra.layout[k]) !== JSON.stringify(rb.layout[k]));
+    const metrics = {};
+    for (const [key, tol] of INK_METRICS) {
+      const [x, y] = [ra.metrics[key], rb.metrics[key]];
+      if (x == null && y == null) continue;
+      if (x == null || y == null || (x !== y && !(Math.abs(x - y) <= tol))) metrics[key] = [x, y];
+    }
+    if (changed.length || Object.keys(metrics).length) out.push({ id: ra.id, changed, a: ra.layout, b: rb.layout, metrics });
+  }
   return out;
+}
+
+// The two runs side by side, one row a case: what the letterer would look at
+// first (size, line count, ink past the box, ink inside the balloon), each as
+// `browser | rust`, and which layout fields differ.
+export function enginesTable(a, b, names = ENGINES) {
+  const diffs = new Map(compareEngines(a, b).map((d) => [d.id, d]));
+  const pair = (x, y) => `${x} | ${y}`;
+  const pct = (v) => (v == null ? '-' : `${(v * 100).toFixed(1)}%`);
+  const head = ['case', `size ${pair(...names)}`, 'lines', 'box+', 'glyph+', 'in-bal', 'differs'];
+  const rows = a.map((ra) => {
+    const rb = b.find((r) => r.id === ra.id);
+    const d = diffs.get(ra.id);
+    return [
+      ra.id,
+      pair(ra.layout.size, rb.layout.size),
+      pair(ra.metrics.lineCount, rb.metrics.lineCount),
+      pair(fx(ra.metrics.boxOverflow, 1), fx(rb.metrics.boxOverflow, 1)),
+      pair(fx(ra.metrics.glyphOverflow, 1), fx(rb.metrics.glyphOverflow, 1)),
+      pair(pct(ra.metrics.inkInBalloon), pct(rb.metrics.inkInBalloon)),
+      d ? [...d.changed, ...Object.keys(d.metrics)].join(',') : 'same',
+    ];
+  });
+  const width = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (cells) => cells.map((c, i) => c.padEnd(width[i])).join('  ').trimEnd();
+  return [line(head), ...rows.map(line)].join('\n');
+}
+
+// The differences spelled out: for each case that differs, its two layouts.
+export function enginesDifferences(a, b, names = ENGINES) {
+  const out = [];
+  for (const d of compareEngines(a, b)) {
+    out.push(`${d.id}: ${[...d.changed, ...Object.keys(d.metrics)].join(', ')}`);
+    if (d.changed.length) {
+      for (const [name, l] of [[names[0], d.a], [names[1], d.b]]) {
+        out.push(`  ${name.padEnd(7)} size ${l.size}  box ${l.x},${l.y} ${l.w}x${l.h}  ${JSON.stringify(l.lines)}`);
+      }
+    }
+    for (const [key, [x, y]] of Object.entries(d.metrics)) out.push(`  ${key}: ${fx(x, 3)} | ${fx(y, 3)}`);
+  }
+  return out.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +600,7 @@ export function benchTable(results) {
 
 // One PNG per category: each case's page around the balloon, the detector's
 // rectangle (dashed), the box (magenta), and the text as the exporter paints it.
-export function writeContactSheets(results, dir) {
+export function writeContactSheets(results, dir, suffix = '') {
   mkdirSync(dir, { recursive: true });
   const written = [];
   const TW = 330;
@@ -559,7 +666,7 @@ export function writeContactSheets(results, dir) {
         ty + TH + 44,
       );
     });
-    const file = join(dir, `${cat}.png`);
+    const file = join(dir, `${cat}${suffix}.png`);
     writeFileSync(file, sheet.toBuffer('image/png'));
     written.push(file);
   }

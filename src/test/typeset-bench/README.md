@@ -34,6 +34,25 @@ The script only sets `TYPESET_BENCH_OUT`, `TYPESET_BENCH_APPROVE` and
 `TYPESET_BENCH_LAYOUT` and runs the test file in the `realfont` project, so
 those variables work on a plain `npx vitest run --project realfont` too.
 
+## Two engines
+
+Every run does the cases twice: under the browser engine (this lane's canvas,
+Skia) and under the Rust text engine (`text-engine/`, measuring from the same
+fixture files and painting its own glyphs). The Rust run needs the wasm:
+`npm run build:engine`.
+
+- The first table, the summary, the approvals and `report.json`'s `cases` are
+  the browser engine's, as they were before there was a second engine.
+- After them comes one table with both, each number as `browser | rust`, and
+  the list of cases that differ: the layout fields that are not the same
+  (size, box, lines) with both layouts, and the ink numbers that moved.
+- With `--out`, `report.json` also holds `rust.cases` and `differences`, and
+  each category has a second sheet, `<category>.rust.png`.
+- `--approve` records the browser engine's layouts only. `approved.json` has
+  no Rust entries, and a Rust result is never compared with it.
+- `runBench(cases, { engine: 'rust' })` in `runner.js` runs one engine alone;
+  `compareEngines(a, b)` compares any two runs.
+
 ## Plugging in a layout
 
 The default layout is the store's: `placeDetectedOnPage`, then the lines every
