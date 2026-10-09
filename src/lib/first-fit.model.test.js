@@ -170,8 +170,10 @@ const invoke = async (cmd, args) => {
   return systemFaceAnswer(file.slots, file.bytes, { known: args.known });
 };
 const createEngine = async () => {
-  if (hand.startHeld) await new Promise((resolve) => hand.starts.push(resolve));
+  // An obsolete held factory completing later must not advance the turn
+  // away from the currently requested engine's held font requests.
   engineTurn++;
+  if (hand.startHeld) await new Promise((resolve) => hand.starts.push(resolve));
   return fakeRustEngine();
 };
 
