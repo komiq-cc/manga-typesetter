@@ -428,9 +428,14 @@ describe('the keys a Mac binds to a move or a cut by lines', () => {
     expect(go({ a: 12, f: 12, up: true }, 'LineUp')).toMatchObject({ f: 0 });
     expect(go({ a: 15, f: 15 }, 'LineUp')).toMatchObject({ f: 12 });
     expect(go({ a: 0, f: 0 }, 'LineUp')).toMatchObject({ f: 0 });
-    // A selection closes on its own end, and the row is that end`s.
+    // A step that arrives AT a wrap arrives on its upper side: the row it left.
+    expect(go({ a: 11, f: 11 }, 'LineDown')).toMatchObject({ f: 12, up: true });
+    // A selection closes on its own end, and the row is that end`s - not the
+    // row a step from the focus would be on.
     expect(go({ a: 3, f: 8 }, 'LineUp')).toMatchObject({ a: 0, f: 0 });
     expect(go({ a: 8, f: 3 }, 'LineDown')).toMatchObject({ a: 12, f: 12, up: true });
+    expect(go({ a: 3, f: 14 }, 'LineUp')).toMatchObject({ a: 0, f: 0 });
+    expect(go({ a: 14, f: 3 }, 'LineDown')).toMatchObject({ a: 14, f: 14, up: false });
   });
 });
 
@@ -576,6 +581,17 @@ describe('casing that changes the length', () => {
       expect(moveCaret(rows, raw, { a: 0, f: 0 }, 'ArrowDown')).toMatchObject({ f: 2, up: false });
       expect(moveCaret(rows, raw, { a: 3, f: 3 }, 'ArrowUp')).toMatchObject({ f: 1, up: false });
       expect(moveCaret(rows, raw, { a: 0, f: 0 }, 'End')).toMatchObject({ f: 1, up: false });
+    });
+
+    it('a letter of two units drawn as three, split: the half on the lower row names the start of the pair', () => {
+      // No casing does this; the map is asked whatever it is.
+      const pair = '\u{1F600}';
+      const m = caseMap(pair, 'ABC', () => 'ABC');
+      expect(m.toDrawn).toEqual([0, 0, 3]);
+      const split = mapRows(rowsFor(pair, ['AB', 'C'], { cased: 'ABC' }), m);
+      expect(split.map((r) => r.offs)).toEqual([[0], [2]]);
+      expect(split[0].trail).toEqual({ x: 20, o: 2 });
+      expect(split[1].lead).toEqual({ x: 0, o: 0 });
     });
 
     it('a row that is nothing but the middle of one letter has no stop: there are no rows', () => {

@@ -1095,6 +1095,45 @@ describe('the right button on a curve that is a picture', () => {
   });
 });
 
+describe('while the editable is moved for the menu its caret is not brought back', () => {
+  it('a selection changing under the menu leaves the editable where the menu has it', async () => {
+    vi.useFakeTimers();
+    // The drawn caret is (17.75, -2) from the editable's own; the selection's
+    // middle is at (320, 410).
+    const restore = geometry({ native: { left: 40, top: 50, width: 0, height: 20 }, mark: { left: 57, top: 46, width: 1.5, height: 24 }, selection: { left: 300, top: 400, width: 40, height: 20 } });
+    try {
+      const m = await typing('plain');
+      const rows = rowsOf(m.box);
+      const el = m.q('.type-edit');
+      press(m, rows[0].xs[1] + 1, rows[0].top + 5);
+      release(m);
+      await tick();
+      const before = shift(m.editable());
+      const ev = ptr('pointerdown', m, rows[1].xs[6] + 3, rows[1].top + 5, 1, { button: 2 });
+      el.dispatchEvent(ev);
+      const moved = shift(m.editable());
+      expect(m.sel()).toEqual([17, 22]);
+      // The caret went to the word's end, and was brought under the drawn
+      // one once more; then the editable was moved for the menu.
+      expect(moved[0] - before[0]).toBeCloseTo(17.75 + ev.clientX - 320, 6);
+      expect(moved[1] - before[1]).toBeCloseTo(-2 + ev.clientY - 410, 6);
+      // The system selecting something of its own under the menu.
+      nativeSel(m, 12, 16);
+      await tick();
+      expect(shift(m.editable())).toEqual(moved);
+      window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      vi.runAllTimers();
+      await tick();
+      // Back, and its caret under the drawn one for what is selected now.
+      expect(shift(m.editable())).not.toEqual(moved);
+      expect(Math.abs(shift(m.editable())[0] - moved[0])).toBeGreaterThan(100);
+    } finally {
+      restore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('the editable\'s own caret is kept under the drawn one', () => {
   // The drawn caret's middle is (57.75, 58) and the editable's own (40, 60).
   const apart = { native: { left: 40, top: 50, width: 0, height: 20 }, mark: { left: 57, top: 46, width: 1.5, height: 24 } };
