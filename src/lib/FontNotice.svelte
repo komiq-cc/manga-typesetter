@@ -5,15 +5,18 @@
   // a font since removed, used to draw in a substitute and say nothing; the
   // only way to find out was to open a box and read its font menu.
   //
-  // With the Rust engine measuring it also lists the boxes holding letters no
-  // loaded face has, which a browser never tells anyone. And with the engine
-  // switched on but no font for it to read, it says that nothing is measuring.
+  // With the Rust engine measuring it also lists the boxes whose text is not
+  // all drawn in the font they are set in: a letter the font lacks is taken
+  // from another font on this computer (which letters, and which font), or is
+  // an empty box when no installed font has it. A browser does the first
+  // silently and never tells anyone. And with the engine switched on but no
+  // font for it to read, it says that nothing is measuring.
   //
   // It is the review list's sibling and sits under it, so it wears the same
   // clothes: the rules below are that component's, copied because a
   // component's styles are its own.
   import { app, missingFonts, fontNameFor, fontByName, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
-  import { boxesMissingLetters, whyFontMissing, engineHasNoFont } from './engine-switch.svelte.js';
+  import { boxesBorrowingLetters, lettersWereAskedFor, whyFontMissing, engineHasNoFont } from './engine-switch.svelte.js';
   import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { plural } from './format.js';
 
@@ -30,6 +33,8 @@
   // With the Rust engine on it reads every box's text, so a keystroke makes it
   // again; the engine is asked only about a face and string it has not seen
   // (engine-switch.svelte.js keeps the answers), the rest is one lookup a box.
+  // Which family a letter is borrowed from is part of that kept answer, so
+  // saying it costs nothing more.
   //
   // `idle` is the switch on with no font the engine can read: no engine is
   // installed, and to the font sync EVERY name is one it has no bytes for -
@@ -42,8 +47,21 @@
     const all = missingFonts(app.pages);
     return idle ? all.filter((m) => WHY[whyFontMissing(m.name)] || !fontByName(m.name)) : all;
   });
-  const letters = $derived(boxesMissingLetters(app.pages));
+  const letters = $derived(boxesBorrowingLetters(app.pages));
+  const borrowing = $derived(letters.filter((l) => l.borrowed.length).length);
+  const lacking = $derived(letters.filter((l) => l.none.length).length);
   let open = $state(false);
+
+  // A handful of the letters, as themselves: enough to recognise the box by.
+  const shown = (cps) => cps.slice(0, 6).map((cp) => String.fromCodePoint(cp)).join(' ') + (cps.length > 6 ? ' …' : '');
+  // One short line for a box: what is borrowed and from where, then what
+  // nothing has. In a plain browser nobody looked through the installed
+  // fonts, so the line does not claim anybody did.
+  function lettersLine(l) {
+    const parts = l.borrowed.map((b) => `${shown(b.letters)} drawn in ${b.family}`);
+    if (l.none.length) parts.push(`${lettersWereAskedFor() ? 'no installed font has' : 'no loaded font has'} ${shown(l.none)}`);
+    return parts.join(' · ');
+  }
 
   const WHY = {
     compressed: 'a WOFF file, which the Rust engine can read only in the desktop app',
@@ -87,13 +105,14 @@
       const pg = app.pages[l.pageIndex];
       const b = pg?.boxes.find((x) => x.id === l.boxId);
       if (!b) continue;
-      const shown = l.letters.slice(0, 6).map((cp) => String.fromCodePoint(cp)).join(' ');
       out.push({
         key: `l:${pg.id}:${l.boxId}`,
         pill: `p.${l.pageIndex + 1}`,
         text: String(boxText(b, pg) ?? '').replace(/\s+/g, ' ').trim(),
-        why: `no loaded font has ${shown}${l.letters.length > 6 ? ' …' : ''}`,
-        title: 'These letters are measured as empty boxes: neither the box’s font nor the last-resort font has them.',
+        why: lettersLine(l),
+        title: l.none.length
+          ? 'The font this box is set in has no glyph for these letters. One no font on this computer has is measured and drawn as an empty box.'
+          : 'The font this box is set in has no glyph for these letters, so they are drawn from another font on this computer.',
         pageIndex: l.pageIndex,
         boxId: l.boxId,
       });
@@ -105,7 +124,8 @@
     [
       idle ? 'Rust engine has no font to measure with' : '',
       missing.length ? `${plural(missing.length, 'font')} missing` : '',
-      letters.length ? `${plural(letters.length, 'box', 'boxes')} with letters no font has` : '',
+      lacking ? `${plural(lacking, 'box', 'boxes')} with letters no font has` : '',
+      borrowing ? `${plural(borrowing, 'box', 'boxes')} with letters from another font` : '',
     ]
       .filter(Boolean)
       .join(' · '),
