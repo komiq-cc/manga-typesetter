@@ -751,6 +751,9 @@ const HITS_SPEC = { pages: [{ w: 1400, h: 800, boxes: [
   { id: 'path', x: 900, y: 200, w: 220, h: 110, text: 'DOWN A BEZIER PATH', over: { size: 24, path: { on: true, pts: [{ x: 6, y: 80, ix: -40, iy: 0, ox: 50, oy: -70 }, { x: 214, y: 40, ix: -50, iy: 70, ox: 40, oy: 0 }] } } },
   { id: 'spill', x: 300, y: 520, w: 80, h: 40, text: 'OVERFLOWING\nSIDEWAYS\nAND\nDOWN\nTHE\nPAGE' },
   { id: 'plain', x: 900, y: 560, w: 220, h: 110 },
+  // Its advance is inside the frame and its ink is not: an italic J's hook
+  // starts left of where its line does.
+  { id: 'lean', x: 600, y: 470, w: 200, h: 230, text: 'J', over: { italic: true, size: 160, align: 'left', font: 'Aaa Sans' } },
 ] }] };
 const ellipse = (cx, cy, rx, ry, mode = 'include') => ({ on: true, mode, brushSize: 20, shapes: [{ kind: 'ellipse', cx, cy, rx, ry }] });
 const MASK_SPEC = { pages: [{ w: 1500, h: 900, boxes: [
