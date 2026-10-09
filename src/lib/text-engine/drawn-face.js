@@ -91,7 +91,7 @@ export function drawnRuns(engine, face, text, { source = false } = {}) {
     return lenders.find((l) => l.font === font) ?? null;
   };
   const named = new Map();
-  const source = (part) => {
+  const sourceFor = (part) => {
     if (part.font === ownFont) return own;
     const key = `${part.font}/${part.bold ? 'b' : ''}${part.italic ? 'i' : ''}`;
     if (!named.has(key)) {
@@ -112,7 +112,7 @@ export function drawnRuns(engine, face, text, { source = false } = {}) {
     if (end > at) {
       const parts = engine.lineParts(face, text.slice(at, end));
       if (!parts) return false;
-      for (const part of parts) put(at + part.start, at + part.end, source(part));
+      for (const part of parts) put(at + part.start, at + part.end, sourceFor(part));
     }
     return true;
   };

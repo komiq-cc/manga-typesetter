@@ -932,6 +932,32 @@ chain13, seven-gap14 and changed-source retarget catalogs remain untouched.
 Their changed fallback substitutions must be reported as obsolete or explicitly
 retargeted, never silently counted as original-source kills.
 
+### PSD static-review correction [I: unexecuted]
+
+The read-only review of frozen `33f185ae0e01ffff6c7bfb76da92bb5cba6ccc0e`
+found one P1 load blocker: the optional `source` parameter and the part resolver
+were both bound as `source` inside `drawnRuns`. This is a JavaScript early syntax
+error inferred from source inspection; the reviewer did not run an import.
+The resolver and its one call are now named `sourceFor`, preserving the public
+metadata option and both engine branches. [I]
+
+The regression controls now explicitly require default borrowed and primary
+run shapes to omit source metadata, with positive opt-in lender identities,
+supplementary-character and line-end boundaries. The source test asserts actual
+allocator ID reuse after a collection face is removed and distinguishes fresh
+engine registration orders. Partial-add failure is followed by a successful
+registration at the failed font's reused ID, checked against a fresh engine.
+The declared-alias test warms the name cache, replaces and removes the variable
+registration, checks old base/instance cleanup, and requires fallback names to
+return to the unoccupied identity. These are new assertion definitions, not
+measured behavior; no tests, builds or probes ran in this correction window. [I]
+
+Static substitution counting confirms the helper rename leaves the existing
+mutation source strings intact, including final PSD s9/s15. All prepared old
+catalogs are preserved. The correction candidate must remain frozen through
+its scoped static review, then receive the coordinator's exact-revision
+behavioral proofs after P7 integration.
+
 ### Final verification [not yet run]
 
 The coordinator will fill this table from exact-revision logs after P7 is

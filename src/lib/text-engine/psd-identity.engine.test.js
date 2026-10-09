@@ -77,21 +77,38 @@ describe('PSD fallback identities follow the complete actual face', () => {
     first.addFaces('Source', collection, [{ slot: 'regular', index: 0 }], 'file');
     install(first);
     const original = request('Source').name;
-    const source = first.sourceIdentity(first.handle(face('Source')).font);
+    const originalFont = first.handle(face('Source')).font;
+    const source = first.sourceIdentity(originalFont);
     first.addFaces('Other', null, [{ slot: 'regular', index: 0 }], 'file');
     expect(first.sourceIdentity(first.handle(face('Other')).font)).toBe(source);
     first.addFaces('Source', null, [{ slot: 'regular', index: 1 }], 'file');
     expect(request('Source').name).not.toBe(original);
     const removed = first.handle(face('Source')).font;
+    const removedSource = first.sourceIdentity(removed);
+    expect(removedSource).not.toBe(source);
     first.removeFamily('Source');
     expect(() => first.sourceIdentity(removed)).toThrow(/not held/);
     first.addFace('Noise', 'regular', comic);
+    expect(first.handle(face('Noise')).font).toBe(originalFont);
     first.addFaces('Source', null, [{ slot: 'regular', index: 0 }], 'file');
+    // The allocator's first empty slot is reused: the same id now means a
+    // different collection face, while its old metadata has been replaced.
+    expect(first.handle(face('Source')).font).toBe(removed);
+    expect(first.sourceIdentity(removed)).toBe(source);
     expect(request('Source').name).toBe(original);
     const second = await rustEngine({ fixtures: false });
     second.addFaces('Source', collection, [{ slot: 'regular', index: 0 }]);
+    expect(second.handle(face('Source')).font).not.toBe(removed);
     install(second);
     expect(request('Source').name).toBe(original);
+    const reordered = await rustEngine({ fixtures: false });
+    reordered.addFace('Noise', 'regular', comic);
+    reordered.addFaces('Source', collection, [{ slot: 'regular', index: 0 }]);
+    expect(reordered.handle(face('Source')).font).not.toBe(second.handle(face('Source')).font);
+    expect(reordered.sourceIdentity(reordered.handle(face('Source')).font)).toBe(source);
+    install(reordered);
+    expect(request('Source').name).toBe(original);
+    install(second);
     second.addFace('Bytes', 'regular', comic);
     const one = request('Bytes').name;
     second.addFace('Bytes', 'regular', dejavu);
@@ -113,6 +130,33 @@ describe('PSD fallback identities follow the complete actual face', () => {
     } finally {
       engine.low.addFont = add;
     }
+    engine.addFace('Recovered', 'regular', dejavu);
+    const recovered = engine.handle(face('Recovered')).font;
+    expect(recovered).toBe(made[0]);
+    const fresh = await rustEngine({ fixtures: false });
+    fresh.addFace('Recovered', 'regular', dejavu);
+    expect(engine.sourceIdentity(recovered)).toBe(fresh.sourceIdentity(fresh.handle(face('Recovered')).font));
+    install(engine);
+    const recoveredName = request('Recovered').name;
+    install(fresh);
+    expect(request('Recovered').name).toBe(recoveredName);
+  });
+
+  it('omits source metadata from default primary and borrowed runs, and adds the actual lender only on request', async () => {
+    const engine = await rustEngine();
+    engine.addFace('Lender', 'regular', dejavu);
+    engine.setFallbacks(['Lender']);
+    const own = face('Comic Neue');
+    const text = 'AΩ\n\u{1d538}B';
+    const plain = drawnRuns(engine, own, text);
+    expect(plain.map((run) => [run.start, run.end, run.own, run.family])).toEqual([
+      [0, 1, true, 'Comic Neue'], [1, 2, false, 'Lender'],
+      [2, 3, true, 'Comic Neue'], [3, 5, false, 'Lender'], [5, 6, true, 'Comic Neue'],
+    ]);
+    for (const run of plain) expect(Object.keys(run).sort()).toEqual(['end', 'family', 'fauxBold', 'fauxItalic', 'own', 'postScriptName', 'slot', 'start']);
+    const metadata = drawnRuns(engine, own, text, { source: true });
+    expect(metadata.map(({ sourceIdentity, ...run }) => run)).toEqual(plain);
+    for (const run of metadata) expect(run.sourceIdentity).toBe(engine.sourceIdentity(engine.handle(face(run.family)).font));
   });
 
   it('uses actual clamped locations, keeps metadata opt-in, and releases eagerly named instances with their source', async () => {
@@ -156,6 +200,24 @@ describe('PSD fallback identities follow the complete actual face', () => {
       expect(request('Declared', true).name).toBe(occupied);
       expect(request('Alias').name).toBe(fallback);
       names.push(fallback);
+      // A warmed complete-name cache must follow replacement and removal.
+      // The old variable base and its generated bold place lose their metadata.
+      const oldBase = engine.handle(face('Declared')).font;
+      const oldHeavy = engine.handle(face('Declared', true)).font;
+      expect(engine.postScriptNames().has(occupied)).toBe(true);
+      engine.addFace('Declared', 'regular', comic);
+      for (const font of [oldBase, oldHeavy]) {
+        expect(() => engine.sourceIdentity(font)).toThrow(/not held/);
+        expect(() => engine.low.fontInfo(font)).toThrow();
+      }
+      expect(engine.postScriptNames().has(occupied)).toBe(false);
+      expect(request('Alias').name).toBe(occupied);
+      engine.addFace('Declared', 'regular', stated);
+      expect(engine.postScriptNames().has(occupied)).toBe(true);
+      expect(request('Alias').name).toBe(fallback);
+      engine.removeFamily('Declared');
+      expect(engine.postScriptNames().has(occupied)).toBe(false);
+      expect(request('Alias').name).toBe(occupied);
     }
     expect(names[0]).toBe(names[1]);
   });
