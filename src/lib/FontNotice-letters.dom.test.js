@@ -19,13 +19,13 @@ const before = { engine: textEngine(), system: app.fonts.system };
 let engine;
 let invoke;
 
-async function start({ native = true, hold = false } = {}) {
+async function start({ native = true, hold = false, coverage = [['Hiragino Sans', 'あいう漢♥'], ['Apple SD Gothic Neo', '한']], unreadable = [] } = {}) {
   engine = { ...fakeRustEngine(), wrapPlain: (face, text) => [text] };
   engine.cover('Hiragino Sans', 'あいう漢♥');
   engine.cover('Apple SD Gothic Neo', '한');
   engine.cover('Helvetica Neue', 'Ω');
-  const files = Object.fromEntries(['Helvetica Neue', 'Hiragino Sans', 'Apple SD Gothic Neo'].map((name) => [name, [{ slots: { regular: 0 }, bytes: SFNT() }]]));
-  invoke = fakeNative(files, { hold, coverage: [['Hiragino Sans', 'あいう漢♥'], ['Apple SD Gothic Neo', '한']] });
+  const files = Object.fromEntries(['Helvetica Neue', 'Hiragino Sans', 'Apple SD Gothic Neo'].filter((name) => !unreadable.includes(name)).map((name) => [name, [{ slots: { regular: 0 }, bytes: SFNT() }]]));
+  invoke = fakeNative(files, { hold, coverage });
   _setEngineSwitchDeps({
     available: () => true,
     createEngine: async () => engine,
@@ -135,6 +135,27 @@ describe('the notice, for a box with letters its font lacks', () => {
     app.pages[0].boxes[0].text = 'A';
     await tick();
     expect(view.container.querySelector('.rv')).toBe(null);
+  });
+
+  it('does not say "no installed font has" of a letter whose font could not be read', async () => {
+    await start({ unreadable: ['Hiragino Sans'] });
+    loadProjectPages([{ id: 1, w: 800, h: 1200, lines: [], boxes: [box('kana', 'あ 한 ☃')] }]);
+    const view = render(FontNotice);
+    await settled();
+    const head = view.getByRole('button', { name: /1 box with letters no font has · 1 box with letters whose font could not be read · 1 box with letters from another font/ });
+    await fireEvent.click(head);
+    expect(rows(view)).toEqual([{ page: 'p.1', text: 'あ 한 ☃', why: '한 drawn in Apple SD Gothic Neo · no installed font has ☃ · あ is in Hiragino Sans, which could not be read' }]);
+  });
+
+  it('nor of a letter nobody could look for: the question failed', async () => {
+    await start({ coverage: 'fail' });
+    loadProjectPages([{ id: 1, w: 800, h: 1200, lines: [], boxes: [box('kana', 'あ ☃')] }]);
+    const view = render(FontNotice);
+    await settled();
+    const head = view.getByRole('button', { name: /1 box with letters whose font could not be read/ });
+    expect(head.textContent).not.toContain('no font has');
+    await fireEvent.click(head);
+    expect(rows(view)).toEqual([{ page: 'p.1', text: 'あ ☃', why: 'could not look for a font with あ ☃' }]);
   });
 
   it('in a plain browser nobody looked through the installed fonts, and the line does not say anybody did', async () => {
