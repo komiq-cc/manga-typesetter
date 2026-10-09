@@ -292,6 +292,32 @@ function newCanvas(w, h) {
   return c;
 }
 
+// The destination of a plan, sized to what the mesh actually covers plus the AA
+// bleed, and snapped outwards to whole page px so the box's origin inside it
+// stays an integer offset - which is what lets the page composite go on
+// snapping the bitmap to the pixel grid.
+function planExtent(plan, pad) {
+  const left = Math.floor(plan.bounds.minX - pad);
+  const top = Math.floor(plan.bounds.minY - pad);
+  const right = Math.ceil(plan.bounds.maxX + pad);
+  const bottom = Math.ceil(plan.bounds.maxY + pad);
+  return { left, top, outW: Math.max(1, right - left), outH: Math.max(1, bottom - top) };
+}
+
+/**
+ * Where a texture lands once the mesh has carried it, without drawing it: the
+ * `{ ox, oy, cw, ch }` `warpBoxCanvas` would hand back for the same options,
+ * page px. Null where the mesh does nothing. For whoever needs to know what a
+ * warped box covers and has no reason to paint it.
+ */
+export function warpExtent(opts = {}) {
+  const { warp, w, h, ox, oy, cw, ch } = opts;
+  const plan = warpPlan(warp, w, h, { x: -ox, y: -oy, w: cw, h: ch }, { sub: opts.sub });
+  if (!plan) return null;
+  const e = planExtent(plan, num(opts.pad ?? WARP_PAD));
+  return { ox: -e.left, oy: -e.top, cw: e.outW, ch: e.outH };
+}
+
 // Draw the finished box texture `src` through the mesh, onto a canvas of its
 // own. Returns `{ canvas, ox, oy, cw, ch }` in the same terms the texture came
 // in - `ox`/`oy` is where the box's top-left sits inside the footprint, `cw`/`ch`
@@ -313,16 +339,7 @@ export function warpBoxCanvas(src, opts = {}) {
   const plan = warpPlan(warp, w, h, { x: -ox, y: -oy, w: cw, h: ch }, { sub: opts.sub });
   if (!plan) return null;
 
-  // The destination, sized to what the mesh actually covers plus the AA bleed,
-  // and snapped outwards to whole page px so the box's origin inside it stays an
-  // integer offset - which is what lets the page composite go on snapping the
-  // bitmap to the pixel grid.
-  const left = Math.floor(plan.bounds.minX - pad);
-  const top = Math.floor(plan.bounds.minY - pad);
-  const right = Math.ceil(plan.bounds.maxX + pad);
-  const bottom = Math.ceil(plan.bounds.maxY + pad);
-  const outW = Math.max(1, right - left);
-  const outH = Math.max(1, bottom - top);
+  const { left, top, outW, outH } = planExtent(plan, pad);
 
   // What a canvas may be. A mesh close to degenerate can ask for a footprint
   // orders of magnitude past the box - `SPAN_LIMIT` is the outer bound and it is

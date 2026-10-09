@@ -101,6 +101,14 @@ struct FileStat {
     modified: u128,
 }
 
+impl FaceFile {
+    /// Whether the file is still the length and age the scan found: a font
+    /// updated, replaced or removed since is another file, or none.
+    pub(crate) fn unchanged(&self) -> bool {
+        stat_of(&self.path).is_ok_and(|now| now == self.stat)
+    }
+}
+
 fn stat_of(path: &std::path::Path) -> std::io::Result<FileStat> {
     let meta = std::fs::metadata(path)?;
     let modified = meta
@@ -255,7 +263,7 @@ fn stat_files(index: &mut FontIndex) {
     }
 }
 
-fn scan() -> (Vec<SystemFont>, FontIndex) {
+pub(crate) fn scan() -> (Vec<SystemFont>, FontIndex) {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     scan_db(&db)
@@ -271,7 +279,7 @@ fn rescan() -> Vec<SystemFont> {
     list
 }
 
-fn index() -> Arc<FontIndex> {
+pub(crate) fn index() -> Arc<FontIndex> {
     if let Some(index) = INDEX.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return index;
     }
@@ -448,7 +456,7 @@ pub async fn system_font_face(family: String, slot: String, known: Option<Vec<St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -553,17 +561,17 @@ mod tests {
     /// The fonts the JavaScript tests measure with, read from where they are
     /// (src/test/fonts): the answer is checked by parsing it now, so it has to
     /// be given real fonts, and no font is added for it.
-    fn fixture(name: &str) -> Vec<u8> {
+    pub(crate) fn fixture(name: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/test/fonts").join(name);
         std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
-    const DEJAVU: &str = "DejaVuSans.ttf";
-    const OBLIQUE: &str = "DejaVuSans-Oblique.ttf";
-    const BANGERS: &str = "Bangers-Regular.ttf";
+    pub(crate) const DEJAVU: &str = "DejaVuSans.ttf";
+    pub(crate) const OBLIQUE: &str = "DejaVuSans-Oblique.ttf";
+    pub(crate) const BANGERS: &str = "Bangers-Regular.ttf";
 
     /// A `.ttc` of whole fonts laid end to end: each font's table directory
     /// is its own, with every offset moved to where the font now starts.
-    fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
+    pub(crate) fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
         let header = 12 + 4 * fonts.len();
         let mut out = Vec::new();
         out.extend_from_slice(b"ttcf");
@@ -590,7 +598,7 @@ mod tests {
     }
 
     /// A font file written for one test, in a directory of its own.
-    fn temp_font(test: &str, name: &str, bytes: &[u8]) -> PathBuf {
+    pub(crate) fn temp_font(test: &str, name: &str, bytes: &[u8]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("mt-system-fonts-{}-{test}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
@@ -600,7 +608,7 @@ mod tests {
 
     /// The index a scan would have made of these faces, each file noted as it
     /// stands now: `(family, weight, italic, path, face index)`.
-    fn scanned(faces: &[(&str, u16, bool, &Path, u32)]) -> FontIndex {
+    pub(crate) fn scanned(faces: &[(&str, u16, bool, &Path, u32)]) -> FontIndex {
         let mut index = FontIndex::new();
         for (family, weight, italic, path, at) in faces {
             fold_file(&mut index, family, *weight, *italic, false, 5, path, *at);
@@ -721,7 +729,7 @@ mod tests {
 
     /// `to` in place of the file at `path`, at the length and the age the
     /// scan found there: only reading it can tell.
-    fn swap_quietly(path: &Path, to: &[u8]) {
+    pub(crate) fn swap_quietly(path: &Path, to: &[u8]) {
         let meta = std::fs::metadata(path).unwrap();
         let mut bytes = to.to_vec();
         assert!(bytes.len() as u64 <= meta.len(), "the stand-in has to fit in the file it replaces");

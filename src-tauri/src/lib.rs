@@ -4,6 +4,7 @@ pub mod brush;
 // `pub` for examples/detect_pages.rs, the headless Detect scripts call.
 pub mod detect;
 mod durability;
+mod font_coverage;
 mod font_decode;
 // Linux-only at runtime; compiled under `test` everywhere so its unit tests
 // run on the Mac too (the code is plain POSIX).
@@ -47,6 +48,7 @@ pub fn run() {
       screen_color::pick_screen_color,
       system_fonts::system_fonts,
       system_fonts::system_font_face,
+      font_coverage::system_font_coverage,
       font_decode::font_to_sfnt,
       durability::fsync_path
     ])

@@ -18,6 +18,7 @@
 // arithmetic and the two paints, kept out of the component so they can be
 // tested without one.
 import { renderBoxTexture, warpTexture } from '../exporter.js';
+import { glyphPainter } from '../text-engine/index.js';
 
 // The most pixels one box's canvas holds: 8 megapixels, 32 MB of RGBA.
 //
@@ -26,9 +27,24 @@ import { renderBoxTexture, warpTexture } from '../exporter.js';
 // resolution on nearly any display, so lowering ITS scale costs sharpness only
 // on a box that is already bigger than the screen - a full-page sound effect
 // at 400% - and costs every ordinary box nothing: a 300 x 200 balloon is under
-// 4 MP at 400% on a 2x display. It is also far inside what a canvas may be
-// (16384 a side, 64 MP: warp-paint.js) and what the engine will paint (67 MP).
+// 4 MP at 400% on a 2x display. It is also far inside the AREA a canvas may
+// have (64 MP: warp-paint.js) and the engine will paint (67 MP).
+//
+// It says nothing about a SIDE. A box 7000 page px long and 100 high is under
+// the budget at 300% and 21,000 px wide, and the engine paints no raster with
+// a side over its own limit - it throws. That limit is the painter's to state
+// (`maxSide`, text-engine/index.js) and is asked of it where the texture is
+// made, below, beside this budget.
 export const PICTURE_MAX_PX = 8 * 1024 * 1024;
+
+/**
+ * A box's texture as the editor paints it: at `scale`, within the pixel budget
+ * and within the longest side the installed painter will paint. Every picture
+ * the editor shows is made here, so the two limits are applied in one place.
+ */
+export function pictureTexture(box, p, tips, scale, maxPx = PICTURE_MAX_PX) {
+  return renderBoxTexture(box, p, tips, scale, maxPx, glyphPainter().maxSide ?? Infinity);
+}
 
 // A turned box is painted finer than the screen. Its turn is CSS's, so the
 // compositor resamples the picture whatever it is painted at, and a picture
@@ -46,6 +62,31 @@ export function pictureScale(zoom, dpr, rotation = 0) {
   return zoom * (dpr > 0 ? dpr : 1) * (rotation % 90 ? TURNED_OVERSAMPLE : 1);
 }
 
+// The most pixels a box's picture holds while a handle is resizing the box:
+// one megapixel.
+//
+// A resize changes what the picture is drawn from on every frame of the drag,
+// so every frame repaints it, and the paint's time follows its pixels.
+// Measured in Chromium on a loaded machine, a frame of the drag to the end of
+// its effects: 2 ms for a tenth of a megapixel, 6 to 15 ms for one, 25 ms for
+// 2.4, 72 to 87 ms for the 8.4 a box at the budget above holds. A megapixel
+// is what fits a frame for type with an outline and a shadow. An ordinary
+// balloon is under it at 100% on any display and at 300% on a 1x one, and is
+// as sharp in the hand as at rest; a page-wide sound effect is soft while it
+// is dragged and is painted in full once, when the handle is let go.
+//
+// It is a budget like the one above and is applied where that one is: handed
+// to the paint in its place (`paintBoxPicture`'s `maxPx`), so it is counted
+// on the FOOTPRINT that is painted and not on the box's frame - a small box
+// whose lines run far below it is megapixels of picture round a frame of
+// none.
+//
+// It bounds the part of a frame that follows the pixels and no more. A box
+// with three bands of outline cost 42 ms a frame at 1.2 megapixels in the same
+// measurement, and 10 ms at a tenth of one: that is the bands' own work, and
+// this budget does not bring it inside a frame.
+export const PICTURE_DRAG_PX = 1024 * 1024;
+
 // The finished bitmap onto the editor's canvas, pixel for pixel, and the
 // footprint back. 'copy' rather than a clear and a draw: the canvas then holds
 // exactly the bytes the painter made, which is what lets a test say the editor
@@ -60,8 +101,10 @@ function show(el, r, maxPx, release) {
   let w = r.canvas.width;
   let h = r.canvas.height;
   const over = (w * h) / maxPx;
+  // How much of the bitmap's resolution the canvas keeps: all of it, or less.
+  let k = 1;
   if (over > 1.02) {
-    const k = 1 / Math.sqrt(over);
+    k = 1 / Math.sqrt(over);
     w = Math.max(1, Math.round(w * k));
     h = Math.max(1, Math.round(h * k));
   }
@@ -83,17 +126,22 @@ function show(el, r, maxPx, release) {
     r.canvas.width = 0;
     r.canvas.height = 0;
   }
-  return { ox: r.ox, oy: r.oy, cw: r.cw, ch: r.ch };
+  return { ox: r.ox, oy: r.oy, cw: r.cw, ch: r.ch, k };
 }
 
 /**
  * Paints `box` into the editor canvas `el` at `scale` device px per page px
- * (less for a box over the budget), mesh included. Returns where the picture
- * sits: `ox`/`oy` page px left of and above the box's own top-left, and the
- * `cw` x `ch` page px it spans - what `pictureCss` places the canvas by.
+ * (less for a box over the budget `maxPx`), mesh included. Returns where the
+ * picture sits: `ox`/`oy` page px left of and above the box's own top-left,
+ * and the `cw` x `ch` page px it spans - what `pictureCss` places the canvas
+ * by - and `ss`, the device px per page px it was really painted at: `scale`
+ * itself where no budget and no limit lowered it, and less where one did.
  */
 export function paintBoxPicture(el, box, p, scale, tips, maxPx = PICTURE_MAX_PX) {
-  return show(el, warpTexture(renderBoxTexture(box, p, tips, scale, maxPx), box), maxPx, true);
+  const tex = pictureTexture(box, p, tips, scale, maxPx);
+  const ss = tex.ss;
+  const { k, ...at } = show(el, warpTexture(tex, box), maxPx, true);
+  return { ...at, ss: k === 1 ? ss : ss * k };
 }
 
 /**
@@ -104,7 +152,8 @@ export function paintBoxPicture(el, box, p, scale, tips, maxPx = PICTURE_MAX_PX)
  */
 export function paintPictureTexture(el, tex, box, maxPx = PICTURE_MAX_PX) {
   const r = warpTexture(tex, box, false);
-  return show(el, r, maxPx, r.canvas !== tex.canvas);
+  const { k, ...at } = show(el, r, maxPx, r.canvas !== tex.canvas);
+  return at;
 }
 
 /**

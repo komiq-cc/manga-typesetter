@@ -53,15 +53,17 @@ export async function createRustTextEngine(source, options = {}) {
   // Families a letter is looked for in when the face lacks it, in order, and
   // the engine chain built from them for each weight and slant asked.
   let fallbacks = [];
-  const chains = [0, 0, 0, 0];
+  // (how many of the fallback families, counted from the front) x (weight and
+  // slant) -> the engine chain made of them. Measuring uses all of them; a
+  // shorter one answers "which letters does the face lack before the n-th
+  // family is asked" (`missing`).
+  const chains = new Map();
   const rules = { ...DEFAULT_RULES };
 
   // Every measurement a caller kept may be stale after this.
   function changed() {
-    for (let i = 0; i < chains.length; i++) {
-      if (chains[i]) low.chainFree(chains[i]);
-      chains[i] = 0;
-    }
+    for (const chain of chains.values()) low.chainFree(chain);
+    chains.clear();
     handles.clear();
     for (const cb of [...listeners]) cb();
   }
@@ -82,20 +84,31 @@ export async function createRustTextEngine(source, options = {}) {
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
-  // The chain is the same for every family asked in one weight and slant:
-  // each fallback family answers with the face CSS would pick from it, so a
-  // bold line borrows a bold letter where the fallback has one.
-  function chainFor(bold, italic) {
-    const at = (bold ? 1 : 0) | (italic ? 2 : 0);
-    if (chains[at]) return chains[at];
-    const fams = fallbacks.map((name) => families.get(name)).filter(Boolean);
-    if (!fams.length) return 0;
-    const chain = low.chainNew();
-    for (const fam of fams) {
-      const { slot, fauxBold, fauxItalic } = matchSlot(present(fam), bold, italic);
-      low.chainPush(chain, fam[slot], { bold: fauxBold, italic: fauxItalic });
+  // The chain is the same for every family asked in one weight and slant.
+  // A fallback family answers with the face CSS would pick from it, so a
+  // bold line borrows a bold letter where the fallback has one - unless it
+  // was listed to lend by its first face (`setFallbacks`), and then it is
+  // that face whatever is asked, emboldened and slanted here.
+  function chainFor(bold, italic, depth = Infinity) {
+    const count = Math.max(0, Math.min(fallbacks.length, depth));
+    const at = count * 4 + ((bold ? 1 : 0) | (italic ? 2 : 0));
+    const have = chains.get(at);
+    if (have !== undefined) return have;
+    const lenders = fallbacks.slice(0, count).filter((f) => families.has(f.family));
+    // 0 is "no chain" to the engine: the face answers alone.
+    let chain = 0;
+    if (lenders.length) {
+      chain = low.chainNew();
+      for (const { family, first } of lenders) {
+        const fam = families.get(family);
+        const slots = present(fam);
+        const { slot, fauxBold, fauxItalic } = first
+          ? { slot: slots[0], fauxBold: bold && !BOLD_SLOTS.has(slots[0]), fauxItalic: italic && !ITALIC_SLOTS.has(slots[0]) }
+          : matchSlot(slots, bold, italic);
+        low.chainPush(chain, fam[slot], { bold: fauxBold, italic: fauxItalic });
+      }
     }
-    chains[at] = chain;
+    chains.set(at, chain);
     return chain;
   }
 
@@ -226,10 +239,19 @@ export async function createRustTextEngine(source, options = {}) {
     /**
      * Code points of `text` that neither the face nor any fallback family has
      * a glyph for, each once, in order of first appearance.
+     *
+     * `depth` looks in the first `depth` fallback families only: 0 is what
+     * the face itself lacks, 1 what is still lacking after the first family
+     * of the list, and so on. Left out, every family is asked, which is what
+     * is measured and drawn.
      */
-    missing(face, text) {
+    missing(face, text, depth = Infinity) {
       const out = [];
-      for (const at of low.missing(resolve(face), text)) {
+      let h = resolve(face);
+      if (depth < fallbacks.length) {
+        h = { font: h.font, size: h.size, flags: (h.flags & ((1 << CHAIN_SHIFT) - 1)) | (chainFor(h.bold, h.italic, depth) << CHAIN_SHIFT) };
+      }
+      for (const at of low.missing(h, text)) {
         const cp = text.codePointAt(at);
         if (!out.includes(cp)) out.push(cp);
       }
@@ -326,14 +348,31 @@ export async function createRustTextEngine(source, options = {}) {
      * for it, most preferred first. A name that is not registered is skipped
      * until it is. With an empty list a missing letter is the face's own
      * `.notdef` box, and `missing` reports it.
+     *
+     * An entry is a family name, and the family then lends from the face CSS
+     * matching picks for the weight and slant asked. Or it is
+     * `{ family, face: 'first' }`, and the family lends from ONE face in
+     * every weight and slant: its regular, or the first slot it has (the
+     * app's slot order), synthesised to what is asked. That is for a family
+     * somebody chose by the letters of that one face (RULES.md rule 11): its
+     * bold may lack what its regular has.
      */
-    setFallbacks(names) {
-      if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) throw new Error('text engine: fallbacks are a list of family names');
-      fallbacks = [...new Set(names)];
+    setFallbacks(list) {
+      if (!Array.isArray(list)) throw new Error('text engine: fallbacks are a list of family names');
+      const next = new Map();
+      for (const item of list) {
+        const first = typeof item !== 'string';
+        if (first && (typeof item?.family !== 'string' || item.face !== 'first')) throw new Error('text engine: fallbacks are a list of family names');
+        const family = first ? item.family : item;
+        const key = `${first ? 1 : 0}${family}`;
+        if (!next.has(key)) next.set(key, { family, first });
+      }
+      fallbacks = [...next.values()];
       changed();
     },
+    /** The families of the list by name, in its order. */
     fallbacks() {
-      return [...fallbacks];
+      return fallbacks.map((f) => f.family);
     },
 
     /**

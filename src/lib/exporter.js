@@ -1,8 +1,8 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
-import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { faceFor, lineWidth, textInset, contentWidth } from './measure.js';
-import { glyphPainter } from './text-engine/index.js';
-import { boxCandidate, placeBlock } from './contain.js';
+import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, PAGE_W, PAGE_H } from './store.svelte.js';
+import { faceFor, textInset, contentWidth } from './measure.js';
+import { glyphPainter, engineDraws } from './text-engine/index.js';
+import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
 import {
   strokeBands,
   strokeExtent,
@@ -23,7 +23,7 @@ import {
   drawInk,
 } from './text-paint.js';
 import { warpActive } from './warp.js';
-import { warpBoxCanvas } from './warp-paint.js';
+import { warpBoxCanvas, warpExtent } from './warp-paint.js';
 import { settleBoxTips } from './brush-tips.js';
 import { withPageImages } from './page-images.js';
 import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
@@ -155,6 +155,10 @@ export async function settleNoise(boxes) {
   if ((boxes ?? []).some((b) => b?.style?.roughen?.on)) await ensureNoisePhase();
 }
 
+// The part of a footprint's padding that is not the reach of any effect: room
+// for an edge's antialiasing and for rounding. See `pad` in `layoutBox`.
+const PAD_SPARE = 4;
+
 // Lay out a box's text and compute its canvas geometry WITHOUT drawing. The
 // footprint (cw×ch) grows to contain the full block incl. overflow beyond the
 // box rect on all sides - mirroring the editor's `overflow:visible` centered
@@ -200,7 +204,7 @@ function layoutBox(box, p) {
     ) +
       (s.blur > 0 ? s.blur * 3 : 0) +
       motionBlurExtent(s.motionBlur) +
-      4,
+      PAD_SPARE,
   );
 
   // Every glyph-by-glyph layout - the bezier path, the closed circle and the
@@ -273,20 +277,38 @@ function layoutBox(box, p) {
     // draws it at: a flush line in a balloon is set in from the edge to its
     // row's (`lineIndents`), so the widest line is not always the one that
     // reaches furthest.
-    let x0 = Infinity;
-    let x1 = -Infinity;
-    lines.forEach((ln, i) => {
-      const w = lineWidth(ln, s, s.size);
-      const x = s.align === 'center' ? lineX[i] - w / 2 : s.align === 'right' ? lineX[i] - w : lineX[i];
-      x0 = Math.min(x0, x);
-      x1 = Math.max(x1, x + w);
-    });
+    const { x0, x1 } = blockRect(place);
     blockX = x0;
 
     topExtra = Math.max(0, -blockY);
     bottomExtra = Math.max(0, blockY + blockH - box.h);
     leftExtra = Math.max(0, -x0);
     rightExtra = Math.max(0, x1 - box.w);
+
+    // The block above is its ADVANCES and its line boxes, and glyphs ink past
+    // both: an italic's first letter starts left of where the line does, its
+    // last leans past the end, a tall glyph stands above a tight line. `pad`
+    // is the reach of what is laid ON the glyphs, measured from them, so ink
+    // that is past the block by more than the pad's spare was painted off the
+    // canvas - cut - with its outline and its shadow (an italic J at 300 px
+    // lost 12% of itself). The glyphs' own ink is known (`place.inks`, what
+    // the containment check reads), so the footprint grows until that ink has
+    // the reach of its effects inside the canvas - and by no more: a box
+    // whose ink is within the spare, which is nearly every box, keeps the
+    // canvas it had, to the byte.
+    //
+    // Only where one engine measures and paints (`engineDraws`): there the
+    // measured ink is the painted ink. The browser path has the same cut and
+    // keeps it until it is removed; see `engineDraws` for the cut-over.
+    if (engineDraws()) {
+      const g = linesInkRect(place);
+      if (g) {
+        leftExtra = Math.max(leftExtra, -g.x0 - PAD_SPARE);
+        topExtra = Math.max(topExtra, -g.y0 - PAD_SPARE);
+        rightExtra = Math.max(rightExtra, g.x1 - box.w - PAD_SPARE);
+        bottomExtra = Math.max(bottomExtra, g.y1 - box.h - PAD_SPARE);
+      }
+    }
   }
 
   // Hand-drawn ink past the box's far edges (OVF-7). The pad above holds the
@@ -500,12 +522,26 @@ function paintShadows(ctx, box, L, SS) {
 
 // How many device px per page px a box's texture is painted at: the scale asked
 // for, lowered - for this box only - until its footprint holds no more than
-// `maxPx` pixels. Resolution gives way, the geometry does not: the footprint is
-// the same page px either way. With no budget the scale asked for is the answer,
-// untouched.
-export function textureScale(cw, ch, scale, maxPx = Infinity) {
+// `maxPx` pixels and neither of its sides is longer than `maxSide`. Resolution
+// gives way, the geometry does not: the footprint is the same page px either
+// way. With no budget and no limit the scale asked for is the answer, untouched.
+//
+// The two are different facts and one does not imply the other: a line across
+// a page is few pixels and very long. The area is the caller's budget; the side
+// is the painter's limit (`maxSide` in text-engine/index.js) - the Rust engine
+// refuses a raster longer than its own, and a refusal there is a throw.
+export function textureScale(cw, ch, scale, maxPx = Infinity, maxSide = Infinity) {
   const area = cw * ch * scale * scale;
-  return area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
+  let ss = area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
+  // Judged as the canvas is cut - to whole pixels, outwards (`renderBoxTexture`)
+  // - so the side that results is the one that is inside the limit.
+  const side = Math.max(cw, ch);
+  if (Math.ceil(side * ss) > maxSide) {
+    ss = maxSide / side;
+    // A quotient times its divisor can land a hair over, and a hair is a pixel.
+    while (Math.ceil(side * ss) > maxSide) ss *= 1 - Number.EPSILON;
+  }
+  return ss;
 }
 
 // Render a box to its own supersampled offscreen canvas. Used for un-rotated
@@ -546,11 +582,12 @@ export function renderBox(box, p, tips) {
 // above 200% and wasted below, and `maxPx` is the most pixels it will hold for
 // one box (`textureScale`). Everything below is stated in page px and applied
 // at `SS`, so the picture is the same picture at any scale and only its
-// resolution moves. The scale that was really used comes back as `ss`.
-export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity) {
+// resolution moves. `maxSide` is the longest side the canvas may have, for a
+// painter that has a limit. The scale that was really used comes back as `ss`.
+export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxSide = Infinity) {
   const L = layoutBox(box, p);
   const s = L.s;
-  const SS = textureScale(L.cw, L.ch, scale, maxPx);
+  const SS = textureScale(L.cw, L.ch, scale, maxPx, maxSide);
   const cnv = document.createElement('canvas');
   // Whole pixels, outwards: at a scale that is not a whole number the footprint
   // does not land on one, and a canvas cut short would lose its last row.
@@ -655,6 +692,23 @@ export function warpTexture(tex, box, release = true) {
     tex.canvas.height = 0;
   }
   return { canvas: warped.canvas, ox: warped.ox, oy: warped.oy, cw: warped.cw, ch: warped.ch };
+}
+
+/**
+ * Where a box's picture sits and what it spans, without painting it: the
+ * `ox`, `oy`, `cw`, `ch` that `renderBox` would hand back, in page px - the
+ * layout's footprint, carried through the mesh for a warped box. It is
+ * arithmetic on the box and its measured lines; no canvas is made. (A painted
+ * texture can span a fraction of a page px more: its canvas is cut to whole
+ * pixels, outwards.) For the editor, which has to know what a box it is not
+ * painting would cover.
+ */
+export function boxFootprint(box, p) {
+  const L = layoutBox(box, p);
+  const flat = { ox: L.ox, oy: L.oy, cw: L.cw, ch: L.ch };
+  const s = box.style;
+  if (!warpActive(s, box.w, box.h)) return flat;
+  return warpExtent({ warp: s.warp, w: box.w, h: box.h, ...flat }) ?? flat;
 }
 
 // The box drawn into an editor canvas, at the editor's zoom. This is the
@@ -1224,6 +1278,16 @@ export async function exportImages(fmt, scope) {
     await document.fonts.ready;
     const pages = scope === 'all' ? app.pages : [page()];
     const ext = EXT[fmt];
+    // THE ONE GATE for every file this writes - a page, the whole chapter,
+    // strip slices, a PSD's rasters. With the Rust engine measuring, a family
+    // is read from disk the first time a box uses it, and so is the family a
+    // letter is borrowed from: a page painted before they are in is a page
+    // broken against a stand-in. So nothing below runs until everything the
+    // pages need is in, or is known not to be coming. A strip slice paints
+    // its neighbours' lettering too, so a strip waits for the whole chapter.
+    // With the browser measuring this is null and nothing is awaited.
+    const settling = fontsSettling(isLongstrip() ? app.pages : pages);
+    if (settling) await settling;
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.

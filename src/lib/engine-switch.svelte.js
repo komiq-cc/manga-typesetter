@@ -30,6 +30,9 @@
 //
 // A system family is not part of that: its bytes are sent for the first time
 // a box uses it (text-engine/font-sync.js), and its boxes wait as in step 1.
+// Neither is a family a letter is borrowed from: the first box that holds a
+// letter its face lacks is what asks which installed family has it
+// (`lettersOf`), and that box waits the same way until the family is in.
 //
 // With no last resort there is no family the engine can answer for - a plain
 // browser with no user fonts - and then no engine is installed at all, and no
@@ -89,6 +92,17 @@ export const engineSwitch = $state({
 });
 
 let generation = 0;
+// The turn of the switch that is in progress, or the last one that ended.
+let starting = null;
+// Opened every time the engine that was measuring stops (`leave`): whoever
+// was waiting for something of it (`fontsSettled`) is let go, to look at what
+// measures now. A promise for the next time, and what opens it.
+let left = turnstile();
+function turnstile() {
+  let open;
+  const promise = new Promise((resolve) => (open = resolve));
+  return { promise, open };
+}
 // The compiled wasm, kept for the session: code, no memory of its own. The
 // instance (`rust`) is what holds the engine's heap, and that lives only while
 // the switch is on.
@@ -128,8 +142,11 @@ function apply() {
   paintWith(want);
 }
 
-// Bytes that were on their way have landed, or will not.
+// Bytes that were on their way have landed, or will not; or the native side
+// has said which family a letter is borrowed from.
 function arrived() {
+  // What becomes of a letter can change with no font changing: "nothing has it".
+  lettersMemo.clear();
   if (engineSwitch.phase !== 'on') return;
   apply();
   noteFontsChanged();
@@ -150,6 +167,10 @@ function leave(phase, error = '') {
   paintWith(null);
   // Also from 'starting': the fits the gate held back are owed.
   if (was === 'on' || was === 'starting') noteFontsChanged();
+  // Last, with the browser measuring again and the pages fitted by it.
+  const gone = left;
+  left = turnstile();
+  gone.open();
 }
 
 // Lets go of the wasm instance and of everything that would keep it reachable.
@@ -173,7 +194,7 @@ async function start() {
   engineSwitch.phase = 'starting';
   engineSwitch.error = '';
   before = textEngine();
-  setFontSource({ ready: () => false });
+  setFontSource({ ready: () => false, settle: fontsSettled });
   // fonts.js reports from now; what it says before the engine has the library
   // is kept and said again after, in order, so nothing falls between the two.
   const early = [];
@@ -196,7 +217,13 @@ async function start() {
     },
     removed: (family, slot) => tell((s) => s.removeUserFace(family, slot)),
     removedFamily: (family) => tell((s) => s.removeUserFamily(family)),
-    scanned: () => tell((s) => s.refresh()),
+    // What was known about borrowed letters goes with the old list (a font
+    // may have been installed), so what was kept of it here goes too; the
+    // relayout fonts.js runs after every scan is what asks again.
+    scanned: () =>
+      tell((s) => {
+        if (s.refresh()) lettersMemo.clear();
+      }),
   });
   try {
     let made;
@@ -224,6 +251,8 @@ async function start() {
       // The bytes go as the raw body of the call and come back the same way: a
       // font as a JSON array of numbers is several times its own size.
       toSfnt: invoke ? (bytes) => invoke('font_to_sfnt', bytes) : null,
+      // Code points go, family names come back: no path either way.
+      systemCoverage: invoke ? (codePoints) => invoke('system_font_coverage', { codePoints }) : null,
       onArrival: arrived,
     });
     for (const rec of records) if (!told.has(`${rec.name}::${rec.slot}`)) sync.setUserFace(rec.name, rec.slot, rec.data);
@@ -234,7 +263,13 @@ async function start() {
     if (stale()) return;
     engineSwitch.phase = 'on';
     const s = sync;
-    setFontSource({ nameFor: (name) => s.nameFor(name), ready: (name) => s.ready(name), missing: (name) => s.missing(name) });
+    setFontSource({
+      nameFor: (name) => s.nameFor(name),
+      ready: (name) => s.ready(name),
+      missing: (name) => s.missing(name),
+      lettersReady: (style, text) => !lettersOf(style, text).pending.length,
+      settle: fontsSettled,
+    });
     apply();
     noteFontsChanged();
   } catch (error) {
@@ -253,9 +288,60 @@ export function useTextEngine(mode) {
   const next = mode === 'rust' ? 'rust' : 'browser';
   if (next === engineSwitch.mode) return Promise.resolve();
   engineSwitch.mode = next;
-  if (next === 'rust') return start();
+  if (next === 'rust') return (starting = start());
   leave('off');
   return Promise.resolve();
+}
+
+// How many times `fontsSettled` looks again before it gives up waiting. Each
+// look that finds something on its way waits for all of it; a family landing
+// can show a letter IT lacks, which is one more look, and that is as deep as
+// it goes - the rest is room, for a scan or a font added meanwhile.
+const SETTLE_ROUNDS = 12;
+
+/**
+ * Resolves when every face `pages` is set in, and every family a letter of
+ * theirs is borrowed from, is in the engine or is known not to be coming.
+ * An export waits on this (through the store's `fontsSettling`, which also
+ * sees to it that the pages are fitted): a page painted before it is a page
+ * whose text was broken against a stand-in.
+ *
+ * Asking is what sends for them: a page that was never on screen names
+ * system families, and holds letters, nobody has asked about yet.
+ *
+ * Three ways out, and no other:
+ *
+ *   - everything is in: resolved;
+ *   - the Rust engine is not the one measuring (never was, was turned off
+ *     while this waited, or failed to start): resolved at once, without
+ *     waiting for anything the engine that went had asked for - the browser
+ *     measures, and it needs no gate. Turned on again meanwhile, the wait
+ *     goes on with the new engine;
+ *   - something was still on its way at every look (a scan after every
+ *     answer, fonts added without end): REJECTED, with words for the user.
+ *     Never resolved with something pending: that is an export of empty boxes
+ *     that says it went well.
+ */
+export async function fontsSettled(pages = app.pages) {
+  for (let round = 0; round < SETTLE_ROUNDS; round++) {
+    const gone = left.promise;
+    if (engineSwitch.phase === 'starting') {
+      await Promise.race([starting, gone]);
+      continue;
+    }
+    const s = sync;
+    if (engineSwitch.phase !== 'on' || !s) return;
+    let waiting = false;
+    for (const p of pages ?? []) {
+      for (const b of p?.boxes ?? []) {
+        if (!b?.style) continue;
+        if (!s.ready(b.style.font) || lettersOf(b.style, String(boxText(b, p) ?? '')).pending.length) waiting = true;
+      }
+    }
+    if (!waiting) return;
+    await Promise.race([s.settled(), gone]);
+  }
+  throw new Error('the fonts kept changing while it waited for them; nothing was written. Try again.');
 }
 
 /**
@@ -281,23 +367,32 @@ export function engineHasNoFont() {
   return engineSwitch.phase === 'on' && !engineSwitch.lastResort;
 }
 
-// ---- letters no face has ----
-// With the Rust engine measuring, a letter the box's face lacks is looked for
-// in the fallback chain, and one nothing in the chain has is measured as the
-// face's empty box. The engine can say which (`missing`); a browser cannot,
-// it asks the system for a font and tells nobody.
+// ---- letters the face lacks ----
+// With the Rust engine measuring, a letter the box's face has no glyph for is
+// drawn from another family: the last resort, or an installed family the
+// native side named for it (text-engine/font-sync.js, `lettersOf`). One
+// nothing has is measured as the face's empty box. The engine can say which
+// is which; a browser cannot, it asks the system for a font and tells nobody.
 //
 // Kept per face and string: the notice that reads this re-reads it for every
-// box of the chapter whenever one of them changes.
+// box of the chapter whenever one of them changes, and the store asks it of a
+// box before every fit. Emptied when the engine's fonts change and when an
+// answer about letters lands (`arrived`).
 const lettersMemo = new Map();
 let lettersMemoFor = null;
+const NO_LETTERS = Object.freeze({ borrowed: Object.freeze([]), none: Object.freeze([]), pending: Object.freeze([]), unread: Object.freeze([]) });
 
-/** Code points of the box's text no face in the chain has; empty unless the Rust engine is measuring. */
-export function lettersMissing(style, text) {
-  if (engineSwitch.phase !== 'on' || !rust || textEngine() !== rust) return [];
+/**
+ * What becomes of the letters of `text` the style's face lacks, as
+ * `{ borrowed: [{ family, letters }], none, pending, unread: [{ family, letters }] }`
+ * (font-sync.js, `lettersOf`); all empty unless the Rust engine is measuring. The first time
+ * a face and string is asked about is what sends for the families it needs.
+ */
+export function lettersOf(style, text) {
+  if (engineSwitch.phase !== 'on' || !rust || !sync || textEngine() !== rust) return NO_LETTERS;
   // A face arriving changes the answer, and that is this signal.
   app.fontsVersion;
-  if (!text || !/\S/.test(text)) return [];
+  if (!text || !/\S/.test(text)) return NO_LETTERS;
   if (lettersMemoFor !== rust) {
     lettersMemoFor = rust;
     lettersMemo.clear();
@@ -311,25 +406,58 @@ export function lettersMissing(style, text) {
   const key = `${face.name}\n${face.bold ? 1 : 0}${face.italic ? 1 : 0}${style.uppercase ? 1 : 0}\n${text}`;
   let out = lettersMemo.get(key);
   if (!out) {
-    out = rust.hasFamily(face.name) ? rust.missing(face, applyCase(text, style)) : [];
+    out = rust.hasFamily(face.name) ? sync.lettersOf(face, applyCase(text, style)) : NO_LETTERS;
     if (lettersMemo.size > 20000) lettersMemo.clear();
     lettersMemo.set(key, out);
   }
   return out;
 }
 
+/** Code points of the box's text no installed font has; empty unless the Rust engine is measuring. */
+export function lettersMissing(style, text) {
+  return lettersOf(style, text).none;
+}
+
 /** The open chapter's boxes that have such letters, as [{ pageIndex, boxId, letters }]. */
 export function boxesMissingLetters(pages = app.pages) {
+  return boxesBorrowingLetters(pages)
+    .filter((b) => b.none.length)
+    .map((b) => ({ pageIndex: b.pageIndex, boxId: b.boxId, letters: b.none }));
+}
+
+/**
+ * The open chapter's boxes whose text is not all drawn in the font they are
+ * set in, as [{ pageIndex, boxId, borrowed: [{ family, letters }], none,
+ * unread: [{ family, letters }] }]: the letters taken from another family and
+ * which one, the letters no installed font has, and the letters whose font
+ * could not be read or looked for. A letter still being looked for is in none
+ * of them yet.
+ *
+ * `look(box, page)` is what answers for one box, `lettersOf` of its style and
+ * text unless the caller has its own. The notice has: it keeps the answer per
+ * box, so that this walk reads no box's text itself and a keystroke in one
+ * box is one box looked at again (FontNotice.svelte).
+ */
+export function boxesBorrowingLetters(pages = app.pages, look = boxLetters) {
   const out = [];
   if (engineSwitch.phase !== 'on') return out;
   (pages ?? []).forEach((p, pageIndex) => {
     for (const b of p.boxes ?? []) {
       if (!b.style) continue;
-      const letters = lettersMissing(b.style, String(boxText(b, p) ?? ''));
-      if (letters.length) out.push({ pageIndex, boxId: b.id, letters });
+      const l = look(b, p);
+      if (l.borrowed.length || l.none.length || l.unread.length) out.push({ pageIndex, boxId: b.id, borrowed: l.borrowed, none: l.none, unread: l.unread });
     }
   });
   return out;
+}
+/** `lettersOf` for a box on its page. */
+export function boxLetters(b, p) {
+  return lettersOf(b.style, String(boxText(b, p) ?? ''));
+}
+
+/** Whether a letter nothing has was looked for among the installed fonts, or there was nobody to ask (a plain browser). */
+export function lettersWereAskedFor() {
+  return engineSwitch.phase === 'on' && !!sync?.canAskLetters();
 }
 
 // For the tests: stand-ins for the wasm, the native side and the library, and
@@ -347,5 +475,6 @@ export function _resetEngineSwitch() {
   engineSwitch.error = '';
   modulePromise = null;
   rust = null;
+  starting = null;
 }
 export const _engineSwitchSync = () => sync;

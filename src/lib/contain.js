@@ -238,6 +238,58 @@ export function placeBlock(cand, opts) {
   };
 }
 
+// A straight block's line boxes as one box-local rectangle: each line's
+// advance, at the x it is drawn at, across; the block's line heights down.
+// Null for a curve, which has no block. This is the rectangle the exporter
+// grows a box's footprint to hold (`layoutBox`), and the place the lines' own
+// elements stand in the editor with the switch off. (What the editor lays
+// over a box shown as a picture, so that text past the frame still takes the
+// pointer, is this and the ink together: `blockReach`.)
+export function blockRect(place) {
+  if (!place || place.isCurve) return null;
+  const s = place.s;
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  place.lines.forEach((ln, i) => {
+    const w = lineWidth(ln, s, s.size);
+    const x = s.align === 'center' ? place.lineX[i] - w / 2 : s.align === 'right' ? place.lineX[i] - w : place.lineX[i];
+    x0 = Math.min(x0, x);
+    x1 = Math.max(x1, x + w);
+  });
+  return { x0, y0: place.blockY, x1, y1: place.blockY + place.blockH };
+}
+
+// A straight block's glyph ink as one box-local rectangle `{x0, y0, x1, y1}`:
+// each line's measured ink (`place.inks`) at its anchor and baseline. Null for
+// a curve, and for a block that inks nothing. Not the advances: an italic's
+// first letter starts left of its anchor and a tall glyph stands above its
+// line box, and this is where they are. `boxInkRect` starts from it.
+export function linesInkRect(place) {
+  if (!place || place.isCurve) return null;
+  let r = null;
+  for (let i = 0; i < place.lines.length; i++) {
+    const k = place.inks[i];
+    if (!k) continue;
+    const base = place.blockY + i * place.lineH + place.baseY;
+    r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
+  }
+  return r;
+}
+
+// Where a straight block is on screen once it is a picture: its line boxes
+// (`blockRect`) and its glyphs' ink (`linesInkRect`) as one box-local
+// rectangle. The picture holds both - the exporter's footprint is grown to
+// the ink where the engine draws (`layoutBox`) - so this is what must take
+// the pointer for the part of a box past its frame: an italic J whose advance
+// is inside the frame and whose hook is 47 px left of it is drawn there and
+// has to be pressable there. Null for a curve.
+export function blockReach(place) {
+  const b = blockRect(place);
+  if (!b) return null;
+  const k = linesInkRect(place);
+  return k ? unite(b, k.x0, k.y0, k.x1, k.y1) : b;
+}
+
 // The same placement after a change of height alone. Line breaking reads the
 // height only through the balloon's rows, which hang from the point the block is
 // anchored to (`balloonWidthsFor`), and a height change anchored by `valign` -
@@ -321,12 +373,7 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
       if (k) r = unite(r, ...turnedInk(k, g.rot, cx + g.x, cy + g.y));
     }
   } else {
-    for (let i = 0; i < place.lines.length; i++) {
-      const k = place.inks[i];
-      if (!k) continue;
-      const base = place.blockY + i * place.lineH + place.baseY;
-      r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
-    }
+    r = linesInkRect(place);
   }
   const ink = inkActive(s.ink) ? inkBounds(s.ink) : null;
   if (ink) r = unite(r, ink.minX, ink.minY, ink.maxX, ink.maxY);

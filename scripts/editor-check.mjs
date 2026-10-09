@@ -4,7 +4,7 @@
 //
 //   npm run dev -- --port 5201 --strictPort          (in another shell)
 //   node scripts/editor-check.mjs --data <tp-data> [--url http://localhost:5201]
-//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real]
+//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag]
 //        [--chapter tsukimichi__121] [--chrome <path>] [--port 9377]
 //
 // No dependency is added for this: the protocol is spoken over node's own
@@ -26,7 +26,7 @@ const args = Object.fromEntries(
 const URL_BASE = (args.url ?? 'http://localhost:5201').replace(/\/$/, '');
 const DATA = args.data ? resolve(args.data) : null;
 const OUT = resolve(args.out ?? (DATA ? join(DATA, 'reports', 'p6') : 'editor-check-out'));
-const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real').split(','));
+const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag').split(','));
 const CHROME = args.chrome ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = Number(args.port ?? 9377);
 const CHAPTER = args.chapter ?? 'tsukimichi__121';
@@ -524,6 +524,242 @@ if (ONLY.has('real') && DATA) {
     await ec('zoom', 1);
     const r = await ec('rects');
     save(`real-page-${DSF}x-${mode === 'rust' ? 'on' : 'off'}.png`, (await shot(r.frame)).canvas);
+  }
+}
+
+// ---- the second check: what is near, what takes the pointer, what is held ----
+const WINDOW = { w: 1600, h: 1000 };
+const painted = (b) => !!b.canvas && b.canvas.w > 0;
+async function click(x, y) {
+  for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+  await sleep(120);
+}
+
+if (ONLY.has('near')) {
+  // The observer's margin, in the real scrolling area: a box within half the
+  // area of it holds its picture before it is in view, a box further does
+  // not, and a box is judged by what its picture covers. The page works it
+  // out (`nearCheck`); the picture of the spilling box is taken here.
+  report.near = {};
+  await ec('engine', 'rust');
+  await viewport(WINDOW.w, WINDOW.h);
+  for (const layout of ['pages', 'longstrip']) {
+    let row;
+    try {
+      row = await ec('nearCheck', layout);
+      const st = await ec('scrollTo', 0, row.spillTop, 4);
+      const shown = await shot({ x: st.scroll.x, y: st.scroll.y, w: st.scroll.w, h: st.scroll.h });
+      save(`near-spill-${layout}-${DSF}x.png`, shown.canvas);
+      row.spill.inkOnScreen = inkBox(shown, true)?.n ?? 0;
+    } catch (err) {
+      row = { ...row, error: String(err.message ?? err) };
+    }
+    report.near[layout] = row;
+    log(`near / ${layout}:`, JSON.stringify(row));
+  }
+}
+
+if (ONLY.has('hits')) {
+  // Letters the picture shows outside the frame take the pointer, and the
+  // picture's own padding does not. The page asks its own hit test
+  // (`hitsCheck`); here the ink is read off the screen and a real click made.
+  await viewport(WINDOW.w, WINDOW.h);
+  const { ids, points, rows } = await ec('hitsCheck');
+  report.hits = rows;
+  const state = await ec('boxesState');
+  const shown = await shot({ x: state.scroll.x, y: state.scroll.y, w: state.scroll.w, h: state.scroll.h });
+  // Every point tried, drawn over a copy of the picture: where the DOM had a
+  // letter, green if it took the pointer and red if not; ink outside a frame
+  // that did not, pink.
+  const rest = crop(shown, 0, 0, shown.w, shown.h);
+  const marks = rest.canvas.getContext('2d');
+  for (const id of ids) {
+    const pts = points[id];
+    const onHits = await ec('hitTest', pts);
+    const made = state.boxes.find((b) => b.id === id);
+    for (const [i, q] of pts.entries()) {
+      marks.fillStyle = onHits[i] === id ? '#00a040' : '#e00000';
+      marks.fillRect((q.x - state.scroll.x) * DSF - 2, (q.y - state.scroll.y) * DSF - 2, 4, 4);
+    }
+    marks.strokeStyle = '#0060ff';
+    marks.strokeRect((made.rect.x - state.scroll.x) * DSF, (made.rect.y - state.scroll.y) * DSF, made.rect.w * DSF, made.rect.h * DSF);
+    // The ink itself, as the screen shows it: every dark pixel of the picture
+    // that is outside the frame, a sample of them asked of the hit test.
+    const cr = made.canvas.rect;
+    const ink = [];
+    for (let y = Math.floor((cr.y - state.scroll.y) * DSF); y < (cr.y + cr.h - state.scroll.y) * DSF; y++) {
+      for (let x = Math.floor((cr.x - state.scroll.x) * DSF); x < (cr.x + cr.w - state.scroll.x) * DSF; x++) {
+        const i = (y * shown.w + x) * 4;
+        if (shown.data[i] > 110 || shown.data[i + 1] > 110 || shown.data[i + 2] > 110) continue;
+        const q = { x: state.scroll.x + (x + 0.5) / DSF, y: state.scroll.y + (y + 0.5) / DSF };
+        if (q.x < made.rect.x || q.x > made.rect.x + made.rect.w || q.y < made.rect.y || q.y > made.rect.y + made.rect.h) ink.push(q);
+      }
+    }
+    const every = Math.max(1, Math.floor(ink.length / 400));
+    const sample = ink.filter((_, i) => i % every === 0);
+    const inkHits = sample.length ? await ec('hitTest', sample) : [];
+    for (const [i, q] of sample.entries()) {
+      if (inkHits[i] === id) continue;
+      marks.fillStyle = '#ff00c0';
+      marks.fillRect((q.x - state.scroll.x) * DSF - 1, (q.y - state.scroll.y) * DSF - 1, 3, 3);
+    }
+    rows[id].inkOutsideTheFrame = { devicePx: ink.length, sampled: sample.length, hit: inkHits.filter((h) => h === id).length };
+    // A real click on a letter outside the frame selects the box.
+    const out = pts.filter((q) => q.outside);
+    if (out.length) {
+      await ec('select', null);
+      const q = out[Math.floor(out.length / 2)];
+      await click(q.x, q.y);
+      rows[id].clickOutsideTheFrameSelected = (await ec('state')).selected;
+      await ec('select', null);
+    }
+    log(`hits ${id.padEnd(7)}`, JSON.stringify(rows[id]));
+  }
+  save(`hits-${DSF}x.png`, rest.canvas);
+}
+
+if (ONLY.has('mask')) {
+  // A masked box at rest keeps its mask image; an edit begun on it is masked
+  // in the same flush. What the image is: a PNG blob per masked box.
+  await viewport(WINDOW.w, WINDOW.h);
+  const spec = await ec('spec', 'mask');
+  report.mask = {};
+  for (const mode of ['browser', 'rust']) {
+    await ec('engine', mode);
+    const before = (await ec('blobs')).length;
+    await ec('openCustom', spec);
+    await ec('zoom', 1);
+    await sleep(300);
+    const blobs = (await ec('blobs')).slice(before).filter((b) => b.live);
+    const row = { liveBlobs: blobs.length, blobBytes: blobs.map((b) => b.size), types: [...new Set(blobs.map((b) => b.type))], boxes: {} };
+    for (const id of ['include', 'exclude', 'large', 'unmasked']) {
+      const rest = await ec('maskState', id);
+      const now = await ec('editNow', id);
+      await ec('endEdit');
+      row.boxes[id] = { atRest: rest, theFlushTheEditBegan: now };
+    }
+    report.mask[mode === 'rust' ? 'on' : 'off'] = row;
+    log(`mask / switch ${mode === 'rust' ? 'ON' : 'OFF'}:`, JSON.stringify(row));
+  }
+}
+
+if (ONLY.has('limits')) {
+  // A box longer than the engine's longest side is painted, lower; a box the
+  // painter refuses is shown as its text and the rest of the page is painted.
+  await viewport(WINDOW.w, WINDOW.h);
+  await ec('engine', 'rust');
+  report.limits = {};
+  await ec('openCustom', await ec('spec', 'limits'));
+  const z = 3 / DSF;
+  await ec('zoom', z);
+  await ec('scrollTo', 0, 0, 4);
+  const errorsBefore = cdp.errors.length;
+  const long = (await ec('boxesState')).boxes.find((b) => b.id === 'long');
+  const same = (await ec('sameAsExporter')).find((r) => r.id === 'long');
+  report.limits.long = { zoom: z, scale: z * DSF, wouldBe: Math.round(7000 * z * DSF), canvas: long.canvas, dom: long.dom, sameAsExporter: same, pageErrors: cdp.errors.length - errorsBefore };
+  log('limits / long box:', JSON.stringify(report.limits.long));
+  // Its text is in the middle of 7,000 page px: scrolled to, to be looked at.
+  await ec('scrollTo', Math.round(long.rect.x + long.rect.w / 2 - WINDOW.w / 2), 0, 4);
+  const middle = await shot({ x: 0, y: 0, w: WINDOW.w, h: 500 });
+  report.limits.long.inkOnScreen = inkBox(middle, true)?.n ?? 0;
+  save(`limits-long-${DSF}x.png`, middle.canvas);
+  await ec('scrollTo', 0, 0, 2);
+
+  const three = async () => Object.fromEntries((await ec('boxesState')).boxes.filter((b) => b.id !== 'long').map((b) => [b.id, { engine: painted(b) && b.canvas.painter === 'engine', dom: b.dom }]));
+  const said = async () => (await ec('logged')).filter((m) => /could not be painted/.test(m)).length;
+  await ec('logged');
+  const steps = {};
+  steps.before = await three();
+  await ec('refuse', 'REFUSED');
+  await ec('zoom', 1);
+  steps.refusedAndRepainted = { boxes: await three(), said: await said() };
+  await ec('zoom', 1.25);
+  steps.repaintedAgain = { boxes: await three(), said: await said() };
+  save(`limits-refused-${DSF}x.png`, (await shot({ x: 0, y: 0, w: WINDOW.w, h: 700 })).canvas);
+  await ec('refuse', null);
+  await ec('zoom', 1);
+  steps.allowedAgain = { boxes: await three(), said: await said() };
+  report.limits.refused = steps;
+  // The refusal is this step's own doing; anything else stays a page error.
+  const mine = (e) => /could not be painted|this job is refused/.test(String(e));
+  report.limits.expectedErrors = cdp.errors.filter(mine).length;
+  for (let i = cdp.errors.length - 1; i >= 0; i--) if (mine(cdp.errors[i])) cdp.errors.splice(i, 1);
+  log('limits / a refused box:', JSON.stringify(steps));
+}
+
+if (ONLY.has('ink')) {
+  // Ink that reaches past its advance is in the picture: no texture has ink
+  // on its own edge, and at rest the letter is where typing shows it.
+  await viewport(WINDOW.w, WINDOW.h);
+  await ec('engine', 'rust');
+  const J = [
+    ['j-italic', { italic: true, size: 80, align: 'left' }, 'J'],
+    ['j-upright', { size: 80, align: 'left' }, 'J'],
+    ['j-right', { italic: true, size: 80, align: 'right' }, 'fJf'],
+    ['wham-italic', { italic: true, size: 60, align: 'left', font: 'Check Bangers' }, 'WHAM'],
+    ['sans-italic', { italic: true, size: 70, align: 'left', font: 'Aaa Sans' }, 'jf'],
+  ];
+  await ec('openCustom', { pages: [{ w: 1500, h: 400, boxes: J.map(([id, over, text], i) => ({ id, x: 80 + i * 280, y: 120, w: 150, h: 120, text, over })) }] });
+  await ec('zoom', 1);
+  const rects = await ec('boxesState');
+  const pics = await ec('pictures');
+  report.ink = [];
+  const pairs = [];
+  for (const [id] of J) {
+    const tex = await fromDataUrl(pics.find((q) => q.id === id).url);
+    // Ink on the outermost row or column of a texture: [pixels, strongest alpha] a side.
+    const side = (n, at) => {
+      let count = 0, most = 0;
+      for (let i = 0; i < n; i++) {
+        const a = tex.data[at(i) * 4 + 3];
+        if (a) count++;
+        if (a > most) most = a;
+      }
+      return [count, most];
+    };
+    const edges = { left: side(tex.h, (y) => y * tex.w), right: side(tex.h, (y) => y * tex.w + tex.w - 1), top: side(tex.w, (x) => x), bottom: side(tex.w, (x) => (tex.h - 1) * tex.w + x) };
+    const edge = Object.values(edges).reduce((n, e) => n + e[0], 0);
+    const b = rects.boxes.find((x) => x.id === id);
+    const cell = { x: b.rect.x - 70, y: b.rect.y - 50, w: b.rect.w + 140, h: b.rect.h + 100 };
+    const rest = await shot(cell);
+    await ec('edit', id);
+    const typing = await shot(cell);
+    await ec('endEdit');
+    await ec('select', null);
+    const inkRest = inkBox(rest, true);
+    const off = offsets(inkRest, inkBox(typing, true));
+    report.ink.push({ id, texture: [tex.w, tex.h], inkedPixelsOnTheTextureEdge: edge, edges: edge ? edges : undefined, inkLeftOfTheBoxDevicePx: inkRest ? +(70 * DSF - inkRest.x0).toFixed(1) : null, typingMinusRest: off });
+    pairs.push([`${id}   (black ink box, typing minus rest, device px: ${off ? `${off.left} ${off.top} ${off.right} ${off.bottom}` : 'no ink'})`, rest, typing]);
+    log(`ink ${id.padEnd(12)}`, JSON.stringify(report.ink.at(-1)));
+  }
+  sheet(`ink-${DSF}x.png`, pairs, `switch ON, zoom 100%, ${DSF}x display: at rest (engine canvas) left, being typed into right`);
+}
+
+if (ONLY.has('drag')) {
+  // A handle dragged, a frame at a time: what a frame costs, and what the
+  // canvas holds while the drag is on and once it is let go.
+  await viewport(WINDOW.w, WINDOW.h);
+  report.drag = {};
+  const spec = { pages: [{ w: 1400, h: 1700, boxes: [
+    { id: 'balloon', x: 60, y: 60, w: 220, h: 110 },
+    { id: 'effect', x: 60, y: 260, w: 600, h: 400, over: { size: 90, strokes: [{ color: '#d02020', width: 4, opacity: 1 }] } },
+    { id: 'page-wide', x: 60, y: 760, w: 1100, h: 800, over: { size: 150, strokes: [{ color: '#d02020', width: 6, opacity: 1 }], shadows: [{ x: 6, y: 6, blur: 8, color: '#000000', opacity: 0.6 }] } },
+  ] }] };
+  const ms = (st) => `${st.median.toFixed(1)} (${st.min.toFixed(1)}-${st.max.toFixed(1)})`;
+  for (const mode of ['browser', 'rust']) {
+    await ec('engine', mode);
+    await ec('openCustom', spec);
+    const out = (report.drag[mode === 'rust' ? 'on' : 'off'] = {});
+    for (const zoom of [1, 3]) {
+      await ec('zoom', zoom);
+      for (const id of ['balloon', 'effect', 'page-wide']) {
+        await ec('reveal', id);
+        const r = await ec('timeDrag', id, 'e', 30, 2);
+        out[`${id}@${zoom * 100}%`] = r;
+        const mp = (s) => (s ? `${((s[0] * s[1]) / 1e6).toFixed(2)} MP` : 'no canvas');
+        log(`drag / switch ${mode === 'rust' ? 'ON ' : 'OFF'} ${id.padEnd(9)} at ${zoom * 100}%: a frame ${r.error ?? ms(r.frame)} ms, letting go ${r.letGo?.toFixed(1)} ms; canvas before ${mp(r.before)}, at the last frame ${mp(r.during)}, after ${mp(r.after)}; grew ${r.grewPagePx} page px`);
+      }
+    }
   }
 }
 
