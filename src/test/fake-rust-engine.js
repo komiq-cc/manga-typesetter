@@ -39,6 +39,10 @@ export function fakeRustEngine() {
   };
   const listeners = new Set();
   let fallbacks = [];
+  // family -> the letters beyond Latin-1 it has (`cover`). Every fake face
+  // has Latin-1 and, unless told otherwise, nothing else.
+  const covers = new Map();
+  const has = (family, cp) => cp <= 0xff || (covers.get(family) ?? '').includes(String.fromCodePoint(cp));
   const asked = [];
   const changed = () => {
     for (const cb of [...listeners]) cb();
@@ -73,10 +77,18 @@ export function fakeRustEngine() {
       return () => listeners.delete(cb);
     },
     faceReady: (face) => families.has(face.name),
-    missing: (face, text) => {
+    // As the adapter: what neither the face nor the first `depth` families
+    // of the fallback list have, the families that are registered. Anything
+    // outside Latin-1 is a letter no fake face has until `cover` says it has.
+    missing: (face, text, depth = Infinity) => {
       fam(face);
-      // Anything outside Latin-1 is a letter no fake face has.
-      return [...new Set([...text].map((ch) => ch.codePointAt(0)).filter((cp) => cp > 0xff))];
+      const chain = [face.name, ...fallbacks.slice(0, depth).filter((name) => families.has(name))];
+      return [...new Set([...text].map((ch) => ch.codePointAt(0)).filter((cp) => !chain.some((name) => has(name, cp))))];
+    },
+    /** Gives a family letters beyond Latin-1, as a string of them. */
+    cover(family, letters) {
+      covers.set(family, letters);
+      changed();
     },
     addFace(family, slot, bytes, index = 0) {
       refuse(family, bytes);
@@ -143,12 +155,17 @@ export function fakeRustEngine() {
  * font file the family's faces live in. Answers are held back until
  * `release()` when `hold` is set, to look at the moment in between.
  *
+ * `coverage` is what `system_font_coverage` knows: `[[family, letters], ...]`
+ * in the order letters are looked for, each letter answered by the first
+ * family that has it as the real command does (src-tauri/src/font_coverage.rs);
+ * `'fail'` makes the command fail.
+ *
  * `calls` is what each command was really given. `font_to_sfnt` takes the
  * font as the raw body of the call (src-tauri/src/font_decode.rs), and Tauri
  * sends a raw body only for bytes: handed anything else - the same bytes
  * wrapped in an object, say - this refuses in the real command's words.
  */
-export function fakeNative(files = {}, { hold = false } = {}) {
+export function fakeNative(files = {}, { hold = false, coverage = [] } = {}) {
   const calls = [];
   // Every `system_font_face` answer, in order: a header alone is 40 bytes.
   const answers = [];
@@ -163,6 +180,17 @@ export function fakeNative(files = {}, { hold = false } = {}) {
       const answer = systemFaceAnswer(file.slots, file.bytes, { known: args.known });
       answers.push(answer);
       return answer;
+    }
+    if (cmd === 'system_font_coverage') {
+      if (coverage === 'fail') throw new Error('the fonts could not be looked through');
+      if (!Array.isArray(args?.codePoints) || args.codePoints.length > 1024) throw new Error('too many letters asked about at once');
+      const families = coverage.map(([name], i) => ({ name, order: String(i).padStart(4, '0'), codePoints: [] }));
+      const none = [];
+      for (const cp of [...new Set(args.codePoints)].sort((a, b) => a - b)) {
+        const at = coverage.findIndex(([, letters]) => letters.includes(String.fromCodePoint(cp)));
+        (at < 0 ? none : families[at].codePoints).push(cp);
+      }
+      return { families: families.filter((f) => f.codePoints.length), none };
     }
     if (cmd === 'font_to_sfnt') {
       if (!(args instanceof Uint8Array || args instanceof ArrayBuffer)) throw new Error('font_to_sfnt takes the font file as the raw body of the call');
