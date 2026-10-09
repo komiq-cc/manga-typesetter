@@ -180,8 +180,12 @@ Rules of map C section 5.3 as applied:
   engine: after painting seven kinds, at most one canvas made on the way
   still holds pixels, and it is the painter's bounded scratch. This test was
   not mutation-checked.
-- No data URLs on this path. The mask image and the SVG filter definitions
-  are not built at all while the picture is shown.
+- No data URLs on this path. The SVG filter definitions are not built at all
+  while the picture is shown. (Corrected in P6b. This said the mask image was
+  not built either. It was dropped at rest, and an edit begun on a masked box
+  then started on unmasked text until the image was made again. Since P6b a
+  masked box keeps its mask image at rest: a PNG blob, 16 KB for a 220 x 110
+  box and 51 KB for a 1000 x 600 one, measured; see `P6B-REPORT.md`, item 5.)
 - Nothing heavy in the reactive key: the ink block goes in by its existing
   key, the texture never.
 - Hidden pages hold no pixels (`shown`). Measured: 0.0 MB on hidden pages in
@@ -190,16 +194,25 @@ Rules of map C section 5.3 as applied:
   longstrip a box waits for the observer before its first paint (`lazy`); in
   paged mode it paints at once and is released if the observer says far.
 
-**Page budget.** There is no hard cap for a page. The bound is geometric: the
-near area is the viewport plus half a viewport on each side, four viewport
-areas. For a 1600 x 1000 window on a 2x display that is 4 x 3200 x 2000 x 4
-bytes = 102 MB if every pixel of it were covered once. Boxes that straddle
-the edge count whole, footprints can overlap, and turned boxes hold four
-times their area, so this is an estimate and not a guarantee; each box is
-capped at 32 MB regardless.
+**Page budget.** There is no hard cap for a page. (Corrected in P6b. This
+paragraph gave a bound of four viewport areas, 102 MB for a 1600 x 1000
+window on a 2x display. It was not a bound, for two reasons. The margin did
+nothing: the observer had no root, and the editor's scrolling area clipped
+before the margin was applied, so the near area was the scrolling area
+itself. And the near area never bounded pixels: a box that touches it holds
+its WHOLE picture, wherever the picture lies.)
 
-**Measured** (sum of `width * height * 4` over every canvas in the document,
-1600 x 1000 window):
+What is true since P6b: a box holds pixels when the footprint of its picture
+touches the scrolling area grown by half its width and half its height on
+each side. Each such box holds its whole picture, up to 32 MB. The bound on a
+page is therefore the number of such boxes times 32 MB, which is not a useful
+number; the measured figures are what there is. With the margin real, more
+boxes hold pixels than the table below shows: 37.0 MB in 9 of 30 canvases for
+the synthetic page at 300% on a 2x display, and 76.0 MB in 15 of 54 for the
+real page, against 10.3 MB and 28.4 MB below. See `P6B-REPORT.md`, item 2.
+
+**Measured** in P6, before the margin was real (sum of `width * height * 4`
+over every canvas in the document, 1600 x 1000 window):
 
 | page | display | switch | 60% | 100% | 300% | elements in boxes |
 |---|---|---|---|---|---|---|
@@ -374,6 +387,8 @@ Readings:
   one. I did not build a lower scale while dragging: the quiet figure does
   not ask for it and the loaded one does. If it is wanted, the place is
   `pictureRes`; it needs a "resizing" flag the store does not have today.
+  (Built in P6b, with a flag in the component: a box over a megapixel is
+  painted lower while a handle resizes it. `P6B-REPORT.md`, item 9.)
 - **A page turn costs a repaint of the page** because hidden pages hold no
   pixels: 14-35 ms quiet, up to 107 ms loaded, against under 4 ms of script
   with the switch off. Keeping the two neighbours painted would make the
@@ -401,12 +416,16 @@ Readings:
    today.
 9. A box whose mask is on: when an edit starts, the mask image has to be
    built before the DOM text can be masked, which is asynchronous. A frame
-   of unmasked text is possible. Inferred; I did not capture it.
+   of unmasked text is possible. Inferred; I did not capture it. (Since
+   P6b the mask image is kept at rest and the edit starts masked, in the
+   same flush: `P6B-REPORT.md`, item 5.)
 10. Hit area: the frame is the same target (measured: centre and corner hit,
     6 px outside does not, both ways). Glyphs that hang outside the frame
     are no longer targets: on the arc box four letters outside the frame hit
     the box with the switch off and none with it on. The canvas is
-    `pointer-events: none`.
+    `pointer-events: none`. (Since P6b they are targets again: the same
+    four hit with the switch on, in Chromium and in WKWebView;
+    `P6B-REPORT.md`, item 4.)
 11. Text of a box at rest cannot be found by the browser's find or selected,
     since it is pixels. Inferred from there being no text node.
 12. Turning a box from exactly upright, the first degree repaints once.

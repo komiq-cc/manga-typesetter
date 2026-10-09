@@ -12,6 +12,8 @@
 // It loads <url>/editor-check.html#self, waits for the page to say it is
 // done, and prints what the page found as JSON. Nothing is installed and
 // nothing is written; the web view keeps no data (a non-persistent store).
+// The window is off every screen and nothing is shown, but the display has to
+// be awake and unlocked: otherwise the page is hidden and the run says so.
 import Cocoa
 import WebKit
 
@@ -45,7 +47,18 @@ class Nav: NSObject, WKNavigationDelegate {
       exit(2)
     }
   }
-  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { poll() }
+  // With the display asleep or the screen locked WebKit calls the page hidden
+  // and gives it no animation frames, and the check waits on frames: said at
+  // once, not after four minutes.
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    web.evaluateJavaScript("document.hidden") { value, _ in
+      if (value as? Bool) == true {
+        print("{\"error\": \"the page is hidden (is the display asleep, or the screen locked?): WebKit gives a hidden page no frames\"}")
+        exit(4)
+      }
+      self.poll()
+    }
+  }
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { print("{\"error\": \"\(error.localizedDescription)\"}"); exit(3) }
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { print("{\"error\": \"\(error.localizedDescription)\"}"); exit(3) }
 }
