@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
-import { rustEngine } from '../../test/rust-engine.js';
+import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
+import { variableFont } from '../../test/variable-fixture.js';
 import { weightOnAxis } from './rust.js';
 import { createRustGlyphPainter } from './rust-painter.js';
 import { drawnFace, drawnRuns } from './drawn-face.js';
@@ -221,5 +222,125 @@ describe('a variable font of this machine', () => {
     rust.removeFamily('Passing');
     expect(() => rust.low.fontInfo(first)).toThrow();
     expect(() => rust.low.fontInfo(second)).toThrow();
+  });
+});
+
+// ===========================================================================
+// Variable fonts made here: Comic Neue with an `fvar` put in
+// ===========================================================================
+// No file, so every machine runs these. The font has axes and no `gvar`: it
+// looks the same everywhere on them, which is beside the point - these are
+// about what a font FILE and a caller can say to the engine, and what is left
+// in it afterwards. (text-engine/tests/instance.rs asks the same of the crate;
+// here it is the wasm, where a Rust panic is `RuntimeError: unreachable` and
+// an engine that answers nothing ever again.)
+describe('a variable font made in the test', () => {
+  const comic = fixtureFont('ComicNeue-Regular.ttf');
+  const TWO = [['wght', 100, 400, 900], ['wdth', 50, 100, 200]];
+  let rust;
+  let low;
+  beforeAll(async () => {
+    rust = await rustEngine();
+    low = rust.low;
+  });
+  const alive = (font) => low.advance({ font, size: 100, flags: 0 }, TEXT) > 0;
+  // The id the next font gets: the lowest free one, so a font left behind shows.
+  const nextId = () => {
+    const id = low.addFont(comic);
+    low.removeFont(id);
+    return id;
+  };
+
+  it('an axis that is not a range is no axis, and asking for a place on it is an error, not a trap', () => {
+    const damaged = [
+      ['wght', 800, 400, 700], // minimum above the maximum
+      ['wght', 400, 900, 700], // default above the maximum
+      ['wght', 400, 100, 700], // default below the minimum
+      ['wght', 900, 900, 100],
+    ];
+    for (const axis of damaged) {
+      const font = low.addFont(variableFont(comic, [axis, TWO[1]]));
+      expect(low.fontInfo(font).axes.map((a) => a.tag)).toEqual(['wdth']);
+      const free = nextId();
+      for (const value of [700, 0, -1e30, 1e30, 3.4e38]) {
+        expect(() => addInstance(low, font, { wght: value }), `${axis} ${value}`).toThrow(/not a range/);
+        // The raw export too, with nothing between the number and the engine.
+        expect(low.exports.mt_font_add_instance(font, 0x77676874, value)).toBe(0);
+      }
+      // The engine is there, nothing was left in it, and the sound axis works.
+      expect(alive(font)).toBe(true);
+      expect(nextId()).toBe(free);
+      const wide = addInstance(low, font, { wdth: 1e30 });
+      expect(low.fontInfo(wide).postScriptName).toBe('ComicNeue_200wdth');
+      low.removeFont(wide);
+      low.removeFont(font);
+    }
+  });
+
+  it('through the adapter, a damaged weight axis is a font with no weight axis: bold is the regular emboldened', () => {
+    rust.addFace('Damaged', 'regular', variableFont(comic, [['wght', 800, 400, 700]]));
+    try {
+      const f = face('Damaged', { bold: true });
+      expect(rust.resolveFace(f)).toEqual({ slot: 'regular', fauxBold: true, fauxItalic: false });
+      expect(rust.advance(f, TEXT)).toBeGreaterThan(rust.advance(face('Damaged'), TEXT));
+    } finally {
+      rust.removeFamily('Damaged');
+    }
+  });
+
+  it('no number and no tag a caller passes traps the engine', () => {
+    const font = low.addFont(variableFont(comic, TWO));
+    const free = nextId();
+    for (const value of [NaN, Infinity, -Infinity]) {
+      expect(() => addInstance(low, font, { wght: value })).toThrow(/not a number/);
+      expect(low.exports.mt_font_add_instance(font, 0x77676874, value)).toBe(0);
+    }
+    expect(() => addInstance(low, font, { wght: '700' })).toThrow(/not a number/);
+    expect(() => addInstance(low, font, {})).toThrow(/at least one/);
+    expect(() => addInstance(low, 9999, { wght: 700 })).toThrow(/unknown font/);
+    expect(nextId()).toBe(free);
+    // Any four bytes as a tag, and any font id: an answer, never a trap.
+    for (const tag of [0, 0xffffffff, 0x20202020, 0x00010203, 0x77676874]) {
+      for (const id of [font, 0, 0xffffffff]) {
+        const made = low.exports.mt_font_add_instance(id, tag, 650);
+        if (made) low.removeFont(made);
+      }
+    }
+    expect(alive(font)).toBe(true);
+    expect(nextId()).toBe(free);
+    low.removeFont(font);
+  });
+
+  it('a bad tag after a good one is refused before anything is made', () => {
+    const font = low.addFont(variableFont(comic, TWO));
+    const free = nextId();
+    expect(() => addInstance(low, font, { wght: 700, bad: 4 })).toThrow(/not an axis tag/);
+    expect(() => addInstance(low, font, { wght: 700, wdth: NaN })).toThrow(/not a number/);
+    expect(nextId()).toBe(free);
+    low.removeFont(font);
+  });
+
+  it('a step that fails takes the steps before it back out', () => {
+    // `wdth` is sound and comes first; `wght` is damaged and fails second.
+    const font = low.addFont(variableFont(comic, [['wght', 800, 400, 700], TWO[1]]));
+    const free = nextId();
+    expect(() => addInstance(low, font, { wdth: 150, wght: 700 })).toThrow(/not a range/);
+    expect(nextId()).toBe(free);
+    low.removeFont(font);
+  });
+
+  it('an instance on two axes is on both, and the step between is not left behind', () => {
+    const font = low.addFont(variableFont(comic, TWO));
+    const free = nextId();
+    const both = addInstance(low, font, { wght: 700, wdth: 150 });
+    expect(low.fontInfo(both).postScriptName).toBe('ComicNeue_700wght_150wdth');
+    // One font more than before, not two: the `wght` step went when `wdth` was made of it.
+    expect(both).toBe(free + 1);
+    expect(nextId()).toBe(free);
+    // And it outlives that step: it measures.
+    expect(alive(both)).toBe(true);
+    low.removeFont(both);
+    expect(nextId()).toBe(free);
+    low.removeFont(font);
   });
 });
