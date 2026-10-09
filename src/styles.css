@@ -785,6 +785,36 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
 .curve-edit .csel{ background:rgba(64,128,255,.3); }
 .curve-edit .ccaret{ width:1.5px; background:var(--tintline); animation:ccaret-blink 1.06s steps(1) infinite; }
 @keyframes ccaret-blink{ 50%{ opacity:0; } }
+/* A box typed into while it is the engine's picture (TextBox.svelte,
+   flat-caret.js): the picture is the result, so the editable that holds the
+   text is not seen - but it stays where it always was in the box, laid out
+   as it always was, because the system puts an IME's window at ITS caret.
+   Not seen at all, rather than made of transparent ink as the ghost above
+   is: a browser paints its own mark on the text an IME is composing, in a
+   colour of its own, and that would lie over the picture. The overlay takes
+   the pointer and holds the marks: the selection a rectangle a row, the
+   caret as tall as its row, the text an IME is composing underlined. All
+   placed in the box's own frame, so its turn and its flip carry them as
+   they carry the picture.
+   Not the scroller's anchor either: a browser that anchors its scrolling
+   holds the focused editable still, and this one changes height as its lines
+   are drawn into it (it is centred, so its top moves) - the page would be
+   scrolled by half a line under a picture that has not moved. */
+.txt.editable.unseen{ pointer-events:none; opacity:0; overflow-anchor:none; }
+.type-edit{ position:absolute; inset:0; cursor:text; }
+.type-edit .tsel, .type-edit .tcaret, .type-edit .tcomp{ position:absolute; pointer-events:none; }
+.type-edit .tpad, .curve-edit .tpad{ position:absolute; }
+.type-edit .tsel{ background:rgba(64,128,255,.3); }
+.type-edit .tcaret{ width:1.5px; margin-left:-.75px; background:var(--tintline); animation:ccaret-blink 1.06s steps(1) infinite; }
+.type-edit .tcomp{ height:2px; background:var(--tintline); }
+.curve-edit .ccomp{ background:transparent; border-bottom:2px solid var(--tintline); box-sizing:border-box; }
+/* The caret while something is selected: still there to be measured (the
+   editable's own caret is kept under it), and not shown. */
+.type-edit .tcaret.off, .curve-edit .ccaret.off{ visibility:hidden; animation:none; }
+/* For the system's menu (TextBox.svelte `typeMenu`): the overlay lets the
+   press through to the editable under it, which is what the menu is for. */
+.type-edit.ctx, .curve-edit.ctx{ pointer-events:none; }
+.type-edit.ctx ~ .txt.editable.unseen, .curve-edit.ctx ~ .txt.editable.unseen{ pointer-events:auto; overflow:visible; }
 
 /* curved (arc) text */
 .tbox .arc{ position:absolute; inset:0; }

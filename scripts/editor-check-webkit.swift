@@ -12,8 +12,12 @@
 // It loads <url>/editor-check.html#self, waits for the page to say it is
 // done, and prints what the page found as JSON. Nothing is installed and
 // nothing is written; the web view keeps no data (a non-persistent store).
-// The window is off every screen and nothing is shown, but the display has to
-// be awake and unlocked: otherwise the page is hidden and the run says so.
+// The window is on the main screen and cannot be seen or touched (it is
+// wholly transparent, takes no pointer and never becomes key): a window off
+// every screen is "not visible" to this macOS (27: `occlusionState` without
+// `.visible`, `screen` nil), WebKit then calls the page hidden and gives it
+// no frames, and the check waits on frames. The display has to be awake and
+// unlocked for the same reason: otherwise the run says the page is hidden.
 import Cocoa
 import WebKit
 
@@ -66,10 +70,15 @@ class Nav: NSObject, WKNavigationDelegate {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let rect = NSRect(x: 0, y: 0, width: width, height: height)
-// A real window, placed off every screen: WebKit lays out and runs rendering
-// updates (which is when an observer answers) only for a view in a window.
+// A real window: WebKit lays out and runs rendering updates (which is when
+// an observer answers) only for a view in a window, and only while the
+// system calls that window visible - which a window off every screen is not.
+// So it is on the screen, in front, and transparent.
 let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
-window.setFrameOrigin(NSPoint(x: -20000, y: -20000))
+window.setFrameOrigin(NSScreen.main?.frame.origin ?? .zero)
+window.alphaValue = 0
+window.ignoresMouseEvents = true
+window.level = .floating
 let config = WKWebViewConfiguration()
 config.websiteDataStore = .nonPersistent()
 let web = WKWebView(frame: rect, configuration: config)

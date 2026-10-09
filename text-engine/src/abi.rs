@@ -545,6 +545,63 @@ pub extern "C" fn mt_paint_end() -> i32 {
     })
 }
 
+/// Where a caret stands on a painted line: the pen position of every cluster
+/// of the text buffer's first `text_len` bytes, as the painter places them.
+///
+/// The line is shaped by `paint::shape_run`, the call the painter makes for a
+/// straight run, with the same face and the same letter spacing, so every
+/// position is the painter's: its letter spacing after each cluster, its
+/// synthesised bold's advance, its fallback parts, its ligatures on or off.
+/// Nothing is measured a second time here.
+///
+/// Returns the cluster count `n`. The out buffer then holds `n + 1` pairs of
+/// little-endian `f64`: per cluster, its UTF-16 offset in the line and the x
+/// of its first glyph's pen (the glyph's origin less its own x offset), in
+/// pixels from the line's start, in the order the clusters are drawn; then
+/// one closing pair, the text's length in UTF-16 units and the line's
+/// advance. The advance is the number `align_offset` centres the line by.
+///
+/// A size or a letter spacing that is not a finite number is `BadSpec`:
+/// every position would be NaN or infinite, and a caller told "n clusters"
+/// would draw a caret from them.
+#[cfg(feature = "paint")]
+#[no_mangle]
+pub extern "C" fn mt_line_carets(
+    font: u32,
+    size: f64,
+    flags: u32,
+    text_len: usize,
+    letter_spacing: f64,
+) -> i32 {
+    if !size.is_finite() || !letter_spacing.is_finite() {
+        return Status::BadSpec as i32;
+    }
+    code(with_text(text_len, |engine, text, st| {
+        let run = crate::paint::shape_run(engine, face(font, size, flags), text, letter_spacing)?;
+        st.out.clear();
+        let mut n = 0i32;
+        let mut last = None;
+        // `shape_run` leaves the measured line in the engine, glyph for glyph
+        // with what it placed.
+        for (placed, glyph) in run.glyphs.iter().zip(engine.line.iter()) {
+            if last == Some(glyph.cluster) {
+                continue;
+            }
+            last = Some(glyph.cluster);
+            let upem = f64::from(engine.font(placed.font)?.info.units_per_em);
+            let pen = placed.x - f64::from(glyph.x_offset) * (size / upem);
+            st.out
+                .extend_from_slice(&f64::from(glyph.cluster).to_le_bytes());
+            st.out.extend_from_slice(&pen.to_le_bytes());
+            n += 1;
+        }
+        let len16 = text.encode_utf16().count() as f64;
+        st.out.extend_from_slice(&len16.to_le_bytes());
+        st.out.extend_from_slice(&run.advance.to_le_bytes());
+        Ok(n)
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

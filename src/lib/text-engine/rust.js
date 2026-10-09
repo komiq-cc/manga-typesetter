@@ -298,6 +298,16 @@ export async function createRustTextEngine(source, options = {}) {
       const out = lineStrings(text, low.wrapPlain(resolve(face), text, { width: Math.max(1, opts.width), letterSpacing: Number(opts.letterSpacing) || 0 }));
       return out.length ? out : [''];
     },
+    /**
+     * Where a caret stands on a line the painter draws: `{ at, x, length,
+     * advance }`, the UTF-16 offset and the pen of every cluster of `text`,
+     * from the painter's own shaping (text-engine/js/engine.mjs). For the
+     * same face, text and letter spacing a job's run is painted with. Absent
+     * on a wasm built before the export existed: a caller asks first.
+     */
+    lineCarets: low.hasLineCarets
+      ? (face, text, letterSpacing = 0) => low.lineCarets(resolve(face), text, Number(letterSpacing) || 0)
+      : undefined,
     loading() {
       return false;
     },
