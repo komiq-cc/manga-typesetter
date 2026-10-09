@@ -69,8 +69,18 @@ function inkBox(img) {
 }
 
 // A picture `k` times as large, averaged down to the small one's grid, in
-// premultiplied terms (what a compositor would show). Returns the mean and the
-// worst alpha difference over the pixels either picture inked, of 255.
+// premultiplied terms (what a compositor would show), against the small one.
+// Of 255, over the pixels either picture inked:
+//
+//   mean, worst   the alpha difference
+//   colour        the premultiplied colour difference, the largest of the
+//                 three channels per pixel: `{ mean, worst }`. Alpha alone
+//                 cannot tell a gradient from a flat fill of the same shape.
+//   solid         the same, over the pixels both pictures ink fully (alpha
+//                 250 and up in the small one and in every pixel averaged
+//                 into it), where there is no edge and the difference is the
+//                 fill's alone: `{ mean, worst, n }`.
+//   ink           the ratio of total ink.
 function against(small, large, k) {
   const { width, height } = small;
   let sum = 0;
@@ -78,18 +88,30 @@ function against(small, large, k) {
   let worst = 0;
   let inkSmall = 0;
   let inkLarge = 0;
+  const colour = { sum: 0, worst: 0 };
+  const solid = { sum: 0, worst: 0, n: 0 };
+  const c = [0, 0, 0];
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let a = 0;
+      let least = 255;
+      c[0] = c[1] = c[2] = 0;
       for (let j = 0; j < k; j++) {
         for (let i = 0; i < k; i++) {
           const lx = x * k + i;
           const ly = y * k + j;
-          if (lx < large.width && ly < large.height) a += large.data[(ly * large.width + lx) * 4 + 3];
+          if (lx < large.width && ly < large.height) {
+            const p = (ly * large.width + lx) * 4;
+            const al = large.data[p + 3];
+            a += al;
+            if (al < least) least = al;
+            for (let q = 0; q < 3; q++) c[q] += (large.data[p + q] * al) / 255;
+          } else least = 0;
         }
       }
       a /= k * k;
-      const b = small.data[(y * width + x) * 4 + 3];
+      const o = (y * width + x) * 4;
+      const b = small.data[o + 3];
       inkSmall += b;
       inkLarge += a;
       if (a < 1 && b < 1) continue;
@@ -97,9 +119,24 @@ function against(small, large, k) {
       sum += d;
       n++;
       if (d > worst) worst = d;
+      let dc = 0;
+      for (let q = 0; q < 3; q++) dc = Math.max(dc, Math.abs(c[q] / (k * k) - (small.data[o + q] * b) / 255));
+      colour.sum += dc;
+      if (dc > colour.worst) colour.worst = dc;
+      if (b >= 250 && least >= 250) {
+        solid.sum += dc;
+        solid.n++;
+        if (dc > solid.worst) solid.worst = dc;
+      }
     }
   }
-  return { mean: n ? sum / n : 0, worst, ink: inkLarge / Math.max(1, inkSmall) };
+  return {
+    mean: n ? sum / n : 0,
+    worst,
+    ink: inkLarge / Math.max(1, inkSmall),
+    colour: { mean: n ? colour.sum / n : 0, worst: colour.worst },
+    solid: { mean: solid.n ? solid.sum / solid.n : 0, worst: solid.worst, n: solid.n },
+  };
 }
 
 describe('the scale a texture is painted at', () => {
@@ -253,7 +290,10 @@ describe('the pixel budget of one texture', () => {
 const KINDS = {
   plain: {},
   bands: { strokes: [{ color: '#ffffff', width: 2, opacity: 1 }, { color: '#000000', width: 2, opacity: 1 }, { color: '#ff0000', width: 3, opacity: 0.5 }] },
+  colour: { color: '#c02040' },
   gradient: { gradient: { on: true, kind: 'linear', angle: 90, scope: 'line', stops: [{ color: '#ff0000', pos: 0, opacity: 1 }, { color: '#0000ff', pos: 1, opacity: 1 }] } },
+  'gradient, box': { gradient: { on: true, kind: 'linear', angle: 0, scope: 'box', stops: [{ color: '#ff0000', pos: 0, opacity: 1 }, { color: '#0000ff', pos: 1, opacity: 1 }] } },
+  'gradient, radial': { gradient: { on: true, kind: 'radial', cx: 0.5, cy: 0.5, radius: 1, scope: 'box', stops: [{ color: '#ffd000', pos: 0, opacity: 1 }, { color: '#c00030', pos: 1, opacity: 1 }] } },
   pattern: { pattern: { on: true, kind: 'dots', fg: '#000000', bg: '#ffcc00', scale: 1 } },
   shadow: { shadows: [{ x: 6, y: 5, blur: 0, color: '#000000', opacity: 1 }] },
   'shadow, blurred': { shadows: [{ x: 6, y: 5, blur: 6, color: '#000000', opacity: 0.8 }] },
@@ -278,6 +318,35 @@ const KINDS = {
 // both the difference and the defect).
 const LIMIT = { blur: 6, smear: 6, 'shadow, blurred': 8, roughen: 48 };
 
+// What the COLOUR may differ by: `mean` over inked pixels in premultiplied
+// terms, and `solid` / `solidWorst` over the pixels with no edge in them. The
+// alpha comparison above cannot see a fill: an opaque gradient and an opaque
+// flat colour are the same alpha. Set from what was measured (the figures in
+// brackets, of 255):
+//
+//   a flat colour   [0.42 mean, 0.01 solid, solid worst 0]: one colour at
+//                   any scale, and the mean is its edges' antialiasing.
+//   gradients       [0.44-0.57 mean, 0.19-0.33 solid, solid worst 1]: a ramp
+//                   sampled at a pixel's centre against the same ramp
+//                   averaged over nine.
+//   pattern         [2.03 mean, 1.06 solid, solid worst 7]: a dot's edge is
+//                   antialiased on two different grids.
+//   bands           [0.45 mean, 0.36 solid]: three outlines, and where two
+//                   meet inside a fully inked pixel the colour steps (worst
+//                   65), so only the means are held.
+//
+// A fill that did not follow the scale - a gradient left in device px, a
+// pattern tile not scaled - reads tens, as the last two cases show with a
+// flat fill standing in for it.
+const COLOUR_LIMIT = {
+  gradient: { mean: 1.5, solid: 1, solidWorst: 3 },
+  'gradient, box': { mean: 1.5, solid: 1, solidWorst: 3 },
+  'gradient, radial': { mean: 1.5, solid: 1, solidWorst: 3 },
+  pattern: { mean: 4, solid: 2.5, solidWorst: 16 },
+  bands: { mean: 1.5, solid: 1.2, solidWorst: Infinity },
+};
+const COLOUR_PLAIN = { mean: 1, solid: 0.5, solidWorst: 2 };
+
 describe('the same picture at another resolution', () => {
   const rows = {};
   for (const [name, over] of Object.entries(KINDS)) {
@@ -294,12 +363,32 @@ describe('the same picture at another resolution', () => {
       // a full 255 on every edge pixel, and the mean over inked pixels well
       // past this.
       expect(m.mean, `${name} mean alpha difference`).toBeLessThan(LIMIT[name] ?? 14);
+      // And it is the same colour, not only the same shape.
+      const lim = COLOUR_LIMIT[name] ?? COLOUR_PLAIN;
+      expect(m.colour.mean, `${name} mean colour difference`).toBeLessThan(lim.mean);
+      expect(m.solid.mean, `${name} mean colour difference where fully inked`).toBeLessThan(lim.solid);
+      expect(m.solid.worst, `${name} worst colour difference where fully inked`).toBeLessThanOrEqual(lim.solidWorst);
+    });
+  }
+
+  // The comparison has to be able to fail. Alpha alone could not tell these
+  // apart: the outside review's case, an opaque fill swapped for a flat one.
+  for (const name of ['gradient', 'gradient, box', 'gradient, radial', 'pattern']) {
+    it(`${name}: a flat fill of the same shape is told apart by its colour, and not by its alpha`, () => {
+      const flat = boxOf({ color: name === 'pattern' ? '#ffcc00' : '#ff0000' });
+      const m = against(pixels(paint(boxOf(KINDS[name]), 1)), pixels(paint(flat, 3)), 3);
+      expect(m.mean).toBeLessThan(LIMIT[name] ?? 14);
+      expect(m.ink).toBeGreaterThan(0.93);
+      expect(m.ink).toBeLessThan(1.07);
+      const lim = COLOUR_LIMIT[name];
+      expect(m.colour.mean).toBeGreaterThan(lim.mean * 5);
+      expect(m.solid.mean).toBeGreaterThan(lim.solid * 5);
     });
   }
   it('prints what was measured', () => {
     console.log(
-      'renderBoxTexture at 3, averaged down, against 1 (alpha of 255 over inked px):\n' +
-        Object.entries(rows).map(([k, m]) => `  ${k.padEnd(16)} mean ${m.mean.toFixed(2).padStart(6)}  worst ${m.worst.toFixed(0).padStart(4)}  ink x${m.ink.toFixed(3)}`).join('\n'),
+      'renderBoxTexture at 3, averaged down, against 1 (of 255; alpha and premultiplied colour over inked px, colour again over solid px):\n' +
+        Object.entries(rows).map(([k, m]) => `  ${k.padEnd(16)} alpha mean ${m.mean.toFixed(2).padStart(6)} worst ${m.worst.toFixed(0).padStart(4)}  ink x${m.ink.toFixed(3)}  colour mean ${m.colour.mean.toFixed(2).padStart(6)} worst ${m.colour.worst.toFixed(0).padStart(4)}  solid mean ${m.solid.mean.toFixed(2).padStart(5)} worst ${m.solid.worst.toFixed(0).padStart(3)} (${m.solid.n} px)`).join('\n'),
     );
   });
 
