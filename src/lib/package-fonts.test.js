@@ -11,9 +11,13 @@ import { fakeIndexedDB } from '../test/fake-indexeddb.js';
 // handed over by the mock below), IndexedDB, `FontFace`, and the browser's
 // download.
 //
-// "The Rust engine switched on" is, to this code, a font source that can
-// settle (`fontsGated`): package-flow.js asks nothing else of the engine, so
-// a source that says so is the whole of the switch here.
+// "The Rust engine switched on" is, to this code, the font gate: a font
+// source that can settle (`fontsGated`) and says which families are missing
+// (`fontMissing`). package-flow.js asks nothing else of the engine, so a
+// source that answers those two is the whole of the switch here. The one
+// below answers as the engine does when every file on the machine can be
+// read; a file that cannot is package-fonts.engine.test.js, with the real
+// gate.
 
 let chapter;
 vi.mock('./library.svelte.js', () => ({
@@ -48,7 +52,13 @@ const chapterIn = (...fonts) => ({
 const library = fakeIndexedDB();
 const before = { builtin: app.fonts.builtin, system: app.fonts.system };
 let downloads;
-const engineOn = () => setFontSource({ ready: () => true, settle: async () => {} });
+const engineOn = () =>
+  setFontSource({
+    ready: () => true,
+    settle: async () => {},
+    // Bytes are the library's or the system's; a built-in has none.
+    missing: (name) => ![...app.fonts.user, ...app.fonts.system].some((f) => f.name === name),
+  });
 
 // The package the export wrote, read back.
 async function exported() {

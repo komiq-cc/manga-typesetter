@@ -12,7 +12,7 @@ import {
 } from './library.svelte.js';
 import { userFontRecords, installFontFace } from './fonts.js';
 import { tagsInUse } from './tags.svelte.js';
-import { app, normalizeLayout, normalizeOcrLanguage, fontsGated } from './store.svelte.js';
+import { app, normalizeLayout, normalizeOcrLanguage, fontsGated, fontFamiliesSettling, fontMissing } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import {
   buildChapterPackage,
@@ -70,12 +70,34 @@ export function recordForExport(record) {
 // Said only with the Rust engine switched on (`fontsGated`), where a family
 // without bytes is a family that is drawn in a stand-in. With the switch off
 // the list is empty and the export says what it always said.
+//
+// Which of the two is THE FONT GATE's answer (`fontMissing`), not a list's: a
+// family the system scan lists whose file cannot be read is in the list and
+// is drawn in a stand-in all the same. Whoever calls this has waited for the
+// gate to know (`familiesKnown`).
 export function fontsStaying(fonts, named = fonts.map((f) => f.name)) {
   if (!fontsGated()) return [];
   const carried = new Set(fonts.filter((f) => Object.values(f.faces ?? {}).some(Boolean)).map((f) => f.name));
-  return named
-    .filter((name) => !carried.has(name))
-    .map((name) => ({ name, why: app.fonts.system.some((f) => f.name === name) ? 'system' : 'missing' }));
+  return named.filter((name) => !carried.has(name)).map((name) => ({ name, why: drawnAsItself(name) && !inLibrary(name) ? 'system' : 'missing' }));
+}
+
+// With the Rust engine switched on: whether the engine draws `name` in a face
+// of that family - the gate's word, which is the editor's "font missing"
+// notice said the other way round.
+const drawnAsItself = (name) => !fontMissing(name);
+const inLibrary = (name) => app.fonts.user.some((f) => f.name === name);
+
+// Resolves when the gate has a lasting answer for each of `names`: a system
+// family is read from disk the first time anything asks about it, and until
+// its file is in, or has been refused, it is neither missing nor not. A wait
+// that gives up (fonts changing without end) is not a reason to fail a
+// package: what is said then is what the gate says at that moment.
+async function familiesKnown(names) {
+  try {
+    await fontFamiliesSettling(names);
+  } catch {
+    /* said as it stands */
+  }
 }
 
 // One sentence for those families, for whoever tells the user; '' for none.
@@ -132,6 +154,7 @@ export async function exportChapterPackage(projectId, chapterId) {
     app: await appVersion(),
   });
   const name = packageFileName(p.name, record.number);
+  if (fontsGated()) await familiesKnown(named);
   const staying = fontsStaying(fonts, named);
 
   if (!isTauri()) {
@@ -201,6 +224,14 @@ export function fontStatus(f) {
   return slots.every((s) => local?.[s]) ? 'present' : 'install';
 }
 
+//
+// Present, system and missing are THE FONT GATE's answer for the family
+// (`fontMissing`), not a list's: a family is in the library's list with a
+// file the engine cannot read (a WOFF2 and nothing to decode it), and in the
+// system scan's with a file that cannot be read, and either is drawn in the
+// last-resort face. Only "to install" is read off the lists, because it is a
+// statement about them: a shipped face the library has no slot for is one
+// the import will put in.
 function engineFontStatus(f) {
   const local = app.fonts.user.find((u) => u.name === f.name)?.faces ?? null;
   // A font shipped under a built-in's name is refused by `installFontFace`
@@ -210,10 +241,13 @@ function engineFontStatus(f) {
   const refused = app.fonts.builtin.some((b) => b.name === f.name);
   if (f.shipped && !refused) {
     const slots = Object.keys(f.faces).filter((s) => f.faces[s]);
-    return slots.every((s) => local?.[s]) ? 'present' : 'install';
+    // A slot the library already has is left as it is by the import
+    // (`installFontFace`), readable or not: with every shipped face there,
+    // what the family will be is what it is now.
+    if (!slots.every((s) => local?.[s])) return 'install';
   }
-  if (local) return 'present';
-  return app.fonts.system.some((s) => s.name === f.name) ? 'system' : 'missing';
+  if (!drawnAsItself(f.name)) return 'missing';
+  return local ? 'present' : 'system';
 }
 
 // The fonts a package's chapter depends on, each with what it means here:
@@ -222,11 +256,17 @@ function engineFontStatus(f) {
 // its built-ins out ("the other machine has it too"), and to the engine a
 // built-in is a font with no bytes: a chapter set in one would otherwise
 // import without a word and open with every box marked "font missing".
-export function packageFontStatuses(pkg) {
+//
+// With the switch on it first waits for the gate to know each of them
+// (`familiesKnown`); with it off nothing is awaited and the answer is the
+// one it always was.
+export async function packageFontStatuses(pkg) {
+  const used = fontsGated() ? fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? []) : [];
+  if (fontsGated()) await familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...used])]);
   const out = pkg.fonts.map((f) => ({ name: f.name, status: fontStatus(f) }));
   if (!fontsGated()) return out;
   const listed = new Set(pkg.fonts.map((f) => f.name));
-  for (const name of fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])) {
+  for (const name of used) {
     if (!listed.has(name)) out.push({ name, status: engineFontStatus({ name, faces: {}, shipped: false }) });
   }
   return out;
@@ -253,7 +293,7 @@ export async function inspectPackage(file, projectId = null) {
       projectName: manifest.project?.name ?? '',
       app: manifest.app ?? '',
       exportedAt: manifest.exportedAt ?? '',
-      fonts: packageFontStatuses(pkg),
+      fonts: await packageFontStatuses(pkg),
       tags: pkg.tags.map((t) => ({ name: t.name, status: projectTag(projectId, t.name) ? 'known' : 'new' })),
     },
   };

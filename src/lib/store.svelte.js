@@ -5194,6 +5194,18 @@ export function fontsSettling(pages = app.pages) {
   });
 }
 
+// The same wait for FAMILIES, for whoever must say something lasting of a
+// family no box of an open page is set in (a chapter package's fonts,
+// package-flow.js): until it resolves `fontMissing` can answer "no" of a
+// family that is only on its way - a system family is read the first time it
+// is asked about - and its file may yet turn out unreadable. Asked as the
+// gate is asked everything, through boxes; they hold no text, so no letter is
+// looked for. Null with no font source.
+export function fontFamiliesSettling(names) {
+  if (!fontSource?.settle) return null;
+  return fontSource.settle([{ boxes: names.map((font) => ({ lineN: null, text: '', style: { font } })) }]);
+}
+
 // Whether an export has that wait in front of it: a font source that can
 // settle, which is the Rust engine switched on. An exporter asks so that it
 // waits on ONE thing - this, or the browser's own font set, which is what it
