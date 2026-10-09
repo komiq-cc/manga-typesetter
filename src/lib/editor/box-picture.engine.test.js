@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../../test/rust-engine.js';
-import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture, pictureTexture } from './box-picture.js';
+import { PICTURE_DRAG_PX, PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture, pictureTexture } from './box-picture.js';
 import { renderBoxTexture, warpTexture, boxFootprint } from '../exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../text-engine/index.js';
 import { createRustGlyphPainter, SCRATCH_KEEP_PX, MAX_RASTER_SIDE } from '../text-engine/rust-painter.js';
@@ -138,8 +138,9 @@ describe('the picture is renderBoxTexture\'s, byte for byte', () => {
         const got = bytes(el);
         expect(inked(got)).toBeGreaterThan(500);
         expect(unlike(got, bytes(want.canvas))).toBe(0);
-        // And it says where the picture goes, in page px.
-        expect(g).toEqual({ ox: want.ox, oy: want.oy, cw: want.cw, ch: want.ch });
+        // And it says where the picture goes, in page px, and that nothing
+        // lowered the scale it was asked for.
+        expect(g).toEqual({ ox: want.ox, oy: want.oy, cw: want.cw, ch: want.ch, ss: scale });
       });
     }
   }
@@ -227,7 +228,41 @@ describe('what it holds', () => {
     expect(g.cw).toBeCloseTo(uncapped.cw, 0);
     expect(g.ch).toBeCloseTo(uncapped.ch, 0);
     expect(inked(bytes(el))).toBeGreaterThan(10000);
+    // And it says what it came out at: under what was asked for, and the
+    // canvas's own pixels over the page px it spans.
+    expect(g.ss).toBeLessThan(6);
+    expect(g.ss).toBeCloseTo(el.width / g.cw, 2);
   });
+
+  // The budget a resize hands it (TextBox.svelte) is counted on what is
+  // painted. The outside review's box: a frame of 100 x 100 and twenty lines of
+  // W at size 80 running far below it, at 300% on a 2x display. Flat and
+  // through a mesh, which is cut down after the mesh is applied.
+  for (const [name, over] of [['flat', {}], ['through a mesh', { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [100, 12], [-6, 100], [94, 92]] } }]]) {
+    it(`a small frame whose lines overflow it is painted within the budget it is handed: ${name}`, () => {
+      const box = boxOf({ size: 80, autoHeight: false, valign: 'top', ...over }, Array(20).fill('W').join('\n'), { x: 0, y: 0, w: 100, h: 100 });
+      const p = pageOf(box);
+      expect(box.w * box.h * 36).toBeLessThan(PICTURE_DRAG_PX);
+      const rest = createCanvas(1, 1);
+      const full = paintBoxPicture(rest, box, p, 6, null);
+      expect(rest.width * rest.height).toBeGreaterThan(PICTURE_DRAG_PX * 4);
+      // (Through the mesh the far lines are thrown wide, and it is over the
+      // picture's own budget at rest as well.)
+      expect(full.ss).toBeGreaterThan(5);
+      expect(full.ss).toBeLessThanOrEqual(6);
+      const el = createCanvas(1, 1);
+      const g = paintBoxPicture(el, box, p, 6, null, PICTURE_DRAG_PX);
+      expect(el.width * el.height).toBeLessThanOrEqual(PICTURE_DRAG_PX * 1.02);
+      expect(el.width * el.height).toBeGreaterThan(PICTURE_DRAG_PX * 0.9);
+      expect(g.ss).toBeLessThan(6);
+      expect(g.ss).toBeCloseTo(el.width / g.cw, 1);
+      // The same place and span as at rest, to the texel.
+      expect(Math.abs(g.ox - full.ox)).toBeLessThan(1 / g.ss);
+      expect(Math.abs(g.cw - full.cw)).toBeLessThan(2 / g.ss);
+      expect(Math.abs(g.ch - full.ch)).toBeLessThan(2 / g.ss);
+      expect(inked(bytes(el))).toBeGreaterThan(10000);
+    });
+  }
 
   // The outside review's box: 7000 x 100, a hundred W at size 80, at 150% on a
   // 2x display. Under the pixel budget, and 21,000 px wide: the engine paints

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PICTURE_DRAG_PX, PICTURE_MAX_PX, PICTURE_OFF, TURNED_OVERSAMPLE, dragScale, pageCorner, pictureCss, pictureKey, pictureScale } from './box-picture.js';
+import { PICTURE_DRAG_PX, PICTURE_MAX_PX, PICTURE_OFF, TURNED_OVERSAMPLE, pageCorner, pictureCss, pictureKey, pictureScale } from './box-picture.js';
 import { textureScale } from '../exporter.js';
 import { defaultStyle, normalizeStyle } from '../data.js';
 
@@ -54,27 +54,25 @@ describe('the pixel budget of one box', () => {
   });
 });
 
-describe('the scale while a handle is resizing the box', () => {
-  it('the budget of a frame of the drag is a megapixel', () => {
+describe('the budget while a handle is resizing the box', () => {
+  // It is handed to the paint in the place of the picture's own budget, so it
+  // is applied by the same arithmetic, to the same thing: the footprint.
+  it('is a megapixel for a frame of the drag', () => {
     expect(PICTURE_DRAG_PX).toBe(1024 * 1024);
+    expect(PICTURE_DRAG_PX).toBeLessThan(PICTURE_MAX_PX);
   });
-  it('is the scale asked for when the box is within it: an ordinary balloon is as sharp as at rest', () => {
+  it('leaves a footprint within it at the scale asked for: an ordinary balloon is as sharp as at rest', () => {
     // 220 x 110 page px at 100% on a 2x display is a tenth of a megapixel.
-    expect(dragScale(2, 220, 110)).toBe(2);
-    expect(dragScale(1, 1000, 1000)).toBe(1);
-    expect(dragScale(4, 256, 256)).toBe(4);
+    expect(textureScale(220, 110, 2, PICTURE_DRAG_PX)).toBe(2);
+    expect(textureScale(1000, 1000, 1, PICTURE_DRAG_PX)).toBe(1);
+    expect(textureScale(256, 256, 4, PICTURE_DRAG_PX)).toBe(4);
   });
-  it('is lowered for a box over it, to the budget and not past it', () => {
-    for (const [w, h, scale] of [[1100, 800, 6], [600, 400, 6], [1600, 2300, 1], [4000, 200, 3]]) {
-      const ss = dragScale(scale, w, h);
+  it('lowers a footprint over it to the budget and not past it', () => {
+    for (const [cw, ch, scale] of [[1100, 800, 6], [600, 400, 6], [1600, 2300, 1], [4000, 200, 3], [130, 2100, 6]]) {
+      const ss = textureScale(cw, ch, scale, PICTURE_DRAG_PX);
       expect(ss).toBeLessThan(scale);
-      expect(w * ss * h * ss).toBeCloseTo(PICTURE_DRAG_PX, 3);
+      expect(cw * ss * ch * ss).toBeCloseTo(PICTURE_DRAG_PX, -1);
     }
-  });
-  it('never raises a scale, and makes nothing of a box with no area', () => {
-    expect(dragScale(0.5, 100, 100)).toBe(0.5);
-    expect(dragScale(3, 0, 100)).toBe(3);
-    expect(dragScale(3, 100, NaN)).toBe(3);
   });
 });
 

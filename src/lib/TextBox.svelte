@@ -63,7 +63,7 @@
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
   import { boxCandidate, placeBlock, blockRect } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
-  import { PICTURE_OFF, pictureScale, dragScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
+  import { PICTURE_MAX_PX, PICTURE_DRAG_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
@@ -131,18 +131,28 @@
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
+  const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
+  // WHILE A HANDLE IS RESIZING THE BOX every frame of the drag is a repaint,
+  // and a frame has no time for megapixels. So while moves are arriving
+  // (`resizing`, set by the drag in `startTransform`) the picture is painted
+  // within a smaller budget (`PICTURE_DRAG_PX`, handed to the paint in the
+  // place of the usual one, so it is counted on what is painted). A box
+  // inside that budget is painted exactly as at rest.
   //
-  // While a handle is resizing the box (`resizing`, set by the drag in
-  // `startTransform`) a box over the drag's budget is painted lower: every
-  // frame of the drag is a repaint, and a frame has no time for megapixels.
-  // The scale is in the picture's key, so letting go is one repaint at the
-  // scale the box has at rest, and for a box within the budget it is nothing.
+  // The budget is not in the picture's key - it changes nothing about what
+  // the picture is OF - so the paint says what it came out at, and a picture
+  // that came out lower than the box has at rest is remembered as soft
+  // (`dragSoft`). When the moves stop coming, `settleResize` forgets what was
+  // drawn for a soft picture, and the paint effect, which reads `resizing`,
+  // paints it once in full; for a box that was never lowered it does nothing.
   let resizing = $state(false);
-  const pictureRes = $derived.by(() => {
-    if (!enginePaints) return 0;
-    const full = pictureScale(z, displayScale(), s.rotation);
-    return resizing ? dragScale(full, box.w, box.h) : full;
-  });
+  let dragSoft = false;
+  function settleResize() {
+    if (!resizing) return;
+    if (dragSoft) warpDrawn = '';
+    dragSoft = false;
+    resizing = false;
+  }
   // Whether the box is near the viewport: null until the observer has said.
   //
   // What is watched is not the box's rectangle but what its picture covers
@@ -593,10 +603,17 @@
   let warpSeq = 0;
 
   function paintWarp(el, tips) {
-    warpGeom = engineShown
-      ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
-      : paintWarpedBox(el, box, pg, z, tips);
-    if (engineShown) keepReach(warpGeom);
+    if (!engineShown) {
+      warpGeom = paintWarpedBox(el, box, pg, z, tips);
+      return;
+    }
+    const budget = resizing ? PICTURE_DRAG_PX : PICTURE_MAX_PX;
+    const g = paintBoxPicture(el, box, pg, pictureRes, tips, budget);
+    // Lower than asked for under the drag's budget: to be painted again when
+    // the drag settles (`settleResize`).
+    dragSoft = resizing && g.ss < pictureRes;
+    warpGeom = { ...g, page: pageCorner(pageFrameEl) };
+    keepReach(warpGeom);
   }
 
   // The paint, for the effect: true when it painted. When it threw, the canvas
@@ -684,6 +701,9 @@
     const key = warpKey;
     const el = warpEl;
     const dragging = warpDragging;
+    // Read so that a resize settling runs this again (`settleResize`): the key
+    // is the same and only what was drawn for it has been forgotten.
+    resizing;
     if (!el) {
       // Warp switched off, or the box is going away: hand the pixels back and
       // forget what was drawn, so switching it on again paints the new canvas.
@@ -1281,7 +1301,7 @@
       if (ev.pointerId !== pid) return;
       live.delete(ac);
       ac.abort();
-      resizing = false;
+      settleResize();
       // Both gestures on this handle CHANGE THE STYLE - the rotation handle
       // writes `rotation`, a corner writes `size` - and the next box placed is
       // meant to follow the box the user just shaped. Nothing else on this path

@@ -23,7 +23,7 @@ vi.mock('./text-paint.js', async (original) => {
 });
 
 import TextBox from './TextBox.svelte';
-import { app, loadProjectPages, page, selectBox, beginEdit, endEdit, setZoom, setZoomLive, moveBoxTo, moveGeom, noteFontsChanged } from './store.svelte.js';
+import { app, loadProjectPages, page, selectBox, deselect, beginEdit, endEdit, setZoom, setZoomLive, moveBoxTo, moveGeom, noteFontsChanged } from './store.svelte.js';
 import { engineSwitch } from './engine-switch.svelte.js';
 import { paintBoxPicture, PICTURE_DRAG_PX, PICTURE_MAX_PX, TURNED_OVERSAMPLE } from './editor/box-picture.js';
 import { paintWarpedBox, renderBoxTexture } from './exporter.js';
@@ -309,7 +309,10 @@ describe('while a handle is resizing the box', () => {
   // paints it within a smaller budget, and the full picture comes back once,
   // when the handle is let go.
   const ev = (type, x) => new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: 300 });
+  // What the paint was asked for: the scale, which a drag does not change,
+  // and the budget, which it does.
   const scaleOf = (call) => call[3];
+  const budgetOf = (call) => call[5];
   async function grabbed(id, opts) {
     const m = await mounted(id, opts);
     selectBox(id);
@@ -329,15 +332,16 @@ describe('while a handle is resizing the box', () => {
       await tick();
       expect(m.paints(), `move ${i + 1}`).toBe(rest.paints + i + 1);
       const el = m.canvas();
-      expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBeLessThan(1);
-      // The box's own area is what is budgeted; the footprint's few px of
-      // padding round it are the slack.
-      expect(el.width * el.height).toBeLessThan(PICTURE_DRAG_PX * 1.05);
+      expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBe(1);
+      expect(budgetOf(paintBoxPicture.mock.calls.at(-1))).toBe(PICTURE_DRAG_PX);
+      // The whole of what is painted is what is budgeted, give or take the
+      // row and column a canvas of whole pixels rounds up by.
+      expect(el.width * el.height).toBeLessThanOrEqual(PICTURE_DRAG_PX + el.width + el.height);
       expect(el.width * el.height).toBeGreaterThan(PICTURE_DRAG_PX * 0.9);
       // Shown at the footprint's size, to within the one texel a canvas of
       // whole pixels rounds up by - about two page px at this scale.
       const f = footprint(m.box, m.pg);
-      const texel = 1 / scaleOf(paintBoxPicture.mock.calls.at(-1));
+      const texel = f.cw / el.width;
       expect(css(el).width - f.cw).toBeGreaterThanOrEqual(0);
       expect(css(el).width - f.cw).toBeLessThan(texel);
       expect(css(el).height - f.ch).toBeGreaterThanOrEqual(0);
@@ -355,6 +359,7 @@ describe('while a handle is resizing the box', () => {
     await tick();
     expect(m.paints()).toBe(dragging + 1);
     expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBe(1);
+    expect(budgetOf(paintBoxPicture.mock.calls.at(-1))).toBe(PICTURE_MAX_PX);
     const f = footprint(m.box, m.pg);
     expect(m.canvas().width).toBe(f.cw);
     expect(m.canvas().height).toBe(f.ch);
@@ -382,6 +387,39 @@ describe('while a handle is resizing the box', () => {
     document.dispatchEvent(ev('pointerup', 520));
     await tick();
     expect(m.paints()).toBe(dragging);
+  });
+
+  // The outside review's box: 100 x 100, and twenty lines of W at size 80
+  // running far below it. The frame is tiny; what is painted is not.
+  it('the budget is of what is painted, not of the box\'s frame: lines that overflow a small box are inside it too', async () => {
+    _setDisplayScale(2);
+    const m = await mounted('straight', { zoom: 3 });
+    m.box.style.autoHeight = false;
+    m.box.style.valign = 'top';
+    m.box.style.size = 80;
+    m.box.w = 100;
+    m.box.h = 100;
+    m.box.text = Array.from({ length: 20 }, () => 'W').join('\n');
+    await tick();
+    const f = footprint(m.box, m.pg);
+    // A frame of 0.36 megapixels at this scale, a picture of several.
+    expect(m.box.w * m.box.h * 36).toBeLessThan(PICTURE_DRAG_PX);
+    expect(f.cw * f.ch * 36).toBeGreaterThan(PICTURE_DRAG_PX * 4);
+    const rest = m.canvas().width * m.canvas().height;
+    expect(rest).toBeGreaterThan(PICTURE_DRAG_PX * 4);
+    selectBox('straight');
+    await tick();
+    m.root.querySelector('.handle.side.e').dispatchEvent(ev('pointerdown', 500));
+    document.dispatchEvent(ev('pointermove', 503));
+    await tick();
+    const el = m.canvas();
+    // Inside the budget, give or take the row and column a canvas rounds up by.
+    expect(el.width * el.height).toBeLessThanOrEqual(PICTURE_DRAG_PX + el.width + el.height);
+    expect(el.width * el.height).toBeGreaterThan(PICTURE_DRAG_PX * 0.9);
+    document.dispatchEvent(ev('pointerup', 503));
+    await tick();
+    const after = footprint(m.box, m.pg);
+    expect(m.canvas().width * m.canvas().height).toBe(after.cw * 6 * after.ch * 6);
   });
 
   it('the rotate handle turns the box and repaints nothing, as a turn does', async () => {

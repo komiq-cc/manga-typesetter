@@ -62,8 +62,8 @@ export function pictureScale(zoom, dpr, rotation = 0) {
   return zoom * (dpr > 0 ? dpr : 1) * (rotation % 90 ? TURNED_OVERSAMPLE : 1);
 }
 
-// The most pixels a box's picture is asked for while a handle is resizing the
-// box: one megapixel.
+// The most pixels a box's picture holds while a handle is resizing the box:
+// one megapixel.
 //
 // A resize changes what the picture is drawn from on every frame of the drag,
 // so every frame repaints it, and the paint's time follows its pixels.
@@ -75,23 +75,17 @@ export function pictureScale(zoom, dpr, rotation = 0) {
 // as sharp in the hand as at rest; a page-wide sound effect is soft while it
 // is dragged and is painted in full once, when the handle is let go.
 //
+// It is a budget like the one above and is applied where that one is: handed
+// to the paint in its place (`paintBoxPicture`'s `maxPx`), so it is counted
+// on the FOOTPRINT that is painted and not on the box's frame - a small box
+// whose lines run far below it is megapixels of picture round a frame of
+// none.
+//
 // It bounds the part of a frame that follows the pixels and no more. A box
 // with three bands of outline cost 42 ms a frame at 1.2 megapixels in the same
 // measurement, and 10 ms at a tenth of one: that is the bands' own work, and
 // this budget does not bring it inside a frame.
 export const PICTURE_DRAG_PX = 1024 * 1024;
-
-/**
- * The scale a box `w` x `h` page px is painted at while it is being resized:
- * `scale`, or less for a box whose own area at `scale` is over the drag's
- * budget. The box's area and not its footprint's - the footprint is the
- * paint's to work out, and the few px of padding round a box that large are
- * nothing against it.
- */
-export function dragScale(scale, w, h) {
-  const px = w * h * scale * scale;
-  return px > PICTURE_DRAG_PX ? scale * Math.sqrt(PICTURE_DRAG_PX / px) : scale;
-}
 
 // The finished bitmap onto the editor's canvas, pixel for pixel, and the
 // footprint back. 'copy' rather than a clear and a draw: the canvas then holds
@@ -107,8 +101,10 @@ function show(el, r, maxPx, release) {
   let w = r.canvas.width;
   let h = r.canvas.height;
   const over = (w * h) / maxPx;
+  // How much of the bitmap's resolution the canvas keeps: all of it, or less.
+  let k = 1;
   if (over > 1.02) {
-    const k = 1 / Math.sqrt(over);
+    k = 1 / Math.sqrt(over);
     w = Math.max(1, Math.round(w * k));
     h = Math.max(1, Math.round(h * k));
   }
@@ -130,17 +126,22 @@ function show(el, r, maxPx, release) {
     r.canvas.width = 0;
     r.canvas.height = 0;
   }
-  return { ox: r.ox, oy: r.oy, cw: r.cw, ch: r.ch };
+  return { ox: r.ox, oy: r.oy, cw: r.cw, ch: r.ch, k };
 }
 
 /**
  * Paints `box` into the editor canvas `el` at `scale` device px per page px
- * (less for a box over the budget), mesh included. Returns where the picture
- * sits: `ox`/`oy` page px left of and above the box's own top-left, and the
- * `cw` x `ch` page px it spans - what `pictureCss` places the canvas by.
+ * (less for a box over the budget `maxPx`), mesh included. Returns where the
+ * picture sits: `ox`/`oy` page px left of and above the box's own top-left,
+ * and the `cw` x `ch` page px it spans - what `pictureCss` places the canvas
+ * by - and `ss`, the device px per page px it was really painted at: `scale`
+ * itself where no budget and no limit lowered it, and less where one did.
  */
 export function paintBoxPicture(el, box, p, scale, tips, maxPx = PICTURE_MAX_PX) {
-  return show(el, warpTexture(pictureTexture(box, p, tips, scale, maxPx), box), maxPx, true);
+  const tex = pictureTexture(box, p, tips, scale, maxPx);
+  const ss = tex.ss;
+  const { k, ...at } = show(el, warpTexture(tex, box), maxPx, true);
+  return { ...at, ss: k === 1 ? ss : ss * k };
 }
 
 /**
@@ -151,7 +152,8 @@ export function paintBoxPicture(el, box, p, scale, tips, maxPx = PICTURE_MAX_PX)
  */
 export function paintPictureTexture(el, tex, box, maxPx = PICTURE_MAX_PX) {
   const r = warpTexture(tex, box, false);
-  return show(el, r, maxPx, r.canvas !== tex.canvas);
+  const { k, ...at } = show(el, r, maxPx, r.canvas !== tex.canvas);
+  return at;
 }
 
 /**
