@@ -75,6 +75,7 @@ pub extern "C" fn mt_paint_job(byte_len: usize) -> i32 {
         s.pixels = Vec::new();
         *s.result = [0.0; 4];
         let painted = (|| -> Result<Option<Raster>, Error> {
+            let _budget = paint::budget::Scope::new();
             let request = paint::decode(s.job.get(..byte_len).ok_or(Error::BadSpec)?)?;
             #[cfg(any(
                 feature = "raster-tiny-skia",

@@ -165,7 +165,7 @@ Chromium: 10,214 more for its real 700, 5,702 more for a 400 it smeared.
 | The JS wrapper, with a "can this wasm do it" check | text-engine/js/instance.mjs (new file) |
 | The rule: 400 and 700 inside the axis, faux bold only under 600 | `weightOnAxis`, rust.js:60; `weighted`, :130 |
 | Instances removed with their face | `forgetWeights`, rust.js:142 |
-| The rule written down | RULES.md, rule 12 |
+| The rule written down | RULES.md, rule 13 |
 
 It needed no painter file: the painter draws through
 `FontEntry::draw_glyph`. `abi_instance.rs` is compiled with the `paint`

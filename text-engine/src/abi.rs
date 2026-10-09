@@ -506,10 +506,11 @@ pub extern "C" fn mt_paint_line(
 #[no_mangle]
 pub extern "C" fn mt_paint_stroke(line_width: f32, rgba: u32) -> i32 {
     with(|s| match s.scene.as_mut() {
-        Some(scene) => {
-            scene.stroke(line_width, crate::paint::Rgba::from_u32(rgba));
-            0
-        }
+        Some(scene) => code(
+            scene
+                .stroke(line_width, crate::paint::Rgba::from_u32(rgba))
+                .map(|()| 0),
+        ),
         None => Status::BadSpec as i32,
     })
 }
@@ -519,10 +520,7 @@ pub extern "C" fn mt_paint_stroke(line_width: f32, rgba: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn mt_paint_fill(rgba: u32) -> i32 {
     with(|s| match s.scene.as_mut() {
-        Some(scene) => {
-            scene.fill(crate::paint::Rgba::from_u32(rgba));
-            0
-        }
+        Some(scene) => code(scene.fill(crate::paint::Rgba::from_u32(rgba)).map(|()| 0)),
         None => Status::BadSpec as i32,
     })
 }
@@ -533,10 +531,16 @@ pub extern "C" fn mt_paint_fill(rgba: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn mt_paint_end() -> i32 {
     with(|s| match s.scene.take() {
-        Some(scene) => {
-            s.out = scene.into_rgba();
-            i32::try_from(s.out.len()).unwrap_or(Status::BadSpec as i32)
-        }
+        Some(scene) => match scene.try_into_rgba() {
+            Ok(out) => {
+                s.out = out;
+                i32::try_from(s.out.len()).unwrap_or(Status::BadSpec as i32)
+            }
+            Err(e) => {
+                s.out.clear();
+                Status::from(e) as i32
+            }
+        },
         None => Status::BadSpec as i32,
     })
 }

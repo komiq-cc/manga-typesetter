@@ -1373,3 +1373,231 @@ fn a_damaged_wire_form_is_refused_not_guessed_at() {
     text[at + 4] = 0xff;
     assert_eq!(decode(&text).err(), Some(Error::BadText));
 }
+
+#[test]
+fn thousands_of_parts_are_bounded_and_the_next_job_paints() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let mut j = job(vec![run(&"I".repeat(6000), 10.1, 50.2)]);
+    j.letter_spacing = -e.advance(face, "I").unwrap();
+    j.bands = vec![
+        Band {
+            color: BLACK,
+            opacity: 1.0,
+            line: 4.0
+        };
+        4
+    ];
+    j.bands.resize(1024, j.bands[0]);
+    let r = request(j, face);
+    assert_eq!(paint_job(&mut e, &r).err(), Some(Error::BadSpec));
+    // The live budget is cleared even after a refusal.
+    assert!(
+        paint_job(&mut e, &request(job(vec![run("I", 10.1, 50.2)]), face))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn clipped_union_matches_a_larger_scene_and_the_job_raster() {
+    use mt_text::paint::Scene;
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let mut small = Scene::new(10, 50, [1., 0., 0., 1., 0., 0.]).unwrap();
+    let mut large = Scene::new(30, 70, [1., 0., 0., 1., 0., 0.]).unwrap();
+    for x in [-7.1, -7.3] {
+        small.add_line(&mut e, face, "I", x, 35.).unwrap();
+        large.add_line(&mut e, face, "I", x + 10., 45.).unwrap();
+    }
+    small.fill(BLACK).unwrap();
+    large.fill(BLACK).unwrap();
+    let a = small.try_into_rgba().unwrap();
+    let b = large.try_into_rgba().unwrap();
+    let r = paint(
+        &mut e,
+        &request(job(vec![run("I", -7.1, 35.), run("I", -7.3, 35.)]), face),
+    );
+    for y in 0..50 {
+        for x in 0..10 {
+            let i = (y * 10 + x) * 4;
+            let k = ((y + 10) * 30 + x + 10) * 4;
+            assert_eq!(&a[i..i + 4], &b[k..k + 4], "crop ({x},{y})");
+            assert_eq!(&a[i..i + 4], &px(&r, x as i32, y as i32), "job ({x},{y})");
+        }
+    }
+    assert_eq!(a[(20 * 10) * 4 + 3], 197);
+}
+
+#[test]
+fn repeating_a_part_three_times_does_not_darken_it() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let single = paint(&mut e, &request(job(vec![run("I", 10.1, 50.2)]), face));
+    let triple = paint(&mut e, &request(job(vec![run("I", 10.1, 50.2); 3]), face));
+    assert_eq!(single, triple);
+}
+
+#[test]
+fn swapping_the_last_two_parallel_edges_keeps_the_review_pixels() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let xs = [10.1, 10.3, 10.5];
+    let first = paint(
+        &mut e,
+        &request(job(xs.iter().map(|&x| run("I", x, 50.2)).collect()), face),
+    );
+    let order = [0, 2, 1];
+    let reordered = paint(
+        &mut e,
+        &request(
+            job(order.iter().map(|&i| run("I", xs[i], 50.2)).collect()),
+            face,
+        ),
+    );
+    assert_eq!(first, reordered, "{order:?}");
+}
+
+#[test]
+fn rounding_residue_does_not_turn_the_next_parts_direction() {
+    use mt_text::paint::Scene;
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 32.);
+    let mut small = Scene::new(48, 44, [1., 0., 0., 1., 0., 0.]).unwrap();
+    let mut large = Scene::new(220, 160, [1., 0., 0., 1., 0., 0.]).unwrap();
+    for (t, x, y) in [
+        ("M", -9.546875, 30.015625),
+        ("V", -5.734375, 29.140625),
+        ("W", 6.265625, 27.1875),
+    ] {
+        small.add_line(&mut e, face, t, x, y).unwrap();
+        large.add_line(&mut e, face, t, x + 64., y + 64.).unwrap();
+    }
+    small.fill(BLACK).unwrap();
+    large.fill(BLACK).unwrap();
+    let a = small.into_rgba().unwrap();
+    let b = large.into_rgba().unwrap();
+    let pixel = (6 * 48 + 11) * 4 + 3;
+    let crop = ((6 + 64) * 220 + 11 + 64) * 4 + 3;
+    assert!(
+        a[pixel].abs_diff(b[crop]) <= 1,
+        "{} vs {}",
+        a[pixel],
+        b[crop]
+    );
+}
+
+#[test]
+fn an_oversized_shaping_run_is_refused_before_the_engine_grows() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.);
+    assert_eq!(
+        paint_job(
+            &mut e,
+            &request(job(vec![run(&"I".repeat(262_145), 10., 50.)]), face)
+        )
+        .err(),
+        Some(Error::BadSpec)
+    );
+    assert!(
+        paint_job(&mut e, &request(job(vec![run("I", 10., 50.)]), face))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn four_hairline_parts_stay_near_supersampled_truth() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.);
+    let mut j = job([10.1, 10.3, 10.5, 10.7].map(|x| run("I", x, 50.2)).to_vec());
+    j.fill = None;
+    j.bands = vec![Band {
+        color: BLACK,
+        opacity: 1.,
+        line: 0.3,
+    }];
+    let mut req = request(j, face);
+    req.transform = Affine([2., 0., 0., 2., 0., 0.]);
+    let base = paint(&mut e, &req);
+    // A 0.6-device-pixel band, with four parts 0.2 job units apart.
+    // Average a 16x raster onto the same device grid, including transparent
+    // samples. The clear-after-union rule has mean error 15.3; retained
+    // directions have mean error 2.9 (RULES.md rule 12).
+    const N: i32 = 16;
+    req.transform = Affine([32., 0., 0., 32., 0., 0.]);
+    let hi = paint(&mut e, &req);
+    let x0 = base.x.min(hi.x.div_euclid(N));
+    let y0 = base.y.min(hi.y.div_euclid(N));
+    let x1 = (base.x + base.width as i32).max((hi.x + hi.width as i32 + N - 1).div_euclid(N));
+    let y1 = (base.y + base.height as i32).max((hi.y + hi.height as i32 + N - 1).div_euclid(N));
+    let (mut sum, mut inked) = (0.0, 0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let mut truth = 0.0;
+            for sy in 0..N {
+                for sx in 0..N {
+                    truth += f64::from(px(&hi, x * N + sx, y * N + sy)[3]);
+                }
+            }
+            truth /= f64::from(N * N);
+            let got = f64::from(px(&base, x, y)[3]);
+            if truth >= 0.5 || got > 0.0 {
+                sum += (got - truth).abs();
+                inked += 1;
+            }
+        }
+    }
+    assert!(inked > 0);
+    let mean = sum / f64::from(inked);
+    assert!(mean < 4.0, "hairline mean error={mean}");
+}
+
+#[test]
+fn hairline_crop_ignores_rounding_noise_in_incoming_slopes() {
+    use mt_text::paint::Scene;
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 32.);
+    let mut small = Scene::new(192, 176, [4., 0., 0., 4., 0., 0.]).unwrap();
+    let mut large = Scene::new(320, 304, [4., 0., 0., 4., 64., 64.]).unwrap();
+    for (text, x, y) in [
+        ("A", 6.125, 31.03125),
+        ("A", -6.515625, 29.5625),
+        ("V", -0.21875, 30.671875),
+    ] {
+        small.add_line(&mut e, face, text, x, y).unwrap();
+        large.add_line(&mut e, face, text, x, y).unwrap();
+    }
+    // 0.75 device pixels; without the incoming slope floor this scene's
+    // cut and larger-scene crop differ by 55 alpha levels natively.
+    small.stroke(0.75 / 2. / 4., BLACK).unwrap();
+    large.stroke(0.75 / 2. / 4., BLACK).unwrap();
+    let a = small.into_rgba().unwrap();
+    let b = large.into_rgba().unwrap();
+    let mut worst = 0;
+    for y in 0..176 {
+        for x in 0..192 {
+            let cut = a[(y * 192 + x) * 4 + 3];
+            let crop = b[((y + 64) * 320 + x + 64) * 4 + 3];
+            worst = worst.max(cut.abs_diff(crop));
+        }
+    }
+    assert!(worst <= 1, "hairline crop delta={worst}");
+}
+
+#[test]
+fn decode_alone_refuses_a_run_over_the_wire_limit() {
+    assert_eq!(
+        decode(&wire(7, &"I".repeat(262_145))).err(),
+        Some(Error::BadSpec)
+    );
+    assert!(decode(&wire(7, &"I".repeat(262_144))).is_ok());
+}

@@ -20,6 +20,7 @@
 //! even tone here, where on a canvas it is darker wherever the strokes of
 //! two neighbouring glyphs or lines overlap.
 
+pub(crate) mod budget;
 mod compose;
 mod geom;
 mod job;
@@ -63,6 +64,7 @@ pub const MAX_SIDE: u32 = 16384;
 
 /// Largest surface accepted, in pixels: 256 MB of RGBA.
 pub const MAX_PIXELS: usize = 1 << 26;
+pub use budget::MAX_PAINT_BYTES;
 
 /// How a synthesised bold joins its outline at a corner.
 ///
@@ -129,7 +131,7 @@ struct GlyphPolys {
 /// The outlines of a job's glyphs, and the shapes made from them.
 #[derive(Default)]
 pub(crate) struct Glyphs {
-    items: Vec<GlyphPolys>,
+    items: budget::Buffer<GlyphPolys>,
 }
 
 impl Glyphs {
@@ -154,6 +156,7 @@ impl Glyphs {
             let mut polys = Polys::default();
             let place = frame.after(&Affine::translate(g.x, g.y));
             outline::glyph_polys(entry, g.glyph, &place, per_unit, skew, tol, &mut polys);
+            budget::check()?;
             if polys.is_empty() {
                 continue;
             }
@@ -168,9 +171,23 @@ impl Glyphs {
                     (0.0, Some(Pt::new(m[0] * by, m[1] * by)))
                 }
             };
-            self.items.push(GlyphPolys { polys, bold, smear });
+            budget::check()?;
+            budget::push(&mut self.items, GlyphPolys { polys, bold, smear })?;
         }
         Ok(())
+    }
+
+    pub(crate) fn account(&mut self) -> Result<(), Error> {
+        self.items.account()?;
+        for g in &mut self.items {
+            g.polys.pts.account()?;
+            g.polys.ends.account()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.items.truncate(len);
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -230,41 +247,46 @@ impl Glyphs {
         ring: bool,
         transform: &Affine,
         tol: f64,
-    ) -> Vec<Part> {
+    ) -> Result<budget::Buffer<Part>, Error> {
         let (right, left) = if transform.det() < 0.0 {
             (Side::Left, Side::Right)
         } else {
             (Side::Right, Side::Left)
         };
-        self.items[range]
-            .iter()
-            .filter_map(|g| {
-                let extra = extra.max(0.0);
-                if g.bold + extra <= 0.0 && g.smear.is_none() {
-                    // Nothing moves the outline: no band, and the fill as
-                    // the font drew it.
-                    return (!ring).then(|| Part::plain(g.polys.map(transform)));
+        let mut parts = budget::Buffer::new();
+        for g in &self.items[range] {
+            let extra = extra.max(0.0);
+            if g.bold + extra <= 0.0 && g.smear.is_none() {
+                // Nothing moves the outline: no band, and the fill as
+                // the font drew it.
+                if !ring {
+                    budget::push(&mut parts, Part::plain(g.polys.map(transform)))?;
                 }
-                Some(Part {
-                    right: Self::moved(g, extra, right, tol).map(transform),
-                    left: Some(Self::moved(g, extra, left, tol).map(transform)),
-                    ring,
-                })
-            })
-            .collect()
+                budget::check()?;
+                continue;
+            }
+            let part = Part {
+                right: Self::moved(g, extra, right, tol).map(transform),
+                left: Some(Self::moved(g, extra, left, tol).map(transform)),
+                ring,
+            };
+            budget::check()?;
+            budget::push(&mut parts, part)?;
+        }
+        Ok(parts)
     }
 }
 
 /// A layer before its coverage is prepared: its parts in device pixels and
 /// what to paint them with.
 struct Planned<'a> {
-    parts: Vec<Part>,
+    parts: budget::Buffer<Part>,
     bx: IBox,
     shader: Shader<'a>,
     alpha: f32,
 }
 
-fn plan<'a>(parts: Vec<Part>, shader: Shader<'a>, alpha: f64) -> Option<Planned<'a>> {
+fn plan<'a>(parts: budget::Buffer<Part>, shader: Shader<'a>, alpha: f64) -> Option<Planned<'a>> {
     if !positive(alpha) {
         return None;
     }
@@ -285,19 +307,34 @@ fn plan<'a>(parts: Vec<Part>, shader: Shader<'a>, alpha: f64) -> Option<Planned<
     })
 }
 
-fn finish(planned: Vec<Planned<'_>>, surface: IBox, rasterizer: &dyn Rasterizer) -> Vec<u8> {
-    let mut layers: Vec<Layer<'_>> = planned
-        .into_iter()
-        .filter_map(|p| {
-            let bx = p.bx.intersect(&surface);
-            (!bx.is_empty()).then(|| Layer {
-                bx,
-                cov: rasterizer.prepare(&p.parts, bx),
-                shader: p.shader,
-                alpha: p.alpha,
-            })
-        })
-        .collect();
+fn finish(
+    planned: budget::Buffer<Planned<'_>>,
+    surface: IBox,
+    rasterizer: &dyn Rasterizer,
+) -> Result<Vec<u8>, Error> {
+    budget::ensure(
+        surface
+            .width()
+            .checked_mul(surface.height())
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::BadSpec)?,
+    )?;
+    let mut layers = budget::Buffer::new();
+    for p in planned {
+        let bx = p.bx.intersect(&surface);
+        if !bx.is_empty() {
+            let cov = rasterizer.prepare(&p.parts, bx)?;
+            budget::push(
+                &mut layers,
+                Layer {
+                    bx,
+                    cov,
+                    shader: p.shader,
+                    alpha: p.alpha,
+                },
+            )?;
+        }
+    }
     compose(&mut layers, surface)
 }
 
@@ -315,6 +352,7 @@ pub fn paint_job_with(
     request: &Request,
     rasterizer: &dyn Rasterizer,
 ) -> Result<Option<Raster>, Error> {
+    let _budget = budget::Scope::new();
     let Request {
         job,
         face,
@@ -342,9 +380,17 @@ pub fn paint_job_with(
         0.0
     };
 
+    if job
+        .runs
+        .iter()
+        .any(|r| r.text.len() > budget::MAX_RUN_BYTES)
+    {
+        return Err(Error::BadSpec);
+    }
     // Every run's glyphs, and for each run the frame its fill is stated in.
     let mut glyphs = Glyphs::default();
-    let mut runs: Vec<(core::ops::Range<usize>, Affine)> = Vec::with_capacity(job.runs.len());
+    let mut runs = budget::Buffer::new();
+    budget::reserve(&mut runs, job.runs.len())?;
     for run in &job.runs {
         let spacing = if job.curved { 0.0 } else { job.letter_spacing };
         let shaped = shape_run(engine, face, &run.text, spacing)?;
@@ -363,23 +409,25 @@ pub fn paint_job_with(
         };
         let from = glyphs.len();
         glyphs.add_run(engine, &shaped, &start, bold_draw, tol)?;
-        runs.push((from..glyphs.len(), frame));
+        budget::push(&mut runs, (from..glyphs.len(), frame))?;
     }
     let all = 0..glyphs.len();
     if all.is_empty() {
         return Ok(None);
     }
 
-    let mut planned: Vec<Planned<'_>> = Vec::new();
+    let mut planned: budget::Buffer<Planned<'_>> = budget::Buffer::new();
     if let Some(color) = job.silhouette {
         // The glyphs and their widest band as one solid shape: grown by
         // half that band's pen, not a stroke laid over a fill. A band is
         // not moved by the weight, so the shape is as wide as the wider of
         // the heavier fill and the band.
         let extra = job.bands.first().map_or(0.0, |b| (b.line / 2.0).max(0.0));
-        let parts = glyphs.parts(all.clone(), extra.max(weight), false, transform, tol);
+        let parts = glyphs.parts(all.clone(), extra.max(weight), false, transform, tol)?;
         let shader = Shader::new(&Fill::Solid(color), transform, tiles);
-        planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
+        if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+            budget::push(&mut planned, p)?;
+        }
     } else {
         for band in &job.bands {
             if !positive(band.line) {
@@ -389,14 +437,17 @@ pub fn paint_job_with(
             // weight is there to follow, strokes a glyph exactly on its
             // outline (P5B-REPORT.md).
             let reach = band.line / 2.0;
-            let parts = glyphs.parts(all.clone(), reach, true, transform, tol);
+            let parts = glyphs.parts(all.clone(), reach, true, transform, tol)?;
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
-            planned.extend(shader.and_then(|s| plan(parts, s, band.opacity)));
+            if let Some(p) = shader.and_then(|s| plan(parts, s, band.opacity)) {
+                budget::push(&mut planned, p)?;
+            }
         }
         // One fill layer per run of glyphs that share a fill. A job-wide
         // fill is one layer; per-line and per-glyph fills are one each,
         // except that neighbours with the same flat colour are merged.
-        let mut groups: Vec<(core::ops::Range<usize>, &Fill, Affine)> = Vec::new();
+        let mut groups: budget::Buffer<(core::ops::Range<usize>, &Fill, Affine)> =
+            budget::Buffer::new();
         for (run, (range, frame)) in job.runs.iter().zip(&runs) {
             // A run's own fill is stated in the run's frame, the job's in
             // the job's.
@@ -412,19 +463,22 @@ pub fn paint_job_with(
                 {
                     r.end = range.end;
                 }
-                _ => groups.push((range.clone(), fill, frame)),
+                _ => budget::push(&mut groups, (range.clone(), fill, frame))?,
             }
         }
         for (range, fill, frame) in groups {
             if range.is_empty() {
                 continue;
             }
-            let parts = glyphs.parts(range, weight, false, transform, tol);
+            let parts = glyphs.parts(range, weight, false, transform, tol)?;
             let shader = Shader::new(fill, &transform.after(&frame), tiles);
-            planned.extend(shader.and_then(|s| plan(parts, s, 1.0)));
+            if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+                budget::push(&mut planned, p)?;
+            }
         }
     }
 
+    budget::check()?;
     let Some(surface) = planned.iter().map(|p| p.bx).reduce(|a, b| a.union(&b)) else {
         return Ok(None);
     };
@@ -432,7 +486,7 @@ pub fn paint_job_with(
     if width > MAX_SIDE as usize || height > MAX_SIDE as usize || width * height > MAX_PIXELS {
         return Err(Error::BadSpec);
     }
-    let data = finish(planned, surface, rasterizer);
+    let data = finish(planned, surface, rasterizer)?;
     Ok(Some(Raster {
         x: surface.x0,
         y: surface.y0,
@@ -440,4 +494,150 @@ pub fn paint_job_with(
         height: height as u32,
         data,
     }))
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    #[test]
+    fn thousands_of_parts_are_bounded_and_the_next_job_paints() {
+        let mut engine = Engine::new();
+        let path = format!(
+            "{}/../src/test/fonts/DejaVuSans.ttf",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let font = engine
+            .add_font_bytes(std::fs::read(path).unwrap(), 0)
+            .unwrap();
+        let run = shape_run(&mut engine, Face::new(font, 40.0), &"I".repeat(6000), 0.0).unwrap();
+        {
+            let _scope = budget::Scope::new();
+            budget::limit_for_test(64 * 1024);
+            let _held = budget::filled(64 * 1024, 0u8).unwrap();
+            // Exercise the production consumer. Failed outline callbacks have
+            // no contours; bypassing its check would silently accept no ink.
+            let mut glyphs = Glyphs::default();
+            assert_eq!(
+                glyphs.add_run(
+                    &engine,
+                    &run,
+                    &Affine::IDENTITY,
+                    BoldDraw::Outset,
+                    FLATTEN_TOLERANCE
+                ),
+                Err(Error::BadSpec)
+            );
+        }
+        let mut scene = Scene::new(64, 64, [1., 0., 0., 1., 0., 0.]).unwrap();
+        scene
+            .add_line(&mut engine, Face::new(font, 40.), "I", 10., 50.)
+            .unwrap();
+        scene.fill(Rgba([0, 0, 0, 255])).unwrap();
+        assert!(scene.into_rgba().unwrap().iter().any(|&v| v != 0));
+    }
+    #[test]
+    fn scene_add_line_reports_a_latched_outline_failure() {
+        let mut engine = Engine::new();
+        let path = format!(
+            "{}/../src/test/fonts/DejaVuSans.ttf",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let font = engine
+            .add_font_bytes(std::fs::read(path).unwrap(), 0)
+            .unwrap();
+        let mut scene = Scene::new(64, 64, [1., 0., 0., 1., 0., 0.]).unwrap();
+        let _scope = budget::Scope::new();
+        budget::limit_for_test(512);
+        assert_eq!(
+            scene.add_line(&mut engine, Face::new(font, 40.), "W", 10., 50.),
+            Err(Error::BadSpec)
+        );
+        assert!(scene.into_rgba().is_err());
+    }
+    fn test_font(e: &mut Engine) -> crate::engine::FontId {
+        e.add_font_bytes(
+            std::fs::read(format!(
+                "{}/../src/test/fonts/DejaVuSans.ttf",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap(),
+            0,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn raster_bytes_are_refused_before_preparing_edges() {
+        struct MustNotPrepare;
+        impl Rasterizer for MustNotPrepare {
+            fn prepare(&self, _: &[Part], _: IBox) -> Result<Box<dyn raster::Coverage>, Error> {
+                panic!("raster precheck must precede edges");
+            }
+        }
+        let fill = Fill::Solid(Rgba([0, 0, 0, 255]));
+        let p = Planned {
+            parts: budget::Buffer::new(),
+            bx: IBox {
+                x0: 0,
+                y0: 0,
+                x1: 64,
+                y1: 64,
+            },
+            shader: Shader::new(&fill, &Affine::IDENTITY, &[]).unwrap(),
+            alpha: 1.,
+        };
+        let planned = [p].into_iter().collect();
+        let _scope = budget::Scope::new();
+        budget::limit_for_test(64 * 64 * 4 - 1);
+        assert_eq!(
+            finish(
+                planned,
+                IBox {
+                    x0: 0,
+                    y0: 0,
+                    x1: 64,
+                    y1: 64
+                },
+                &MustNotPrepare
+            )
+            .err(),
+            Some(Error::BadSpec)
+        );
+    }
+
+    #[test]
+    fn job_run_limit_precedes_work_on_any_earlier_run() {
+        let mut e = Engine::new();
+        let font = test_font(&mut e);
+        let face = Face::new(font, 40.);
+        e.measure_line(face, "W", crate::engine::ShapeMode::MEASURE)
+            .unwrap();
+        let before = e.line.clone();
+        let req = Request {
+            face,
+            bold_draw: None,
+            weight: 0.,
+            transform: Affine::IDENTITY,
+            tiles: vec![],
+            job: job::Job {
+                curved: false,
+                align: job::Align::Left,
+                letter_spacing: 0.,
+                bands: vec![],
+                silhouette: None,
+                fill: Some(Fill::Solid(Rgba([0, 0, 0, 255]))),
+                runs: ["III".to_owned(), "I".repeat(262_145)]
+                    .into_iter()
+                    .map(|text| job::Run {
+                        text,
+                        x: 10.,
+                        y: 50.,
+                        rot: 0.,
+                        fill: None,
+                    })
+                    .collect(),
+            },
+        };
+        assert_eq!(paint_job(&mut e, &req).err(), Some(Error::BadSpec));
+        assert_eq!(e.line, before);
+    }
 }

@@ -202,11 +202,12 @@
       "rule": "image",
       "metric": "bboxDelta",
       "max": 2,
-      "enforce": false,
-      "why": "Not enforced until the engine paints (P5). Ink bounds within 2 device px; the two browsers are 1 px apart at the median and 13 px at p99.",
+      "enforce": true,
+      "why": "Ink bounds within 2 device px of the reference in 98% of covered pictures. Against WebKit the engine's painter reaches 98.3% (3,612 of 3,675); Chromium against WebKit is 92.8%. What is left is WebKit's own blur filter, its 3 px offset on unrotated supersampled text, and 11 pictures where the reference cuts ink that reaches past the advance and the engine's picture holds it.",
       "excludeTags": [
         "uncovered"
-      ]
+      ],
+      "atLeast": 0.98
     },
     {
       "id": "pixels.bbox.uncovered",
@@ -226,11 +227,12 @@
       "rule": "image",
       "metric": "thick",
       "max": 3,
-      "enforce": false,
-      "why": "Not enforced until the engine paints (P5). A disagreement region one device pixel wide measures 2 and is antialiasing; the two browsers are at 2 at the median. Above 3 a stroke or a glyph is in a different place.",
+      "enforce": true,
+      "why": "No disagreement wider than 3 device px in 97% of covered pictures. A region one device pixel wide measures 2 and is antialiasing; above 3 a stroke or a glyph is in a different place. Against WebKit the engine's painter reaches 97.4% (3,578 of 3,675); Chromium against WebKit is 90.4%.",
       "excludeTags": [
         "uncovered"
-      ]
+      ],
+      "atLeast": 0.97
     },
     {
       "id": "pixels.thick.uncovered",
@@ -252,7 +254,7 @@
       "min": 0.95,
       "minSize": 16,
       "enforce": false,
-      "why": "Not enforced until the engine paints (P5). At size 16 and above; the two browsers overlap 97% at the median.",
+      "why": "Reported, not enforced. The engine paints the font's outline (decision D4); both Mac browsers draw text 11 to 14% heavier (font smoothing), so the overlap with WebKit is under 0.95 for a third of the pictures at size 16 and above (2,104 of 3,162 pass) while the ink box and the thickness gates hold. The two browsers overlap 97% at the median.",
       "excludeTags": [
         "uncovered"
       ]
