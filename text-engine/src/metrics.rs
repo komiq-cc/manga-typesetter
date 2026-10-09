@@ -134,6 +134,7 @@ impl Engine {
     /// half up: what `fontBoundingBoxAscent`/`Descent` are in Chromium and in
     /// WebKit, which agree on every face and size captured.
     pub fn font_box(&self, face: Face) -> Result<FontBox, Error> {
+        self.check_chain(face.chain)?;
         let info = self.info(face.font)?;
         match self.rules.font_box {
             FontBoxRule::Skia => self.font_box_unrounded(face),
@@ -150,6 +151,7 @@ impl Engine {
     /// The line box before any rounding: the same table values as
     /// [`Engine::font_box`], scaled in plain arithmetic.
     pub fn font_box_unrounded(&self, face: Face) -> Result<FontBox, Error> {
+        self.check_chain(face.chain)?;
         let info = self.info(face.font)?;
         let scale = face.size / f64::from(info.units_per_em);
         let (a, d) = match self.rules.font_box {
