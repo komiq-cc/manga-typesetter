@@ -36,12 +36,27 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
-/// Returns the job buffer, grown to hold at least `capacity` bytes. The
-/// pointer stays valid until the next call with a larger capacity.
+/// Largest job accepted, in bytes. A guard like the surface's: a job is its
+/// text and its pattern tiles, and the largest the app can write is a few
+/// megabytes.
+pub const MAX_JOB_BYTES: usize = 1 << 28;
+
+/// Returns the job buffer, grown to hold at least `capacity` bytes, or null
+/// when `capacity` is more than [`MAX_JOB_BYTES`] or the memory is not to be
+/// had. The pointer stays valid until the next call with a larger capacity.
+///
+/// A refusal changes nothing: the buffer is as it was and the engine paints
+/// the next job as if this call had not been made. (Growing a `Vec` past
+/// what the allocator can give aborts, which in wasm is a trap that leaves
+/// this module's state borrowed for good.)
 #[no_mangle]
 pub extern "C" fn mt_paint_job_reserve(capacity: usize) -> *mut u8 {
     with(|s| {
         if s.job.len() < capacity {
+            let more = capacity - s.job.len();
+            if capacity > MAX_JOB_BYTES || s.job.try_reserve_exact(more).is_err() {
+                return core::ptr::null_mut();
+            }
             s.job.resize(capacity, 0);
         }
         s.job.as_mut_ptr()

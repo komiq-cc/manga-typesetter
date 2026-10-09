@@ -5,7 +5,7 @@
 //! Chromium and WebKit on the user's fonts; RULES.md records what each
 //! reference does and which way every rule went.
 
-use crate::engine::{Engine, Face, FontBoxRule, ShapeMode, Synth};
+use crate::engine::{BoldAdvance, Engine, Face, FontBoxRule, ShapeMode, Synth};
 use crate::font::{FontInfo, LineBox, VerticalMetrics};
 use crate::Error;
 
@@ -189,7 +189,13 @@ impl Engine {
             let entry = self.font(part.font)?;
             let scale = face.size / f64::from(entry.info.units_per_em);
             let extra = self.bold_extra(part.synth, face.size);
-            let grow = if part.synth.bold {
+            // The ink of a synthesised bold is the ink of the way it is
+            // drawn, and the rule that sets its advance sets that too
+            // (`paint::BoldDraw::for_rule`): grown on every side when the
+            // advance is unchanged, and under WebKit's rule the glyph drawn
+            // again one `extra` to the right, which adds to its right edge
+            // and to nothing else.
+            let grow = if part.synth.bold && self.rules.bold_advance == BoldAdvance::Unchanged {
                 bold_outset(face.size)
             } else {
                 0.0
@@ -205,7 +211,7 @@ impl Engine {
                     let cur = (
                         shift + (ox + f64::from(b.x_min)) * scale - grow,
                         (oy + f64::from(b.y_min)) * scale - grow,
-                        shift + (ox + f64::from(b.x_max)) * scale + grow,
+                        shift + (ox + f64::from(b.x_max)) * scale + grow + extra,
                         (oy + f64::from(b.y_max)) * scale + grow,
                     );
                     ext = Some(match ext {

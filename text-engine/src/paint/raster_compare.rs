@@ -2,11 +2,24 @@
 //! interface. For the comparison in P5A-REPORT.md only: `parity/raster.mjs`
 //! picks one through `mt_paint_rasterizer` and paints the same jobs with it.
 //!
-//! Both are handed the very polylines the exact rasteriser gets, so what is
-//! compared is the rasteriser and nothing else.
+//! Each is handed the very polylines the exact rasteriser gets, as one path
+//! (`Part::one_shape`): a rasteriser that fills a path cannot be told to
+//! unite glyphs one by one, so where two glyphs of one layer overlap, what
+//! it does with a path that overlaps itself is part of what is compared.
 
 use super::geom::{IBox, Polys};
-use super::raster::{Coverage, Exact, Rasterizer};
+use super::raster::{Coverage, Exact, Part, Rasterizer};
+
+/// The parts as one path for a rasteriser that fills one path by the
+/// non-zero rule, which is what all three of these are.
+#[allow(dead_code)]
+fn one_path(parts: &[Part]) -> Polys {
+    let mut polys = Polys::default();
+    for part in parts {
+        part.one_shape(&mut polys);
+    }
+    polys
+}
 
 /// A rasteriser by the number `mt_paint_rasterizer` takes.
 pub fn by_id(id: u32) -> Option<&'static dyn Rasterizer> {
@@ -57,7 +70,8 @@ pub struct TinySkia;
 
 #[cfg(feature = "raster-tiny-skia")]
 impl Rasterizer for TinySkia {
-    fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+        let polys = &one_path(parts);
         let (w, h) = (bx.width(), bx.height());
         let mut data = vec![0u8; w * h];
         let mut pb = tiny_skia::PathBuilder::new();
@@ -97,7 +111,8 @@ pub struct Zeno;
 
 #[cfg(feature = "raster-zeno")]
 impl Rasterizer for Zeno {
-    fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+        let polys = &one_path(parts);
         use zeno::{Command, Fill, Format, Vector};
         let (w, h) = (bx.width(), bx.height());
         let mut data = vec![0u8; w * h];
@@ -133,7 +148,8 @@ pub struct Vello;
 
 #[cfg(feature = "raster-vello")]
 impl Rasterizer for Vello {
-    fn prepare(&self, polys: &Polys, bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+        let polys = &one_path(parts);
         use vello_cpu::color::palette::css::WHITE;
         use vello_cpu::kurbo::BezPath;
         let (w, h) = (bx.width(), bx.height());

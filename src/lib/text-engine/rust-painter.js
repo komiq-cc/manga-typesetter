@@ -12,9 +12,9 @@ import { patternTileCanvas, patternTilePx, TILE_SS } from '../text-paint.js';
 
 // A synthesised bold is drawn the way it is measured (text-engine/RULES.md):
 // WebKit's wider advance belongs to WebKit's second glyph a step to the right,
-// and an unchanged advance to a glyph grown on every side. Mixing them puts
-// ink where the measurement did not leave room for it.
-const BOLD_DRAW = { webkit: 'smear', unchanged: 'outset' };
+// and an unchanged advance to a glyph grown on every side. The engine's
+// `boldAdvance` rule decides both, in the engine: its ink box is measured for
+// the drawing its painter makes, so nothing is chosen here.
 
 // A scratch canvas this large is not kept: one page-sized box would otherwise
 // hold its megabytes for the rest of the session.
@@ -22,7 +22,11 @@ const KEEP_PX = 2048 * 2048;
 
 /**
  * @param {object} rust the engine `createRustTextEngine` made; it holds the faces a job names
- * @param {{ boldDraw?: 'outset' | 'smear' }} [options] overrides the rule above
+ * @param {{ boldDraw?: 'outset' | 'smear', weight?: number }} [options]
+ *   `boldDraw` names a drawing outright, against the rule above, for looking at the other one.
+ *   `weight` grows every filled glyph shape by that many device pixels on every side before it
+ *   is painted (bands stay strokes of the font's own outline); 0, the default, paints the
+ *   font's outline.
  */
 export function createRustGlyphPainter(rust, options = {}) {
   // One tile's pixels per pattern, so a job that fills every line with the
@@ -48,7 +52,8 @@ export function createRustGlyphPainter(rust, options = {}) {
       font: face.font,
       size: face.size,
       synth: face.flags,
-      boldDraw: options.boldDraw ?? BOLD_DRAW[rust.rules().boldAdvance],
+      boldDraw: options.boldDraw ?? 'rule',
+      weight: options.weight ?? 0,
       transform: [m.a, m.b, m.c, m.d, m.e, m.f],
       tiles: tile,
       // Copied into the scratch canvas before anything else calls the engine.
@@ -70,6 +75,13 @@ export function createRustGlyphPainter(rust, options = {}) {
     // still apply to it as they would to drawn text.
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // Pixel for pixel means unfiltered. The exporter's canvases ask for
+    // `imageSmoothingQuality = 'high'`, and Skia then resamples even a
+    // one-to-one copy with a cubic that reaches one pixel to each side: every
+    // edge is softened, and the column beside the copied rectangle, which in
+    // a reused scratch holds an earlier job's pixels, leaks into the last
+    // column drawn as a faint line.
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(cnv, 0, 0, width, height, x, y, width, height);
     ctx.restore();
     if (keep) scratch = cnv;

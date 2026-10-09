@@ -47,7 +47,8 @@ fn request(job: Job, face: Face) -> Request {
     Request {
         job,
         face,
-        bold_draw: BoldDraw::Outset,
+        bold_draw: None,
+        weight: 0.0,
         transform: Affine::IDENTITY,
         tiles: Vec::new(),
     }
@@ -195,6 +196,42 @@ fn letter_spacing_moves_each_glyph_and_counts_after_the_last_one() {
     let mid = f64::from(centre.0 + centre.2) / 2.0;
     let want = 200.0 + (ink.right - ink.left - ink.width) / 2.0 - 5.0;
     assert!((mid - want).abs() < 0.75, "{mid} vs {want}");
+
+    // Every glyph, not only the ends: the boxes above would be the same if
+    // the middle H had stayed where it is without spacing. An H is one run
+    // of inked columns (its bar joins its stems), so the picture has three,
+    // each the same width and a glyph's advance plus the gap after the last.
+    let raster = paint(&mut e, &request(spaced(Align::Left), face));
+    let inked_column = |x: u32| {
+        (0..raster.height).any(|y| raster.data[((y * raster.width + x) * 4 + 3) as usize] >= 128)
+    };
+    let mut letters: Vec<(u32, u32)> = Vec::new();
+    for x in 0..raster.width {
+        match (inked_column(x), letters.last_mut()) {
+            (true, Some(last)) if last.1 == x => last.1 = x + 1,
+            (true, _) => letters.push((x, x + 1)),
+            _ => {}
+        }
+    }
+    assert_eq!(letters.len(), 3, "{letters:?}");
+    let pitch = ink.width / 3.0 + 10.0;
+    let one = e.line_ink(face, "H").unwrap();
+    for (k, &(from, to)) in letters.iter().enumerate() {
+        let left = 200.0 - one.left + k as f64 * pitch;
+        let got = f64::from(raster.x) + f64::from(from);
+        assert!(
+            (got - left).abs() <= 1.0,
+            "letter {k} starts at {got}, not {left}"
+        );
+        let width = f64::from(to - from);
+        assert!(
+            (width - (one.left + one.right)).abs() <= 1.5,
+            "letter {k} is {width} wide"
+        );
+    }
+    // The same line unspaced has its middle letter a gap further left.
+    let plain = paint(&mut e, &request(job(vec![run("HHH", 200.0, 100.0)]), face));
+    assert_eq!(plain.width + 20, raster.width);
 }
 
 #[test]
@@ -241,6 +278,52 @@ fn the_transform_scales_turns_and_moves_the_ink() {
     }
 }
 
+/// A band, a synthesised bold and a weight all move the outline to one side
+/// of the way it runs, and a mirror swaps the sides.
+#[test]
+fn a_mirrored_job_is_the_job_mirrored() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let bold = Synth {
+        bold: true,
+        oblique: false,
+    };
+    let band = Band {
+        color: RED,
+        opacity: 1.0,
+        line: 6.0,
+    };
+    for (rule, synth, bands, weight) in [
+        (BoldAdvance::Unchanged, Synth::NONE, vec![band], 0.0),
+        (BoldAdvance::Unchanged, bold, Vec::new(), 0.0),
+        (BoldAdvance::WebKit, bold, vec![band], 0.0),
+        (BoldAdvance::Unchanged, Synth::NONE, Vec::new(), 1.5),
+    ] {
+        e.rules.bold_advance = rule;
+        let mut j = job(vec![run("Rb", 20.0, 60.0)]);
+        j.bands = bands;
+        let face = Face {
+            synth,
+            ..Face::new(font, 40.0)
+        };
+        let mut r = request(j, face);
+        r.weight = weight;
+        let straight = paint(&mut e, &r);
+        r.transform = Affine([-1.0, 0.0, 0.0, 1.0, 200.0, 0.0]);
+        let mirrored = paint(&mut e, &r);
+        let (a, b) = (inked(&straight), inked(&mirrored));
+        assert_eq!((200 - a.2, a.1, 200 - a.0, a.3), b, "{rule:?} {synth:?}");
+        for y in a.1..a.3 {
+            for x in a.0..a.2 {
+                let (p, q) = (px(&straight, x, y), px(&mirrored, 199 - x, y));
+                for c in 0..4 {
+                    assert!(p[c].abs_diff(q[c]) <= 2, "{x},{y}: {p:?} vs {q:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_surface_beyond_the_guard_is_refused() {
     let mut e = Engine::new();
@@ -251,6 +334,113 @@ fn a_surface_beyond_the_guard_is_refused() {
     r.transform = Affine([8.0, 0.0, 0.0, 8.0, 0.0, 0.0]);
     let ok = paint(&mut e, &r);
     assert!(ok.width <= MAX_SIDE && ok.height <= MAX_SIDE);
+}
+
+#[test]
+fn glyphs_that_overlap_are_one_shape_and_weight_grows_it() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let one = e.line_ink(face, "H").unwrap();
+    // Two H pulled over each other by half a letter, in a half-transparent
+    // fill: where they share ink it is laid once, neither doubled (a canvas
+    // that fills letter by letter) nor missing.
+    let mut j = job(vec![run("HH", 100.0, 100.0)]);
+    j.letter_spacing = -one.width / 2.0;
+    j.fill = Some(Fill::Solid(Rgba([255, 0, 0, 128])));
+    let r = paint(&mut e, &request(j.clone(), face));
+    let mut alphas = [0usize; 256];
+    for p in r.data.chunks_exact(4) {
+        alphas[p[3] as usize] += 1;
+    }
+    assert!(alphas[128] > 300, "{}", alphas[128]);
+    assert_eq!(alphas[129..].iter().sum::<usize>(), 0);
+    // The bar of the first H runs on into the second: one unbroken row.
+    let mid_y = (100.0 - one.ascent / 2.0) as i32;
+    let (from, to) = (
+        100.0 + one.left.abs() + 1.0,
+        100.0 + one.width / 2.0 + one.right - 1.0,
+    );
+    for x in from.ceil() as i32..to.floor() as i32 {
+        assert_eq!(px(&r, x, mid_y)[3], 128, "column {x}");
+    }
+
+    // Weight: every edge of the fill moves out by that many device pixels,
+    // here 2 at a scale of 2. The band stays where it was, so the heavier
+    // fill covers 2 px more of it, and the ink is no larger for it.
+    let mut j = job(vec![run("H", 100.0, 100.0)]);
+    j.bands = vec![Band {
+        color: BLUE,
+        opacity: 1.0,
+        line: 4.0,
+    }];
+    let mut heavy = request(j, face);
+    heavy.transform = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    let plain = paint(&mut e, &heavy);
+    heavy.weight = 2.0;
+    let r = paint(&mut e, &heavy);
+    let left = |r: &Raster, colour: [u8; 4]| {
+        let y = 2 * mid_y;
+        (r.x..r.x + r.width as i32)
+            .find(|&x| px(r, x, y) == colour)
+            .unwrap()
+    };
+    let black = [0, 0, 0, 255];
+    assert_eq!(left(&plain, black) - left(&r, black), 2, "the fill");
+    assert_eq!(left(&plain, BLUE.0), left(&r, BLUE.0), "the band");
+    assert_eq!(inked(&plain), inked(&r));
+    assert_box(
+        inked(&r),
+        (
+            2.0 * (100.0 - one.left - 2.0),
+            2.0 * (100.0 - one.ascent - 2.0),
+            2.0 * (100.0 + one.right + 2.0),
+            2.0 * (100.0 + one.descent + 2.0),
+        ),
+    );
+    // With no band the ink grows by the weight, and a silhouette is as wide
+    // as the wider of the heavier fill and the band: here the weight, 3
+    // device px against the band's 2 job units at a scale of 1.
+    let mut bare = request(job(vec![run("H", 100.0, 100.0)]), face);
+    bare.weight = 3.0;
+    let grown = (
+        100.0 - one.left - 3.0,
+        100.0 - one.ascent - 3.0,
+        100.0 + one.right + 3.0,
+        100.0 + one.descent + 3.0,
+    );
+    assert_box(inked(&paint(&mut e, &bare)), grown);
+    bare.job.bands = vec![Band {
+        color: BLUE,
+        opacity: 1.0,
+        line: 4.0,
+    }];
+    bare.job.silhouette = Some(RED);
+    assert_box(inked(&paint(&mut e, &bare)), grown);
+}
+
+#[test]
+fn a_scene_and_a_job_buffer_beyond_the_guards_are_refused() {
+    use mt_text::abi_paint::{mt_paint_job, mt_paint_job_reserve, MAX_JOB_BYTES};
+    use mt_text::paint::Scene;
+    // A scene's surface passes the guard a job's does: each side, and the
+    // pixels. 16384 x 16384 has sides that pass and a gigabyte of pixels.
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    assert!(Scene::new(16384, 16384, identity).is_err());
+    assert!(Scene::new(16385, 1, identity).is_err());
+    assert!(Scene::new(8192, 8192, identity).is_ok());
+
+    // A job buffer larger than any job is refused with a null pointer, and
+    // the next call is served as if nothing had happened.
+    assert!(mt_paint_job_reserve(usize::MAX).is_null());
+    assert!(mt_paint_job_reserve(MAX_JOB_BYTES + 1).is_null());
+    let bytes = wire(77, "abc");
+    let ptr = mt_paint_job_reserve(bytes.len());
+    assert!(!ptr.is_null());
+    // SAFETY: `ptr` is the engine's job buffer, at least `bytes.len()` long.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
+    // Font 77 was never added: the job is read and refused for that, -2.
+    assert_eq!(mt_paint_job(bytes.len()), -2);
 }
 
 #[test]
@@ -302,6 +492,102 @@ fn bands_are_painted_widest_first_under_the_fill() {
         corner[3], 0,
         "a round join leaves the corner of the box empty"
     );
+}
+
+/// The stretches of ink along device row `y`, each from where it starts to
+/// where it ends in fractions of a pixel. Right for upright edges, which is
+/// what a stem has: a pixel's coverage is then how far the ink reaches
+/// into it.
+fn stretches(r: &Raster, y: i32) -> Vec<(f64, f64)> {
+    let cov = |x: i32| f64::from(px(r, x, y)[3]) / 255.0;
+    let mut out = Vec::new();
+    let mut x = r.x;
+    let end = r.x + r.width as i32;
+    while x < end {
+        if cov(x) == 0.0 {
+            x += 1;
+            continue;
+        }
+        let first = x;
+        while x < end && cov(x) > 0.0 {
+            x += 1;
+        }
+        out.push((
+            f64::from(first + 1) - cov(first),
+            f64::from(x - 1) + cov(x - 1),
+        ));
+    }
+    out
+}
+
+/// A band round a synthesised bold is the stroke the reference that draws
+/// the bold that way makes: the font's outline stroked with a pen wider by
+/// the bold's own (an outset, Skia), or stroked at its place and at the end
+/// of the smear with everything between (WebKit). The weight does not move
+/// it. Seen with no fill over it, across the stem of an "I", which is a
+/// rectangle.
+#[test]
+fn a_band_round_a_bold_glyph_is_the_outlines_stroke_made_bold() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let size = 200.0;
+    let regular = Face::new(font, size);
+    let bold = Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..regular
+    };
+    let ink = e.line_ink(regular, "I").unwrap();
+    let (x, y) = (100.0, 300.0);
+    let (x0, x1) = (x - ink.left, x + ink.right);
+    let o = bold_outset(size);
+    let v = size * WEBKIT_BOLD_ADVANCE;
+    // Wide enough that every band below leaves the middle of the stem bare.
+    assert!(x1 - x0 > 6.0 + (2.0 * o).max(v) + 2.0, "{}", x1 - x0);
+    let row = (y - ink.ascent / 2.0) as i32;
+    let unchanged = BoldAdvance::Unchanged;
+    let webkit = BoldAdvance::WebKit;
+    // The rule, the face, the weight, the pen (half the band's line), and
+    // how far the band reaches to the left and to the right of each edge
+    // of the stem.
+    for (rule, face, weight, pen, reach) in [
+        (unchanged, regular, 0.0, 3.0, (3.0, 3.0)),
+        (unchanged, bold, 0.0, 3.0, (3.0 + o, 3.0 + o)),
+        (unchanged, bold, 0.0, 0.5, (0.5 + o, 0.5 + o)),
+        (unchanged, regular, 2.25, 3.0, (3.0, 3.0)),
+        (unchanged, bold, 1.5, 3.0, (3.0 + o, 3.0 + o)),
+        (webkit, bold, 0.0, 3.0, (3.0, 3.0 + v)),
+        (webkit, bold, 1.5, 3.0, (3.0, 3.0 + v)),
+        // A pen thinner than the smear is long: still one band at each
+        // edge, not two lines.
+        (webkit, bold, 0.0, v / 4.0, (v / 4.0, v / 4.0 + v)),
+    ] {
+        e.rules.bold_advance = rule;
+        let mut j = job(vec![run("I", x, y)]);
+        j.fill = None;
+        j.bands = vec![Band {
+            color: RED,
+            opacity: 1.0,
+            line: pen * 2.0,
+        }];
+        let mut r = request(j, face);
+        r.weight = weight;
+        let got = stretches(&paint(&mut e, &r), row);
+        let want = [(x0 - reach.0, x0 + reach.1), (x1 - reach.0, x1 + reach.1)];
+        let what = format!(
+            "{rule:?}, bold {}, weight {weight}, pen {pen}",
+            face.synth.bold
+        );
+        assert_eq!(got.len(), 2, "{what}: {got:?}, wanted {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g.0 - w.0).abs() < 0.06 && (g.1 - w.1).abs() < 0.06,
+                "{what}: {got:?}, wanted {want:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -788,7 +1074,7 @@ fn whitespace_a_canvas_turns_into_a_space_is_painted_as_one() {
 }
 
 #[test]
-fn a_bold_under_the_webkit_advance_rule_is_painted_where_it_is_measured() {
+fn a_synthesised_bold_is_painted_where_it_is_measured_under_each_rule() {
     let mut e = Engine::new();
     let font = load(&mut e, "DejaVuSans.ttf");
     let bold = Face {
@@ -799,31 +1085,53 @@ fn a_bold_under_the_webkit_advance_rule_is_painted_where_it_is_measured() {
         ..Face::new(font, 36.0)
     };
     let (x, y) = (40.0, 80.0);
-    let narrow = e.line_ink(bold, "HIH").unwrap();
-    e.rules.bold_advance = BoldAdvance::WebKit;
-    let wide = e.line_ink(bold, "HIH").unwrap();
-    // Two glyphs each moved on by size / 36 = 1 px, and the advance by three.
-    assert!((wide.right - narrow.right - 2.0).abs() < 1e-9);
-    assert!((wide.width - narrow.width - 3.0).abs() < 1e-9);
-    for align in [Align::Left, Align::Center, Align::Right] {
-        let mut j = job(vec![run("HIH", x, y)]);
-        j.align = align;
-        let start = match align {
-            Align::Left => 0.0,
-            Align::Center => -wide.width / 2.0,
-            Align::Right => -wide.width,
-        };
-        let got = inked(&paint(&mut e, &request(j, bold)));
-        assert_box(
-            got,
-            (
-                x + start - wide.left,
-                y - wide.ascent,
-                x + start + wide.right,
-                y + wide.descent,
-            ),
-        );
+    let regular = e.line_ink(Face::new(font, 36.0), "HIH").unwrap();
+    let mut inks = Vec::new();
+    for rule in [BoldAdvance::Unchanged, BoldAdvance::WebKit] {
+        e.rules.bold_advance = rule;
+        // The request names no way to draw the bold: the rule decides, and
+        // the ink the engine measures is the ink of that drawing.
+        let ink = e.line_ink(bold, "HIH").unwrap();
+        for align in [Align::Left, Align::Center, Align::Right] {
+            let mut j = job(vec![run("HIH", x, y)]);
+            j.align = align;
+            let start = match align {
+                Align::Left => 0.0,
+                Align::Center => -ink.width / 2.0,
+                Align::Right => -ink.width,
+            };
+            let got = inked(&paint(&mut e, &request(j, bold)));
+            assert_box(
+                got,
+                (
+                    x + start - ink.left,
+                    y - ink.ascent,
+                    x + start + ink.right,
+                    y + ink.descent,
+                ),
+            );
+        }
+        inks.push(ink);
     }
+    let (grown, smeared) = (inks[0], inks[1]);
+    // Unchanged: the same advance, the ink grown on every side.
+    assert_eq!(grown.width, regular.width);
+    let by = grown.left - regular.left;
+    assert!(by > 0.3 && (grown.ascent - regular.ascent - by).abs() < 1e-9);
+    // WebKit: size / 36 = 1 px more per glyph, the last glyph two steps on
+    // and drawn again a step to the right, and nothing added above or below
+    // or on the left.
+    assert!((smeared.width - regular.width - 3.0).abs() < 1e-9);
+    assert!((smeared.right - regular.right - 3.0).abs() < 1e-9);
+    assert_eq!(
+        (smeared.left, smeared.ascent, smeared.descent),
+        (regular.left, regular.ascent, regular.descent)
+    );
+    // Naming the other drawing outright still paints it, off the measure.
+    let mut named = request(job(vec![run("HIH", x, y)]), bold);
+    named.bold_draw = Some(BoldDraw::Outset);
+    let got = inked(&paint(&mut e, &named));
+    assert!(f64::from(got.1) < y - smeared.ascent - 0.3, "{got:?}");
 }
 
 #[test]
@@ -846,7 +1154,7 @@ fn a_bold_drawn_as_a_smear_thickens_stems_and_not_bars() {
     let ink = e.line_ink(plain, "H").unwrap();
     let smear = |e: &mut Engine, j: Job, face: Face| {
         let mut r = request(j, face);
-        r.bold_draw = BoldDraw::Smear;
+        r.bold_draw = Some(BoldDraw::Smear);
         paint(e, &r)
     };
     let regular = paint(&mut e, &request(job(vec![run("H", x, y)]), plain));
@@ -927,11 +1235,12 @@ fn wire(font: u32, text: &str) -> Vec<u8> {
     u(&mut b, font);
     u(&mut b, 2); // oblique
     u(&mut b, 5); // fallback chain
-    u(&mut b, 1); // bold drawn as a smear
+    u(&mut b, 2); // bold drawn as a smear
     f(&mut b, 40.0);
     for v in [2.0, 0.0, 0.0, 2.0, 5.0, 6.0] {
         f(&mut b, v);
     }
+    f(&mut b, 0.375); // weight
     u(&mut b, 0); // straight, no silhouette
     u(&mut b, 1); // centre
     f(&mut b, 1.5);
@@ -976,7 +1285,8 @@ fn the_wire_form_decodes_to_the_job_it_states() {
     assert_eq!(r.face.size, 40.0);
     assert!(r.face.synth.oblique && !r.face.synth.bold);
     assert_eq!(r.face.chain, 5);
-    assert_eq!(r.bold_draw, BoldDraw::Smear);
+    assert_eq!(r.bold_draw, Some(BoldDraw::Smear));
+    assert_eq!(r.weight, 0.375);
     assert_eq!(r.transform, Affine([2.0, 0.0, 0.0, 2.0, 5.0, 6.0]));
     assert_eq!(
         r.job,
@@ -1041,11 +1351,21 @@ fn a_damaged_wire_form_is_refused_not_guessed_at() {
     version[4] = 99;
     assert!(decode(&version).is_err());
     let mut align = good.clone();
-    align[84] = 9;
+    align[92] = 9;
     assert!(decode(&align).is_err());
     let mut bold = good.clone();
     bold[20] = 7;
     assert!(decode(&bold).is_err());
+    // No drawing named: the engine's bold rule decides.
+    let mut by_rule = good.clone();
+    by_rule[20] = 0;
+    assert_eq!(decode(&by_rule).unwrap().bold_draw, None);
+    // A weight below nothing or beyond the guard: the f64 at byte 80.
+    for w in [-0.25, 64.5] {
+        let mut weight = good.clone();
+        weight[80..88].copy_from_slice(&f64::to_le_bytes(w));
+        assert_eq!(decode(&weight).err(), Some(Error::BadSpec), "{w}");
+    }
     // Text that is not UTF-8.
     let mut text = good.clone();
     let at = good.len() - 20 - 3 - 4;

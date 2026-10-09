@@ -136,6 +136,30 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     expect(blue).toBeGreaterThan(200);
   });
 
+  it('lands pixel for pixel on a canvas that smooths, with nothing of an earlier job beside it', () => {
+    // The exporter's canvases set the smoothing quality to high. A wide job
+    // with a band first, so the kept scratch holds ink to the right of where
+    // the narrow job's raster ends.
+    const wide = job({ bands: [{ color: '#ffffff', opacity: 1, line: 6 }], runs: [{ text: 'WAIT WHAT', x: 20, y: 60 }] });
+    const narrow = job({ runs: [{ text: 'WAIT', x: 20, y: 60 }] });
+    const pixels = (painter, prepare) => {
+      const { canvas } = drawn(painter, narrow, { prepare });
+      return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    };
+    const used = createRustGlyphPainter(rust);
+    drawn(used, wide);
+    const smoothed = pixels(used, (c) => {
+      c.imageSmoothingEnabled = true;
+      c.imageSmoothingQuality = 'high';
+    });
+    const plain = pixels(createRustGlyphPainter(rust), (c) => {
+      c.imageSmoothingEnabled = false;
+    });
+    let differing = 0;
+    for (let i = 0; i < plain.length; i++) if (plain[i] !== smoothed[i]) differing++;
+    expect(differing).toBe(0);
+  });
+
   it('draws a synthesised bold the way the engine measured it', () => {
     const bold = job({ face: face('Bangers', 40, true), runs: [{ text: 'IIII', x: 20, y: 60 }] });
     const width = (c) => {
@@ -155,6 +179,38 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     } finally {
       rust.setRules({ boldAdvance: 'webkit' });
     }
+  });
+
+  it('measures the ink of a synthesised bold for the drawing the rule gives it', () => {
+    const bold = job({ face: face('Bangers', 40, true), align: 'left', runs: [{ text: 'IIII', x: 20, y: 60 }] });
+    for (const boldAdvance of ['unchanged', 'webkit']) {
+      rust.setRules({ boldAdvance });
+      try {
+        const m = rust.lineInk(bold.face, 'IIII');
+        const b = ink(drawn(createRustGlyphPainter(rust), bold).canvas);
+        // At 2x: the painted box is the measured one, to a device pixel.
+        expect(Math.abs(b.x0 - 2 * (20 - m.left)), `${boldAdvance} left`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.x1 + 1 - 2 * (20 + m.right)), `${boldAdvance} right`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.y0 - 2 * (60 - m.ascent)), `${boldAdvance} top`).toBeLessThanOrEqual(1);
+        expect(Math.abs(b.y1 + 1 - 2 * (60 + m.descent)), `${boldAdvance} bottom`).toBeLessThanOrEqual(1);
+      } finally {
+        rust.setRules({ boldAdvance: 'webkit' });
+      }
+    }
+  });
+
+  it('paints heavier by the weight it is made with, and not at all heavier without one', () => {
+    const plain = ink(drawn(createRustGlyphPainter(rust), job()).canvas);
+    const zero = ink(drawn(createRustGlyphPainter(rust, { weight: 0 }), job()).canvas);
+    const heavy = ink(drawn(createRustGlyphPainter(rust, { weight: 2 }), job()).canvas);
+    expect(zero).toEqual(plain);
+    // Two device pixels on every side.
+    expect([plain.x0 - heavy.x0, plain.y0 - heavy.y0, heavy.x1 - plain.x1, heavy.y1 - plain.y1]).toEqual([2, 2, 2, 2]);
+  });
+
+  it('is refused a job buffer no job could need, and paints the next job', () => {
+    expect(rust.low.exports.mt_paint_job_reserve(0xffffffff)).toBe(0);
+    expect(ink(drawn(createRustGlyphPainter(rust), job()).canvas)).not.toBe(null);
   });
 
   it('refuses a job whose font the engine does not have', () => {

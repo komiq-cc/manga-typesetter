@@ -12,7 +12,7 @@ use super::outline::FLATTEN_TOLERANCE;
 use super::raster::Exact;
 use super::shade::Shader;
 use super::shape::shape_run;
-use super::{finish, plan, plan_ring, BoldDraw, Glyphs, Planned, MAX_SIDE};
+use super::{finish, plan, BoldDraw, Glyphs, Planned, MAX_PIXELS, MAX_SIDE};
 use crate::engine::{Engine, Face};
 use crate::Error;
 
@@ -36,7 +36,13 @@ impl Scene {
     /// A transparent surface of `width` x `height` device pixels. `matrix` is
     /// the canvas `setTransform(a, b, c, d, e, f)` that maps user space to it.
     pub fn new(width: u32, height: u32, matrix: [f32; 6]) -> Result<Self, Error> {
-        if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+        // The same guard a job's surface passes: a side, and the pixels.
+        if width == 0
+            || height == 0
+            || width > MAX_SIDE
+            || height > MAX_SIDE
+            || width as usize * height as usize > MAX_PIXELS
+        {
             return Err(Error::BadSpec);
         }
         if matrix.iter().any(|v| !v.is_finite()) {
@@ -113,14 +119,15 @@ impl Scene {
                 let shader = |color| Shader::new(&Fill::Solid(color), &self.transform, &[]);
                 planned.extend(match *op {
                     Op::Stroke(n, line, color) if line > 0.0 => {
-                        let (outer, inner) = self.glyphs.band(0..n, line, tol);
-                        shader(color)
-                            .and_then(|s| plan_ring(&outer, &inner, &self.transform, s, 1.0))
+                        let parts = self
+                            .glyphs
+                            .parts(0..n, line / 2.0, true, &self.transform, tol);
+                        shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                     Op::Stroke(..) => None,
                     Op::Fill(n, color) => {
-                        let shape = self.glyphs.solid(0..n, 0.0, tol);
-                        shader(color).and_then(|s| plan(&shape, &self.transform, s, 1.0))
+                        let parts = self.glyphs.parts(0..n, 0.0, false, &self.transform, tol);
+                        shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                 });
             }
