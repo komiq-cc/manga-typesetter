@@ -200,3 +200,24 @@ fn a_size_or_a_spacing_that_is_no_number_is_an_error_and_not_a_line_of_them() {
     let c = carets(font, 30.0, 0, "ab", -2.5);
     assert!(c.x.iter().all(|x| x.is_finite()) && c.advance.is_finite());
 }
+
+/// A question with finite numbers can still have an answer without them: a
+/// size so large that the pens overflow. That is an error too, with nothing
+/// left in the out buffer for a caller to read as positions.
+#[test]
+fn an_answer_with_a_position_that_is_not_finite_is_an_error() {
+    let font = abi_font("ComicNeue-Regular.ttf");
+    assert_eq!(answer(font, f64::MAX, "MMMM", 0.0), Status::BadSpec as i32);
+    assert_eq!(mt_out_len(), 0);
+    assert_eq!(answer(font, 30.0, "MMMM", f64::MAX), Status::BadSpec as i32);
+    assert_eq!(mt_out_len(), 0);
+    assert_eq!(
+        answer(font, 30.0, "MMMM", -f64::MAX),
+        Status::BadSpec as i32
+    );
+    // Large, and every position still a number: answered.
+    assert_eq!(answer(font, 1.0e9, "MMMM", 0.0), 4);
+    let c = carets(font, 1.0e9, 0, "MMMM", 0.0);
+    assert!(c.x.iter().all(|x| x.is_finite()) && c.advance.is_finite());
+    assert!(c.advance > c.x[3] && c.x[3] > c.x[1]);
+}
