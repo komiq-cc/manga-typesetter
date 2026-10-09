@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
 import { flushSync, tick } from 'svelte';
+import { compile } from 'svelte/compiler';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // The two paints are the real ones, on the lane's stand-in canvas, wrapped so
 // a case can count them; and the roughening's phase, which a browser measures
@@ -1000,9 +1003,40 @@ describe('what takes the pointer while the box is a picture', () => {
     expect(m.root.querySelector('.hit')).toBe(null);
   });
 
-  it('follows the hand tool like the rest of the box: it states no pointer-events of its own', async () => {
+  // The hand tool makes a box deaf from outside it: the box layer is given
+  // `.pan`, and the app's style sheet turns pointer events off for the boxes
+  // in it (src/styles.css). A target follows by inheriting, which it does
+  // only while nothing gives it pointer events of its own - not its inline
+  // style and not a rule of the component's. So this reads the answer the
+  // browser would give, under the two real style sheets: the app's, and the
+  // component's own as the compiler writes it (without the scoping class,
+  // which this lane's build does not put in the document).
+  it('follows the hand tool like the rest of the box: under the app\'s own style sheets, the targets of a deaf box are deaf', async () => {
     const m = await arcOut(true);
-    for (const el of m.root.querySelectorAll('.hit')) expect(el.style.pointerEvents).toBe('');
+    const at = (name) => readFileSync(fileURLToPath(new URL(name, import.meta.url)), 'utf8');
+    const own = compile(at('./TextBox.svelte'), { css: 'external', filename: 'TextBox.svelte' }).css.code.replace(/\.svelte-[a-z0-9]+/g, '');
+    expect(own).toMatch(/\.hit\s*\{/);
+    const sheets = [at('../styles.css'), own].map((text) => {
+      const el = document.createElement('style');
+      el.textContent = text;
+      document.head.appendChild(el);
+      return el;
+    });
+    try {
+      const hits = [...m.root.querySelectorAll('.hit')];
+      expect(hits.length).toBeGreaterThan(3);
+      const layer = m.view.container;
+      layer.className = 'boxlayer';
+      expect(getComputedStyle(m.root).pointerEvents).toBe('auto');
+      for (const el of hits) expect(getComputedStyle(el).pointerEvents).toBe('auto');
+      layer.className = 'boxlayer pan';
+      expect(getComputedStyle(m.root).pointerEvents).toBe('none');
+      for (const el of hits) expect(getComputedStyle(el).pointerEvents).toBe('none');
+      // Nor inline.
+      for (const el of hits) expect(el.style.pointerEvents).toBe('');
+    } finally {
+      for (const el of sheets) el.remove();
+    }
   });
 
   it('straight text that fits its box needs none: the box is the target', async () => {
