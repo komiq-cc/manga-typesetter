@@ -31,6 +31,7 @@ import {
   toast,
   cancelChapterPlace,
   useChapterTypesetting,
+  stampTypesetting,
 } from './store.svelte.js';
 import { normalizeTypesetting, newTypesetting, legacyTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
@@ -2039,7 +2040,8 @@ async function writeOpenChapter(seq) {
   // record follows it here rather than the other way round.
   record.mode = app.chapterMode;
   // The same for its typesetting (DET-3): Settings writes it while it is open.
-  record.typesetting = { ...app.typesetting };
+  // Stamped with the engine that fitted the boxes written below.
+  record.typesetting = stampTypesetting();
   // Blob URLs are runtime-only. `file` and `cleanedFile` are the durable
   // references and both are read off the page itself, so a document whose pages
   // were replaced or reordered in the editor can never hand one page's images

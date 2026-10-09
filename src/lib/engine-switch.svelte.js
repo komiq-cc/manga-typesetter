@@ -15,7 +15,10 @@
 //      face is ready (`setFontSource`), so from this moment nothing writes a
 //      size or a height into the document: a box placed now is 'pending', a
 //      fit asked for now is done when the engine is in. What is on screen
-//      meanwhile is the browser's layout, written nowhere.
+//      meanwhile is the browser's layout, written nowhere. A chapter that is
+//      open is noted as it stands, for the user to be told what this engine
+//      changes in it and for the switch going off to put it back (`firstFit`
+//      in the store).
 //   2. the wasm: compiled once per session however often the switch is
 //      flipped, and an instance made of it for this turn of the switch.
 //   3. the app's own font lists: at launch the user's library is still being
@@ -194,7 +197,8 @@ async function start() {
   engineSwitch.phase = 'starting';
   engineSwitch.error = '';
   before = textEngine();
-  setFontSource({ ready: () => false, settle: fontsSettled });
+  const was = before;
+  setFontSource({ ready: () => false, settle: fontsSettled, before: () => was });
   // fonts.js reports from now; what it says before the engine has the library
   // is kept and said again after, in order, so nothing falls between the two.
   const early = [];
@@ -269,6 +273,10 @@ async function start() {
       missing: (name) => s.missing(name),
       lettersReady: (style, text) => !lettersOf(style, text).pending.length,
       settle: fontsSettled,
+      // For a chapter this engine fits for the first time (`firstFit` in the
+      // store): whether it is the one measuring, and who measured before it.
+      measuring: () => !!rust && textEngine() === rust,
+      before: () => was,
     });
     apply();
     noteFontsChanged();

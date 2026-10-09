@@ -13,6 +13,8 @@ import {
   normalizeReview,
   normalizeTypesetting,
   normalizeAuto,
+  LAYOUT_VERSION,
+  LAYOUT_VERSION_RUST,
 } from './data.js';
 // The tag module reaches back for nothing - it takes the pages it works on as
 // arguments - so this stays a one-way edge and the two cannot cycle. What comes
@@ -65,7 +67,7 @@ import {
   setTypesetEnabled,
   faceFor,
 } from './measure.js';
-import { textEngine } from './text-engine/index.js';
+import { textEngine, setTextEngine } from './text-engine/index.js';
 import { browserFaceReady } from './text-engine/browser.js';
 import { solveLayout } from './auto-layout.js';
 // Containment - whether a box's text stays inside the box, and the ladder that
@@ -302,6 +304,11 @@ export function loadProjectPages(rawPages) {
   // metrics, so a test run never rewrites geometry from a stand-in number.
   // Before it, the one box a load lays out: one placed while its face was
   // loading and never solved, whose face is in by now (`solvePending`).
+  //
+  // And before either, with the Rust engine switched on and a chapter it has
+  // not fitted before: every box is noted as the file has it (`beginFirstFit`),
+  // so that what this pass changes can be told to the user and taken back.
+  beginFirstFit();
   for (const p of app.pages) {
     solvePending(p);
     refitPage(p);
@@ -760,6 +767,9 @@ const lineBoxGeoms = (p, n) =>
 // count.
 export function autoFitBox(b, p = page()) {
   if (!b?.style || !canMeasure()) return false;
+  // An edit's fit: the box is the user's from here, and no longer one whose
+  // lines an engine moved.
+  forgetRelaid(b);
   if (boxFaceArriving(b, p)) {
     holdFit(b);
     return false;
@@ -1006,6 +1016,7 @@ function growAndReview(b, p, cand, place, lineCount) {
   const changed = isAutoBox(cand) ? growHeightTo(b, lineCount, p, cand, place) : false;
   if (changed && held) b.auto.stamp = solveStamp(b, cand.text);
   reviewBox(b, p, changed ? placeAtHeight(place, boxCandidate(b, cand.text)) : place);
+  if (firstFit.open) noteRelaid(b, place);
   return changed;
 }
 
@@ -1133,7 +1144,11 @@ export function flaggedBoxes(pages = app.pages) {
   const out = [];
   for (const pg of pages ?? []) {
     for (const b of pg?.boxes ?? []) {
-      const review = reviewOf(b, pg);
+      // The queue's list also holds a box whose lines the Rust engine moved
+      // the first time it fitted the chapter, while that is being told
+      // (`relaidNote`). Only this list: the badge, the export and the PSD ask
+      // `reviewOf`, and to them such a box is one that fits.
+      const review = reviewOf(b, pg) ?? relaidNote(b);
       if (review) out.push({ pageId: pg.id, boxId: b.id, review });
     }
   }
@@ -1153,6 +1168,257 @@ export function refitPage(p) {
   let n = 0;
   for (const b of p.boxes) if (refitBox(b, p)) n++;
   return n;
+}
+
+// ---------- a chapter the Rust engine fits for the first time ----------
+// A chapter's boxes were sized by whichever engine measured when they were
+// lettered, and the file says which: `typesetting.version`, 1 for the browser,
+// 2 for the Rust text engine (data.js). The two do not measure alike - the
+// Rust engine reads a glyph's true outline where WebKit reports a line's
+// advance as its ink, it has one rule for a synthesised bold, and its own
+// breaker for plain text (text-engine/RULES.md) - so the first time the Rust
+// engine opens a version 1 chapter, the grow-only pass every open runs can
+// find something to do: a height to grow, a flag to raise or to clear, a
+// line that breaks somewhere else. Nothing else: a box's width, size and
+// place are not the open's to change under either engine (`refitBox`).
+//
+// The user's rule for that moment (2026-09-23) is that this may happen, and
+// two things follow from it being the engine's doing and not theirs:
+//
+//   they are told   what changed, once, in the queue (EngineNotice.svelte):
+//                   how many boxes grew, how many are newly flagged, how many
+//                   are no longer, how many break their lines differently.
+//                   Flagged boxes are in the review list as always; a box
+//                   whose lines moved and that still fits is listed there too
+//                   (`relaidNote`), for as long as the notice stands, so the
+//                   list the app already has is how they are stepped through.
+//   nothing is      until the user edits the chapter or keeps the changes
+//   written         (`keepFirstFit`). Opening does not mark the document
+//                   unsaved, a font arriving afterwards does not either
+//                   (`relayoutAll`), and leaving the chapter untouched writes
+//                   nothing (`flushSave`). Turning the switch off again puts
+//                   every box back as it was noted (`endFirstFit`). The first
+//                   save that does run - any edit's - carries the grown
+//                   heights and the flags with it, and stamps the file 2
+//                   (`stampTypesetting`).
+//
+// For that, every box is noted as it stood before the engine fitted it: at a
+// load, as the file has it; when the switch comes on over an open chapter,
+// as the browser left it. Kept beside the document, never in it, and only
+// while the Rust engine is switched on: with the browser measuring none of
+// this runs, and a chapter opens exactly as it always has.
+//
+// How its lines broke before is not in the file. It is asked of the engine
+// that measured before the switch (`linesBefore`) for as long as there is
+// one: AT CUT-OVER, when the browser's measuring goes, that question has
+// nobody to answer it, `relaid` is then never set, and the notice counts
+// heights and flags alone.
+export const firstFit = $state({
+  // The open chapter has boxes noted: it is at version 1 and the Rust engine
+  // is, or is about to be, the one fitting it.
+  open: false,
+  // What the engine changed has reached disk, by a save of any kind.
+  kept: false,
+  // The user has answered the notice.
+  dismissed: false,
+  // Raised when a box's lines are found to have moved, or not to have: that
+  // is kept beside the box, where no signal sees it.
+  seen: 0,
+});
+// box -> { y, h, review, flagged, stamp, lines, relaid }
+let noted = new WeakMap();
+
+function resetFirstFit() {
+  if (!firstFit.open && !firstFit.kept && !firstFit.dismissed) return;
+  firstFit.open = false;
+  firstFit.kept = false;
+  firstFit.dismissed = false;
+  noted = new WeakMap();
+}
+
+// Whether the Rust engine is the one measuring: the switch is on and its
+// engine is installed (it is not while it starts, nor with no font to read).
+const rustMeasuring = () => !!fontSource?.measuring?.();
+
+function beginFirstFit() {
+  resetFirstFit();
+  if (!fontSource || app.typesetting.version >= LAYOUT_VERSION_RUST) return;
+  if (!app.pages.some((p) => p.boxes.length)) return;
+  noted = new WeakMap();
+  const lines = linesBefore();
+  for (const p of app.pages) {
+    for (const b of p.boxes) {
+      noted.set(b, {
+        y: b.y,
+        h: b.h,
+        review: b.review ? $state.snapshot(b.review) : null,
+        flagged: !!(b.review ?? solverReview(b, p)),
+        stamp: b.auto?.stamp ?? null,
+        lines: lines?.get(b) ?? null,
+        relaid: false,
+      });
+    }
+  }
+  firstFit.open = true;
+}
+
+// Every box's lines as the engine that measured before the switch breaks
+// them: the browser, for as long as the app has one. Null when there is no
+// such engine to ask. A box it cannot answer for - text on a curve, a face
+// the browser has not loaded, a breaker this environment lacks - is left out,
+// and is then a box whose lines are not known to have moved.
+//
+// Asked with that engine installed and the font source out, which is the
+// state a browser session is in, so a name resolves as it does there. Both
+// are put back before anything else runs: nothing renders and nothing is
+// fitted in between, and the layouts kept from either engine are dropped on
+// the way in and on the way out (`setTextEngine`, measure.js).
+function linesBefore() {
+  const engine = fontSource?.before?.();
+  if (!engine || !canMeasure()) return null;
+  const source = fontSource;
+  const now = textEngine();
+  const out = new Map();
+  fontSource = null;
+  if (now !== engine) setTextEngine(engine);
+  try {
+    for (const p of app.pages) {
+      for (const b of p.boxes) {
+        try {
+          const text = boxText(b, p);
+          if (!b.style || !/\S/.test(String(text ?? ''))) continue;
+          if (engine.loading?.() || engine.faceReady?.(faceFor(b.style, b.style.size)) === false) continue;
+          const place = placeBlock(boxCandidate(b, text));
+          if (!place.isCurve && Array.isArray(place.lines)) out.set(b, place.lines.slice());
+        } catch {
+          /* not known */
+        }
+      }
+    }
+  } finally {
+    if (now !== engine) setTextEngine(now);
+    fontSource = source;
+  }
+  return out;
+}
+
+// A fit has just placed the box's block: whether its lines are the ones it
+// had before. Only said by the Rust engine, of a box it can answer for.
+function noteRelaid(b, place) {
+  const was = noted.get(b);
+  if (!was?.lines || place.isCurve || !Array.isArray(place.lines) || !rustMeasuring()) return;
+  const relaid = was.lines.length !== place.lines.length || was.lines.some((line, i) => line !== place.lines[i]);
+  if (relaid === was.relaid) return;
+  was.relaid = relaid;
+  firstFit.seen++;
+}
+function forgetRelaid(b) {
+  if (!firstFit.open) return;
+  const was = noted.get(b);
+  if (!was?.relaid) return;
+  was.relaid = false;
+  was.lines = null;
+  firstFit.seen++;
+}
+
+// What `flaggedBoxes` lists beside the flags: a box whose lines the engine
+// moved, while the notice stands. The flag's shape, so the queue's list shows
+// it as it shows any other; no edge is crossed, so every side reads 0. Never
+// written, and not a flag: `box.review` is not touched, `reviewOf` does not
+// answer with it, and the note goes with the notice.
+const RELAID = Object.freeze({ kind: 'overflow', overflow: Object.freeze({ l: 0, t: 0, r: 0, b: 0 }), reason: REVIEW_REASONS.relaid });
+function relaidNote(b) {
+  if (!firstFit.open || firstFit.dismissed) return null;
+  firstFit.seen;
+  return noted.get(b)?.relaid ? RELAID : null;
+}
+
+/**
+ * What the Rust engine changed in the open chapter the first time it fitted
+ * it, counted against the boxes as they were noted; null when there is
+ * nothing to say (the browser measures, the chapter is at version 2, the
+ * notice was answered, or the engine is still starting). `first` is the
+ * first box to look at: one newly flagged, or one whose lines moved.
+ */
+export function firstFitChanges(pages = app.pages) {
+  if (!firstFit.open || firstFit.dismissed) return null;
+  // The engine coming on is not a signal of its own; the relayout it runs is.
+  app.fontsVersion;
+  firstFit.seen;
+  if (!rustMeasuring()) return null;
+  let grew = 0;
+  let flagged = 0;
+  let cleared = 0;
+  let relaid = 0;
+  let first = null;
+  for (const pg of pages ?? []) {
+    for (const b of pg?.boxes ?? []) {
+      const was = noted.get(b);
+      if (!was) continue;
+      const now = !!(b.review ?? solverReview(b, pg));
+      if (b.h > was.h) grew++;
+      if (now && !was.flagged) flagged++;
+      if (!now && was.flagged) cleared++;
+      if (was.relaid) relaid++;
+      if (!first && ((now && !was.flagged) || was.relaid)) first = { pageId: pg.id, boxId: b.id };
+    }
+  }
+  return { grew, flagged, cleared, relaid, first, kept: firstFit.kept };
+}
+
+// Whether the open chapter holds what the engine changed and nothing of the
+// user's: it was noted, no save has run since, and no edit is waiting for one.
+const firstFitUnkept = () => firstFit.open && !firstFit.kept && app.saved;
+
+// The switch going off. An untouched chapter is put back as it was noted, so
+// that trying the engine and turning it off again is not an edit; one the
+// user has edited or kept stays as it is, since it is on disk that way or
+// about to be.
+function endFirstFit() {
+  if (firstFitUnkept()) {
+    for (const p of app.pages) {
+      for (const b of p.boxes) {
+        const was = noted.get(b);
+        if (!was) continue;
+        if (b.y !== was.y) b.y = was.y;
+        if (b.h !== was.h) b.h = was.h;
+        if (was.review) writeReview(b, was.review);
+        else writeReview(b, null);
+        if (b.auto && b.auto.stamp !== was.stamp) b.auto.stamp = was.stamp;
+      }
+    }
+  }
+  resetFirstFit();
+}
+
+/**
+ * The notice's answer: what the engine changed is kept. Written now - the
+ * grown heights, the flags, and the file's version - unless a save has
+ * already carried it, and the notice goes either way.
+ */
+export function keepFirstFit() {
+  if (!firstFit.open) return Promise.resolve();
+  firstFit.dismissed = true;
+  if (firstFit.kept || !rustMeasuring()) return Promise.resolve();
+  markUnsaved();
+  return flushSave();
+}
+
+/**
+ * The chapter's typesetting as a save writes it, stamped with the engine
+ * that fitted the boxes going to disk with it: 2 with the Rust engine
+ * measuring; with the browser measuring, what the chapter had - except that
+ * a 2 becomes a 1 again, since its boxes are the browser's now, and the Rust
+ * engine is to say what it changes the next time it meets them. Called by
+ * the saver as it takes its snapshot, and by nothing else: this is the one
+ * place the number is written.
+ */
+export function stampTypesetting() {
+  const had = app.typesetting.version;
+  const version = rustMeasuring() ? LAYOUT_VERSION_RUST : had === LAYOUT_VERSION_RUST ? LAYOUT_VERSION : had;
+  if (version !== had) app.typesetting = { ...app.typesetting, version };
+  if (firstFit.open) firstFit.kept = true;
+  return { ...app.typesetting };
 }
 
 // ---------- a font arriving changes every measurement ----------
@@ -1204,12 +1470,26 @@ export function relayoutAll() {
   clearLayoutMemo();
   app.fontsVersion++;
   let n = 0;
-  for (const p of app.pages) n += landPage(p);
+  let edited = 0;
+  for (const p of app.pages) {
+    const landed = landPage(p);
+    n += landed.n;
+    edited += landed.edited;
+  }
   if (fitsAwaited > 0 && !app.pages.some((p) => p.boxes.some((b) => fitsAwaitingFace.has(b)))) fitsAwaited = 0;
   // Only when something moved: the geometry is in the document, so it has to
   // reach disk, and an unsaved flag raised by a font that changed no box would
   // be a write nobody asked for.
-  if (n) markUnsaved();
+  //
+  // With the Rust engine switched on (a font source), only when what moved was
+  // an edit's own fit landing late or a box being laid out for the first time.
+  // A height the grow-only pass grew is not written for its own sake: the
+  // engine coming on, a system family's bytes arriving a moment after a
+  // chapter opened, a letter's font being found - none is the user's doing,
+  // and each would otherwise put the file on disk 800ms after a chapter was
+  // merely opened. The height is worked out again, the same, at every open;
+  // it reaches disk with the next save the user's own edit causes.
+  if (fontSource ? edited : n) markUnsaved();
   return n;
 }
 
@@ -1217,16 +1497,19 @@ export function relayoutAll() {
 // that were pending, and the grow-only refit of everything else. `open` is
 // false for a page that is no longer in the document (`fontsSettling`): it has
 // no history, and a page of the chapter that is open now may carry its id.
+//
+// Answers how many boxes moved (`n`), and how many of those were laid out or
+// fitted for an edit rather than grown by the grow-only pass (`edited`).
 function landPage(p, open = true) {
   // Counted so a session with nothing waiting never walks the boxes for it.
   const landing = fitsAwaited > 0 ? heldFitsLanding(p) : null;
-  let n = solvePending(p);
-  if (landing) n += fitLanding(p, landing);
-  n += refitPage(p);
+  let edited = solvePending(p);
+  if (landing) edited += fitLanding(p, landing);
+  const n = edited + refitPage(p);
   // Last, with the box as all three left it: the edit that asked for the fit
   // was recorded before the fit could run, and its undo entry is owed this.
   if (landing && open) for (const { b, was } of landing) fitLanders.notify(p.id, b.id, was, fitGeom(b));
-  return n;
+  return { n, edited };
 }
 
 // Every box on a page placed while its face was loading, solved now that the
@@ -1278,6 +1561,8 @@ export function solvePending(p, boxes = p?.boxes) {
 export function useChapterTypesetting(raw) {
   app.typesetting = normalizeTypesetting(raw);
   setTypesetEnabled(app.typesetting.mode === 'smart');
+  // Another chapter, or none: what was noted of the last one goes with it.
+  resetFirstFit();
 }
 
 // Settings' switch for the open chapter. Saved with it, and every box
@@ -1688,6 +1973,10 @@ export function markSaved() {
 }
 export function flushSave() {
   clearTimeout(saveT);
+  // A chapter the Rust engine fitted for the first time, which the user has
+  // neither edited nor kept: there is nothing of theirs to write, and what
+  // the engine grew and flagged is not written by leaving (`firstFit`).
+  if (firstFitUnkept()) return Promise.resolve();
   // Every non-debounce save comes through here - leaving the editor, quitting,
   // opening another chapter - and this is the path most likely to be the one
   // that fails, because it is the one that runs when the user is on their way
@@ -5161,12 +5450,24 @@ export function fontByName(name) {
 //                  starts the looking. Absent while the engine is starting.
 //   settle(pages)  a promise for "nothing these pages need is on its way any
 //                  more" (`fontsSettling`).
+//   measuring()    whether the Rust engine is the one measuring right now.
+//                  Absent while it is starting.
+//   before()       the engine that measured before the switch went on, for
+//                  asking how a box's lines broke then (`linesBefore`).
 //
 // Null, which is every session that never turns the switch on, leaves every
 // function below answering exactly as it did before there was a switch.
 let fontSource = null;
 export function setFontSource(source) {
+  const was = fontSource;
+  // Going off: the boxes go back as they were before the engine fitted them,
+  // unless the user has kept or edited them since. Before the source goes,
+  // and before the browser re-fits what is open (`leave`).
+  if (was && !source) endFirstFit();
   fontSource = source ?? null;
+  // Coming on over a chapter that is already open: it is noted as it stands,
+  // fitted by the browser, before the engine re-fits it.
+  if (!was && fontSource && app.loaded) beginFirstFit();
 }
 
 // What an export waits for before it paints `pages`: every face their boxes
