@@ -1306,6 +1306,10 @@ let stamping = null;
 // A fresh browser chapter records its snapshot without acquiring that policy.
 let disk = null;
 let documentTurn = 0;
+// Final outgoing writes can overlap. A matching browser handoff retires
+// ownership only after every final that acquired this Rust debt has settled.
+const finalSettlements = new Set();
+const finalOwnsDocument = () => [...finalSettlements].some((t) => t.owned && t.turn === documentTurn && t.ref === app.chapterRef);
 // Keep's wait: how long it lasts, its timer, whether it has run out, and the
 // promise `keepFirstFit` handed back.
 export const KEEP_WAIT_MS = 4000;
@@ -1400,6 +1404,7 @@ function beginFirstFit() {
   // Engine turns own save debt, not a fresh disk snapshot. A browser write
   // still in flight (or an unsaved browser edit) is already behind this memory.
   disk.owned = true;
+  for (const t of finalSettlements) if (t.turn === documentTurn && t.ref === app.chapterRef) t.owned = true;
   disk.asOpened = opened || (!stamping && (app.saved || loaderDirty) && disk.doc === docText() && disk.version === app.typesetting.version);
   noted = new WeakMap();
   notedTypesetting = JSON.stringify({ ...app.typesetting, version: 0 });
@@ -1802,7 +1807,7 @@ function settleDisk() {
   if (!fileBehind()) {
     // Once the work crossing Rust's switch-off has landed, ordinary browser
     // autosaves resume their existing policy. Pure never-Rust races are deferred.
-    if (!fontSource && disk) disk.owned = false;
+    if (!fontSource && disk && !finalOwnsDocument()) disk.owned = false;
     return;
   }
   if (firstFit.kept) firstFit.kept = false;
@@ -2423,6 +2428,9 @@ export function flushSave({ settle = false } = {}) {
   // go, and says why.
   const ref = app.chapterRef;
   const owned = !!fontSource || !!disk?.owned;
+  const turn = documentTurn;
+  const ticket = settle && savers.size() && ref ? { ref, turn, owned } : null;
+  if (ticket) finalSettlements.add(ticket);
   return savers.size() && ref
     ? runSavers().then(async () => {
         // Leaving/quit must finish debt discovered while its final snapshot
@@ -2430,8 +2438,8 @@ export function flushSave({ settle = false } = {}) {
         // still absent is not waited for: compare the document/version that
         // actually exists now, rather than Keep's remaining wait or future fit.
         while (
-          settle && app.chapterRef === ref && app.loaded &&
-          (owned || fontSource || disk?.owned) && disk &&
+          settle && app.chapterRef === ref && documentTurn === turn && app.loaded &&
+          (owned || ticket?.owned || fontSource || disk?.owned) && disk &&
           (disk.doc !== docText() || disk.version !== versionNow() || disk.mode !== app.chapterMode)
         ) {
           clearTimeout(saveT);
@@ -2439,6 +2447,10 @@ export function flushSave({ settle = false } = {}) {
         }
       }).catch((e) => {
         throw saveFailed(e);
+      }).finally(() => {
+        if (!ticket) return;
+        finalSettlements.delete(ticket);
+        if (app.chapterRef === ref && documentTurn === turn) settleDisk();
       })
     : Promise.resolve();
 }

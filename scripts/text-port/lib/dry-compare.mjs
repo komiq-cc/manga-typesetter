@@ -38,6 +38,25 @@ export function storedIds(stem, pages) {
   return { ids, repaired };
 }
 
+// The layout denominator comes from the untouched source document, before
+// any open, font fit or layout result. An explicit blank box text overrides
+// its line; line-backed text follows the stored translation/legacy schema.
+export function requiredStoredLayouts(stem, pages) {
+  const { ids } = storedIds(stem, pages);
+  const layoutIds = [];
+  const curveIds = [];
+  (pages ?? []).forEach((p, pi) => (p.boxes ?? []).forEach((b, bi) => {
+    const ln = (p.lines ?? []).find((ln) => ln.n === b.lineN);
+    const text = b.text ?? ln?.en ?? ln?.natural ?? ln?.stylised ?? ln?.text ?? '';
+    if (!String(text).trim()) return;
+    const id = ids.get(at(pi, bi));
+    layoutIds.push(id);
+    const s = b.style;
+    if ((s?.path?.on && (s.path.pts?.length ?? 0) >= 2) || s?.circle?.on || (s?.curve && s.curve !== 0)) curveIds.push(id);
+  }));
+  return { layoutIds, curveIds };
+}
+
 /**
  * The open document against the file, box for box: every stored box has a
  * partner at its place, and there is no box the file does not have. Anything

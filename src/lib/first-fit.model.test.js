@@ -1529,6 +1529,96 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally { await cleanupModel(); }
   });
 
+  it('overlapping Rust final settlements retain receipt ownership after a matching browser handoff and later edit', async () => {
+    resetHand();
+    state.open = false;
+    const finals = [];
+    let settled = 0;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.editLine();
+      hand.hold = true;
+      for (let i = 0; i < 3; i++) {
+        const final = flushSave({ settle: true });
+        final.then(() => settled++, () => {});
+        finals.push(final);
+      }
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      await EVENTS.switchOff();
+      // A's Rust snapshot is behind the browser handoff B. The other finals
+      // still own the outgoing debt even when B matches both current files.
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      await EVENTS.editLine();
+      // Keep every subsequent writer held. Old source must fail on an extra
+      // held writer/pending final before unheld cleanup could enter its loop.
+      for (let i = 0; i < 3; i++) {
+        expect(hand.writes).toHaveLength(1);
+        hand.writes.shift().ok();
+        await pass(0);
+      }
+      expect(hand.writes, 'current both-file receipts must stop the final queues').toHaveLength(0);
+      expect(settled, 'all three outgoing finals must settle').toBe(3);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
+      choicesOnDisk(c, 'independent later choice after all outgoing finals');
+      await Promise.all(finals);
+    } finally {
+      await cleanupModel();
+      await Promise.allSettled(finals);
+    }
+  });
+
+  it('a stale outgoing Rust final ticket cannot settle or stamp the next browser chapter', async () => {
+    resetHand();
+    state.open = false;
+    let final;
+    let settled = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.editLine();
+      const outgoing = c;
+      hand.hold = true;
+      final = flushSave({ settle: true }).then(() => { settled = true; });
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      expect(hand.writes[0].path).toBe(paths(outgoing).chapter);
+      // Explicit close invalidates the outgoing identity while its actual
+      // both-file saver remains held. No flush/drain precedes the new open.
+      closeChapter();
+      state.open = false;
+      await EVENTS.switchOff();
+      adopt(chapters[1]);
+      await open(V2);
+      const incomingChapter = onDisk();
+      const incomingText = textOnDisk();
+      await EVENTS.editLine();
+      expect(app.typesetting.version).toBe(2);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(settled, 'a stale outgoing ticket must finish without saving the new identity').toBe(true);
+      expect(hand.writes).toHaveLength(0);
+      expect(onDisk()).toBe(incomingChapter);
+      expect(textOnDisk()).toBe(incomingText);
+      expect(JSON.parse(fsx._tree.files.get(paths(outgoing).chapter)).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(fsx._tree.files.get(paths(outgoing).text)).pages[0].lines[0].en).toBe('AAA');
+      expect(app.typesetting.version).toBe(2);
+      await final;
+    } finally {
+      await cleanupModel();
+      await Promise.allSettled(final ? [final] : []);
+    }
+  });
+
   it('an empty chapter Keep does not wait for the previous chapter’s held font', async () => {
     resetHand();
     state.open = false;
@@ -1642,6 +1732,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
   // Review findings and mutation-sensitive boundaries, kept by name so they
   // run even when the generator's seed count is zero.
   const FOUND = {
+    'original seed20262477 settles concurrent final opens after browser handoff': ['switchOn', 'engineStarts', 'open1', 'switchOn', 'engineStarts', 'edit', 'wait', 'reversePages', 'writeLands', 'holdWrites', 'editLate', 'unmarkedMode', 'engineStarts', 'debounce', 'writeLands', 'open1', 'switchOff', 'writeLands', 'openEmpty', 'fontLands', 'openEmpty', 'debounce', 'unmarkedHandle', 'open2', 'unmarked_cleaned', 'reversePages', 'keep', 'fontLands', 'writeLands', 'fontLands', 'open1', 'writeLands', 'editLate'],
     'the final leave snapshot awaits a fit that lands while it is held': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'leave', 'fontLands', 'writeLands'],
     'switching off cannot restore over an independently retained handle choice': ['switchOn', 'engineStarts', 'open1', 'unmarkedHandle', 'switchOff'],
     'a held Rust save remains owed after switching off': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'switchOff', 'writeLands'],

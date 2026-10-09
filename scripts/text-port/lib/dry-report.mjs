@@ -154,14 +154,17 @@ export function assertReportRecords(run, rows) {
   if (!Array.isArray(run.chapters) || !Array.isArray(rows)) fail('missing chapter or box records');
   const chapters = new Map();
   const expected = new Map();
+  const required = new Map();
   for (const c of run.chapters) {
     if (typeof c.chapter !== 'string' || chapters.has(c.chapter) || !Number.isInteger(c.boxes) || c.boxes < 0) fail('invalid or duplicate chapter metadata');
     chapters.set(c.chapter, c);
     if (c.refused) continue;
     if (!Array.isArray(c.boxIds) || c.boxIds.length !== c.boxes || new Set(c.boxIds).size !== c.boxes) fail(`${c.chapter}: stored IDs do not match declared ${c.boxes} boxes`);
+    if (!Array.isArray(c.layoutIds) || !Array.isArray(c.curveIds) || new Set(c.layoutIds).size !== c.layoutIds.length || new Set(c.curveIds).size !== c.curveIds.length || c.layoutIds.some((id) => !c.boxIds.includes(id)) || c.curveIds.some((id) => !c.layoutIds.includes(id))) fail(`${c.chapter}: invalid stored text/layout denominator`);
     for (const id of c.boxIds) {
       if (typeof id !== 'string' || !id || expected.has(id)) fail('invalid or duplicate stored ID');
       expected.set(id, c.chapter);
+      if (c.layoutIds.includes(id)) required.set(id, c.curveIds.includes(id));
     }
   }
   const seen = new Set();
@@ -169,6 +172,21 @@ export function assertReportRecords(run, rows) {
     if (!chapters.has(row.chapter) || chapters.get(row.chapter).refused || expected.get(row.id) !== row.chapter || seen.has(row.id)) fail(`${row.id}: duplicate, extra or foreign box`);
     if (!row.rust?.state || !row.strip) fail(`${row.id}: missing Rust or strip partner`);
     if ([row.rust.state, row.strip].some((partner) => ['x', 'y', 'w', 'h', 'size'].some((k) => !Number.isFinite(partner[k])))) fail(`${row.id}: malformed Rust or strip geometry`);
+    const lay = row.rust.lay;
+    if (!required.has(row.id)) {
+      if (lay !== null) fail(`${row.id}: a stored no-text box has an unexpected layout`);
+    } else {
+      const bad = () => fail(`${row.id}: missing or malformed required Rust layout`);
+      const rect = (r) => r && ['l', 't', 'r', 'b'].every((k) => Number.isFinite(r[k]));
+      if (!lay || typeof lay !== 'object' || lay.error || lay.curve !== required.get(row.id) || typeof lay.fits !== 'boolean' || !rect(lay.overflow) || Object.values(lay.overflow).some((v) => v < 0) || !Object.hasOwn(lay, 'ink') || (lay.ink !== null && (!rect(lay.ink) || lay.ink.r < lay.ink.l || lay.ink.b < lay.ink.t)) || !Object.hasOwn(lay, 'directMetrics')) bad();
+      if (lay.curve) {
+        if (['lines', 'lineX', 'blockY', 'blockH', 'directMetrics'].some((k) => lay[k] !== null)) bad();
+      } else {
+        if (!Array.isArray(lay.lines) || !lay.lines.length || lay.lines.some((s) => typeof s !== 'string') || !Array.isArray(lay.lineX) || lay.lineX.length !== lay.lines.length || !lay.lineX.every(Number.isFinite) || !Number.isFinite(lay.blockY) || !Number.isFinite(lay.blockH) || lay.blockH < 0) bad();
+        const m = lay.directMetrics;
+        if (m !== null && (!m || ![m.font?.ascent, m.font?.descent, m.lineH].every(Number.isFinite) || m.font.ascent < 0 || m.font.descent < 0 || m.lineH <= 0 || !Array.isArray(m.inks) || m.inks.length !== lay.lines.length || m.inks.some((k, i) => /\S/.test(lay.lines[i]) ? !k || ![k.ascent, k.descent].every(Number.isFinite) || k.ascent < 0 || k.descent < 0 : k !== null))) bad();
+      }
+    }
     seen.add(row.id);
   }
   if (seen.size !== expected.size) fail(`${expected.size - seen.size} stored boxes have no record`);

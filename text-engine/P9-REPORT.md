@@ -1412,3 +1412,52 @@ unknown Error/rejection failures cannot be called kills. Seven pure parser
 examples passed (measured; no mutation execution). A RESET_LEDGER mutation
 may now be redundant because the private actual receipt survives clearing
 the global stamp; a survivor must be recorded honestly, then investigated.
+
+The narrow cleaned-name correction at e377944 was independently measured by
+root: focused20 passed169 tests, with18 completed original orders and two
+exact browser-witness prefixes, zero unknown orders in that20-order sample.
+Its661 requested generated events executed641 and left20 unexecuted tail
+events. Only the generated category/event-stage counters describe original
+orders; legacy writes/keeps/asOpened/asDocument/browserDeferred totals also
+include named and shrink replays. A witness shrink preserves its class, not
+necessarily the original lost key or chapter identity. Attribution uses each
+preserved original fullOrder/windows/witness, not its minimized order.
+
+The e377944 full6000 attempt reached root's650-second deadline without a
+model result and is a timeout, not a pass. Root confirmed its owned processes
+gone after TERM; a redundant KILL cleanup exception prevented the original
+metadata write, with the raw log/trace/sample and a separate incident record
+preserved. The separate test-only diagnostic archive subsequently timed out
+at180 seconds (wrapper124, child143, acceptance false) with source unchanged.
+It reached original seed20262477: four pending transitions and a held outgoing
+writer after browser handoff. Before that stall its partial transformed output
+also recorded31 unknown original orders. These are unresolved; neither a
+diagnostic prefix nor the focused20 proves all6000 orders.
+
+The bounded settlement repair now keeps an actual outgoing ref/document-turn
+ticket alive until each Rust-owned final call finishes. Acquiring Rust during
+an already active final window acquires that same ticket. A matching browser
+receipt cannot retire ownership while another current owned final still needs
+receipts, and closing/opening another identity prevents an old ticket from
+settling or stamping that new chapter. Pure browser final calls remain unowned;
+the measured default browser autosave cancellation defect is not repaired.
+A bounded overlapping-final regression asserts no further held writer and all
+three completed final calls before cleanup. The original33-event seed20262477
+is retained separately. Old-source reproduction must select only the bounded
+named assertion; a hot loop/timeout never counts as a mutation kill.
+
+The final combined Codex review of e377944 completed with two tool findings.
+The dry lane now derives required layoutIds and curveIds from untouched stored
+text/translation before any open or engine layout. Report-only validation
+requires a complete finite straight/curve layout for those IDs, an explicit
+null for a true no-text box, and coherent direct metrics or explicit unknown
+metrics. Missing/null/empty layouts cannot silently remove a placement
+comparison. The browser checker retains its21 named checks and separately
+records a fatal global page-error verdict/count/details before writing its
+result; collected Runtime exceptions cannot print all passed or exit0.
+
+The separately labeled review4 catalog removes only active-final retirement
+protection, required-layout validation, or the global page-error predicate.
+The32 original definitions and their sealed runner remain unchanged. These
+current repairs and new regressions are draft/unrun; all final-source model,
+mutation, real dry-run, browser, capture and final review proofs remain pending.

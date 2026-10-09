@@ -57,7 +57,7 @@ import { GlobalFonts } from '@napi-rs/canvas';
 import { dataDir, guardedPath, safeId, sha256, root } from '../../scripts/text-port/lib/common.mjs';
 import { scanInstalled, systemList, nativeStandIn } from '../../scripts/text-port/lib/installed-fonts.mjs';
 import { directBlock, metricKey, readReferenceMetrics } from '../../scripts/text-port/lib/dry-metrics.mjs';
-import { at, storedIds, assertPartners, unrepairedPages, changeOf } from '../../scripts/text-port/lib/dry-compare.mjs';
+import { at, storedIds, requiredStoredLayouts, assertPartners, unrepairedPages, changeOf } from '../../scripts/text-port/lib/dry-compare.mjs';
 
 const FIXTURE_SOURCE = /^src\/test\/fonts\//;
 
@@ -260,6 +260,7 @@ if (process.env.TP_DRYRUN !== '1') {
       const stem = safeId(basename(name, '.json').toLowerCase());
       const record = JSON.parse(readFileSync(guardedPath(dir, name), 'utf8'));
       const named = storedIds(stem, record.pages);
+      const requiredLayouts = requiredStoredLayouts(stem, record.pages);
       ids = named.ids;
       // A page the loader repairs from its picture: not something this run
       // can do, so nothing is said of the chapter but that.
@@ -437,7 +438,7 @@ if (process.env.TP_DRYRUN !== '1') {
       }
       chapters.push({
         chapter: stem, mode, modeFrom: hasMode ? 'file' : 'legacy', version, pages: (record.pages ?? []).length, boxes: stored.size,
-        idsRepaired: named.repaired, boxIds: [...ids.values()],
+        idsRepaired: named.repaired, boxIds: [...ids.values()], ...requiredLayouts,
         minted, savedAtOpen, savedAfterFonts, writesByOpening: beforeLeave - writesBefore, writesOnLeave,
         notice, writesOnKeep, versionOnKeep, versionBack,
         browserRun: !!browser, paintFailures: painted.filter((p) => p.includes(' FAILED ')),

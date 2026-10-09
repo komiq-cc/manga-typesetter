@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
-import { at, storedIds, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
+import { at, storedIds, requiredStoredLayouts, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
 import { explain, inkMoved, stripAgainst, assertLanePassed, assertReportRecords } from '../../../scripts/text-port/lib/dry-report.mjs';
 import { predictMiddle } from '../../../scripts/text-port/lib/dry-metrics.mjs';
+import { p9CheckResult } from '../../../scripts/text-port/lib/p9-check-result.mjs';
 
 // The dry run of P9 (scripts/text-port/dry-run.mjs) says "0 boxes changed
 // their width" and "0 changes unexplained" of the user's chapters. These are
@@ -222,7 +223,7 @@ describe('a report needs the lane’s own passing verdict', () => {
   it('accepts only a completed passing lane', () => {
     expect(() => assertLanePassed(pass())).not.toThrow();
   });
-  it.each(['layout', 'paint', 'record completeness'])('--report-only exits 1 and creates no signable report for failed %s', (kind) => {
+  it.each(['layout', 'paint', 'record completeness', 'missing required layout', 'empty required layout'])('--report-only exits 1 and creates no signable report for failed %s', (kind) => {
     const scratch = mkdtempSync(join(tmpdir(), 'p9-report-refusal-'));
     try {
       mkdirSync(join(scratch, 'raw'));
@@ -237,7 +238,10 @@ describe('a report needs the lane’s own passing verdict', () => {
       }
       writeFileSync(join(scratch, 'raw/direct-webkit.json'), JSON.stringify({ schema: 1, engine: 'system-webkit', complete: true, errors: [], sources, records: [] }));
       writeFileSync(join(scratch, 'raw/boxes.jsonl'), '');
-      if (kind === 'record completeness') run.chapters = [{ chapter: 'one', boxes: 1, boxIds: ['a'], pages: 1, mode: 'smart', modeFrom: 'file', version: 1, idsRepaired: [], paintFailures: [] }];
+      if (kind === 'record completeness' || kind.endsWith('required layout')) {
+        run.chapters = [{ chapter: 'one', boxes: 1, boxIds: ['a'], layoutIds: kind === 'record completeness' ? [] : ['a'], curveIds: [], pages: 1, mode: 'smart', modeFrom: 'file', version: 1, idsRepaired: [], paintFailures: [] }];
+        if (kind.endsWith('required layout')) writeFileSync(join(scratch, 'raw/boxes.jsonl'), JSON.stringify({ id: 'a', chapter: 'one', rust: { state: geom, lay: kind.startsWith('missing') ? null : {} }, strip: geom }) + '\n');
+      }
       else run.verdict[`${kind}Failures`].push('synthetic failure');
       writeFileSync(join(scratch, 'raw/run.json'), JSON.stringify(run));
       const child = spawnSync(process.execPath, ['scripts/text-port/dry-run.mjs', '--data', scratch, '--out', scratch, '--report-only', 'yes'], { encoding: 'utf8' });
@@ -250,7 +254,7 @@ describe('a report needs the lane’s own passing verdict', () => {
 });
 
 describe('a report accounts for every declared stored box exactly once', () => {
-  const run = () => ({ chapters: [{ chapter: 'one', boxes: 2, boxIds: ['a', 'b'] }, { chapter: 'two', boxes: 1, boxIds: ['c'] }] });
+  const run = () => ({ chapters: [{ chapter: 'one', boxes: 2, boxIds: ['a', 'b'], layoutIds: [], curveIds: [] }, { chapter: 'two', boxes: 1, boxIds: ['c'], layoutIds: [], curveIds: [] }] });
   const row = (id, chapter = 'one') => ({ id, chapter, rust: { state: geom, lay: null }, strip: geom });
   const complete = () => [row('a'), row('b'), row('c', 'two')];
   it('accepts exact records from two distinct chapters', () => {
@@ -274,5 +278,68 @@ describe('a report accounts for every declared stored box exactly once', () => {
     expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 1 }] }, [])).toThrow('no report can be written');
     expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 1, boxIds: [] }] }, [])).toThrow('no report can be written');
     expect(() => assertReportRecords({ chapters: [{ chapter: 'one', boxes: 2, boxIds: ['a', 'a'] }] }, complete())).toThrow('no report can be written');
+  });
+});
+
+describe('stored source text independently requires a complete report layout', () => {
+  const run = () => ({ chapters: [{ chapter: 'one', boxes: 3, boxIds: ['lettered', 'curve', 'blank'], layoutIds: ['lettered', 'curve'], curveIds: ['curve'] }] });
+  const row = (id, lay) => ({ id, chapter: 'one', rust: { state: geom, lay }, strip: geom });
+  const curve = () => layOf({ curve: true, lines: null, lineX: null, blockY: null, blockH: null, directMetrics: null });
+  const rows = (lay = layOf()) => [row('lettered', lay), row('curve', curve()), row('blank', null)];
+  it('derives straight, curved and blank requirements from stored text and translations before any layout exists', () => {
+    const pages = [{ id: 1, lines: [{ n: 1, en: 'translated' }, { n: 2, en: '', natural: 'overridden' }, { n: 3, en: null, natural: 'legacy' }], boxes: [
+      { id: 'a', text: null, lineN: 1 }, { id: 'b', text: ' ', lineN: 1 },
+      { id: 'c', text: null, lineN: 2 }, { id: 'd', text: null, lineN: 3 },
+      { id: 'e', text: 'curved', style: { circle: { on: true } } },
+    ] }];
+    expect(requiredStoredLayouts('source', pages)).toEqual({ layoutIds: ['c.source.p1.ba', 'c.source.p1.bd', 'c.source.p1.be'], curveIds: ['c.source.p1.be'] });
+  });
+  it('accepts complete straight and curved layouts while a true no-text box has null layout', () => {
+    expect(() => assertReportRecords(run(), rows())).not.toThrow();
+  });
+  it.each([
+    ['missing', undefined], ['null', null], ['empty', {}], ['error', { error: 'broken' }],
+    ['missing lines', layOf({ lines: undefined })], ['nonstring lines', layOf({ lines: [4, 'TWO'] })],
+    ['missing line positions', layOf({ lineX: undefined })], ['wrong position count', layOf({ lineX: [50] })],
+    ['nonfinite line position', layOf({ lineX: [50, NaN] })], ['nonfinite block top', layOf({ blockY: Infinity })],
+    ['missing block height', layOf({ blockH: undefined })], ['missing fit verdict', layOf({ fits: undefined })],
+    ['malformed overflow', layOf({ overflow: {} })], ['malformed ink', layOf({ ink: { l: 0, t: 0, r: NaN, b: 1 } })],
+    ['negative overflow', layOf({ overflow: { l: -1, t: 0, r: 0, b: 0 } })],
+    ['missing direct metric contract', layOf({ directMetrics: undefined })], ['malformed direct metrics', layOf({ directMetrics: {} })],
+    ['missing nonblank direct ink', layOf({ directMetrics: { ...directOf(), inks: [null, { ascent: 22, descent: 3 }] } })],
+    ['forged curve branch', curve()],
+  ])('refuses %s required Rust layout without changing the stored denominator', (_, lay) => {
+    const broken = rows();
+    broken[0].rust.lay = lay;
+    expect(() => assertReportRecords(run(), broken)).toThrow('no report can be written');
+  });
+  it('refuses a malformed curve, unexpected no-text layout and contradictory layout denominator', () => {
+    const malformed = rows(); malformed[1].rust.lay.blockY = 0;
+    expect(() => assertReportRecords(run(), malformed)).toThrow('no report can be written');
+    const unexpected = rows(); unexpected[2].rust.lay = layOf();
+    expect(() => assertReportRecords(run(), unexpected)).toThrow('no report can be written');
+    const missing = run(); delete missing.chapters[0].layoutIds;
+    expect(() => assertReportRecords(missing, rows())).toThrow('no report can be written');
+    const foreign = run(); foreign.chapters[0].curveIds.push('foreign');
+    expect(() => assertReportRecords(foreign, rows())).toThrow('no report can be written');
+  });
+});
+
+describe('the P9 browser checker has a global page-error verdict', () => {
+  it('keeps the existing named checks passing but fails collected uncaught browser exceptions', () => {
+    const failures = [];
+    const errors = ['Uncaught Error: asynchronous page exception'];
+    const result = p9CheckResult(failures, errors);
+    expect(result).toMatchObject({ verdict: { complete: true, passed: false }, failures: [], pageErrorCount: 1, exitCode: 1 });
+    expect(result.errors).toEqual(errors);
+    expect(result.summary).not.toContain('all passed');
+  });
+  it('passes only with no named failures and no page errors, preserving counts beyond bounded details', () => {
+    expect(p9CheckResult([], [])).toMatchObject({ verdict: { passed: true }, pageErrorCount: 0, exitCode: 0, summary: 'all passed' });
+    expect(p9CheckResult(['named failed'], [])).toMatchObject({ verdict: { passed: false }, exitCode: 1 });
+    const result = p9CheckResult([], Array.from({ length: 25 }, (_, i) => `error${i}`));
+    expect(result.pageErrorCount).toBe(25);
+    expect(result.errors).toHaveLength(20);
+    expect(result.exitCode).toBe(1);
   });
 });

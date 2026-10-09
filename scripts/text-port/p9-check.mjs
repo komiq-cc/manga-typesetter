@@ -23,6 +23,7 @@ import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmS
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { p9CheckResult } from './lib/p9-check-result.mjs';
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1']] : acc), []),
@@ -296,14 +297,14 @@ try {
     await shot('6-handle-held.png');
   }
 
-  report.errors = cdp.errors.slice(0, 20);
-  report.failures = failures;
+  const result = p9CheckResult(failures, cdp.errors);
+  Object.assign(report, result);
   writeFileSync(join(OUT, 'check.json'), JSON.stringify(report, null, 2) + '\n');
   log(`first open of ${CHAPTER} under the Rust engine: ${opened.boxes} boxes, load ${opened.ms} ms (browser: ${report.steps.browser.open.ms} ms; version 2: ${again.ms} ms)`);
   log(`notice: ${first.notice?.what ?? 'none'}`);
-  log(`${failures.length ? `${failures.length} FAILED` : 'all passed'}; written to ${OUT}`);
+  log(`${result.summary}; written to ${OUT}`);
   if (cdp.errors.length) log(`page errors: ${cdp.errors.slice(0, 5).join(' | ')}`);
-  process.exitCode = failures.length ? 1 : 0;
+  process.exitCode = result.exitCode;
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;
