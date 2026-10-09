@@ -379,3 +379,29 @@ node scripts/text-port/p8-audit.mjs --data <tp-data>   # -> <tp-data>/reports/p8
 It starts its own Vite (port 5204) and Chromium (DevTools port 9382) and
 stops both. The head of the file says what a plain browser makes it stand in
 for (the library on disk, system fonts) and that typing is not acted out.
+
+
+### P9c direct WebKit measurements
+
+Before the P9 dry run, record the existing Safari layout's exact lines with
+raw canvas font-box and per-line ink metrics. This reads only local copies
+under tp-data. It installs/downloads no fonts and starts no server/collector.
+The private output includes source/font SHA256s and must use a new path:
+
+```
+node scripts/text-port/dry-metrics.mjs --data <tp-data> --out <tp-data>/reports/p9-direct-metrics.json
+node scripts/text-port/dry-run.mjs --data <tp-data> --out <out> --legacy-mode smart
+```
+
+The capture compiles dry-metrics-webkit.swift in a private temporary folder,
+loads copy font bytes into a nonpersistent local WKWebView, measures the
+font and exact lines, then deletes its private HTML/executable. The dry run
+validates hashes and copies the raw artifact into raw/direct-webkit.json.
+For an independently repeated capture use a fresh JSON path and pass it as
+`--webkit-metrics <json>`. Missing/stale reference metrics are refused. The
+prediction reads those direct measurements, never blockY or positioned ink;
+font-box shifts name rule3 and glyph-ink shifts name rule4.
+
+A raw lane also needs its completed passing verdict. --report-only cannot
+publish a failed or incomplete layout/paint lane. Reports/p9/check is kept
+when the dry run replaces its own output.

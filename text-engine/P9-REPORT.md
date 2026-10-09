@@ -679,52 +679,50 @@ Second round:
 
 ## 11. Exactly what is written to the user's files, and when
 
-Rewritten in the second round. The first round's table was wrong in four
-rows: it said "leaving without an edit: nothing" where a change the app had
-not marked (a handle still held) was then lost; it gave version 2 to every
-save under the Rust engine, a box still waiting for its font included; it
-said Keep writes at once; and it did not say what a failed write leaves.
+Rewritten for the third round. These are the current contracts. Section14
+records the previous implementation and its then-measured proofs. In
+particular, its remembered stamp debt and its immediate dirty flag on Keep
+are superseded.
 
-With the switch **off**: nothing changes from before this phase, except that
-a chapter at version 2 is saved as version 1.
+With the switch **off**: saving and loading behave as before this phase,
+except that a chapter at version2 is saved as version1. The old browser
+save race described in section15 remains.
 
-With the switch **on**, for a chapter at version 1. "Untouched" means: the
-document equals what was noted at the open plus what the engine itself wrote
-(tops, heights, flags, solver stamps; all of a box laid out for the first
-time), compared page by page and box by box, and the chapter has not been
-marked unsaved.
+With the switch **on**, a version1 chapter is untouched when its durable
+chapter mode, typesetting settings, pages in order, and boxes equal the open
+plus the engine's own recorded fits, nobody marked an edit, no save has
+landed or is in flight, and nobody pressed Keep. Engine-only fits in that
+state do not write. Version2 also has private ownership notes, with no
+notice, so an engine-only late grow does not arm an autosave; its normal
+leave-save contract is retained.
 
 | moment | written |
 |---|---|
-| opening | nothing |
-| a font arriving after the open, the chapter untouched | nothing (a box laid out for the first time by it included) |
-| leaving, quitting or the window closing, the chapter untouched | nothing |
-| turning the switch off, the chapter untouched | nothing; the boxes go back in memory, each whole |
-| leaving or quitting with a change the app has not marked yet (a resize, move or rotate handle still held; "Fit now" that only changed the reason; anything else that altered a page or a box) | `chapter.json` and `translations.json`, whole, as below. Nothing is put back |
-| the first save an edit causes (800 ms after it, or on leaving) | `chapter.json`, whole, as every save: the edit, every grown `h` and its `y`, every `review` raised or cleared. `typesetting.version: 2` if no box of the chapter is waiting for its font at that moment; otherwise the number the file had (1). And `translations.json`, which every save derives from it |
-| the font that box waited for arriving, after such a save | one more save, 800 ms later: the box as the engine has now fitted it, and `typesetting.version: 2` |
-| leaving before that font arrives | nothing more; the file stays at version 1, and the next open under the Rust engine shows the notice again |
-| Keep on the notice | the same two files, without an edit. If a box is still waiting for its font the write waits for it (the chapter is marked unsaved at the press, so leaving meanwhile writes at once); when the wait gives up, what there is is written, at the file's number |
-| a save while the engine is still starting (the switch on, nothing measuring yet) | the edit, at the number the file had; no height or flag of the engine's, since it has fitted nothing |
-| a save that fails (disk full, folder gone) | nothing, or whatever the failed write left; the chapter stays unsaved, the indicator shows the failure, the notice stays or comes back, the version in memory stays the file's. Leaving, the next edit or Keep tries again |
-| a load that mints ids or repairs pages | as before this phase: the repair is saved, and it carries the above |
+| opening, a late font, or waiting with an untouched/unkept version1 chapter | nothing |
+| leaving/quitting an untouched version1 chapter | nothing |
+| switch off for that untouched version1 chapter | nothing; whole boxes return to their open state |
+| leaving/quitting/switch off after an unmarked durable change (a held handle, style/fit/text, picture association, translation, page order or mode) | the two document files as the user's document stands; no restore over the change |
+| an edit save while a font is still held or the engine still starts | chapter.json and translations.json from one snapshot; the file's current version remains (1 or2) |
+| the engine starts/a font lands after a save snapshot | settlement compares the actual current document/version to the landed snapshot; a newer document arms a follow-up save, even if the older write cancelled a debounce |
+| ready Rust save, with no box waiting on any page | the whole document at version2 |
+| Keep while a font waits | one deferred write; no ordinary debounce from the press; saved state can remain true while the visible notice says Keep is waiting |
+| Keep's fonts land, or four-second deadline expires | write what is ready once; if any font still waits, retain the file's version; close the notice only after both document files land |
+| a font finally arrives after that deadline | save the fitted document and its ready version2 |
+| leaving/quitting/switch off during Keep's wait | honor the choice by writing what is ready; Keep's waiting state belongs to that chapter and is cleared when it ends |
+| chapter.json lands but translations.json fails | the whole save has failed: indicator stays failed/unsaved, no new ledger snapshot or kept claim; retry writes both files |
+| an older snapshot lands after a durable change | it cannot mark the newer document or fits kept/saved; settlement arms the outstanding write |
+| load that mints ids or repairs pages | the existing repair/save path remains; the saved snapshot follows the same version rule |
 
-With the switch on, for a chapter at version 2: as before this phase, except
-that a font arriving late no longer schedules a save unless an edit's own
-fit was waiting for it. A version 2 chapter saved while a box waits for its
-font stays at 2.
+No new persisted field is added. Line-break notes and Keep's waiting state
+are memory only. The comparison includes every serialized box/style key,
+page/detection/translation data, durable filenames and order. It excludes
+runtime picture URLs and editor selection. The version decision is derived
+from the engine and every waiting box at each snapshot; it is not a debt
+flag remembered when a prior write began.
 
-Never written: which boxes had their lines moved; that the notice was seen;
-any new field. No file under the chapter's folder changes by opening, by a
-late font, by waiting or by leaving (measured: the engine test digests every
-file in the folder). Keep changes exactly `chapter.json` and
-`translations.json` (measured, same test); the page images and every other
-file keep their bytes.
-
-One thing in memory only, with the switch on and in a long strip: a box the
-open does not grow no longer has its top edge rewritten in its last bit
-(section 14). Under the browser that rewrite still happens, as before this
-phase, and reaches the file with the next save.
+The prior measured engine-test folder digests in section14 are historical
+proofs; the new whole-tree and real-file proofs are listed in section15
+only after their new runs finish.
 
 ## 12. What only the desktop app can show
 
@@ -998,3 +996,140 @@ with `--legacy-mode smart`, on `3f368143`, wasm `1aba362c…`:
   real copy has such a page.
 - The first-round figure "a second run gave 201, 122 and 249 ms" is not
   repeated; section 8 has this round's one run.
+
+
+## 15. Third round (P9c)
+
+Implementation is in progress. **No merge readiness is claimed here.** The
+coordinator must repeat the proofs and obtain the independent final Codex
+review on the integrated P7c/P8c candidate before this branch is merged.
+No P10, main merge or push is part of this round.
+
+### Starting work and invariant
+
+The two paused files were preserved byte for byte before editing (measured:
+SHA256 store `a60516e5a61fb6106a68a4a1ef644c1ba2f3d418b0990fe984c488d64623100d`,
+model `fe55b4285a28c3f8ee4547a3b4c1cff56cab5738a3c7a402d3224c9332981d57`).
+Their exact starting diff is private in tp-data/reports/resume-20261009.
+No reset, stash or revert was used. This round continues that implementation.
+
+`disk` is the last snapshot known to have landed, including the version and
+chapter mode. `docText` serializes the durable current document.
+`versionNow` derives the number from the current measuring engine and all
+waiting boxes. `landed`, font/engine arrival and Keep use `settleDisk` to
+ask whether the file is behind. A finishing write is not itself proof that
+the newer document is saved. The note comparison sees page position and
+mode/settings as well as every durable box/page field. Notes for version2
+preserve its engine-only grow policy while keeping its notice off.
+
+The three original bad orders are retained as named real-store/real-saver
+model sequences. The old unpatched store's seeds20261102,20261268 and
+20261024, and84 failures in1500 sequences, are **historical measured evidence
+from the paused worker**, not new measurements by this worker.
+
+The model now reads both chapter.json and translations.json and checks
+chapter mode and typesetting mode. It has two distinct pages, page-order
+and unmarked-handle/mode events, an empty chapter event, and held/failing
+translation writes. Named boundary probes change each durable field after
+an old snapshot, let that snapshot finish, and require the next debounce's
+actual bytes without a rescue flush. An untouched version1 must retain both
+original byte strings and have zero chapter writes. Version2's existing
+leave-save is permitted. A deadline test checks the disk while the font is
+still held, before allowing its eventual fit.
+
+### Keep and the notice
+
+Keep owns one bounded wait, at most4000ms. The press does not arm the ordinary
+800ms edit debounce. The waiting state is visible in EngineNotice, including
+what happens at the deadline and after a later font arrives. After failure,
+the notice offers Keep again and the save indicator/toast state remains.
+The timeout writes even if known geometry is unchanged. Multiple arrivals
+while one Keep write is in flight are coalesced; a newer snapshot is written
+when that write finishes. A close clears the chapter's wait and promise.
+
+The five previously failing tests were not weakened: three exact return
+objects now include keeping:false; the held handle is truthfully unsaved
+when settlement sees its disk difference; Keep remains saved/visible while
+otherwise untouched and waiting, with no write before it finishes. New
+fixtures cover non-rotation style, balloon fit, both durable filenames,
+page order, an offscreen held font, a never-arriving font/deadline/later fit,
+and a stale Keep from a closed chapter.
+
+### Independent rule3/rule4 prediction
+
+The old positioned-ink-minus-blockY calculation is removed. The lane calls
+fontBox and lineInk directly for each face and exact line. A system-WebKit
+capture reads only existing local font/chapter COPIES and records exact text,
+size, spacing, bold/slant, CSS, local font face SHA256s, raw font/ink metrics,
+and source file hashes. It uses a nonpersistent local WKWebView with private
+HTML; no server, collector, font installation or download is needed.
+
+Canvas lineInk in browser.js does not apply letterSpacing; measure.js adds
+horizontal spacing only. This check predicts vertical centring, so the
+raw vertical font/ink measurements follow that same contract. Blank lines
+are skipped as blockInk skips them. Every named family must have loaded
+local FontFace records; missing-family fallback is refused. Individual
+missing-glyph fallback can still occur in WebKit; missing/borrowing boxes
+are excluded from rule3/rule4 attribution.
+
+The middle-alignment formula decomposes the shift into a font-box baseline
+(rule3) and glyph ink relative to that baseline (rule4). A checked sum names
+both rules. Neither operand reads the actual placement or positioned ink.
+Missing/stale independent metrics do not receive an ink explanation. The
+fault probe changes only ascent by200px: the resulting -100px shift is
+rule3. A100px unrelated placement fault remains unexplained.
+
+Before a real dry run, on a new private output path:
+
+```
+node scripts/text-port/dry-metrics.mjs --data <tp-data> --out <tp-data>/reports/p9-direct-metrics.json
+node scripts/text-port/dry-run.mjs --data <tp-data> --out <report-dir> --legacy-mode smart
+```
+
+The second command defaults to that metric artifact. A repeat/reference copy
+can be selected with `--webkit-metrics <private-json>`. The validated raw
+artifact is copied into the report's raw/direct-webkit.json, so report-only
+uses the same measurements. Source hashes are checked again.
+
+**Pending measurement:** the real moved-only39 boxes must be recounted
+against this independent prediction. No old19/20 split is claimed as proof
+of this repair.
+
+### Failed lanes cannot become reports
+
+The lane begins with an incomplete verdict. Its final raw/run.json records
+completed/pass status and all layout/paint failures. writeReport requires a
+completed passing verdict and independently rejects its failure lists,
+including chapter paint metadata. The same check runs for report-only.
+Synthetic failed layout/paint metadata is tested through the actual CLI:
+exit1 and no new signable HTML/Markdown. A mutation removing that guard must
+reach a fully supplied synthetic report fixture, not fail because inputs
+are missing.
+
+### Old default-mode defect (read only)
+
+`library.svelte.js` calls markSaved at the end of writeOpenChapter only when
+no newer save CALL has incremented saveSeq. A user edit during the old
+write can arm an800ms timer without yet making such a call. If the old write
+lands before that timer, its markSaved clears the timer and says saved;
+the newer edit was absent from that snapshot. This order also exists with
+the switch off (inferred from code, not reproduced on user data). It is an
+old browser defect. Default mode is unchanged in this round.
+
+### Proof record
+
+Measured first focused run:115/117 tests passed; first-fit and DOM files
+passed. The model's new held-translation gate was not released by its leave
+helper, so a leave-created translation write remained held; this was a
+harness defect, fixed by releasing that same gate at leave/switch-on.
+The other failure was a strict -0/+0 match in the rule3 decomposition;
+zero is now normalized without changing the independent expectation.
+Neither failure was classified as a timing flake.
+
+Syntax checks and parsing of the generated metric page passed (measured).
+The private p9c-mutations.py runner is prepared, with untouched source hashes,
+clean controls and scratch-only mutations. **Mutations, full suites,
+6000-sequence model, engine/native tests, browser check, direct metric
+capture, both captures, repeated real dry run and final Codex review are
+still pending.** They will be scheduled below load8 and recorded here before
+acceptance. The existing reports/p9/check directory has not been touched.
