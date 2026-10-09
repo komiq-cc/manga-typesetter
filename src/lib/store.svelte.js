@@ -1057,9 +1057,18 @@ function growHeightTo(b, lineCount, p, cand, place) {
   const need = Math.max(neededHeight(lineCount, s, textInset(s)), inkHeight(cand, place));
   const lim = b.auto?.on ? fitLimit(cand, p, null) : null;
   const extent = lim ? { top: -lim.y0, total: lim.y1 - lim.y0 } : stripOf(p);
+  const from = extent && extent.total > 0 ? b.y + extent.top : b.y;
   const next = extent && extent.total > 0
-    ? growToFit({ y: b.y + extent.top, h: b.h, valign: s.valign }, need, extent.total)
+    ? growToFit({ y: from, h: b.h, valign: s.valign }, need, extent.total)
     : growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
+  // Nothing to grow. Said here, in the extent's own coordinates, with the
+  // Rust engine switched on: a top edge taken into a long strip's coordinates
+  // and back is not always the number it was (`(y + top) - top`, off in the
+  // last bit), and the comparison below then reads that as a box that moved -
+  // a `y` written by an open that grew nothing, in hundreds of boxes of a
+  // long chapter. Under the browser the pass is left exactly as it has
+  // always been.
+  if (fontSource && next.h === b.h && next.y === from) return false;
   if (extent && extent.total > 0) next.y -= extent.top;
   if (next.h === b.h && next.y === b.y) return false;
   b.y = next.y;

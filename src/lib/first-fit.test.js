@@ -926,3 +926,39 @@ describe('Keep, when the write fails', () => {
     app.saveFailed = false;
   });
 });
+
+// In a long strip a box may grow over the seam into the next page, so the
+// grow-only pass works in the strip's coordinates: `(y + top) - top`, which is
+// not always `y` again in the last bit. Found by the dry run, which opens the
+// user's chapters under both layouts.
+describe('in a long strip, a box the open does not grow', () => {
+  const Y = 214.97986469072166;
+  const strip = () => ({
+    pages: [
+      { id: 1, w: 800, h: 1200, lines: [], boxes: [] },
+      { id: 2, w: 800, h: 1200, lines: [], boxes: [{ ...box('roomy', 'AnimeAce', 'AA', 200, Y), h: 400 }] },
+    ],
+    typesetting: { mode: 'smart', version: LAYOUT_VERSION },
+  });
+  beforeEach(() => {
+    app.projectLayout = 'longstrip';
+  });
+  afterEach(() => {
+    app.projectLayout = 'pages';
+  });
+
+  it('keeps its top edge to the last bit under the Rust engine, and the open says nothing', async () => {
+    expect(Y + 1200 - 1200).not.toBe(Y);
+    await useTextEngine('rust');
+    open(strip());
+    expect(by('roomy').y).toBe(Y);
+    expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, cleared: 0, relaid: 0, laid: 0 });
+    await flushSave();
+    expect(saves).toHaveLength(0);
+  });
+
+  it('under the browser the pass is as it has always been: this phase changes nothing there', () => {
+    open(strip());
+    expect(by('roomy').y).toBe(Y + 1200 - 1200);
+  });
+});
