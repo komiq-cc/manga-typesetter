@@ -117,6 +117,9 @@ export function typeModel(box, text) {
     };
   });
   const space = engine.advance(face, ' ') + spacing;
-  const rows = mapRows(buildRows(drawn, segs, geom, { space, bounds: graphemeBounds(drawn) }), map);
+  // A caret stands at a grapheme boundary of the RAW text; where the casing
+  // changed the text's length the cased text's are not the raw text's.
+  const rows = mapRows(buildRows(drawn, segs, geom, { space, bounds: graphemeBounds(drawn) }), map, map ? graphemeBounds(raw) : null);
+  if (!rows) return null;
   return { kind: 'flat', rows, lines: place.lines, map };
 }

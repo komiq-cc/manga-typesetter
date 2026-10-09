@@ -411,6 +411,128 @@ describe('casing that changes the length', () => {
     const rows = rowsFor('AB', ['AB']);
     expect(mapRows(rows, null)).toBe(rows);
   });
+
+  // The grapheme boundaries of a text, as type-rows.js gives them.
+  const graphemes = (text) => {
+    const at = new Set([text.length]);
+    for (const { index } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) at.add(index);
+    return (o) => at.has(o);
+  };
+
+  it('a letter and the mark it carries, after a letter cased to two: no stop between them', () => {
+    // "ß", "a", U+0301: drawn "SS", "A", U+0301. The cased row has no stop
+    // between the A and its mark; neither have the raw rows, with the raw
+    // text`s graphemes or without.
+    const raw = 'ßa\u0301';
+    const cased = raw.toUpperCase();
+    const m = caseMap(raw, cased);
+    expect(m.toDrawn).toEqual([0, 2, 3, 4]);
+    const casedRows = rowsFor(raw, [cased], { cased, clusters: [[0, 1, 2]], bounds: graphemes(cased) });
+    expect(casedRows[0].offs).toEqual([0, 1, 2, 4]);
+    expect(stops(mapRows(casedRows, m, graphemes(raw))[0])).toEqual([[0, 0], [1, 20], [3, 40]]);
+    expect(stops(mapRows(casedRows, m)[0])).toEqual([[0, 0], [1, 20], [3, 40]]);
+    // And where only the RAW text says so (cased rows built with a stop at
+    // every offset): the raw text`s graphemes are asked.
+    const loose = rowsFor(raw, [cased], { cased });
+    expect(loose[0].offs).toEqual([0, 1, 2, 3, 4]);
+    expect(mapRows(loose, m, graphemes(raw))[0].offs).toEqual([0, 1, 3]);
+  });
+
+  it('an emoji after a letter cased to two: no stop inside its pair of units', () => {
+    const raw = 'ß\u{1F600}';
+    const cased = raw.toUpperCase();
+    const m = caseMap(raw, cased);
+    expect(m.toDrawn).toEqual([0, 2, 2, 4]);
+    // Cased rows with a stop at every unit: the raw side alone keeps the
+    // caret out of the pair, by the text`s graphemes and, without them, by
+    // the pair having one cased offset.
+    const loose = rowsFor(raw, [cased], { cased });
+    expect(mapRows(loose, m, graphemes(raw))[0].offs).toEqual([0, 1, 3]);
+    expect(mapRows(loose, m)[0].offs).toEqual([0, 1, 3]);
+  });
+
+  describe('a letter drawn as two, and the line broken between them', () => {
+    // "aßb" drawn "ASSB", broken AS / SB.
+    const raw = 'aßb';
+    const cased = 'ASSB';
+    const rows = mapRows(rowsFor(raw, ['AS', 'SB'], { cased }), caseMap(raw, cased), graphemes(raw));
+
+    it('neither row has a stop between the halves, and nothing is shared', () => {
+      expect(stops(rows[0])).toEqual([[0, 0], [1, 10]]);
+      expect(stops(rows[1])).toEqual([[2, 10], [3, 20]]);
+      expect(rows[0].soft).toBe(false);
+      expect(rows[0].trail).toEqual({ x: 20, o: 2 });
+      expect(rows[1].lead).toEqual({ x: 0, o: 1 });
+      expect(rows[0].lead).toBeUndefined();
+      expect(rows[1].trail).toBeUndefined();
+    });
+
+    it('no caret is drawn between them, whatever the offset and the affinity', () => {
+      for (let o = 0; o <= raw.length; o++) {
+        for (const up of [false, true]) {
+          const c = caretAt(rows, o, up);
+          expect([c.row, c.x], `offset ${o}`).not.toEqual([0, 20]);
+          expect([c.row, c.x], `offset ${o}`).not.toEqual([1, 0]);
+        }
+      }
+      expect(caretAt(rows, 1)).toMatchObject({ row: 0, x: 10 });
+      expect(caretAt(rows, 2, true)).toMatchObject({ row: 1, x: 10 });
+    });
+
+    it('the letter selected is both its halves', () => {
+      expect(selectionRects(rows, 1, 2)).toEqual([
+        { x: 10, y: 100, w: 10, h: H },
+        { x: 0, y: 120, w: 10, h: H },
+      ]);
+      // And a selection that ends before it, or starts after it, has neither.
+      expect(selectionRects(rows, 0, 1)).toEqual([{ x: 0, y: 100, w: 10, h: H }]);
+      expect(selectionRects(rows, 2, 3)).toEqual([{ x: 10, y: 120, w: 10, h: H }]);
+    });
+
+    it('a press on a half goes to the nearer side of the whole letter', () => {
+      // The right half of the first S: after the letter, which is on the lower row.
+      expect(offsetAt(rows, 17, 110)).toEqual({ o: 2, up: false, row: 0 });
+      expect(offsetAt(rows, 12, 110)).toEqual({ o: 1, up: false, row: 0 });
+      // The left half of the second S: before the letter, on the upper row.
+      expect(offsetAt(rows, 2, 130)).toEqual({ o: 1, up: false, row: 1 });
+      expect(offsetAt(rows, 8, 130)).toEqual({ o: 2, up: false, row: 1 });
+    });
+
+    it('three presses take the row with the whole letter; Down lands on a stop of the row', () => {
+      expect(linePress(rows, raw, 5, 110)).toEqual({ a: 0, f: 2, up: false });
+      expect(linePress(rows, raw, 5, 130)).toEqual({ a: 1, f: 3, up: false });
+      expect(moveCaret(rows, raw, { a: 0, f: 0 }, 'ArrowDown')).toMatchObject({ f: 2, up: false });
+      expect(moveCaret(rows, raw, { a: 3, f: 3 }, 'ArrowUp')).toMatchObject({ f: 1, up: false });
+      expect(moveCaret(rows, raw, { a: 0, f: 0 }, 'End')).toMatchObject({ f: 1, up: false });
+    });
+
+    it('a row that is nothing but the middle of one letter has no stop: there are no rows', () => {
+      const m = caseMap('x', 'ABC', () => 'ABC');
+      expect(m.toDrawn).toEqual([0, 3]);
+      expect(mapRows(rowsFor('x', ['A', 'B', 'C'], { cased: 'ABC' }), m)).toBeNull();
+    });
+  });
+});
+
+describe('a line as long as a paste makes it', () => {
+  it('its rows are made in one pass over its clusters, not one pass a letter', () => {
+    const n = 4000;
+    const text = 'a'.repeat(n);
+    const segs = editLines(text, text, [text]);
+    let reads = 0;
+    const counted = (list) => new Proxy(list, { get: (t, k) => (typeof k === 'string' && /^\d+$/.test(k) && reads++, t[k]) });
+    const at = Array.from({ length: n }, (_, k) => k);
+    const rows = buildRows(text, segs, [{ top: 0, height: H, anchor: 0, at: counted(at), x: counted(at.map((k) => k * W)), end: n * W }], { space: SPACE });
+    expect(rows[0].offs).toHaveLength(n + 1);
+    expect(rows[0].xs[n]).toBe(n * W);
+    expect(rows[0].xs[1234]).toBe(12340);
+    // A handful of reads a letter. One pass a letter is n * n / 2 of them.
+    expect(reads).toBeLessThan(12 * n);
+    // And one stop found among them, the same.
+    reads = 0;
+    expect(caretAt(rows, 3000).x).toBe(30000);
+    expect(offsetAt(rows, 30004, 5).o).toBe(3000);
+  });
 });
 
 describe('two presses select a word and three a row, as the browser does in the editable', () => {

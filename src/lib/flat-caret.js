@@ -21,8 +21,12 @@
 //     soft,          the row ends where the line wrapped: its last offset is
 //                    also the next row's first (see `rowOf`)
 //     hard,          the row ends at a Return that is in the text
-//     line }         the drawn line it is, or -1 for a row the layout trims
+//     line,          the drawn line it is, or -1 for a row the layout trims
+//     lead, trail }  only where a letter is drawn as two and the line broke
+//                    between them (`mapRows`): the half of it on this row
 //
+//
+
 // and the rules a row is built by are `buildRows`' comment.
 import { stepChar } from './edit-lines.js';
 import { wordAt } from './curve-caret.js';
@@ -86,15 +90,16 @@ export function buildRows(text, segs, geom, { space = 0, bounds = null } = {}) {
       offs.push(o);
       xs.push(x);
     };
-    const x0 = g.body.length ? penAt(m, 0, g.body, ok, bs) : m.anchor;
-    const x1 = g.body.length ? penAt(m, g.body.length, g.body, ok, bs) : m.anchor;
+    const pens = g.body.length ? bodyPens(m, g.body.length, ok, bs) : null;
+    const x0 = pens ? pens[0] : m.anchor;
+    const x1 = pens ? pens[g.body.length] : m.anchor;
     // Rule 2, to the left: the head's spaces after its last Return.
     const lead = g.start + hN;
     for (let o = lead; o < bs; o++) if (o === lead || ok(o)) put(o, x0 - (bs - o) * space);
     // The body. Its two ends are stops whatever `bounds` says.
     for (let k = 0; k <= g.body.length; k++) {
       if (k && k < g.body.length && !ok(bs + k)) continue;
-      put(bs + k, k === 0 ? x0 : k === g.body.length ? x1 : penAt(m, k, g.body, ok, bs));
+      put(bs + k, pens ? pens[k] : x0);
     }
     // Rule 2, to the right: the tail's spaces before its first Return.
     const t = g.tail.indexOf('\n');
@@ -136,28 +141,33 @@ function edgeRow(from, to, top, m, hard) {
   return { top, height: m.height, offs, xs, soft: false, hard, line: -1 };
 }
 
-// The pen at offset `k` of a line's body (rule 1). `ok` and `base` are for
-// counting the graphemes of the cluster `k` falls in.
-function penAt(m, k, body, ok, base) {
+// The pen at every offset 0..n of a line's body (rule 1), in one pass over
+// its clusters - a line can be as long as a paste makes it. `ok` and `base`
+// are for counting the graphemes of a cluster. An offset the first cluster
+// does not reach stands at its pen; one past the last cluster's letters, at
+// the line's end; and a cluster that starts where the body ends (the
+// invented hyphen) leaves the end at its own pen.
+function bodyPens(m, n, ok, base) {
   const at = m.at;
-  let c = at.length - 1;
-  while (c > 0 && at[c] > k) c--;
-  if (!at.length) return m.anchor;
-  if (at[c] === k) return m.x[c];
-  if (k < at[0]) return m.x[0];
-  const next = c + 1 < at.length ? at[c + 1] : null;
-  const to = next ?? body.length;
-  const toX = next == null ? m.end : m.x[c + 1];
-  // Past the body's end is the invented hyphen's cluster, or nothing.
-  if (k >= to) return toX;
-  let parts = 1;
-  let before = 0;
-  for (let o = at[c] + 1; o < to; o++) {
-    if (!ok(base + o)) continue;
-    parts++;
-    if (o <= k) before++;
+  const xs = new Array(n + 1);
+  if (!at.length) return xs.fill(m.anchor);
+  for (let k = 0; k <= n && k < at[0]; k++) xs[k] = m.x[0];
+  for (let c = 0; c < at.length && at[c] <= n; c++) {
+    const from = at[c];
+    const next = c + 1 < at.length ? at[c + 1] : null;
+    const to = Math.min(next ?? n, n);
+    const toX = next == null ? m.end : m.x[c + 1];
+    xs[from] = m.x[c];
+    let parts = 1;
+    for (let o = from + 1; o < to; o++) if (ok(base + o)) parts++;
+    let before = 0;
+    for (let o = from + 1; o < to; o++) {
+      if (ok(base + o)) before++;
+      xs[o] = m.x[c] + ((toX - m.x[c]) * before) / parts;
+    }
+    if (next == null) for (let k = Math.max(to, from + 1); k <= n; k++) xs[k] = toX;
   }
-  return m.x[c] + ((toX - m.x[c]) * before) / parts;
+  return xs;
 }
 
 // ----- an offset on the rows -----
@@ -181,9 +191,14 @@ export function rowOf(rows, o, up = false) {
 // The x of raw offset `o` on a row: its stop's, or the stop before it when it
 // is not one (inside a grapheme), clamped to the row.
 function xOn(r, o) {
-  let k = r.offs.length - 1;
-  while (k > 0 && r.offs[k] > o) k--;
-  return r.xs[k];
+  let lo = 0;
+  let hi = r.offs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (r.offs[mid] <= o) lo = mid;
+    else hi = mid - 1;
+  }
+  return r.xs[lo];
 }
 
 // Where the caret stands: `{ x, top, height, row }`. Null with no rows.
@@ -207,9 +222,13 @@ export function selectionRects(rows, a, b, nl = 0) {
     const to = Math.min(hi, last(r));
     if (from > to) continue;
     const brk = r.hard && hi > last(r) ? nl : 0;
-    if (from === to && !brk) continue;
-    const x0 = xOn(r, from);
-    const x1 = xOn(r, to);
+    // The half of a split letter this row draws is selected with the letter:
+    // past the row's last stop, or before its first.
+    const head = r.lead && lo < first(r) ? r.lead.x : null;
+    const tail = r.trail && hi > last(r) ? r.trail.x : null;
+    if (from === to && !brk && head == null && tail == null) continue;
+    const x0 = head ?? xOn(r, from);
+    const x1 = tail ?? xOn(r, to);
     const left = Math.min(x0, x1);
     out.push({ x: left, y: r.top, w: Math.abs(x1 - x0) + brk, h: r.height });
   }
@@ -237,6 +256,16 @@ export function offsetAt(rows, x, y) {
   if (!rows.length) return { o: 0, up: false, row: -1 };
   const i = rowAt(rows, y);
   const r = rows[i];
+  const k = stopNear(r, x);
+  // Nearer the far side of a split letter's half than any stop of this row:
+  // the offset on that side of the letter, which is on the row next to this.
+  const d = Math.abs(r.xs[k] - x);
+  if (r.trail && Math.abs(r.trail.x - x) <= d) return { o: r.trail.o, up: false, row: i };
+  if (r.lead && Math.abs(r.lead.x - x) < d) return { o: r.lead.o, up: false, row: i };
+  return { o: r.offs[k], up: r.soft && k === r.offs.length - 1, row: i };
+}
+// The stop of a row nearest an x, as its index: the later of two as near.
+function stopNear(r, x) {
   let k = 0;
   let d = Infinity;
   for (let j = 0; j < r.xs.length; j++) {
@@ -246,7 +275,7 @@ export function offsetAt(rows, x, y) {
       k = j;
     }
   }
-  return { o: r.offs[k], up: r.soft && k === r.offs.length - 1, row: i };
+  return k;
 }
 
 // ----- two presses, and three -----
@@ -291,7 +320,10 @@ export function wordPress(rows, text, x, y) {
 export function linePress(rows, text, x, y) {
   const r = rows[offsetAt(rows, x, y).row];
   if (!r) return { a: 0, f: 0, up: false };
-  return { a: first(r), f: r.hard ? Math.min(last(r) + 1, String(text ?? '').length) : last(r), up: r.soft };
+  // With the whole of a letter it draws half of.
+  const a = r.lead ? r.lead.o : first(r);
+  const f = r.trail ? r.trail.o : r.hard ? Math.min(last(r) + 1, String(text ?? '').length) : last(r);
+  return { a, f, up: r.soft };
 }
 
 // The raw span of the row a caret is on, `[from, to]`: what the soft-line
@@ -345,8 +377,10 @@ export function moveCaret(rows, text, sel, key, mods = {}, goal = null) {
     const j = i + (k === 'ArrowUp' ? -1 : 1);
     if (j < 0) return done(0, false, gx);
     if (j >= rows.length) return done(v.length, false, gx);
-    const hit = offsetAt([rows[j]], gx, rows[j].top);
-    return done(hit.o, hit.up, gx);
+    // A stop of that row itself, so the caret is on it.
+    const to = rows[j];
+    const at = stopNear(to, gx);
+    return done(to.offs[at], to.soft && at === to.offs.length - 1, gx);
   }
   return null;
 }
@@ -419,27 +453,64 @@ export function rawAtDrawn(map, d) {
   return lo;
 }
 
-// Rows made in cased offsets, in raw ones: a stop stays where a raw offset
-// lands on it and goes where none does (between the two S of one "ß"), and a
-// row keeps its ends, so what two rows shared they still share.
-export function mapRows(rows, map) {
+// Rows made in cased offsets, in raw ones. `bounds`, when given, says whether
+// a caret may stand at a RAW offset (a grapheme boundary of the raw text);
+// without it, a raw offset inside a surrogate pair - which has its pair's
+// cased offset - is the one place known to be inside a letter.
+//
+// A raw offset is a stop of a row when a caret may stand there in the raw
+// text AND its cased offset is a stop of the cased row. So none is between
+// the two S of one "ß", none between a base and the mark it carries
+// (whichever text the mark was found in), and a row keeps the ends it shared
+// with its neighbours.
+//
+// One case has no shared end: the line broke INSIDE a letter drawn as two
+// ("ß" as "SS", wrapped or hyphenated between the S). Neither row then ends
+// at an offset of the raw text on that side. The upper row stops before the
+// letter and the lower starts after it, and each says which half it draws:
+//
+//   trail: { x, o }   on the upper row: where its half ends, and the raw
+//                     offset after the whole letter (a stop of the lower row)
+//   lead:  { x, o }   on the lower row: where its half starts, and the raw
+//                     offset before the whole letter
+//
+// so a selection of the letter covers both halves (`selectionRects`), a press
+// on a half goes to the nearer side of the LETTER (`offsetAt`), and no caret
+// is ever drawn between the halves. The upper row is not `soft`: nothing is
+// shared.
+//
+// Null when a row would be left with no stop at all (a line that holds
+// nothing but the middle of one letter): the caller types into DOM text.
+export function mapRows(rows, map, bounds = null) {
   if (!map) return rows;
   const t = map.toDrawn;
-  return rows.map((r) => {
+  const ok = bounds ?? ((o) => o === 0 || t[o] !== t[o - 1]);
+  const out = [];
+  for (const r of rows) {
     const offs = [];
     const xs = [];
     const lo = rawAtDrawn(map, first(r));
-    const hi = rawAtDrawn(map, last(r));
-    for (let o = lo; o <= hi; o++) {
-      // A raw offset inside a surrogate pair has its pair's cased offset.
-      if (o > lo && t[o] === t[o - 1]) continue;
+    const end = last(r);
+    let k = 0;
+    let o = lo;
+    for (; o < t.length && t[o] <= end; o++) {
+      if (!ok(o)) continue;
+      while (k < r.offs.length && r.offs[k] < t[o]) k++;
+      if (r.offs[k] !== t[o]) continue;
       offs.push(o);
-      xs.push(xOn(r, Math.min(Math.max(t[o], first(r)), last(r))));
+      xs.push(r.xs[k]);
     }
-    if (!offs.length) {
-      offs.push(lo);
-      xs.push(r.xs[0]);
-    }
-    return { ...r, offs, xs };
-  });
+    if (!offs.length) return null;
+    // The row starts, or ends, inside a letter's cased form.
+    const lead = t[lo] > first(r) ? { x: r.xs[0], o: letterStart(t, lo - 1) } : null;
+    const trail = o < t.length && (o === 0 || t[o - 1] < end) ? { x: r.xs[r.xs.length - 1], o } : null;
+    out.push({ ...r, offs, xs, soft: r.soft && !trail, ...(lead ? { lead } : null), ...(trail ? { trail } : null) });
+  }
+  return out;
+}
+// The first raw offset of the letter raw offset `o` is in (a surrogate pair's
+// second unit has its first's cased offset).
+function letterStart(t, o) {
+  while (o > 0 && t[o] === t[o - 1]) o--;
+  return o;
 }
