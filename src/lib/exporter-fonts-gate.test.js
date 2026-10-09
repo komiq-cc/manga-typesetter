@@ -197,6 +197,102 @@ describe('an export waits for the fonts its pages need', () => {
     });
   });
 
+  // ONE EXPORT, ONE ENGINE. What an export waited for is the fonts of the
+  // engine that was installed while it waited; if another is installed by
+  // the time a page is painted, the page was painted from fonts nobody
+  // waited for (and a chapter would be half one engine's, half the other's).
+  describe('the engine it waited for', () => {
+    const stand = () => {
+      const engine = { id: 'rust', onFontsChange: () => () => {}, loading: () => false };
+      return { engine, painter: { engine, paint() {} } };
+    };
+    const was = { engine: textEngine(), painter: glyphPainter() };
+    afterEach(() => {
+      setTextEngine(was.engine);
+      setGlyphPainter(was.painter);
+    });
+    // The browser's font set, asked and never answered.
+    function neverReady() {
+      const asked = { ready: 0 };
+      Object.defineProperty(globalThis.document.fonts, 'ready', { get: () => (asked.ready++, new Promise(() => {})) });
+      return asked;
+    }
+    // Runs `flip` the moment the export asks for its first canvas: after
+    // every wait, as the page begins to be painted.
+    function atFirstCanvas(flip) {
+      const create = globalThis.document.createElement;
+      let done = false;
+      globalThis.document.createElement = (tag) => {
+        if (tag === 'canvas' && !done) {
+          done = true;
+          flip();
+        }
+        return create(tag);
+      };
+      return () => done;
+    }
+
+    for (const fmt of ['PNG', 'PSD']) {
+      it(`${fmt}: switched off while a page is painted, the export stops and writes no file`, async () => {
+        const rust = stand();
+        setTextEngine(rust.engine);
+        setGlyphPainter(rust.painter);
+        gate().open();
+        const asked = neverReady();
+        const flipped = atFirstCanvas(() => {
+          setTextEngine(was.engine);
+          setGlyphPainter(was.painter);
+        });
+        const ok = await exportImages(fmt, 'current');
+        expect(flipped()).toBe(true);
+        // Not written from the browser's fonts, which nobody had waited for...
+        expect(asked.ready).toBe(0);
+        expect(downloaded).toEqual([]);
+        // ...and said.
+        expect(ok).toBe(false);
+        expect(app.toast?.msg).toMatch(/text engine was switched/);
+      });
+    }
+
+    it('a whole chapter: the pages written before the switch stand, the page it happened on and the rest are not written', async () => {
+      const rust = stand();
+      setTextEngine(rust.engine);
+      setGlyphPainter(rust.painter);
+      gate().open();
+      neverReady();
+      // The second page's first canvas: page 11 is already written by then.
+      const create = globalThis.document.createElement;
+      globalThis.document.createElement = (tag) => {
+        if (tag === 'canvas' && downloaded.length === 1) {
+          setTextEngine(was.engine);
+          setGlyphPainter(was.painter);
+        }
+        return create(tag);
+      };
+      expect(await exportImages('PNG', 'all')).toBe(false);
+      expect(downloaded).toEqual(['ch01-11.png']);
+    });
+
+    it('switched ON while the browser’s fonts are waited for: the engine’s gate is waited for too, and then it is written', async () => {
+      let ready;
+      Object.defineProperty(globalThis.document.fonts, 'ready', { get: () => new Promise((resolve) => (ready = resolve)) });
+      const done = exportImages('PNG', 'current');
+      await flush();
+      // The switch goes on while that wait is open.
+      const rust = stand();
+      setTextEngine(rust.engine);
+      setGlyphPainter(rust.painter);
+      const g = gate();
+      ready();
+      await flush();
+      expect(g.asked).toHaveLength(1);
+      expect(made).toEqual([]);
+      g.open();
+      expect(await done).toBe(true);
+      expect(downloaded).toEqual(['ch01-22.png']);
+    });
+  });
+
   it('a wait that fails is an export that fails, said so, and not a page painted anyway', async () => {
     setFontSource({ ready: () => true, settle: () => Promise.reject(new Error('the fonts never settled')) });
     expect(await exportImages('PNG', 'current')).toBe(false);

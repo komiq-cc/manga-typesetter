@@ -1,7 +1,7 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth } from './measure.js';
-import { glyphPainter, engineDraws } from './text-engine/index.js';
+import { glyphPainter, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
 import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
 import {
   strokeBands,
@@ -1123,7 +1123,7 @@ const RASTER = new Set(['PNG', 'JPG', 'WebP']);
 
 // The whole-chapter strip export. Called only from `exportImages`, which already
 // holds `app.exporting` across it.
-async function exportStripImages(fmt) {
+async function exportStripImages(fmt, held) {
   const pages = app.pages;
   const { tops, total } = await measureStrip(pages);
   const target = app.stripSliceH > 0 ? app.stripSliceH : SLICE_H_DEFAULT;
@@ -1151,6 +1151,7 @@ async function exportStripImages(fmt) {
     // memory budget when the next line asks for another few hundred megapixels.
     canvas.width = 0;
     canvas.height = 0;
+    enginesHeld(held);
     const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
     if (dir) await writeItemTo(dir, name, blob);
     else downloadBlob(blob, name);
@@ -1271,10 +1272,41 @@ export async function exportTextJson(scope) {
   return true;
 }
 
+// ONE EXPORT, ONE ENGINE (`enginesNow`, text-engine/index.js). An export
+// HOLDS the engine its font waits ended on:
+//
+//   - `enginesSettled`: the engine was changed while the export waited, so
+//     what was waited for was the other one's fonts. It waits again, for the
+//     one installed now, until a wait ends on the engine it began on;
+//   - `enginesHeld`: asked when a file's pixels are finished and before the
+//     file is written. Another engine by then means the file was measured or
+//     painted, in part or whole, from fonts nobody waited for: it is not
+//     written, nor is any file after it, and the export says why. Files
+//     already written were each painted by the one engine and stand.
+//
+// It does not ask again at each page instead: a chapter whose first pages are
+// the engine's and whose last are the browser's is the half-and-half file
+// this is here to refuse, only spread over more files.
+export async function enginesSettled(pages) {
+  let held;
+  do {
+    held = enginesNow();
+    const settling = fontsSettling(pages);
+    if (settling) await settling;
+    if (!engineDraws()) await document.fonts.ready;
+  } while (!enginesAre(held));
+  return held;
+}
+export function enginesHeld(held) {
+  if (enginesAre(held)) return;
+  throw new Error('the text engine was switched while this was being written, so it was not written. Export again.');
+}
+
 // Public entry: scope = 'current' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
 export async function exportImages(fmt, scope) {
   app.exporting = true;
   try {
+    let held = enginesNow();
     // The browser's own font set is the browser path's wait, and with the
     // Rust engine switched on it is not the one that matters: the gate below
     // is (and it is asked first only so that, with the switch off, this line
@@ -1296,6 +1328,9 @@ export async function exportImages(fmt, scope) {
     // this machine it can read - and then the browser paints the text after
     // all, from its own fonts.
     if (settling && !engineDraws()) await document.fonts.ready;
+    // The engine these waits began on is not the one installed: they were the
+    // wrong waits. (Never taken with the switch left alone.)
+    if (!enginesAre(held)) held = await enginesSettled(isLongstrip() ? app.pages : pages);
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
@@ -1306,7 +1341,7 @@ export async function exportImages(fmt, scope) {
     // page is still a single page, and the user asking for "this page" in a
     // strip is asking for the slice they are looking at, not a re-cut of it.
     if (isLongstrip() && scope === 'all' && RASTER.has(fmt)) {
-      return await exportStripImages(fmt);
+      return await exportStripImages(fmt, held);
     }
 
     const baseName = sanitizeExportName(app.exportName);
@@ -1339,6 +1374,7 @@ export async function exportImages(fmt, scope) {
         }
         return await renderPageBlob(p, fmt);
       });
+      enginesHeld(held);
       const name = `${baseName}-${p.id}.${ext}`;
       if (streamDir) {
         await writeItemTo(streamDir, name, blob);

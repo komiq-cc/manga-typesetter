@@ -313,6 +313,28 @@ describe('what a PSD waits for', () => {
     await expect(buildPagePsd(bare)).rejects.toThrow('the fonts kept changing');
   });
 
+  it('the engine taken away while it is built: no file, and it says why', async () => {
+    await on();
+    stubDocument();
+    // The page's art is read after the fonts are waited for and before the
+    // file is written: the switch goes off there.
+    const page = { ...bare, get raw() { return (useTextEngine('browser'), null); } };
+    setFontSource({ ready: () => true, nameFor: () => 'Helvetica Neue', missing: () => false, settle: async () => {} });
+    await expect(buildPagePsd(page)).rejects.toThrow('the text engine was switched');
+    expect(engineDraws()).toBe(false);
+  });
+
+  it('the engine taken away while its fonts are waited for: the browser’s are waited for instead, and it is built', async () => {
+    await on();
+    const asked = stubDocument();
+    setFontSource({ ready: () => true, settle: async () => void useTextEngine('browser') });
+    const bytes = await buildPagePsd(bare);
+    // Once where it always was (the browser draws after all), once more as
+    // the wait of the engine now installed.
+    expect(asked.ready).toBe(2);
+    expect(readPsd(bytes, { skipLayerImageData: true, skipCompositeImageData: true, skipThumbnail: true }).width).toBe(300);
+  });
+
   it('with the switch off it waits for the browser’s fonts, as it did', async () => {
     const asked = stubDocument();
     expect(fontsSettling([bare])).toBe(null);

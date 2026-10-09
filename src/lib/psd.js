@@ -11,12 +11,12 @@
 import { writePsd, readPsd } from 'ag-psd';
 import { app, PAGE_W, PAGE_H } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
-import { renderBoxLayer, pageSpace, settleNoise } from './exporter.js';
+import { renderBoxLayer, pageSpace, settleNoise, enginesSettled, enginesHeld } from './exporter.js';
 import { settleBoxTips } from './brush-tips.js';
 import { fontCssFor, fontNameFor, reviewOf, fontsSettling, fontMissing } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
 import { applyCase, canMeasure, textInset, contentWidth, blockYFor, faceFor } from './measure.js';
-import { textEngine, engineDraws } from './text-engine/index.js';
+import { textEngine, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
 import { drawnFace, drawnRuns } from './text-engine/drawn-face.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { normalizeFit, normalizeAuto } from './data.js';
@@ -930,10 +930,16 @@ export function writePagePsd(doc) {
 // then nothing is built: a type layer written from a stand-in is a file of
 // wrong breaks that says it went well. `document.fonts.ready` is the browser
 // path's wait and stays that: awaited when the browser is what draws.
+//
+// One file, one engine (`enginesSettled`, exporter.js): the type layers'
+// breaks, the pixels behind them and the font names are all of the engine
+// these waits ended on, or the file is not built.
 export async function buildPagePsd(p) {
+  let held = enginesNow();
   const settling = fontsSettling([p]);
   if (settling) await settling;
   if (!engineDraws()) await document.fonts.ready;
+  if (!enginesAre(held)) held = await enginesSettled([p]);
   const { w: W, h: H } = await pageSpace(p);
   // A roughened box's pixels are displaced against a phase measured from the
   // running browser, and measuring it is a rasterisation - so it is settled
@@ -997,6 +1003,7 @@ export async function buildPagePsd(p) {
   // Embedded lossless project state - ORIGINAL page coordinates.
   const project = { key: PROJECT_KEY, schema: SCHEMA, page: serializePage(p) };
 
+  enginesHeld(held);
   return writePagePsd(pagePsdDocument({ w: W, h: H, textLayers, baseLayers, project }));
 }
 

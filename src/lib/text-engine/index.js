@@ -65,3 +65,18 @@ export function setGlyphPainter(p) {
 export function engineDraws() {
   return engine != null && painter.engine === engine;
 }
+
+// ONE EXPORT, ONE ENGINE. Which engine measures and which painter draws can
+// change between two awaits (the switch is flipped; a font lands and the
+// engine has, or no longer has, something to draw with; it fails and the
+// browser takes over). An export paints across many awaits, so it keeps what
+// was installed when its font waits ended (`enginesNow`) and asks, when a
+// file's pixels are finished, whether that is still what is installed
+// (`enginesAre`). Told by identity: turning the switch off and on makes a new
+// engine, and a painter is made new each time it goes in.
+export function enginesNow() {
+  return { engine, painter };
+}
+export function enginesAre(held) {
+  return held.engine === engine && held.painter === painter;
+}
