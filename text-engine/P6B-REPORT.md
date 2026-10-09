@@ -1,8 +1,15 @@
 # P6b: what the outside review found in the editor picture, fixed
 
-Branch `tp/editor`, on top of `5d73134`. Seventeen commits, listed in section
-14. The brief is `tp-data/briefs/p6b-editor-fixes.md`; items below carry its
-numbers and the review's finding numbers.
+Branch `tp/editor`, on top of `5d73134`. Seventeen commits in the first
+round, listed in section 14. The brief is
+`tp-data/briefs/p6b-editor-fixes.md`; items below carry its numbers and the
+review's finding numbers.
+
+A second outside review of those commits found nine things. They are fixed in
+eleven more commits: section 16, "Second round". Sentences in sections 1 to 15
+that those fixes made untrue are corrected in place and say so. Line numbers
+in sections 1 to 9 are as at the end of the first round (`a113b77`) unless
+the sentence is marked as corrected; section 16 has the current ones.
 
 Every figure is marked **measured** or **inferred**. Measured in Chromium
 means headless Chrome 155 driven by `scripts/editor-check.mjs`. Measured in
@@ -12,6 +19,8 @@ bundle 22625.1.29.11.27) in a real `WKWebView`, by
 two other workers and the coordinator's captures.
 
 ## 0. Result
+
+First round, at `3d6580b`. The second round's results are in section 16.
 
 | proof | result |
 |---|---|
@@ -39,6 +48,10 @@ by what it would be after this raster. It grows while the grown canvas is
 within `SCRATCH_KEEP_PX` (2048 x 2048 px of area, line 23). Past that it is
 cut to this raster. A raster over the bound by itself still goes through a
 canvas that is given back at once.
+
+**Corrected in the second round.** "Within the bound" was true of the canvas
+after it was re-cut and not of the canvas between the two assignments that
+re-cut it. Section 16, finding 3.
 
 **Chosen differently from the brief.** The brief says: over the bound, use a
 one-off canvas. Measured with that policy: after one wide raster, 20 ordinary
@@ -89,9 +102,12 @@ far let go of ink that was still in view.
 
 **Changed.** `src/lib/TextBox.svelte:147`. The observer watches an empty
 element (`.reach`, markup at line 2031) laid over the footprint the picture
-was last painted to, and over the box until there is one. The footprint is
-kept when the pixels are let go, so a box comes back by the measure it left
-by. The predecessor's judge inferred 1 of 2,482 real boxes at 300 to 400%
+was last painted to, and over the box until there is one. (Corrected in the
+second round: the sentence here said the footprint is kept when the pixels
+are let go. It was, and that was wrong: a box let go and then edited was
+watched by a footprint it no longer had. While the box holds no pixels the
+element is now over the footprint worked out for the box as it is. Section
+16, finding 2.) The predecessor's judge inferred 1 of 2,482 real boxes at 300 to 400%
 needs this once the margin is real; I did not re-measure that figure.
 
 **Tests.** `src/lib/editor/near-view.test.js`, 10 tests; three watched fail
@@ -164,11 +180,13 @@ Measured before, in jsdom: of three boxes repainted in one flush, one
 `paintBoxPicture` call was reached; and an unhandled rejection from the late
 repaint.
 
-`src/lib/TextBox.svelte:575` (`tryPaint`): the throw is caught where the
+`src/lib/TextBox.svelte:638` (`tryPaint`): the throw is caught where the
 paint is called. The canvas is released. The box is shown as its DOM text
-(`engineShown`, line 122, is false while the key that failed is the key)
+(`engineShown`, line 130, is false while the key that failed is the key)
 until what it is painted from changes, and then it is tried again. It is
-logged once per box, not once a frame.
+logged once per box, not once a frame. (Corrected in the second round: the
+catch is reached only while the engine draws. As first written it was also
+reached with the switch off, for a warped box. Section 16, finding 8.)
 
 **Tests.** For the side: `exporter-scale.engine.test.js`, "the longest side
 of one texture", and `box-picture.engine.test.js`, the long box; six watched
@@ -184,8 +202,10 @@ one message is logged; repainted again while still refused, no second
 message; allowed again, it is the picture again.
 
 **Not done.** The mesh gizmo's drag (`warpPainter.begin` and `frame`) is not
-wrapped. A warped box painted the old way has no DOM text to fall back to
-and is left empty on a throw until its key changes.
+wrapped. (Corrected in the second round: this paragraph said a warped box is
+left empty on a throw. With the engine drawing it is now shown as its text,
+without its mesh; with the switch off nothing is caught and the exception
+goes where it went at `5d73134`. Section 16, findings 7 and 8.)
 
 ## 4. Finding 7: letters outside the frame could not be clicked
 
@@ -194,9 +214,11 @@ was the only target. Curved text and overflowing lines are drawn outside it.
 
 **Changed.** `src/lib/TextBox.svelte:1009`. While the picture is shown and
 the box is not warped, transparent targets stand where the letters are: one
-per glyph of a curve, at the glyph's own place and turn (line 2073), or one
-rectangle for straight text that runs past its box (line 2076; the block's
-advances by its line boxes, `blockRect` in `contain.js:247`). Straight text
+per glyph of a curve, at the glyph's own place and turn (line 2160), or one
+rectangle for straight text that runs past its box (line 2163). (Corrected
+in the second round: the rectangle was the block's advances by its line
+boxes, `blockRect`. It is now those and the glyphs' ink together,
+`blockReach` in `contain.js:286`. Section 16, finding 6.) Straight text
 that fits has none. They state no `pointer-events` of their own, so the hand
 tool still deafens them with the rest of the box. The canvas and `.warpl`
 are untouched.
@@ -338,10 +360,12 @@ and every fit in the store stands down for that (`faceArriving`,
 **Measured before** (DOM test): with the face arriving, a bottom edge
 dragged far up stopped at 109 px, the stand-in's line count, not at 30.
 
-**Changed.** `src/lib/store.svelte.js:3099`: `edgeDragFloor(b, lineCount,
-p)`, beside the fits it mirrors. It returns the plain minimum
+**Changed.** `src/lib/store.svelte.js:3106`: `edgeDragFloor(b, dir,
+lineCount, p)`, beside the fits it mirrors. It returns the plain minimum
 (`EDGE_DRAG_MIN`, 30) and holds the fit while the face is arriving.
-`TextBox.svelte:1224` asks it.
+`TextBox.svelte:1306` asks it. (Corrected in the second round: it took no
+`dir`, and held a fit for a corner or a side-edge drag as well, which take
+no floor. Section 16, finding 1.)
 
 **Tests.** `src/lib/edge-drag-floor.test.js`, 6 tests (a new function; not
 watched failing). `src/lib/TextBox-edge-drag.dom.test.js`, 3 tests; one
@@ -396,12 +420,18 @@ frames):
 
 P6 inferred "about 60 ms a frame for an 8 MP box". Measured: 72 to 87.
 
-**Changed.** `src/lib/TextBox.svelte:132`: `resizing`, a flag of the
-component, set on the drag's first move (line 1228) and cleared when it ends
-(line 1243). `pictureRes` reads it (line 133). While it is set, the scale is
-`dragScale` (`src/lib/editor/box-picture.js:91`): the scale asked for, or
-less for a box whose own area at that scale is over `PICTURE_DRAG_PX`, one
-megapixel. The scale is in the picture's key, so letting go is one repaint.
+**Changed.** `src/lib/TextBox.svelte:157`: `resizing`, a flag of the
+component, set on the drag's first move (line 1310). While it is set the
+paint is handed `PICTURE_DRAG_PX`, one megapixel
+(`src/lib/editor/box-picture.js:88`), in the place of the picture's usual
+budget (`paintWarp`, line 614). A picture that came out lower than the box
+has at rest is painted once more when the drag settles (`settleResize`, line
+159).
+
+(Corrected in the second round. As first written the scale itself was
+lowered, by `dragScale`, from the box's own width and height; the flag was
+cleared by a pointer coming up on the document and by nothing else. Both
+were wrong: section 16, findings 4 and 5. `dragScale` is gone.)
 
 **Chosen differently from the brief, in amount.** The brief says a lower
 scale. A scale lowered for every box would soften the ordinary balloon, whose
@@ -429,8 +459,10 @@ measured). With the switch off a frame of the same drag is 0.5 to 1.0 ms of
 script; the browser's own layout and raster come after and a page cannot
 time them.
 
-The canvas is a little over a megapixel because the budget is on the box's
-area and the footprint has padding.
+The table above is the first round's code, where the canvas was a little
+over a megapixel because the budget was on the box's area and the footprint
+has padding. With the budget on the footprint it is 1.05 MP in every row
+that is lowered (measured; section 16, finding 4).
 
 **What it does not do.** It bounds the part of a frame that follows the
 pixels. The `cost` step's resize of a box with three bands of outline took
@@ -442,7 +474,9 @@ set the flag, and its figures are the same before and after.
 box", 4 tests; `TextBox-engine-picture.dom.test.js`, "while a handle is
 resizing the box", 5 tests. Watched fail: the four unit tests and two of the
 DOM tests (one of them only on the missing export). The other three DOM
-tests say what must not change and passed before.
+tests say what must not change and passed before. (Second round: the four
+unit tests were of `dragScale` and are replaced by three of the budget; the
+DOM group is 15 tests. Section 16.)
 
 ## 10. Not this task
 
@@ -580,3 +614,297 @@ deleted. The brief's naming for a second try is `p6b-sk2`; I used letters.
 
 The before figures in section 9 are from the same `drag` step run on the
 tree before `f915739`; that run's report was not kept.
+
+## 16. Second round
+
+An outside review of the seventeen commits found nine things
+(`tp-data/reports/codex-p6b-review.out`), and the coordinator added a tenth.
+All ten are changed. None was refuted. Each was reproduced before it was
+fixed, and the reproduction is kept as the test, except where said. Numbers
+are the review's finding numbers; the order is the order of the work.
+
+Line numbers are as at `0388fc4`.
+
+### Finding 8: the catch was reached with the switch off
+
+**Wrong.** `tryPaint` wraps the paint of the box's canvas. With the switch
+off a warped box is painted there too, by the old path, and at `5d73134` an
+exception from it went up through the effect. The catch swallowed it.
+
+**Reproduced.** `TextBox-engine-picture.dom.test.js`, "with the switch off
+nothing here catches": a warped box, the old paint made to throw, and
+`flushSync` must throw the same error. Watched fail (nothing thrown).
+
+**Changed.** `src/lib/TextBox.svelte:638`: `tryPaint` begins `if
+(!enginePaints) { paintWarp(el, tips); return true; }`. `failed` (line 129)
+is also false whenever the engine is not drawing, so no state of the
+fallback can be reached with the switch off.
+
+### Finding 7: a warped box that could not be painted was an empty canvas
+
+**Wrong.** With the engine drawing, a warped box whose paint threw was left
+as a 0 x 0 canvas: no text, no name for a screen reader, nothing to press.
+The log said it was shown as its text.
+
+**Chosen:** it really falls back. The box is shown as its DOM text, without
+its mesh, until what it is painted from changes. It can be seen, pressed and
+read. The log line says "without its mesh" for a warped box.
+
+**Changed.** `src/lib/TextBox.svelte:129`: `failed` is of the key that was
+wanted (`wantedKey`, line 600), for a warped box as for any other.
+`pictured` (line 562) is false while it holds, which is what puts the text
+elements back.
+
+**Reproduced.** Two tests in "a paint that throws". A warped box refused
+from the start: its lines are elements in the frame, a press on one selects
+the box, the same picture is not tried again, and it is the picture again
+when allowed. And a warped box that painted and is then refused: it lets go
+of its picture and is its text. Both watched fail (a canvas where the text
+was expected).
+
+**Measured in Chromium, 1x and 2x** (`limits` step, which now has a warped
+box among the refused): refused, it is DOM text and no engine canvas;
+allowed again, it is the engine's picture; the two boxes beside it are
+pictures throughout; 2 messages for 2 refused boxes, 0 more on the next
+repaint; 0 page errors. Looked at `limits-refused-2x.png`: both refused
+boxes show their text, the warped one unwarped.
+
+### Finding 2: a culled box was watched by the footprint it used to have
+
+**Wrong.** The element the observer watches kept the footprint of the last
+paint. A box let go and then given more text, a larger size or an outline
+was still judged by the old rectangle, and ink that grew into view was not
+painted until the old rectangle came near.
+
+**Reproduced.** "a box nobody can see", four tests watched fail: text, size,
+style and mesh changed while the box was let go, and the watched element
+must be the new footprint.
+
+**Changed.** `src/lib/exporter.js:706`: `boxFootprint(box, p)`, the
+footprint as arithmetic (`layoutBox`, and for a mesh
+`warpExtent`, `src/lib/warp-paint.js:313`, which is the extent
+`warpBoxCanvas` already worked out, taken out of it). No canvas is made.
+`src/lib/TextBox.svelte:192`: while the box holds a picture the watched
+rectangle is the painted one, as before; while it holds none it is
+`boxFootprint` of the box as it is.
+
+**Test of the arithmetic.** `box-picture.engine.test.js`, one test a kind
+(7): what `boxFootprint` says is what a paint returns, at scales 1 and 2,
+and no canvas was made to say it. New function; not watched failing.
+
+### Finding 3: the scratch canvas was over its bound between two assignments
+
+**Wrong.** Re-cutting the scratch set the width and then the height. From
+186 x 6212 to 8738 x 50 it was 8738 x 6212 on the way: 54,280,456 px, 217 MB
+(measured by the test's double).
+
+**Reproduced.** `rust-painter-scratch.engine.test.js`: the canvas double
+records every size it is given, not only the last. Two tests watched fail
+(`8738 x 6212: expected 54280456 to be <= 4194304`).
+
+**Changed.** `src/lib/text-engine/rust-painter.js:93`. The side that shrinks
+is assigned first. What stands between the two assignments is then no larger
+than both the old canvas and the new. The file has 11 tests.
+
+### Finding 4: the drag's budget counted the frame, not what is painted
+
+**Wrong.** `dragScale` lowered the scale by the box's own width and height.
+The picture is of the footprint. The review's box, 100 x 100 with twenty
+lines below it, at 300% on a 2x display, painted 7,365,060 px a frame
+"within" a budget of 1,048,576 (measured in the DOM test).
+
+**Reproduced.** "the budget is of what is painted, not of the box's frame".
+Watched fail with that number.
+
+**Changed.** `dragScale` is removed. `src/lib/TextBox.svelte:614`
+(`paintWarp`) hands the paint `PICTURE_DRAG_PX` in the place of
+`PICTURE_MAX_PX` while the flag is set. So the arithmetic that bounds a
+picture at rest (`textureScale` on the footprint, and for a mesh the cut
+after it is applied) bounds it in the hand. The scale asked for no longer
+changes through a drag, so `paintBoxPicture`
+(`src/lib/editor/box-picture.js:140`) now also returns `ss`, the scale it
+came out at; a picture that came out lower is repainted once when the drag
+settles.
+
+**Tests.** The DOM test above. `box-picture.engine.test.js`, two tests (the
+review's box flat and through a mesh, painted for real within the budget
+handed in); these pass on the old code as well, since the layer always took
+a budget, and are there for `ss` and the mesh. `box-picture.test.js`, three
+tests of the budget in the place of the four of `dragScale`.
+
+**Measured in Chromium** (`drag` step, final run, machine loaded): every
+lowered row holds 1.05 MP at the last frame, where the first round's held
+1.12 to 1.21. A frame: 7.8 ms for the effect box and 10.0 ms for the
+page-wide box at 300% on 2x; letting go 41.9 and 51.9 ms, and the canvas is
+8.39 MP again after. A box a few percent over the megapixel at rest is
+lowered by those few percent and repainted once on letting go (the balloon
+at 300% on 2x: 4.1 ms).
+
+### Finding 5: the flag outlived a drag that ended without a pointer-up
+
+**Wrong.** `resizing` was cleared in the gesture's `end`, which hears
+`pointerup` and `pointercancel` on the document. A drag whose moves stopped
+any other way left it set, and every later edit of the box was painted
+within a megapixel.
+
+**Reproduced.** Nine tests in "while a handle is resizing the box", under
+the comment "every way a drag ends". Six watched fail (the
+canvas stayed at 1,049,559 px where 3,781,076 was expected): the window
+losing the focus, the handle losing the pointer's capture, the box
+deselected (what Escape does), another box selected, the box typed into,
+and a drag that goes on after a blur. Three passed before and say what must
+stay: pointer up, pointer cancelled, the box deleted under the drag.
+
+**Changed.** `src/lib/TextBox.svelte:159`: `settleResize`, the one place the
+flag is cleared. It is called from the gesture's `end`; from a `blur` of the
+window and a `lostpointercapture` on the handle, both added beside the
+gesture's own listeners and removed with them (line 1368); and from an
+effect when the handles go away (`handlesOn`, line 826). The flag is set
+only while the engine draws and there is a handle on the box (line 1310).
+
+**Left as it was, on purpose.** The new ways settle the picture. They do not
+end the gesture: a drag whose window lost the focus, or whose box was
+deselected, still moves the box if moves keep arriving, as at `5d73134`,
+and its end is still `end`. Ending it would change what a drag does with the
+switch off.
+
+### Finding 1: a corner drag queued a fit it had no floor for
+
+**Wrong.** The handle asked `edgeDragFloor` on every resize. While the face
+is arriving that function stands the floor down and holds a fit for when the
+face lands. A corner scales the type and takes no floor; a left or right
+edge leaves the height alone. The fit held for them ran when the face
+landed and moved the box.
+
+**Reproduced.** `edge-drag-floor.test.js`, "a corner dragged while the face
+is arriving is where the drag left it": watched fail, the width 48 became
+192 and x 100 became 28 (measured; the test's engine is arithmetic, so these
+are its numbers and not the review's 75 and 86.5). `TextBox-edge-drag.dom
+.test.js`, four corners through the component: all four watched fail
+(`fitHeld` true).
+
+**Changed.** `src/lib/resize-math.js:13`: `takesHeightFloor(dir)`, true for
+`n` and `s` alone, used by `resizeBoxMath` where the floor is applied (line
+26; the same floor for every handle as before). `src/lib/store.svelte.js
+:3106`: `edgeDragFloor(b, dir, lineCount, p)` asks it first and returns the
+plain minimum, holding nothing, for any other handle. A width drag still
+holds its own fit in `resizeBox`, as it did.
+
+**Tests.** 14 in `edge-drag-floor.test.js` (8 new), 8 in
+`TextBox-edge-drag.dom.test.js` (5 new). The six per-handle tests and the
+predicate's are new and were not watched failing.
+
+### Finding 6: ink that leans out of the frame had no target
+
+**Wrong.** Straight text got a target only when its advances reached past
+the frame. The footprint holds the ink since the first round, so an italic J
+whose advance is inside the frame is on screen 47 px left of it (measured,
+the real face), and could not be pressed.
+
+**Reproduced.** Two tests, both watched fail with the ink left out of the
+rectangle. `exporter-footprint.engine.test.js`, the real face: the rectangle
+must reach the ink (`x0` 2 where -47.2 was expected). `TextBox-engine-picture
+.dom.test.js`, through the component with an engine whose letters lean: one
+target, left of the frame by what the letter leans, and a press on it
+selects the box (no target was made).
+
+**Changed.** `src/lib/contain.js:286`: `blockReach(place)`, the line boxes
+and the ink as one rectangle. `src/lib/TextBox.svelte:1091` uses it.
+
+**Measured in Chromium** (`hits` step, which now has an italic J at 160 px,
+left-aligned): ink outside the frame 1,272 device px at 2x and 312 at 1x; of
+424 and 312 sampled, all hit; the picture's padding corners, 0 of 4. Not run
+on the old code in the browser; that it would be 0 hit is inferred from the
+DOM test. Looked at `hits-2x.png`: the hook is left of the frame and no
+point is marked as missed.
+
+### Finding 9: the hand-tool test read inline style
+
+**Wrong.** It asserted that a target has no inline `pointer-events`. A rule
+in the component's style block passes that.
+
+**Changed.** The test puts the app's style sheet (`src/styles.css`, where
+the hand tool turns a box's pointer events off) and the component's own
+compiled one in the document, gives the box layer the hand tool's class,
+and reads the computed value on every target.
+
+**Proved.** With `.hit { pointer-events: auto; }` added to the component it
+fails (`expected 'auto' to be 'none'`); the mutation was then removed.
+
+### The coordinator's: a test that failed when the machine was busy
+
+"plain ink: identical inside the old canvas, the cut ink outside it" painted
+four boxes twice each: 3.0 s alone (measured), 6.3 s in the coordinator's
+run, over the 5 s default. It is one test a box now, 0.3 to 0.8 s each alone
+(measured), and the file states a 30 s limit, the one `solver-answers
+.test.js` states, for its 2.0 s paint with an outline and a shadow as well.
+
+### Proofs
+
+| proof | result |
+|---|---|
+| `./node_modules/.bin/vitest run`, at `b81450a` | 113 files: 110 passed, 1 skipped, 2 failed. 3,274 tests: 3,264 passed, 7 skipped, 3 failed. All three failures are time limits, in files this branch does not touch: `src/test/text-port/compare/cli.test.js` (2 tests, 5 s) and `src/lib/solver-perf.realfont.test.js` (1 test, 60 s). Load average 43 at the time (measured) |
+| those two files alone | 2 files passed; 21 tests passed, 6 skipped (measured) |
+| `npm run build` | exit 0. The two warnings TextBox had, now at lines 240 and 241; no new one |
+| capture, default mode, `p6b-sk2` against `runs/ref-sk/base` | only `manifest.json` differs (measured). Commit `b81450a`, tree clean, 0 errors, 225 s. `p6b-sk2` deleted |
+| capture, `--engine new`, `p6b-new2` against `runs/new/r3` | `layout.jsonl` and `metrics.jsonl` byte-identical. `manifest.json`, `pixels.jsonl` and 15 PNGs differ: the same 15 as `p6b-new` (the two lists of differing files are equal) |
+| `p6b-new2` against `p6b-new` | only `manifest.json` differs: the 15 pictures and `pixels.jsonl` are byte-identical to that run's (measured). `p6b-new2` left in place |
+| editor check, Chromium, `--dsf 2` and `--dsf 1` | exit 0 and 0 page errors, both. At `0388fc4` |
+
+`0388fc4` is one commit after the suite and the captures, and changes only
+`src/test/editor-check/host.js`, the check page's own script. No test and no
+capture reads it.
+
+Not run again: the WKWebView runner. Its figures in sections 2 to 5 are the
+first round's.
+
+How they were run, from the worktree:
+
+```
+./node_modules/.bin/vitest run
+./node_modules/.bin/vitest run src/test/text-port/compare/cli.test.js src/lib/solver-perf.realfont.test.js
+npm run build
+
+node scripts/text-port/capture-node.mjs --data <tp-data> --run p6b-sk2
+diff -rq <tp-data>/runs/ref-sk/base <tp-data>/runs/ref-sk/p6b-sk2
+
+node scripts/text-port/capture-node.mjs --data <tp-data> --run p6b-new2 --engine new
+diff -rq <tp-data>/runs/new/r3 <tp-data>/runs/new/p6b-new2
+diff -rq <tp-data>/runs/new/r3 <tp-data>/runs/new/p6b-new          (the same list)
+diff -rq <tp-data>/runs/new/p6b-new <tp-data>/runs/new/p6b-new2
+
+./node_modules/.bin/vite --port 5203 --strictPort --host 127.0.0.1     (kept running, stopped after)
+node scripts/editor-check.mjs --data <tp-data> --url http://127.0.0.1:5203 --port 9381 --out <tp-data>/reports/p6b-r2 --dsf 2
+node scripts/editor-check.mjs --data <tp-data> --url http://127.0.0.1:5203 --port 9381 --out <tp-data>/reports/p6b-r2 --dsf 1
+```
+
+The check's reports and pictures of this round are in
+`<tp-data>/reports/p6b-r2`; the logs are `<tp-data>/reports/p6b-r2-check-1x.log`
+and `p6b-r2-check-2x.log`. The first round's are untouched in `reports/p6b`.
+
+### Commits
+
+| hash | subject |
+|---|---|
+| `926284d` | fix(editor): with the switch off a paint that throws is not caught, as it never was |
+| `2d68501` | fix(editor): a warped box whose picture cannot be painted is shown as its text, without its mesh, not as an empty canvas |
+| `78d3a63` | fix(editor): a box that has been let go is watched by the footprint it would have now, not the one it was last painted to |
+| `8adf94c` | fix(text-engine): the scratch canvas is never over its bound between the two assignments that re-cut it |
+| `75b524f` | fix(editor): the budget of a resize is counted on what is painted, not on the box's frame |
+| `0507620` | fix(editor): a resize settles its picture on every way the moves stop, not only on a pointer coming up |
+| `32b072b` | fix(editor): a fit is held for a face only by a drag whose floor stood down for it |
+| `79a100f` | fix(editor): the target over a picture holds the ink that leans out of the frame, not only the lines' advances |
+| `e07fdc0` | test(export): the footprint's heavy paints have a time limit that a busy machine does not break |
+| `b81450a` | test(editor): the hand-tool test of the pointer targets reads the style a browser would compute, not the inline one |
+| `0388fc4` | test(editor): the editor check's pointer step has a letter whose ink leans out of a frame its advance is inside |
+
+And the commit this section is in.
+
+### What only the real desktop app can show, added by this round
+
+- That a window losing the focus, or a handle losing its capture, is told to
+  the page in WKWebView as it is in the test: `blur` on the window and
+  `lostpointercapture` on the handle. The tests dispatch those events; no
+  browser was made to lose its focus mid-drag.
+- That a pen lands on the target over ink that leans out of a frame.
+
