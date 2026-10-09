@@ -556,6 +556,10 @@ pub extern "C" fn mt_paint_end() -> i32 {
 /// pixels from the line's start, in the order the clusters are drawn; then
 /// one closing pair, the text's length in UTF-16 units and the line's
 /// advance. The advance is the number `align_offset` centres the line by.
+///
+/// A size or a letter spacing that is not a finite number is `BadSpec`:
+/// every position would be NaN or infinite, and a caller told "n clusters"
+/// would draw a caret from them.
 #[cfg(feature = "paint")]
 #[no_mangle]
 pub extern "C" fn mt_line_carets(
@@ -565,6 +569,9 @@ pub extern "C" fn mt_line_carets(
     text_len: usize,
     letter_spacing: f64,
 ) -> i32 {
+    if !size.is_finite() || !letter_spacing.is_finite() {
+        return Status::BadSpec as i32;
+    }
     code(with_text(text_len, |engine, text, st| {
         let run = crate::paint::shape_run(engine, face(font, size, flags), text, letter_spacing)?;
         st.out.clear();

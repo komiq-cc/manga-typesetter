@@ -7,7 +7,7 @@
 
 use mt_text::abi::{
     mt_alloc, mt_chain_new, mt_chain_push, mt_font_add, mt_line_carets, mt_out_len, mt_out_ptr,
-    mt_rule_set, mt_text_reserve, RULE_BOLD_ADVANCE,
+    mt_rule_set, mt_text_reserve, Status, RULE_BOLD_ADVANCE,
 };
 use mt_text::paint::shape_run;
 use mt_text::{BoldAdvance, Engine, Face, FontId, Synth, WEBKIT_BOLD_ADVANCE};
@@ -175,4 +175,28 @@ fn offsets_are_utf16_units() {
     let c = carets(font, 30.0, 0, "a\u{1D11E}b", 0.0);
     assert_eq!(c.at, vec![0, 1, 3]);
     assert_eq!(c.len, 4);
+}
+
+/// The call as JS makes it, for its answer alone.
+fn answer(font: u32, size: f64, text: &str, spacing: f64) -> i32 {
+    let ptr = mt_text_reserve(text.len());
+    // SAFETY: the text buffer holds at least `text.len()` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), ptr, text.len()) };
+    mt_line_carets(font, size, 0, text.len(), spacing)
+}
+
+#[test]
+fn a_size_or_a_spacing_that_is_no_number_is_an_error_and_not_a_line_of_them() {
+    let font = abi_font("ComicNeue-Regular.ttf");
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(answer(font, bad, "a", 0.0), Status::BadSpec as i32);
+        assert_eq!(answer(font, 30.0, "a", bad), Status::BadSpec as i32);
+        // And with no letter to place: the question is as bad.
+        assert_eq!(answer(font, bad, "", 0.0), Status::BadSpec as i32);
+    }
+    // The numbers a box has are answered: any size, a spacing either way.
+    assert_eq!(answer(font, 30.0, "a", 0.0), 1);
+    assert_eq!(answer(font, 0.0, "a", -4.0), 1);
+    let c = carets(font, 30.0, 0, "ab", -2.5);
+    assert!(c.x.iter().all(|x| x.is_finite()) && c.advance.is_finite());
 }

@@ -156,6 +156,25 @@ describe('the engine can say where a caret stands', () => {
     }
     expect(typeof lineCarets).toBe('function');
   });
+
+  it('a size or a spacing that is no number is refused by the engine, not answered with positions that are none', () => {
+    const face = faceFor(style(), 60);
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(() => rust.lineCarets({ ...face, size: bad }, 'a'), `size ${bad}`).toThrow(/lineCarets/);
+    }
+    // The adapter reads a spacing that is no number as none; an endless one reaches the engine.
+    expect(rust.lineCarets(face, 'a', NaN).x).toEqual([expect.any(Number)]);
+    expect(() => rust.lineCarets(face, 'a', Infinity)).toThrow(/lineCarets/);
+    expect(() => linePens(rust, { ...face, size: NaN }, 'a', 0)).toThrow();
+  });
+
+  it('an engine that answers with a position that is no number is not believed', () => {
+    const answer = (over) => ({ lineCarets: () => ({ at: [0, 1], x: [0, 10], length: 2, advance: 20, ...over }) });
+    expect(linePens(answer({}), null, 'ab', 0)).toEqual({ at: [0, 1], x: [0, 10], end: 20 });
+    expect(() => linePens(answer({ x: [0, NaN] }), null, 'ab', 0)).toThrow(/not a number/);
+    expect(() => linePens(answer({ advance: Infinity }), null, 'ab', 0)).toThrow(/not a number/);
+    expect(() => linePens(answer({ at: [NaN, 1] }), null, 'ab', 0)).toThrow(/not a number/);
+  });
 });
 
 describe('in pixels: a glyph`s ink starts at the caret before it plus its own left bearing', () => {

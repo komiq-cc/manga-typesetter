@@ -57,6 +57,12 @@ function graphemeBounds(text) {
  */
 export function linePens(engine, face, line, letterSpacing) {
   const c = engine.lineCarets(face, line, letterSpacing);
+  // An answer with a position that is no number is no answer (a size or a
+  // spacing that is none; the engine refuses those itself, and an engine
+  // that does not is not believed): the caller has no model then.
+  if (!Number.isFinite(c.advance) || !c.x.every(Number.isFinite) || !c.at.every(Number.isFinite)) {
+    throw new Error('type-rows: a caret position that is not a number');
+  }
   let at = c.at;
   let x = c.x;
   // Left-to-right text arrives in order. Anything else (a run the shaper
@@ -83,8 +89,10 @@ export function linePens(engine, face, line, letterSpacing) {
  *
  * `map` is `caseMap`'s: null when a raw offset is a cased one. Null when the
  * box cannot be typed into as a picture - the engine has no `lineCarets`,
- * the lines cannot be laid over the text, or the casing cannot be mapped -
- * and it is then typed into as DOM text, as it always was.
+ * the lines cannot be laid over the text, the casing cannot be mapped, or a
+ * row of it would have nowhere for a caret to stand - and it is then typed
+ * into as DOM text, as it always was. Throws when the engine does (a size
+ * that is no number); the caller takes that as null.
  */
 export function typeModel(box, text) {
   const engine = textEngine();
