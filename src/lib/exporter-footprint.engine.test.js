@@ -109,6 +109,8 @@ const J = (over = {}) => boxOf({ font: 'DejaVu Sans', italic: true, size: 300, a
 const OVERHANGS = {
   'italic J at 300, left-aligned (the review\'s box)': J(),
   'upright J at 300, left-aligned': boxOf({ font: 'DejaVu Sans', size: 300, align: 'left' }, 'J', { w: 300, h: 400 }),
+  // The editor check's box: its ink starts on the first column of its canvas.
+  'italic jf at 70, left-aligned': boxOf({ font: 'DejaVu Sans', italic: true, size: 70, align: 'left' }, 'jf', { w: 150, h: 120 }),
   'faux italic filling its box, leaning out on the right': boxOf({ font: 'Bangers', italic: true, size: 120 }, 'WHAM', { w: 250, h: 140 }),
   'italic J with an outline and a shadow': J({ strokes: [{ color: '#e11d48', width: 8, opacity: 1 }], shadows: [{ x: -6, y: 4, blur: 4, color: '#000000', opacity: 0.6 }] }),
   'italic J, right-aligned in a narrow box': boxOf({ font: 'DejaVu Sans', italic: true, size: 300, align: 'right' }, 'J', { w: 60, h: 400 }),
