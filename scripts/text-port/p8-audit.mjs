@@ -337,8 +337,9 @@ window.__p8 = {
     const b = st.page().boxes.find((x) => String(x.id) === String(id));
     const geom = () => [b.w, b.h, b.style.size].map((n) => Math.round(n * 10) / 10);
     const before = geom();
-    b.w = Math.max(48, b.w * 0.45);
-    b.h = Math.max(24, b.h * 0.3);
+    // Narrower than its longest word and one line high: nothing of it fits.
+    b.w = Math.min(b.w, 56);
+    b.h = Math.min(b.h, 18);
     const squeezed = geom();
     const one = st.fitBoxNow(id);
     const fitted = geom();
@@ -372,7 +373,7 @@ window.__p8 = {
     const raws = new Map(pages.map((p) => [p.file, PNG1]));
     const cleaned = new Map(pages.filter((p) => p.cleaned).map((p) => [p.cleaned, PNG1]));
     const bytes = pkg.buildChapterPackage({ record: rec, translations: null, project: { name: 'P8 audit', layout: 'pages', ocrLanguage: 'ja' }, raws, cleaned, fonts: list, tags: [], app: 'p8-audit' });
-    // `familiesKnown` (package-flow.js), which the export awaits here.
+    // familiesKnown (package-flow.js), which the export awaits here.
     try { await st.fontFamiliesSettling(named); } catch { /* said as it stands */ }
     const staying = flow.fontsStaying(list, named);
     const seen = await flow.inspectPackage(new File([bytes], 'audit.mtchapter'), null);
