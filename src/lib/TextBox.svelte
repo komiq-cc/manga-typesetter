@@ -118,8 +118,16 @@
   // changes (`paintFailed` is the key that failed), and then it is tried
   // again. The throw is caught where the paint is called, in the effect, so
   // the other boxes of the same flush are painted as if nothing had happened.
+  //
+  // A WARPED box too, and it loses its mesh by it: CSS cannot state a mesh,
+  // and the painter that refused the engine's picture is the one the old
+  // warped paint asks as well, so the choice is its lines unwarped in its
+  // frame or nothing at all, and a box nobody can see or press is not a
+  // choice. `failed` therefore stands down every picture of the box, the old
+  // one included (`pictured`, `warpKey`). Always false with the switch off.
   let paintFailed = $state(null);
-  const engineShown = $derived(engineWanted && engineKey !== paintFailed);
+  const failed = $derived(enginePaints && paintFailed !== null && wantedKey === paintFailed);
+  const engineShown = $derived(engineWanted && !failed);
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
@@ -510,7 +518,7 @@
   // the display's scale rather than at 2 and stretched, and it is not painted
   // at all for a box nobody can see (`pictureOn`).
   const warped = $derived(warpActive(s, box.w, box.h));
-  const pictured = $derived(warped || engineShown);
+  const pictured = $derived((warped || engineShown) && !failed);
   let warpEl = $state(null);
   let warpGeom = $state(null);
   // Everything the picture is drawn from - the whole style, because a warped
@@ -545,14 +553,18 @@
         : PICTURE_OFF
       : '',
   );
-  const warpKey = $derived(
-    engineShown
+  // The key of the picture the box is to be, whichever paint makes it: the
+  // engine's, or the old one a warped box has with the switch off (and, with
+  // it on, while it is being typed into).
+  const wantedKey = $derived(
+    engineWanted
       ? engineKey
       : warped
         ? JSON.stringify({ ...s, ink: 0 }) +
           `|${inkKey}|${text}|${box.w}|${box.h}|${z}|${app.fontsVersion}`
         : '',
   );
+  const warpKey = $derived(failed ? '' : wantedKey);
   let warpDrawn = '';
   let warpLive = null; // non-reactive twin of warpEl: what the pixel release acts on
   let warpTips = null;
@@ -566,11 +578,9 @@
   }
 
   // The paint, for the effect: true when it painted. When it threw, the canvas
-  // holds nothing (a half-made picture is not kept), the engine's picture
-  // stands down for this key (`paintFailed`, above) and the error is said
-  // once for the box, not once a frame of a drag that keeps failing. A warped
-  // box painted the old way has no DOM text to fall back to - a mesh is not
-  // something CSS can state - and is left empty until its key changes.
+  // holds nothing (a half-made picture is not kept), the picture stands down
+  // for this key (`paintFailed`, above) and the error is said once for the
+  // box, not once a frame of a drag that keeps failing.
   //
   // ONLY WITH THE ENGINE PAINTING. With the switch off the effect calls the
   // paint bare, as it did before there was an engine's picture, and whatever a
@@ -594,9 +604,9 @@
       warpSeq++;
       if (!failSaid) {
         failSaid = true;
-        console.error(`the picture of box ${box.id} could not be painted${engineShown ? '; it is shown as its text' : ''}`, err);
+        console.error(`the picture of box ${box.id} could not be painted; it is shown as its text${warped ? ', without its mesh' : ''}`, err);
       }
-      if (engineShown) paintFailed = key;
+      paintFailed = key;
       return false;
     }
   }

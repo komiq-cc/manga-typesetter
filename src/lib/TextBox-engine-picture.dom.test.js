@@ -915,6 +915,14 @@ describe('a paint that throws', () => {
     expect(said).toHaveBeenCalledTimes(1);
   });
 
+  // The painter's refusal is the painter's: whichever paint asks it, throws.
+  const refuseBoth = () => {
+    refuse();
+    paintWarpedBox.mockImplementation(() => {
+      throw new Error('mt-text: paintJob: malformed paint job, or a surface larger than the engine allows');
+    });
+  };
+
   it('with the switch off nothing here catches: a warped box whose paint throws keeps the picture it had, and the throw goes where it always went', async () => {
     // Default mode is what it was before the engine's picture existed: the
     // effect called the paint and an exception left it. No release, no log.
@@ -939,6 +947,56 @@ describe('a paint that throws', () => {
       expect([el.width, el.height]).toEqual(had);
       expect(said).not.toHaveBeenCalled();
       expect(m.root.querySelector('canvas')).toBe(el);
+    } finally {
+      paintWarpedBox.mockImplementation(real.paintWarpedBox);
+    }
+  });
+
+  it('a warped box whose paint throws is shown as its text, without its mesh: never an empty picture', async () => {
+    refuseBoth();
+    try {
+      const m = await mounted('warped');
+      // Not a canvas with nothing in it: the lines, as elements, in the frame.
+      isDom(m);
+      expect(said).toHaveBeenCalledTimes(1);
+      expect(String(said.mock.calls[0][0])).toContain('warped');
+      expect(String(said.mock.calls[0][0])).toContain('without its mesh');
+      // It can be seen and pressed like any box of DOM text.
+      m.root.querySelector('.tline').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+      expect(app.selectedId).toBe('warped');
+      // The same picture is not tried again; a change is, and still refused it
+      // leaves the new text and says nothing more.
+      const tries = m.paints() + paintWarpedBox.mock.calls.length;
+      m.box.style.rotation = 90;
+      await tick();
+      selectBox('warped');
+      await tick();
+      expect(m.paints() + paintWarpedBox.mock.calls.length).toBe(tries);
+      m.box.text = 'SOMETHING ELSE';
+      await tick();
+      isDom(m);
+      expect(said).toHaveBeenCalledTimes(1);
+      // Allowed again, it is the picture again, mesh and all.
+      paintBoxPicture.mockImplementation(real.paintBoxPicture);
+      paintWarpedBox.mockImplementation(real.paintWarpedBox);
+      m.box.text = 'AND ANOTHER';
+      await tick();
+      const el = m.canvas();
+      expect(el.width * el.height).toBeGreaterThan(0);
+      expect(m.root.querySelector('.txt')).toBe(null);
+    } finally {
+      paintWarpedBox.mockImplementation(real.paintWarpedBox);
+    }
+  });
+
+  it('a warped box that painted and then throws lets go of its picture and is its text', async () => {
+    const m = await mounted('warped');
+    expect(m.canvas().width).toBeGreaterThan(0);
+    refuseBoth();
+    try {
+      m.box.style.color = '#ff0000';
+      await tick();
+      isDom(m);
     } finally {
       paintWarpedBox.mockImplementation(real.paintWarpedBox);
     }

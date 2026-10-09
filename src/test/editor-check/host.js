@@ -759,10 +759,12 @@ const MASK_SPEC = { pages: [{ w: 1500, h: 900, boxes: [
   { id: 'large', x: 40, y: 220, w: 1000, h: 600, over: { size: 120, clip: ellipse(500, 300, 420, 240) } },
   { id: 'unmasked', x: 640, y: 40, w: 220, h: 110 },
 ] }] };
-// The outside review's box, 7,000 page px long, and three to refuse one of.
+// The outside review's box, 7,000 page px long, and four to refuse two of,
+// one of them warped.
 const LIMITS_SPEC = { pages: [{ w: 7200, h: 600, boxes: [
   { id: 'long', x: 40, y: 60, w: 7000, h: 100, text: 'A LINE AS LONG AS A STRIP IS TALL' },
   { id: 'refused', x: 40, y: 260, w: 220, h: 110, text: 'THIS ONE IS\nREFUSED' },
+  { id: 'refused-warped', x: 940, y: 260, w: 220, h: 110, text: 'REFUSED\nAND WARPED', over: { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [232, 14], [-8, 118], [220, 110]] } } },
   { id: 'beside', x: 340, y: 260, w: 220, h: 110 },
   { id: 'after', x: 640, y: 260, w: 220, h: 110 },
 ] }] };
