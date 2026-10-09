@@ -123,7 +123,15 @@ pub(crate) struct PlanSlot {
 pub struct FontEntry {
     data: SharedBytes,
     index: u32,
+    /// The shaping font, AT THIS ENTRY'S PLACE on the font's variation axes:
+    /// the default one for a font registered from its file, another for an
+    /// instance (`instance`). Its normalized coordinates are what outlines
+    /// are drawn at too, so what is measured and what is painted are one
+    /// instance.
     pub(crate) hb: harfrust::Font,
+    /// The axis values this entry was moved to, in user units; empty at the
+    /// font's default. Kept so an instance of an instance adds to them.
+    location: Vec<(Tag, f32)>,
     pub info: FontInfo,
     /// Building a plan costs far more than shaping a short line with it, and
     /// a font sees a handful of script/direction pairs at most.
@@ -149,10 +157,64 @@ impl FontEntry {
             data,
             index,
             hb,
+            location: Vec::new(),
             info,
             plans: RefCell::new(Vec::new()),
             bounds: RefCell::new([GlyphMap::default(), GlyphMap::default()]),
         })
+    }
+
+    /// The same face at another place on its variation axes: `settings` are
+    /// axis tags and values in user units (`wght` 700). An axis not named
+    /// stays where this entry has it, a value past an axis' range is brought
+    /// to its end, and an axis the font does not have is ignored - so on a
+    /// font with no axes this is the font again.
+    ///
+    /// The bytes are shared, not copied. Shaping, advances, outlines, bounds
+    /// and the line box are all read at the new place; the PostScript name
+    /// is the instance's (`instance_postscript_name`). Everything else in
+    /// `info` describes the file, as it does for the default.
+    pub fn instance(&self, settings: &[(Tag, f32)]) -> Result<Self, Error> {
+        let bytes: &[u8] = (*self.data).as_ref();
+        let font = FontRef::from_index(bytes, self.index).map_err(|_| Error::BadFont)?;
+        let mut location = self.location.clone();
+        for &(tag, value) in settings {
+            if !value.is_finite() {
+                return Err(Error::BadSpec);
+            }
+            let Some(axis) = font.axes().iter().find(|a| a.tag() == tag) else {
+                continue;
+            };
+            let value = value.clamp(axis.min_value(), axis.max_value());
+            match location.iter_mut().find(|(t, _)| *t == tag) {
+                Some(at) => at.1 = value,
+                None => location.push((tag, value)),
+            }
+        }
+        let hb = self
+            .hb
+            .instance_builder()
+            .variations(location.iter().copied())
+            .build();
+        let mut info = read_info(&font, &hb, bytes);
+        if let Some(name) = instance_postscript_name(&font, &location) {
+            info.postscript_name = name;
+        }
+        Ok(Self {
+            data: Arc::clone(&self.data),
+            index: self.index,
+            hb,
+            location,
+            info,
+            plans: RefCell::new(Vec::new()),
+            bounds: RefCell::new([GlyphMap::default(), GlyphMap::default()]),
+        })
+    }
+
+    /// Where this entry is on the font's axes, as `(tag, user value)`; empty
+    /// at the default.
+    pub fn location(&self) -> &[(Tag, f32)] {
+        &self.location
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -178,7 +240,9 @@ impl FontEntry {
         let Some(outline) = font.outline_glyphs().get(GlyphId::new(glyph)) else {
             return false;
         };
-        let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+        // No coordinates at the font's default, which is `LocationRef::default()`.
+        let location = LocationRef::new(self.hb.normalized_coords());
+        let settings = DrawSettings::unhinted(Size::unscaled(), location);
         outline.draw(settings, pen).is_ok()
     }
 
@@ -261,6 +325,91 @@ fn read_info(font: &FontRef<'_>, hb: &harfrust::Font, bytes: &[u8]) -> FontInfo 
         faces_in_file,
         byte_len: bytes.len(),
     }
+}
+
+/// The PostScript name of a variable font at `location`, by Adobe's rule for
+/// naming instances (Technical Note 5902), or `None` at the font's default,
+/// whose name is the font's own name ID 6.
+///
+/// - A named instance of the font at exactly this place that states a
+///   PostScript name: that name.
+/// - Otherwise a prefix - name ID 25, else the typographic family, else the
+///   family, letters and digits only - and then `-` and the named
+///   instance's subfamily name (letters and digits only) when the place is a
+///   named instance, or `_<value><tag>` for every axis away from its default
+///   when it is not: `STIXTwoTextRoman-Bold`, `STIXTwoTextRoman_650wght`.
+///
+/// The note's last step, a hash in place of a name longer than 127
+/// characters, is not taken: the name is cut at 127.
+fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Option<String> {
+    let axes = font.axes();
+    // Every axis' value at this place, in the font's axis order.
+    let at: Vec<f32> = axes
+        .iter()
+        .map(|a| {
+            location
+                .iter()
+                .find(|(tag, _)| *tag == a.tag())
+                .map_or(a.default_value(), |(_, v)| *v)
+        })
+        .collect();
+    if axes
+        .iter()
+        .zip(&at)
+        .all(|(a, v)| (a.default_value() - v).abs() < 1e-3)
+    {
+        return None;
+    }
+    let text = |id: skrifa::string::StringId| {
+        font.localized_strings(id)
+            .english_or_first()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let plain = |s: String| -> String { s.chars().filter(char::is_ascii_alphanumeric).collect() };
+    let named = font.named_instances().iter().find(|inst| {
+        let coords: Vec<f32> = inst.user_coords().collect();
+        coords.len() == at.len() && coords.iter().zip(&at).all(|(a, b)| (a - b).abs() < 1e-3)
+    });
+    if let Some(name) = named
+        .as_ref()
+        .and_then(|inst| inst.postscript_name_id())
+        .and_then(text)
+    {
+        return Some(name);
+    }
+    let prefix = text(NameId::VARIATIONS_POSTSCRIPT_NAME_PREFIX)
+        .or_else(|| text(NameId::TYPOGRAPHIC_FAMILY_NAME).map(plain))
+        .or_else(|| text(NameId::FAMILY_NAME).map(plain))
+        .filter(|s| !s.is_empty())?;
+    let mut name = prefix;
+    match named.and_then(|inst| text(inst.subfamily_name_id())) {
+        Some(style) => {
+            name.push('-');
+            name.push_str(&plain(style));
+        }
+        None => {
+            for (axis, value) in axes.iter().zip(&at) {
+                if (axis.default_value() - value).abs() < 1e-3 {
+                    continue;
+                }
+                // Whole numbers as they are, the rest to three places with
+                // the trailing zeroes gone.
+                let mut number = format!("{value:.3}");
+                if number.contains('.') {
+                    number = number
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string();
+                }
+                name.push('_');
+                name.push_str(&number);
+                name.push_str(axis.tag().to_string().trim());
+            }
+        }
+    }
+    name.truncate(127);
+    Some(name)
 }
 
 /// Collects the exact extent of an outline, curve extrema included.

@@ -18,6 +18,10 @@
 //!   the instance must be thrown away.
 
 pub mod abi;
+// Reaches the shared engine through `abi::with_engine`, which exists with the
+// painter only; see the note at the top of the file.
+#[cfg(feature = "paint")]
+pub mod abi_instance;
 #[cfg(feature = "paint")]
 pub mod abi_paint;
 mod engine;

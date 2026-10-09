@@ -12,6 +12,7 @@
 // not ready, and measuring it throws: a silent substitute would be a layout
 // solved against a font nobody sees.
 import { createEngine, SYNTH_BOLD, SYNTH_OBLIQUE, CHAIN_SHIFT, RULES } from '../../../text-engine/js/engine.mjs';
+import { addInstance, instancesSupported } from '../../../text-engine/js/instance.mjs';
 import { FACE_SLOTS } from '../data.js';
 
 const ITALIC_SLOTS = new Set(['italic', 'boldItalic']);
@@ -37,6 +38,30 @@ export function matchSlot(present, bold, italic) {
   if (!pool.length) pool = present;
   const slot = pool.find((s) => BOLD_SLOTS.has(s) === bold) ?? pool[0];
   return { slot, fauxBold: bold && !BOLD_SLOTS.has(slot), fauxItalic: italic && !ITALIC_SLOTS.has(slot) };
+}
+
+// A VARIABLE FONT WITH A WEIGHT AXIS is every weight in one file, and the app
+// asks for two: regular and bold, 400 and 700 as CSS counts them. The face is
+// drawn at the weight asked, brought into the axis' range - not at wherever
+// the file's axes happen to start (SF Compact starts at 1000), and not as its
+// regular smeared when a bold is asked and the font can draw a real one.
+//
+// What is left to synthesise is what CSS leaves: a bold asked of an axis
+// that stops short of 600 is the axis' heaviest, emboldened.
+//
+// A face in a BOLD slot is drawn at 700 whatever is asked, as the browser
+// draws a face registered with `weight: 700` (fonts.js) - that is the slot's
+// meaning, and a family with only that face shows its regular as it.
+//
+// Only an axis on the CSS scale counts: old GX fonts (Skia) have a `wght`
+// that runs 0.48 to 3.2, which means nothing here.
+const WEIGHT = { regular: 400, bold: 700 };
+const SYNTH_BOLD_BELOW = 600;
+export function weightOnAxis(axis, bold, slot) {
+  if (!axis || !(axis.min >= 1 && axis.max <= 1000 && axis.max >= 100)) return null;
+  const asked = bold || BOLD_SLOTS.has(slot) ? WEIGHT.bold : WEIGHT.regular;
+  const wght = Math.min(axis.max, Math.max(axis.min, asked));
+  return { wght, fauxBold: bold && wght < SYNTH_BOLD_BELOW };
 }
 
 /**
@@ -84,6 +109,42 @@ export async function createRustTextEngine(source, options = {}) {
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
+  // Variable fonts (see `weightOnAxis`). A slot holds the font as its file
+  // starts it; the weights it is drawn at are fonts of their own to the
+  // engine, made the first time one is asked for and gone with the slot's.
+  const canInstance = instancesSupported(low);
+  // slot font -> its `wght` axis, or null; slot font -> weight -> engine font
+  const weightAxes = new Map();
+  const instances = new Map();
+  function weightAxis(font) {
+    let axis = weightAxes.get(font);
+    if (axis === undefined) {
+      axis = (canInstance && low.fontInfo(font).axes.find((a) => a.tag === 'wght')) || null;
+      weightAxes.set(font, axis);
+    }
+    return axis;
+  }
+  // The font a slot's face is drawn from for this weight, and whether it is
+  // emboldened: the slot's own font and what `matchSlot` said, unless the
+  // font has a weight axis.
+  function weighted(font, slot, bold, fauxBold) {
+    const axis = weightAxis(font);
+    const at = weightOnAxis(axis, bold, slot);
+    if (!at) return { font, fauxBold };
+    if (at.wght === axis.default) return { font, fauxBold: at.fauxBold };
+    let made = instances.get(font);
+    if (!made) instances.set(font, (made = new Map()));
+    if (!made.has(at.wght)) made.set(at.wght, addInstance(low, font, { wght: at.wght }));
+    return { font: made.get(at.wght), fauxBold: at.fauxBold };
+  }
+  // Called for a slot's font when it goes, after `changed()`: nothing names
+  // the instances by then.
+  function forgetWeights(font) {
+    weightAxes.delete(font);
+    for (const instance of instances.get(font)?.values() ?? []) low.removeFont(instance);
+    instances.delete(font);
+  }
+
   // The face one family of the fallback list lends to a request of this
   // weight and slant, and what is synthesised of it: the one statement of
   // that, for the chain that is measured and drawn from (`chainFor`) and for
@@ -94,7 +155,7 @@ export async function createRustTextEngine(source, options = {}) {
     const { slot, fauxBold, fauxItalic } = first
       ? { slot: slots[0], fauxBold: bold && !BOLD_SLOTS.has(slots[0]), fauxItalic: italic && !ITALIC_SLOTS.has(slots[0]) }
       : matchSlot(slots, bold, italic);
-    return { family, slot, font: fam[slot], fauxBold, fauxItalic };
+    return { family, slot, ...weighted(fam[slot], slot, bold, fauxBold), fauxItalic };
   }
 
   // The chain is the same for every family asked in one weight and slant.
@@ -128,11 +189,12 @@ export async function createRustTextEngine(source, options = {}) {
     }
     const bold = !!face.bold;
     const italic = !!face.italic;
-    const { slot, fauxBold, fauxItalic } = matchSlot(present(fam), bold, italic);
+    const { slot, fauxBold: smeared, fauxItalic } = matchSlot(present(fam), bold, italic);
+    const { font, fauxBold } = weighted(fam[slot], slot, bold, smeared);
     return {
       name: face.name, bold, italic, slot,
       // The three fields the low-level loader reads.
-      font: fam[slot], size: face.size,
+      font, size: face.size,
       flags: (fauxBold ? SYNTH_BOLD : 0) | (fauxItalic ? SYNTH_OBLIQUE : 0) | (chainFor(bold, italic) << CHAIN_SHIFT),
     };
   }
@@ -167,6 +229,7 @@ export async function createRustTextEngine(source, options = {}) {
     fileFonts.get(file).add(font);
   }
   function removeFont(font) {
+    forgetWeights(font);
     low.removeFont(font);
     const file = fontFile.get(font);
     if (file === undefined) return;

@@ -197,6 +197,22 @@ impl Engine {
     /// Registers one face of a font file.
     pub fn add_font(&mut self, data: SharedBytes, face_index: u32) -> Result<FontId, Error> {
         let entry = FontEntry::new(data, face_index)?;
+        Ok(self.insert(entry))
+    }
+
+    /// Registers font `of` again at another place on its variation axes
+    /// (`FontEntry::instance`): a font of its own from then on, measured and
+    /// drawn there, sharing the bytes of the first. `of` stays as it was.
+    pub fn add_instance(
+        &mut self,
+        of: FontId,
+        settings: &[(skrifa::raw::types::Tag, f32)],
+    ) -> Result<FontId, Error> {
+        let entry = self.font(of)?.instance(settings)?;
+        Ok(self.insert(entry))
+    }
+
+    fn insert(&mut self, entry: FontEntry) -> FontId {
         let slot = self.fonts.iter().position(Option::is_none);
         let idx = match slot {
             Some(i) => {
@@ -208,7 +224,7 @@ impl Engine {
                 self.fonts.len() - 1
             }
         };
-        Ok(idx as FontId + 1)
+        idx as FontId + 1
     }
 
     /// Registers another face of a file that is already loaded, without a
