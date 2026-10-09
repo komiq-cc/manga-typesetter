@@ -50,8 +50,11 @@ pub const MAX_CODE_POINTS: usize = 1024;
 
 /// The largest `cmap` table that is read. The biggest on the Mac this was
 /// written on is under 1 MB (a CJK face with ninety thousand letters); a
-/// table past this is a broken file, not a bigger font.
-const MAX_CMAP_BYTES: u32 = 16 * 1024 * 1024;
+/// table past this is a broken file, not a bigger font. It is also the bound
+/// on what one damaged font can cost: reading the table is paid for out of
+/// its own length (`Purse`), so at most this many bytes are read and at most
+/// this many steps are taken over them.
+const MAX_CMAP_BYTES: u32 = 4 * 1024 * 1024;
 
 /// Which list applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,16 +189,37 @@ fn be32(b: &[u8], at: usize) -> Option<u32> {
 /// maps a private range, and a font with nothing else has no letters to lend.
 const SUBTABLES: [(u16, u16); 8] = [(3, 10), (0, 6), (0, 4), (3, 1), (0, 3), (0, 2), (0, 1), (0, 0)];
 
+/// What reading a table may still cost. Every step of every loop below pays
+/// for the bytes of the table it is about, and the purse starts at the
+/// table's length: a sound table describes each code point with bytes of its
+/// own and never empties it. One that does not - format 4 segments laid over
+/// one another, each sending every code point through the same glyph array -
+/// asks for more reading than it has bytes, runs out, and is not a font
+/// letters are lent from. So the steps taken over a table, and the ranges
+/// made from it (never more than one for two bytes paid), are bounded by its
+/// length whatever it says.
+struct Purse(usize);
+
+impl Purse {
+    fn pay(&mut self, bytes: usize) -> Option<()> {
+        self.0 = self.0.checked_sub(bytes)?;
+        Some(())
+    }
+}
+
 /// A `cmap` table's coverage: every code point its best Unicode subtable maps
-/// to a glyph other than glyph 0. None when it has no subtable this reads.
-/// Nothing in the table is trusted: every offset is checked against its
-/// length, and a count that runs past the end stops there.
+/// to a glyph other than glyph 0. None when it has no subtable this reads, or
+/// asks for more reading than it has bytes (`Purse`). Nothing in the table is
+/// trusted: every offset is checked against its length, and a count that runs
+/// past the end stops there.
 fn parse_cmap(table: &[u8]) -> Option<Vec<(u32, u32)>> {
+    let mut purse = Purse(table.len());
     let count = usize::from(be16(table, 2)?);
     let mut found: Vec<(u16, u16, usize)> = Vec::new();
     for i in 0..count {
         let rec = 4 + i * 8;
         let Some(offset) = be32(table, rec + 4) else { break };
+        purse.pay(8)?;
         found.push((be16(table, rec)?, be16(table, rec + 2)?, offset as usize));
     }
     for want in SUBTABLES {
@@ -203,12 +227,12 @@ fn parse_cmap(table: &[u8]) -> Option<Vec<(u32, u32)>> {
         let Some(format) = be16(table, at) else { continue };
         let mut out = Ranges::default();
         let read = match format {
-            0 => subtable_0(table, at, &mut out),
-            4 => subtable_4(table, at, &mut out),
-            6 => subtable_6(table, at, &mut out),
-            10 => subtable_10(table, at, &mut out),
-            12 => subtable_12(table, at, &mut out, false),
-            13 => subtable_12(table, at, &mut out, true),
+            0 => subtable_0(table, at, &mut out, &mut purse),
+            4 => subtable_4(table, at, &mut out, &mut purse),
+            6 => subtable_6(table, at, &mut out, &mut purse),
+            10 => subtable_10(table, at, &mut out, &mut purse),
+            12 => subtable_12(table, at, &mut out, &mut purse, false),
+            13 => subtable_12(table, at, &mut out, &mut purse, true),
             _ => None,
         };
         if read.is_some() {
@@ -247,8 +271,9 @@ impl Ranges {
     }
 }
 
-fn subtable_0(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
-    let glyphs = t.get(at + 6..at + 6 + 256)?;
+fn subtable_0(t: &[u8], at: usize, out: &mut Ranges, purse: &mut Purse) -> Option<()> {
+    let glyphs = t.get(at.checked_add(6)?..at.checked_add(6 + 256)?)?;
+    purse.pay(256)?;
     for (cp, glyph) in glyphs.iter().enumerate() {
         if *glyph != 0 {
             out.add(cp as u32, cp as u32);
@@ -257,13 +282,15 @@ fn subtable_0(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
     Some(())
 }
 
-fn subtable_4(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
-    let segs = usize::from(be16(t, at + 6)?) / 2;
-    let ends = at + 14;
+fn subtable_4(t: &[u8], at: usize, out: &mut Ranges, purse: &mut Purse) -> Option<()> {
+    let segs = usize::from(be16(t, at.checked_add(6)?)?) / 2;
+    let ends = at.checked_add(14)?;
     let starts = ends + segs * 2 + 2;
     let deltas = starts + segs * 2;
     let offsets = deltas + segs * 2;
     for s in 0..segs {
+        // A segment is eight bytes of the four arrays.
+        purse.pay(8)?;
         let end = u32::from(be16(t, ends + s * 2)?);
         let start = u32::from(be16(t, starts + s * 2)?);
         let delta = u32::from(be16(t, deltas + s * 2)?);
@@ -287,6 +314,10 @@ fn subtable_4(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
             }
             continue;
         }
+        // Each code point of the segment is a glyph id of its own in the
+        // glyph array, two bytes: paid for, so segments that share the array
+        // cannot have it read once for each of them.
+        purse.pay((end - start + 1) as usize * 2)?;
         for cp in start..=end {
             let at = offsets + s * 2 + offset + (cp - start) as usize * 2;
             let raw = u32::from(be16(t, at).unwrap_or(0));
@@ -298,11 +329,12 @@ fn subtable_4(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
     Some(())
 }
 
-fn subtable_6(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
-    let first = u32::from(be16(t, at + 6)?);
-    let count = usize::from(be16(t, at + 8)?);
+fn subtable_6(t: &[u8], at: usize, out: &mut Ranges, purse: &mut Purse) -> Option<()> {
+    let first = u32::from(be16(t, at.checked_add(6)?)?);
+    let count = usize::from(be16(t, at.checked_add(8)?)?);
     for i in 0..count {
         let Some(glyph) = be16(t, at + 10 + i * 2) else { break };
+        purse.pay(2)?;
         if glyph != 0 {
             out.add(first + i as u32, first + i as u32);
         }
@@ -310,11 +342,12 @@ fn subtable_6(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
     Some(())
 }
 
-fn subtable_10(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
-    let first = be32(t, at + 12)?;
-    let count = be32(t, at + 16)? as usize;
+fn subtable_10(t: &[u8], at: usize, out: &mut Ranges, purse: &mut Purse) -> Option<()> {
+    let first = be32(t, at.checked_add(12)?)?;
+    let count = be32(t, at.checked_add(16)?)? as usize;
     for i in 0..count {
-        let Some(glyph) = be16(t, at + 20 + i * 2) else { break };
+        let Some(glyph) = be16(t, at.checked_add(20)?.checked_add(i.checked_mul(2)?)?) else { break };
+        purse.pay(2)?;
         let cp = first.checked_add(i as u32)?;
         if glyph != 0 {
             out.add(cp, cp);
@@ -325,11 +358,12 @@ fn subtable_10(t: &[u8], at: usize, out: &mut Ranges) -> Option<()> {
 
 /// Formats 12 and 13: groups of `(first, last, glyph)`. In 12 the glyph
 /// counts up through the group, in 13 (`same`) the whole group is one glyph.
-fn subtable_12(t: &[u8], at: usize, out: &mut Ranges, same: bool) -> Option<()> {
-    let groups = be32(t, at + 12)? as usize;
+fn subtable_12(t: &[u8], at: usize, out: &mut Ranges, purse: &mut Purse, same: bool) -> Option<()> {
+    let groups = be32(t, at.checked_add(12)?)? as usize;
     for g in 0..groups {
-        let rec = at + 16 + g * 12;
+        let rec = at.checked_add(16)?.checked_add(g.checked_mul(12)?)?;
         let (Some(first), Some(last), Some(glyph)) = (be32(t, rec), be32(t, rec + 4), be32(t, rec + 8)) else { break };
+        purse.pay(12)?;
         if first > last {
             continue;
         }
@@ -406,43 +440,95 @@ fn judged(index: &FontIndex, family: &str) -> Option<FaceFile> {
 /// What has been read since the last scan. It belongs to one scan's index
 /// (`Arc::ptr_eq`) and is dropped with it: a new scan may have found other
 /// files behind the same names.
-#[derive(Default)]
+///
+/// It is shared by every question (the command keeps one), and its lock is
+/// held only to look something up or to put something in: never while a file
+/// is being read. A font that is slow to read - a damaged one, a file on a
+/// disk that has gone to sleep - therefore holds up the question that reached
+/// it and no other.
 pub struct Seen {
-    scan: Option<Arc<FontIndex>>,
-    order: Vec<(String, String)>,
+    kept: Mutex<Option<Kept>>,
+}
+
+struct Kept {
+    scan: Arc<FontIndex>,
+    order: Arc<Vec<(String, String)>>,
     /// family -> its coverage; None for a family that cannot be offered.
     read: HashMap<String, Option<Arc<Coverage>>>,
 }
 
+impl Default for Seen {
+    fn default() -> Self {
+        Seen::new()
+    }
+}
+
 impl Seen {
-    fn follow(&mut self, os: Os, index: &Arc<FontIndex>) {
-        if self.scan.as_ref().is_some_and(|have| Arc::ptr_eq(have, index)) {
-            return;
+    pub const fn new() -> Self {
+        Seen { kept: Mutex::new(None) }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Kept>> {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The order letters are looked for in the families of this scan; what
+    /// was kept of another scan is dropped.
+    fn follow(&self, os: Os, index: &Arc<FontIndex>) -> Arc<Vec<(String, String)>> {
+        let mut kept = self.lock();
+        match kept.as_ref() {
+            Some(have) if Arc::ptr_eq(&have.scan, index) => have.order.clone(),
+            _ => {
+                let order = Arc::new(ordered(os, index));
+                *kept = Some(Kept { scan: index.clone(), order: order.clone(), read: HashMap::new() });
+                order
+            }
         }
-        self.scan = Some(index.clone());
-        self.order = ordered(os, index);
-        self.read.clear();
     }
 
     /// The family's coverage if it can be offered right now: its file is
-    /// still the one the scan found, and its glyphs are outlines.
-    fn offerable(&mut self, index: &FontIndex, family: &str) -> Option<Arc<Coverage>> {
+    /// still the one the scan found, and its glyphs are outlines. `read` is
+    /// what reads a face's coverage out of its file (`read_coverage`), and it
+    /// is called with the lock let go.
+    fn offerable(&self, index: &Arc<FontIndex>, family: &str, read: impl FnOnce(&Path, u32) -> Result<Coverage, String>) -> Option<Arc<Coverage>> {
         let face = judged(index, family)?;
         // Asked every time, of a family already read too: the file can go
         // between two questions, and asking is one `stat`.
         if !face.unchanged() {
             return None;
         }
-        self.read
-            .entry(family.to_string())
-            .or_insert_with(|| read_coverage(&face.path, face.index).ok().filter(|c| !c.picture).map(Arc::new))
-            .clone()
+        let of_this_scan = |kept: &Option<Kept>| kept.as_ref().is_some_and(|have| Arc::ptr_eq(&have.scan, index));
+        {
+            let kept = self.lock();
+            if of_this_scan(&kept) {
+                if let Some(have) = kept.as_ref().and_then(|k| k.read.get(family)) {
+                    return have.clone();
+                }
+            }
+        }
+        let coverage = read(&face.path, face.index).ok().filter(|c| !c.picture).map(Arc::new);
+        // Two questions may have read the same family at once: the first one
+        // in is kept, and both answer the same. Nothing is kept for a scan
+        // that was replaced while the file was read.
+        let mut kept = self.lock();
+        if of_this_scan(&kept) {
+            if let Some(have) = kept.as_mut() {
+                return have.read.entry(family.to_string()).or_insert(coverage).clone();
+            }
+        }
+        coverage
     }
 
     /// How many families have been read so far, for the tests and the measurement.
     #[cfg(test)]
     fn families_read(&self) -> usize {
-        self.read.len()
+        self.lock().as_ref().map_or(0, |k| k.read.len())
+    }
+
+    /// What is kept of one family, for the tests.
+    #[cfg(test)]
+    fn kept_of(&self, family: &str) -> Option<Arc<Coverage>> {
+        self.lock().as_ref().and_then(|k| k.read.get(family).cloned().flatten())
     }
 }
 
@@ -469,7 +555,7 @@ pub struct CoverageAnswer {
 /// Which family each of `asked` is drawn from. Each code point is answered
 /// once, however often it was listed; a number that is no Unicode scalar
 /// value is one nothing has.
-pub fn cover(os: Os, index: &Arc<FontIndex>, read: &mut Seen, asked: &[u32]) -> Result<CoverageAnswer, String> {
+pub fn cover(os: Os, index: &Arc<FontIndex>, read: &Seen, asked: &[u32]) -> Result<CoverageAnswer, String> {
     if asked.len() > MAX_CODE_POINTS {
         return Err(format!("too many letters asked about at once ({}; the limit is {MAX_CODE_POINTS})", asked.len()));
     }
@@ -484,39 +570,41 @@ pub fn cover(os: Os, index: &Arc<FontIndex>, read: &mut Seen, asked: &[u32]) -> 
         }
         scalar
     });
-    read.follow(os, index);
-    for at in 0..read.order.len() {
+    let families = read.follow(os, index);
+    for (order, name) in families.iter() {
         if left.is_empty() {
             break;
         }
-        let (order, name) = read.order[at].clone();
-        let Some(coverage) = read.offerable(index, &name) else { continue };
+        let Some(coverage) = read.offerable(index, name, read_coverage) else { continue };
         let mine: Vec<u32> = left.iter().copied().filter(|cp| coverage.has(*cp)).collect();
         if mine.is_empty() {
             continue;
         }
         left.retain(|cp| !coverage.has(*cp));
-        answer.families.push(Covering { name, order, code_points: mine });
+        answer.families.push(Covering { name: name.clone(), order: order.clone(), code_points: mine });
     }
     answer.none.extend(left);
     answer.none.sort_unstable();
     Ok(answer)
 }
 
-static READ: Mutex<Option<Seen>> = Mutex::new(None);
+static READ: Seen = Seen::new();
 
 /// Which installed family has each of these code points. Off the main thread:
 /// the first question about a letter nothing has reads a `cmap` out of every
 /// installed family.
+///
+/// The limit on a question (`MAX_CODE_POINTS`, in `cover`) bounds the WORK
+/// done for it, not the memory the request took: Tauri has parsed the whole
+/// call into a JSON value before any command sees its arguments, as it does
+/// for every command of the app. What keeps a question short is the frontend,
+/// which never sends more than the limit in one call (`COVERAGE_MAX` in
+/// font-sync.js); this is the second line, for a caller that is not it.
 #[tauri::command]
 pub async fn system_font_coverage(code_points: Vec<u32>) -> Result<CoverageAnswer, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let index = index();
-        let mut guard = READ.lock().unwrap_or_else(|e| e.into_inner());
-        cover(Os::current(), &index, guard.get_or_insert_with(Seen::default), &code_points)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || cover(Os::current(), &index(), &READ, &code_points))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -537,7 +625,7 @@ mod tests {
 
     /// The answer as `(family, code points)` pairs, and what nothing has.
     fn asked(os: Os, index: FontIndex, cps: &[u32]) -> (Vec<(String, Vec<u32>)>, Vec<u32>) {
-        let answer = cover(os, &Arc::new(index), &mut Seen::default(), cps).unwrap();
+        let answer = cover(os, &Arc::new(index), &Seen::default(), cps).unwrap();
         (answer.families.into_iter().map(|f| (f.name, f.code_points)).collect(), answer.none)
     }
 
@@ -665,7 +753,7 @@ mod tests {
         let names = ["It's \"quoted\"", "ヒラギノ角ゴシック", "\u{1F47B} Ghost", "line\nbreak", "tab\there", " leading space", "\u{1}control", "ÀCCENT", long.as_str()];
         for name in names {
             let index = scanned(&[(name, 400, false, &wide, 0)]);
-            let answer = cover(Os::Macos, &Arc::new(index), &mut Seen::default(), &[HEART]).unwrap();
+            let answer = cover(Os::Macos, &Arc::new(index), &Seen::default(), &[HEART]).unwrap();
             assert_eq!(answer.families.len(), 1, "{name:?}");
             assert_eq!(answer.families[0].name, name);
             // Nothing of the name is lost on the way to the frontend.
@@ -688,19 +776,39 @@ mod tests {
         let first = font("gone", "first.ttf", DEJAVU);
         let second = font("gone", "second.ttf", DEJAVU);
         let index = Arc::new(scanned(&[("Alpha", 400, false, &first, 0), ("Beta", 400, false, &second, 0)]));
-        let mut seen = Seen::default();
-        let name = |seen: &mut Seen| cover(Os::Macos, &index, seen, &[HEART]).unwrap().families[0].name.clone();
-        assert_eq!(name(&mut seen), "Alpha");
+        let seen = Seen::default();
+        let name = |seen: &Seen, index: &Arc<FontIndex>| cover(Os::Macos, index, seen, &[HEART]).unwrap().families[0].name.clone();
+        assert_eq!(name(&seen, &index), "Alpha");
         // Uninstalled after it was read and kept: the next family answers.
         std::fs::remove_file(&first).unwrap();
-        assert_eq!(name(&mut seen), "Beta");
+        assert_eq!(name(&seen, &index), "Beta");
         // Written over: another length and date, so not the file that was listed.
         std::fs::write(&second, fixture(BANGERS)).unwrap();
-        let answer = cover(Os::Macos, &index, &mut seen, &[HEART, 0x41]).unwrap();
+        let answer = cover(Os::Macos, &index, &seen, &[HEART, 0x41]).unwrap();
         assert_eq!(answer, CoverageAnswer { families: vec![], none: vec![0x41, HEART] });
+
+        // Written over by a file of the SAME length, later: the date alone
+        // says it is another file. (The length alone would keep lending the
+        // letters of the font that was there.)
+        let third = font("gone", "third.ttf", DEJAVU);
+        let index = Arc::new(scanned(&[("Gamma", 400, false, &third, 0)]));
+        let seen = Seen::default();
+        assert_eq!(name(&seen, &index), "Gamma");
+        let listed = std::fs::metadata(&third).unwrap();
+        let mut other = fixture(BANGERS);
+        other.resize(listed.len() as usize, 0);
+        std::fs::write(&third, &other).unwrap();
+        let later = listed.modified().unwrap() + std::time::Duration::from_secs(90);
+        std::fs::File::options().write(true).open(&third).unwrap().set_modified(later).unwrap();
+        assert_eq!(std::fs::metadata(&third).unwrap().len(), listed.len());
+        assert_eq!(cover(Os::Macos, &index, &seen, &[HEART, 0x41]).unwrap(), CoverageAnswer { families: vec![], none: vec![0x41, HEART] });
+        // Put back as it was listed, date and all: it is that file again.
+        std::fs::write(&third, fixture(DEJAVU)).unwrap();
+        std::fs::File::options().write(true).open(&third).unwrap().set_modified(listed.modified().unwrap()).unwrap();
+        assert_eq!(name(&seen, &index), "Gamma");
         // And a file that was never there to read.
         let index = Arc::new(scanned(&[("Nowhere", 400, false, Path::new("/nowhere/at/all/font.ttf"), 0)]));
-        assert_eq!(cover(Os::Macos, &index, &mut Seen::default(), &[0x41]).unwrap().none, vec![0x41]);
+        assert_eq!(cover(Os::Macos, &index, &Seen::default(), &[0x41]).unwrap().none, vec![0x41]);
     }
 
     #[test]
@@ -721,23 +829,23 @@ mod tests {
     fn an_empty_question_reads_nothing_and_a_long_one_is_refused() {
         let wide = font("bounds", "wide.ttf", DEJAVU);
         let index = Arc::new(scanned(&[("Wide", 400, false, &wide, 0)]));
-        let mut seen = Seen::default();
-        assert_eq!(cover(Os::Macos, &index, &mut seen, &[]).unwrap(), CoverageAnswer::default());
+        let seen = Seen::default();
+        assert_eq!(cover(Os::Macos, &index, &seen, &[]).unwrap(), CoverageAnswer::default());
         assert_eq!(seen.families_read(), 0);
         // At the limit it is answered, each letter once however often listed.
         let mut most: Vec<u32> = (0x41..0x41 + 26).cycle().take(MAX_CODE_POINTS).collect();
-        let answer = cover(Os::Macos, &index, &mut seen, &most).unwrap();
+        let answer = cover(Os::Macos, &index, &seen, &most).unwrap();
         assert_eq!(answer.families[0].code_points, (0x41..0x41 + 26).collect::<Vec<u32>>());
         // One more is an error, and nothing is looked up for it.
         most.push(HEART);
-        let mut fresh = Seen::default();
+        let fresh = Seen::default();
         assert_eq!(
-            cover(Os::Macos, &index, &mut fresh, &most).unwrap_err(),
+            cover(Os::Macos, &index, &fresh, &most).unwrap_err(),
             "too many letters asked about at once (1025; the limit is 1024)"
         );
         assert_eq!(fresh.families_read(), 0);
         let endless = vec![KANA_A; 5_000_000];
-        assert!(cover(Os::Macos, &index, &mut fresh, &endless).is_err());
+        assert!(cover(Os::Macos, &index, &fresh, &endless).is_err());
     }
 
     #[test]
@@ -773,16 +881,16 @@ mod tests {
 
         // What was read is kept for the scan it was read under, and no longer.
         let index = Arc::new(scanned(&[("Alpha", 400, false, &latin, 0), ("Beta", 400, false, &wide, 0)]));
-        let mut seen = Seen::default();
-        cover(Os::Macos, &index, &mut seen, &[0x41]).unwrap();
+        let seen = Seen::default();
+        cover(Os::Macos, &index, &seen, &[0x41]).unwrap();
         assert_eq!(seen.families_read(), 1, "a letter the first family has opens the first family only");
-        cover(Os::Macos, &index, &mut seen, &[HEART]).unwrap();
+        cover(Os::Macos, &index, &seen, &[HEART]).unwrap();
         assert_eq!(seen.families_read(), 2);
-        let kept = seen.read["Beta"].clone().unwrap();
-        cover(Os::Macos, &index, &mut seen, &[NOTE]).unwrap();
-        assert!(Arc::ptr_eq(&kept, seen.read["Beta"].as_ref().unwrap()), "read a second time");
+        let kept = seen.kept_of("Beta").unwrap();
+        cover(Os::Macos, &index, &seen, &[NOTE]).unwrap();
+        assert!(Arc::ptr_eq(&kept, &seen.kept_of("Beta").unwrap()), "read a second time");
         let rescanned = Arc::new(scanned(&[("Alpha", 400, false, &wide, 0)]));
-        assert_eq!(cover(Os::Macos, &rescanned, &mut seen, &[HEART]).unwrap().families[0].name, "Alpha");
+        assert_eq!(cover(Os::Macos, &rescanned, &seen, &[HEART]).unwrap().families[0].name, "Alpha");
         assert_eq!(seen.families_read(), 1);
     }
 
@@ -879,6 +987,103 @@ mod tests {
         }
     }
 
+    /// The reviewer's table: `segs` format 4 segments that ALL span U+0000 to
+    /// U+FFFF, each reading its glyphs through the glyph array (a range
+    /// offset that is not 0), and a glyph array that alternates a glyph with
+    /// glyph 0 - so every code point of every segment is a step, and every
+    /// other one a range of its own. With 32,767 segments that is two
+    /// thousand million steps and a thousand million ranges out of a table of
+    /// 393 KB.
+    fn hostile_format_4(segs: usize) -> Vec<u8> {
+        let mut body = words(&[0, 0, (segs * 2) as u16, 0, 0, 0]);
+        body.extend(std::iter::repeat_n(0xFFFFu16, segs).flat_map(u16::to_be_bytes)); // end codes
+        body.extend(words(&[0])); // pad
+        body.extend(std::iter::repeat_n(0u16, segs).flat_map(u16::to_be_bytes)); // start codes
+        body.extend(std::iter::repeat_n(0u16, segs).flat_map(u16::to_be_bytes)); // deltas
+        // Each offset is the distance from itself to the glyph array behind the offsets.
+        body.extend((0..segs).flat_map(|s| (((segs - s) * 2) as u16).to_be_bytes()));
+        body.extend((0..0x1_0000u32).flat_map(|cp| ((cp & 1) as u16).to_be_bytes()));
+        cmap_with(4, &body)
+    }
+
+    /// A font file that is a `cmap` table and nothing else.
+    fn font_of_cmap(table: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        bytes.extend_from_slice(b"cmap");
+        bytes.extend(longs(&[0, 28, table.len() as u32]));
+        bytes.extend_from_slice(table);
+        bytes
+    }
+
+    #[test]
+    fn a_table_that_asks_for_more_reading_than_it_has_bytes_is_refused_quickly() {
+        // Before the purse: 256 such segments took 5.3 s in this build and the
+        // time grew with their number; 32,767 would have been eleven minutes
+        // and eight gigabytes of ranges.
+        // One segment of it is a sound table (every code point has two bytes
+        // of its own), and the second is already too many. Asked first: a
+        // reader that lets two through would not come back from the rest.
+        assert_eq!(parse_cmap(&hostile_format_4(1)).map(|r| r.len()), Some(32_768));
+        assert_eq!(parse_cmap(&hostile_format_4(2)), None);
+        let table = hostile_format_4(32_767);
+        let t = std::time::Instant::now();
+        assert_eq!(parse_cmap(&table), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:.2?}", t.elapsed());
+
+        // The other loops, each told to run as far as a count can say, over a
+        // table at the largest size that is read: the steps are the table's.
+        let mut most = words(&[0]);
+        most.extend(longs(&[0, 0, u32::MAX]));
+        most.resize(MAX_CMAP_BYTES as usize - 14, 0xAA);
+        for format in [10u16, 12, 13] {
+            let t = std::time::Instant::now();
+            let _ = parse_cmap(&cmap_with(format, &most));
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "format {format} took {:.2?}", t.elapsed());
+        }
+
+        // As a font in the folder: not offered, and the next family answers.
+        let bad = temp_font("coverage-hostile", "bad.ttf", &font_of_cmap(&table));
+        let good = font("hostile", "good.ttf", DEJAVU);
+        assert!(read_coverage(&bad, 0).is_err());
+        let index = scanned(&[("Aaa Bad", 400, false, &bad, 0), ("Good", 400, false, &good, 0)]);
+        let t = std::time::Instant::now();
+        assert_eq!(asked(Os::Macos, index, &[0x41, HEART]).0, pairs(&[("Good", &[0x41, HEART])]));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:.2?}", t.elapsed());
+        // And the table of the size this refuses to read at all is not read.
+        let huge = temp_font("coverage-hostile", "huge.ttf", &font_of_cmap(&vec![0u8; MAX_CMAP_BYTES as usize + 1]));
+        assert_eq!(read_coverage(&huge, 0).unwrap_err(), "the font's cmap table does not fit its file");
+    }
+
+    #[test]
+    fn nothing_is_locked_while_a_file_is_read() {
+        let wide = font("lock", "wide.ttf", DEJAVU);
+        let index = Arc::new(scanned(&[("Wide", 400, false, &wide, 0)]));
+        let seen = Seen::default();
+        seen.follow(Os::Macos, &index);
+        let mut read = 0;
+        let coverage = seen.offerable(&index, "Wide", |path, face| {
+            read += 1;
+            // Another question can look things up and put things in meanwhile.
+            assert!(seen.kept.try_lock().is_ok(), "the lock is held while the file is read");
+            read_coverage(path, face)
+        });
+        assert!(coverage.unwrap().has(HEART));
+        assert_eq!(read, 1);
+        // Kept: the second time nothing is read.
+        assert!(seen.offerable(&index, "Wide", |_, _| panic!("read a second time")).is_some());
+        // A scan that replaced this one while the file was being read: the
+        // answer is given, and nothing of the old scan is kept under the new.
+        let other = Arc::new(scanned(&[("Wide", 400, false, &wide, 0)]));
+        let fresh = Seen::default();
+        fresh.follow(Os::Macos, &index);
+        let coverage = fresh.offerable(&index, "Wide", |path, face| {
+            fresh.follow(Os::Macos, &other);
+            read_coverage(path, face)
+        });
+        assert!(coverage.unwrap().has(HEART));
+        assert_eq!(fresh.families_read(), 0);
+    }
+
     /// What this machine answers, where it is a Mac with the families macOS
     /// ships: the kana come from Hiragino Sans, as CoreText draws them.
     #[test]
@@ -889,12 +1094,12 @@ mod tests {
             return;
         }
         let index = Arc::new(index);
-        let mut seen = Seen::default();
+        let seen = Seen::default();
         let cps = [KANA_A, 0x30A2, 0x6F22, 0xD55C, HEART, 0x2605, 0x2192, NOTE, GRIN, 0x10_FFFF];
-        let answer = cover(Os::current(), &index, &mut seen, &cps).unwrap();
+        let answer = cover(Os::current(), &index, &seen, &cps).unwrap();
         // The same question again, and from a cold start, is the same answer.
-        assert_eq!(cover(Os::current(), &index, &mut seen, &cps).unwrap(), answer);
-        assert_eq!(cover(Os::current(), &index, &mut Seen::default(), &cps).unwrap(), answer);
+        assert_eq!(cover(Os::current(), &index, &seen, &cps).unwrap(), answer);
+        assert_eq!(cover(Os::current(), &index, &Seen::default(), &cps).unwrap(), answer);
         assert!(answer.none.contains(&0x10_FFFF));
         // Every family named is one the list has, and its file can be handed over.
         for family in &answer.families {
@@ -960,12 +1165,12 @@ mod tests {
         let kana: Vec<u32> = "こんにちは".chars().map(u32::from).collect();
         let mixed = [KANA_A, 0x6F22, 0xD55C, HEART, 0x2605, 0x2192, NOTE];
         for (what, cps) in [("kana", &kana[..]), ("kana, kanji, hangul, symbols", &mixed[..]), ("a letter nothing has", &[0x10_FFFF][..]), ("an emoji", &[GRIN][..])] {
-            let mut seen = Seen::default();
+            let seen = Seen::default();
             let t = Instant::now();
-            let answer = cover(Os::current(), &index, &mut seen, cps).unwrap();
+            let answer = cover(Os::current(), &index, &seen, cps).unwrap();
             let first = t.elapsed();
             let t = Instant::now();
-            cover(Os::current(), &index, &mut seen, cps).unwrap();
+            cover(Os::current(), &index, &seen, cps).unwrap();
             let again = t.elapsed();
             let names: Vec<String> = answer.families.iter().map(|f| format!("{} x{}", f.name, f.code_points.len())).collect();
             println!("B  {what}: first answer {first:.2?} ({} families read), again {again:.2?}: {names:?}, none {}", seen.families_read(), answer.none.len());
@@ -983,10 +1188,10 @@ mod tests {
             ('卍', "Hiragino Sans"), ('㊙', "Hiragino Sans"), ('①', "Hiragino Sans"),
         ];
         if cfg!(target_os = "macos") {
-            let mut seen = Seen::default();
+            let seen = Seen::default();
             let mut same = 0;
             for (ch, coretext) in sample {
-                let answer = cover(Os::Macos, &index, &mut seen, &[u32::from(ch)]).unwrap();
+                let answer = cover(Os::Macos, &index, &seen, &[u32::from(ch)]).unwrap();
                 let mine = answer.families.first().map_or("(none)", |f| f.name.as_str()).to_string();
                 if mine == coretext {
                     same += 1;
@@ -997,14 +1202,30 @@ mod tests {
             println!("C  the family CoreText picks, of {} sample letters Helvetica Neue lacks: {same} the same", sample.len());
         }
 
+        // Every family's coverage as one line, to a file: to compare two
+        // readers of the same fonts. `MT_COVERAGE_DUMP=/path/to/file`.
+        if let Ok(path) = std::env::var("MT_COVERAGE_DUMP") {
+            let mut lines: Vec<String> = Vec::new();
+            for name in index.keys() {
+                let face = judged(&index, name).unwrap();
+                lines.push(match read_coverage(&face.path, face.index) {
+                    Ok(c) => format!("{name}\t{}\t{}\t{}", c.count(), c.ranges.len(), c.picture),
+                    Err(e) => format!("{name}\tunread: {e}"),
+                });
+            }
+            lines.sort();
+            std::fs::write(&path, lines.join("\n")).unwrap();
+            println!("E  {} families written to {path}", lines.len());
+        }
+
         // The answer the command would send for the code points in a file
         // (decimal, one to a line), as it goes over the wire, on one line:
         // `MT_COVERAGE_ASK=/path/to/ask.txt cargo test … -- --ignored --nocapture`
         if let Ok(path) = std::env::var("MT_COVERAGE_ASK") {
             let asked: Vec<u32> = std::fs::read_to_string(&path).unwrap().split_whitespace().map(|n| n.parse().unwrap()).collect();
-            let mut seen = Seen::default();
+            let seen = Seen::default();
             let t = Instant::now();
-            let answer = cover(Os::current(), &index, &mut seen, &asked).unwrap();
+            let answer = cover(Os::current(), &index, &seen, &asked).unwrap();
             println!("D  {} letters from {path}: {:.2?}, {} families read", asked.len(), t.elapsed(), seen.families_read());
             println!("ANSWER {}", serde_json::to_string(&answer).unwrap());
         }
