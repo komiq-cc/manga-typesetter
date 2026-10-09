@@ -247,6 +247,21 @@ repeat byte for byte; `ref-cr` repeats its numbers and all but about one
 picture in two thousand, which differ by a fraction of a percent of coverage
 (its glyph rasteriser is on the GPU).
 
+## One engine on two hosts
+
+```
+node scripts/text-port/same-pixels.mjs <runA> <runB> [--data <dir>]    # e.g. new/r4 new/r4-wk
+```
+
+Two `new` runs of one tree, taken on different hosts (node, Chromium, Safari),
+must be the same pictures. PNG bytes cannot show it, since each host has its
+own encoder, so this decodes both runs and compares pixel for pixel. A picture
+whose style asks the host's canvas for something (a shadow, a blur, a motion
+blur, a pattern tile, a clip mask, the PSD layer path) is counted and may
+differ; every other picture is the engine's own pixels, and one that differs
+makes the exit code 1. Measured on tree `e829744`: 3,558 of 3,558 equal in
+Chromium and in Safari against node; 32 of the 174 with a host step.
+
 ## Comparing
 
 `node scripts/text-port/compare.mjs <runA> <runB> [--out <dir>] [--gates <file>]`
