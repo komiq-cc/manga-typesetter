@@ -288,3 +288,23 @@ worst first.
 - No host invents a number. No silent skip, no silent fallback font.
 - Real chapters are only ever read from copies under `$TP_DATA/chapters/`.
 - Nothing under `$TP_DATA` is committed.
+
+## The P8 audit: which browser text calls are left
+
+`p8-audit.mjs` loads the app itself in a headless Chromium and counts every
+call to `measureText`, `fillText`, `strokeText`, `document.fonts.load`,
+`.check` and `.ready`, `new FontFace`, and `Range.getClientRects` and
+`getBoundingClientRect`, by the line of the app that made it, through one
+acted-out session: a chapter opened, pages turned, a box selected, moved,
+resized, restyled in the Inspector, fitted, a page auto-typeset, and the PNG,
+PSD and `.mtchapter` exports. Once with `textEngine: 'browser'` and once with
+`'rust'`; then, engine on, it writes PSDs of untouched pages and reads them
+back against what the painter was handed.
+
+```sh
+node scripts/text-port/p8-audit.mjs --data <tp-data>   # -> <tp-data>/reports/p8/audit.md
+```
+
+It starts its own Vite (port 5204) and Chromium (DevTools port 9382) and
+stops both. The head of the file says what a plain browser makes it stand in
+for (the library on disk, system fonts) and that typing is not acted out.
