@@ -974,7 +974,7 @@
                 >
                   {#each pg.boxes as box (box.id)}
                     {#if isBoxVisible(box, i)}
-                      <TextBox {box} {pg} pageFrameEl={frameEls[i]} />
+                      <TextBox {box} {pg} pageFrameEl={frameEls[i]} lazy />
                     {/if}
                   {/each}
                 </div>
@@ -1010,7 +1010,7 @@
             <!-- Same as the strip above: a translate chapter draws no boxes. -->
             {#if !translate}
               {#each m.pg.boxes as box (box.id)}
-                <TextBox {box} pg={m.pg} pageFrameEl={pagedFrameEls[m.i]} />
+                <TextBox {box} pg={m.pg} pageFrameEl={pagedFrameEls[m.i]} shown={m.i === app.pageIndex} />
               {/each}
             {/if}
           </div>

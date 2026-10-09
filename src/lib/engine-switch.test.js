@@ -3,13 +3,16 @@ import {
   app, loadProjectPages, page, autoFitBox, refitBox, fitBoxNow, placeActiveAt, fontNameFor, fontCssFor, measuredFontFor, fontMissing, missingFonts,
 } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
-import { engineSwitch, useTextEngine, lettersMissing, boxesMissingLetters, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
+import {
+  engineSwitch, useTextEngine, lettersMissing, boxesMissingLetters, whyFontMissing, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync,
+} from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { _restoreFontRecords, addFontFile, installFontFace, removeFontFace, removeUserFont, systemFontEntry, watchUserFaces } from './fonts.js';
 import { lineWidth, faceFor, layoutLines, applyCase, contentWidth, textInset, setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
 import { neededHeight } from './typeset.js';
 import { defaultStyle, normalizeStyle } from './data.js';
 import { fakeRustEngine, fakeNative, widthOf, SFNT, TTC, WOFF2 } from '../test/fake-rust-engine.js';
+import { fakeIndexedDB } from '../test/fake-indexeddb.js';
 
 // ===========================================================================
 // The textEngine switch, with stand-ins for the wasm and the native side
@@ -49,6 +52,10 @@ function need(b) {
 }
 
 const original = { engine: textEngine(), typeset: typesetEnabled(), system: app.fonts.system };
+// The user's font library: where a watcher that starts late reads the bytes
+// back from. One for the file, emptied between cases - fonts.js keeps its
+// connection.
+const library = fakeIndexedDB();
 let browser;
 let engine;
 let createEngine;
@@ -75,6 +82,7 @@ beforeEach(() => {
     }
   });
   vi.stubGlobal('document', { fonts: { add() {}, delete() {} } });
+  vi.stubGlobal('indexedDB', library);
   initHistory();
   resetHistory();
   app.chapterRef = null;
@@ -91,6 +99,8 @@ afterEach(async () => {
   _setEngineSwitchDeps(null);
   watchUserFaces(null);
   for (const f of [...app.fonts.user]) await removeUserFont(f.name);
+  library.rows.clear();
+  library.full = false;
   app.fonts.system = original.system;
   loadProjectPages([]);
   setTextEngine(original.engine);
@@ -154,14 +164,45 @@ describe('the switch', () => {
     expect(engine.registered()).toEqual({});
   });
 
-  it('loads the wasm once however often it is flipped', async () => {
+  it('compiles the wasm once however often it is flipped, and makes a new engine of it each time it goes on', async () => {
+    const MODULE = { compiled: true };
+    const compile = vi.fn(async () => MODULE);
+    const made = [];
+    createEngine.mockImplementation(async () => {
+      made.push(fakeRustEngine());
+      return made.at(-1);
+    });
+    deps({ compile });
     await addFontFile(fontFile('WildWords.ttf'));
     await useTextEngine('rust');
+    expect(textEngine()).toBe(made[0]);
     await useTextEngine('browser');
     await useTextEngine('rust');
-    expect(createEngine).toHaveBeenCalledTimes(1);
-    expect(textEngine()).toBe(engine);
-    expect(engine.registered()).toEqual({ WildWords: ['regular'] });
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(createEngine.mock.calls).toEqual([[MODULE], [MODULE]]);
+    expect(made).toHaveLength(2);
+    expect(textEngine()).toBe(made[1]);
+    expect(made[1].registered()).toEqual({ WildWords: ['regular'] });
+    // The first one is finished with: nothing was put into it again.
+    expect(made[0].registered()).toEqual({});
+    // And the letters it was asked about are asked of the new one.
+    expect(lettersMissing(styleFor('WildWords'), 'あ')).toEqual([0x3042]);
+    expect(made[1].asked).toContain('WildWords');
+    expect(made[0].asked).not.toContain('WildWords');
+  });
+
+  it('compiles again after a compile that failed', async () => {
+    const compile = vi.fn(async () => ({}));
+    compile.mockRejectedValueOnce(new Error('the text engine could not be read (404)'));
+    deps({ compile });
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    expect(engineSwitch).toMatchObject({ phase: 'failed', error: 'the text engine could not be read (404)' });
+    expect(createEngine).not.toHaveBeenCalled();
+    await useTextEngine('browser');
+    await useTextEngine('rust');
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(engineSwitch.phase).toBe('on');
   });
 
   it('says so when the engine cannot start, keeps the browser, and tries again when asked again', async () => {
@@ -383,9 +424,84 @@ describe('a compressed face', () => {
     await addFontFile(fontFile('Anchor.ttf'));
     await addFontFile(fontFile('Webby.woff2', WOFF2()));
     await useTextEngine('rust');
-    expect(invoke.calls).toEqual([['font_to_sfnt', 'bytes']]);
+    // What the command was given is the file and nothing around it: Tauri
+    // sends a raw body only for bytes, and the command takes nothing else
+    // (the stand-in refuses as it does).
+    expect(invoke.calls).toHaveLength(1);
+    const [command, body] = invoke.calls[0];
+    expect(command).toBe('font_to_sfnt');
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect([...body]).toEqual([...WOFF2()]);
     expect(engine.registered()).toEqual({ Anchor: ['regular'], Webby: ['regular'] });
     expect(fontMissing('Webby')).toBe(false);
+  });
+
+  it('is not decoded by a call that wraps the bytes in arguments: the command refuses, as the real one does', async () => {
+    const invoke = fakeNative({});
+    await expect(invoke('font_to_sfnt', { bytes: WOFF2() })).rejects.toThrow('takes the font file as the raw body of the call');
+    await expect(invoke('font_to_sfnt', [...WOFF2()])).rejects.toThrow('raw body');
+    await expect(invoke('font_to_sfnt', WOFF2().buffer)).resolves.toBeInstanceOf(ArrayBuffer);
+  });
+});
+
+// The save into the library fails (no room), the browser has the face all the
+// same. fonts.js keeps such bytes only while somebody is watching, so which
+// came first - the font or the switch - decides whether the engine has them.
+describe('a face the library could not store', () => {
+  beforeEach(async () => {
+    await addFontFile(fontFile('Anchor.ttf'));
+    library.full = true;
+  });
+
+  it('added before the switch is on: the engine has no bytes of it, and it is a missing font that says why', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    expect(app.toast.msg).toContain('could not be saved');
+    await useTextEngine('rust');
+    expect(engineSwitch.phase).toBe('on');
+    expect(engine.registered()).toEqual({ Anchor: ['regular'] });
+    expect(fontMissing('WildWords')).toBe(true);
+    expect(whyFontMissing('WildWords')).toBe('unsaved');
+    expect(fontNameFor('WildWords')).toBe('Anchor');
+    // Taken out and added again, with room this time, it is a font like any other.
+    await removeUserFont('WildWords');
+    library.full = false;
+    await addFontFile(fontFile('WildWords.ttf'));
+    expect(engine.registered()).toEqual({ Anchor: ['regular'], WildWords: ['regular'] });
+    expect(fontMissing('WildWords')).toBe(false);
+    expect(whyFontMissing('WildWords')).toBe(null);
+  });
+
+  it('added with the switch on: the engine has it at once, and no longer once the switch has been off', async () => {
+    await useTextEngine('rust');
+    await addFontFile(fontFile('WildWords.ttf'));
+    expect(app.toast.msg).toContain('could not be saved');
+    expect(engine.registered()).toEqual({ Anchor: ['regular'], WildWords: ['regular'] });
+    expect(fontMissing('WildWords')).toBe(false);
+    expect(fontNameFor('WildWords')).toBe('WildWords');
+    // Off gives the bytes back; there is then nowhere to read them from.
+    await useTextEngine('browser');
+    expect(fontMissing('WildWords')).toBe(false);
+    await useTextEngine('rust');
+    expect(engine.registered()).toEqual({ Anchor: ['regular'] });
+    expect(fontMissing('WildWords')).toBe(true);
+    expect(whyFontMissing('WildWords')).toBe('unsaved');
+  });
+
+  it('is not what a missing font is measured in, though it is the user’s only other family', async () => {
+    await addFontFile(fontFile('Aardvark.ttf'));
+    await useTextEngine('rust');
+    // 'Aardvark' sorts before 'Anchor' and would be the last resort if it could be read.
+    expect(engineSwitch.lastResort).toBe('Anchor');
+  });
+
+  it('one face of a family lost, another stored: the family is measured as itself, without the lost face', async () => {
+    await addFontFile(fontFile('WildWords-Bold.ttf'));
+    library.full = false;
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    expect(engine.registered()).toEqual({ Anchor: ['regular'], WildWords: ['regular'] });
+    expect(fontMissing('WildWords')).toBe(false);
+    expect(_engineSwitchSync().snapshot().user.WildWords).toEqual({ bold: 'unusable', regular: 'ready' });
   });
 });
 
@@ -405,7 +521,7 @@ describe('system faces', () => {
     app.fonts.system = installed();
     await useTextEngine('rust');
     expect(engineSwitch).toMatchObject({ phase: 'on', lastResort: 'Helvetica Neue' });
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular' }]]);
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Helvetica Neue', slot: 'regular', known: [] }]]);
     expect(engine.registered()).toEqual({ 'Helvetica Neue': ['regular', 'bold', 'italic', 'boldItalic'] });
     expect(new Set(Object.values(engine.families.get('Helvetica Neue')).map((f) => f.file)).size).toBe(1);
   });
@@ -420,7 +536,8 @@ describe('system faces', () => {
     // A chapter set in a system font opens: nothing of it is in the engine yet.
     loadProjectPages(doc([box('Zapfino')]));
     const b = page().boxes[0];
-    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular' }]]);
+    // The question says which file the engine holds already: the last resort's.
+    expect(invoke.calls).toEqual([['system_font_face', { family: 'Zapfino', slot: 'regular', known: [expect.stringMatching(/^[0-9a-f]{16}$/)] }]]);
     // Not measured into the document as the last resort: the height on file stands.
     expect(b.h).toBe(20);
     expect(fontNameFor('Zapfino')).toBe('Helvetica Neue');
@@ -582,5 +699,32 @@ describe('letters no face has', () => {
       { pageIndex: 0, boxId: 'kana', letters: [0x3053] },
       { pageIndex: 0, boxId: 'gone', letters: [0x306d] },
     ]);
+  });
+
+  it('are asked of the text as it is set: the same words in capitals are another question', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    // 'ÿ' is a letter every stand-in face has; its capital 'Ÿ' is one none has.
+    const lower = styleFor('WildWords', { uppercase: false });
+    const upper = styleFor('WildWords', { uppercase: true });
+    expect(lettersMissing(lower, 'ÿ')).toEqual([]);
+    expect(lettersMissing(upper, 'ÿ')).toEqual([0x178]);
+    expect(lettersMissing(lower, 'ÿ')).toEqual([]);
+    // And in a box: turning capitals on is enough to list it.
+    loadProjectPages(doc([box('WildWords', { text: 'ÿ', style: { uppercase: false } })]));
+    expect(boxesMissingLetters()).toEqual([]);
+    page().boxes[0].style.uppercase = true;
+    expect(boxesMissingLetters()).toEqual([{ pageIndex: 0, boxId: 'b1', letters: [0x178] }]);
+  });
+
+  it('are asked once for a face and a string, however often the notice reads them', async () => {
+    await addFontFile(fontFile('WildWords.ttf'));
+    await useTextEngine('rust');
+    const missing = vi.spyOn(engine, 'missing');
+    for (let i = 0; i < 5; i++) lettersMissing(styleFor('WildWords', { size: 20 + i }), 'こ');
+    expect(missing).toHaveBeenCalledTimes(1);
+    // Bold is another face, and may have what the regular lacks.
+    lettersMissing(styleFor('WildWords', { bold: true }), 'こ');
+    expect(missing).toHaveBeenCalledTimes(2);
   });
 });
