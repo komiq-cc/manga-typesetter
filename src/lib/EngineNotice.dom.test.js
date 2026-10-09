@@ -3,8 +3,8 @@ import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import EngineNotice from './EngineNotice.svelte';
 import ReviewList from './ReviewList.svelte';
-import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting } from './store.svelte.js';
-import { useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
+import { app, loadProjectPages, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave, stampTypesetting, placeActiveAt } from './store.svelte.js';
+import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { contentWidth, setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
 import { fakeRustEngine, SFNT } from '../test/fake-rust-engine.js';
@@ -107,6 +107,11 @@ afterEach(() => {
 });
 
 const notice = (view) => view.container.querySelector('.en');
+// Keep waits for the fonts and then for the write: more than one turn.
+const settled = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await tick();
+};
 const button = (view, name) => [...view.container.querySelectorAll('.en-btn')].find((b) => b.textContent.trim() === name);
 
 describe('the first-fit notice', () => {
@@ -204,5 +209,66 @@ describe('the first-fit notice', () => {
     await tick();
     expect(notice(view)).toBe(null);
     expect(saves).toHaveLength(1);
+  });
+
+  it('a Keep whose write fails leaves the notice standing, with Keep to press again, and says why', async () => {
+    const file = lettered();
+    await rustOn();
+    open(file);
+    const view = render(EngineNotice);
+    unhook();
+    unhook = setSaver(async () => {
+      stampTypesetting();
+      throw new Error('disk full');
+    });
+    await fireEvent.click(button(view, 'Keep'));
+    await settled();
+    expect(app.toast.msg).toBe('Could not save: disk full');
+    expect(notice(view).querySelector('.en-note').textContent).toContain('Nothing is saved until you edit the chapter or keep these.');
+    expect(button(view, 'Keep').disabled).toBe(false);
+    expect(app.saved).toBe(false);
+    unhook();
+    unhook = setSaver(async () => {
+      saves.push(stampTypesetting());
+      markSaved();
+    });
+    await fireEvent.click(button(view, 'Keep'));
+    await settled();
+    expect(saves).toEqual([{ mode: 'smart', version: 2 }]);
+    expect(notice(view)).toBe(null);
+    app.saveFailed = false;
+  });
+
+  it('a box stored as never laid out is said to have been laid out, and only the others to have kept their width, size and place', async () => {
+    // Placed while the engine was starting, when every face is on its way.
+    const records = [
+      { name: 'AnimeAce', slot: 'regular', file: 'AnimeAce.ttf', data: SFNT() },
+      { name: 'Narrow', slot: 'regular', file: 'Narrow.ttf', data: SFNT() },
+    ];
+    let made;
+    const started = new Promise((resolve) => (made = () => resolve(fakeRustEngine())));
+    const deps = (createEngine) => ({ available: () => true, createEngine, invoke: async () => null, booted: async () => {}, records: async () => records, watch: () => {}, os: () => 'macos' });
+    _setEngineSwitchDeps(deps(() => started));
+    const on = useTextEngine('rust');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(engineSwitch.phase).toBe('starting');
+    open({
+      pages: [{ id: 1, w: 800, h: 1200, lines: [{ n: 1, text: 'AAAA BBBB CCCC DDDD', tr: 'AAAA BBBB CCCC DDDD', tags: [] }], boxes: [], activeLineN: 1 }],
+      typesetting: { mode: 'smart', version: 1 },
+    });
+    app.lastStyle.font = 'Narrow';
+    placeActiveAt(400, 400);
+    const file = { pages: copy(app.pages), typesetting: { mode: 'smart', version: 1 } };
+    expect(file.pages[0].boxes[0].auto.status).toBe('pending');
+    close();
+    await useTextEngine('browser');
+    made();
+    await on;
+    _setEngineSwitchDeps(deps(async () => fakeRustEngine()));
+    await rustOn();
+    open(file);
+    const view = render(EngineNotice);
+    expect(notice(view).querySelector('.en-what').textContent).toBe('1 box laid out for the first time');
+    expect(notice(view).querySelector('.en-note').textContent).toContain('No other box changed its width, size or place.');
   });
 });

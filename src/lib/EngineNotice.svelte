@@ -4,12 +4,16 @@
   // opened with the new engine switched on. That engine measures a little
   // differently, so an open can grow a height, raise or clear a "needs
   // review" flag, or break a box's lines somewhere else. It never changes a
-  // box's width, size or place. This says how many of each, once per chapter.
+  // box's width, size or place - with one exception that is not the engine's:
+  // a box stored as never laid out (placed while its font was still loading)
+  // is laid out by the open that finds its font, under either engine, and is
+  // counted here as that. This says how many of each, once per chapter.
   //
   // Nothing is saved by opening. The file takes the changes with the first
   // save an edit of the user's causes, or when they press Keep here. Until
   // then leaving the chapter writes nothing, and turning the engine off puts
-  // every box back.
+  // every box back. A Keep whose write fails has kept nothing: the store
+  // brings this back, and the reason is said in a toast.
   //
   // It lists no boxes of its own. A flagged box is in the review list, where
   // flagged boxes always are, and a box whose lines moved is listed there too
@@ -27,7 +31,7 @@
   // Null with the browser measuring, at version 2, and once answered: then
   // nothing below reads a box.
   const changes = $derived(firstFitChanges(app.pages));
-  const any = $derived(!!changes && changes.grew + changes.flagged + changes.cleared + changes.relaid > 0);
+  const any = $derived(!!changes && changes.grew + changes.flagged + changes.cleared + changes.relaid + changes.laid > 0);
   const what = $derived(
     changes
       ? [
@@ -35,6 +39,7 @@
           changes.flagged ? `${plural(changes.flagged, 'box', 'boxes')} newly flagged` : '',
           changes.cleared ? `${plural(changes.cleared, 'box', 'boxes')} no longer flagged` : '',
           changes.grew ? `${plural(changes.grew, 'box', 'boxes')} grew taller` : '',
+          changes.laid ? `${plural(changes.laid, 'box', 'boxes')} laid out for the first time` : '',
         ]
           .filter(Boolean)
           .join(' · ')
@@ -72,7 +77,7 @@
     </div>
     <div class="en-what">{what}</div>
     <div class="en-note">
-      No box changed its width, size or place.
+      {changes.laid ? 'No other box' : 'No box'} changed its width, size or place.
       {#if changes.kept}
         These are saved with the chapter.
       {:else}
