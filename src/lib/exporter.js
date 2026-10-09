@@ -1,8 +1,8 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth } from './measure.js';
-import { glyphPainter } from './text-engine/index.js';
-import { boxCandidate, placeBlock, blockRect } from './contain.js';
+import { glyphPainter, engineDraws } from './text-engine/index.js';
+import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
 import {
   strokeBands,
   strokeExtent,
@@ -155,6 +155,10 @@ export async function settleNoise(boxes) {
   if ((boxes ?? []).some((b) => b?.style?.roughen?.on)) await ensureNoisePhase();
 }
 
+// The part of a footprint's padding that is not the reach of any effect: room
+// for an edge's antialiasing and for rounding. See `pad` in `layoutBox`.
+const PAD_SPARE = 4;
+
 // Lay out a box's text and compute its canvas geometry WITHOUT drawing. The
 // footprint (cw×ch) grows to contain the full block incl. overflow beyond the
 // box rect on all sides - mirroring the editor's `overflow:visible` centered
@@ -200,7 +204,7 @@ function layoutBox(box, p) {
     ) +
       (s.blur > 0 ? s.blur * 3 : 0) +
       motionBlurExtent(s.motionBlur) +
-      4,
+      PAD_SPARE,
   );
 
   // Every glyph-by-glyph layout - the bezier path, the closed circle and the
@@ -280,6 +284,31 @@ function layoutBox(box, p) {
     bottomExtra = Math.max(0, blockY + blockH - box.h);
     leftExtra = Math.max(0, -x0);
     rightExtra = Math.max(0, x1 - box.w);
+
+    // The block above is its ADVANCES and its line boxes, and glyphs ink past
+    // both: an italic's first letter starts left of where the line does, its
+    // last leans past the end, a tall glyph stands above a tight line. `pad`
+    // is the reach of what is laid ON the glyphs, measured from them, so ink
+    // that is past the block by more than the pad's spare was painted off the
+    // canvas - cut - with its outline and its shadow (an italic J at 300 px
+    // lost 12% of itself). The glyphs' own ink is known (`place.inks`, what
+    // the containment check reads), so the footprint grows until that ink has
+    // the reach of its effects inside the canvas - and by no more: a box
+    // whose ink is within the spare, which is nearly every box, keeps the
+    // canvas it had, to the byte.
+    //
+    // Only where one engine measures and paints (`engineDraws`): there the
+    // measured ink is the painted ink. The browser path has the same cut and
+    // keeps it until it is removed; see `engineDraws` for the cut-over.
+    if (engineDraws()) {
+      const g = linesInkRect(place);
+      if (g) {
+        leftExtra = Math.max(leftExtra, -g.x0 - PAD_SPARE);
+        topExtra = Math.max(topExtra, -g.y0 - PAD_SPARE);
+        rightExtra = Math.max(rightExtra, g.x1 - box.w - PAD_SPARE);
+        bottomExtra = Math.max(bottomExtra, g.y1 - box.h - PAD_SPARE);
+      }
+    }
   }
 
   // Hand-drawn ink past the box's far edges (OVF-7). The pad above holds the

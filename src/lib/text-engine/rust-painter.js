@@ -117,5 +117,6 @@ export function createRustGlyphPainter(rust, options = {}) {
     }
   }
 
-  return { id: 'rust', paint, maxSide: MAX_RASTER_SIDE };
+  // `engine` says whose ink this painter paints (`engineDraws`, index.js).
+  return { id: 'rust', paint, maxSide: MAX_RASTER_SIDE, engine: rust };
 }

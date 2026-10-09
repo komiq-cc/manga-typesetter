@@ -42,3 +42,18 @@ export function glyphPainter() {
 export function setGlyphPainter(p) {
   painter = p;
 }
+
+// Whether ONE engine both measures and paints: the painter says which engine
+// it paints with (`engine`, the Rust painter's), and that engine is the one
+// installed for measuring. Then a line's measured ink is exactly the ink that
+// will be painted, and a canvas can be sized by it.
+//
+// This is the gate for what is right in the Rust engine and would change the
+// browser path's output if it were done there too: today one thing, the
+// footprint grown to hold ink past the advances (`layoutBox`, exporter.js).
+// The browser path has the same defect and keeps it, byte for byte, until it
+// is removed. AT CUT-OVER this function and its one call go, and what the
+// call guards becomes unconditional.
+export function engineDraws() {
+  return engine != null && painter.engine === engine;
+}

@@ -258,6 +258,23 @@ export function blockRect(place) {
   return { x0, y0: place.blockY, x1, y1: place.blockY + place.blockH };
 }
 
+// A straight block's glyph ink as one box-local rectangle `{x0, y0, x1, y1}`:
+// each line's measured ink (`place.inks`) at its anchor and baseline. Null for
+// a curve, and for a block that inks nothing. Not the advances: an italic's
+// first letter starts left of its anchor and a tall glyph stands above its
+// line box, and this is where they are. `boxInkRect` starts from it.
+export function linesInkRect(place) {
+  if (!place || place.isCurve) return null;
+  let r = null;
+  for (let i = 0; i < place.lines.length; i++) {
+    const k = place.inks[i];
+    if (!k) continue;
+    const base = place.blockY + i * place.lineH + place.baseY;
+    r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
+  }
+  return r;
+}
+
 // The same placement after a change of height alone. Line breaking reads the
 // height only through the balloon's rows, which hang from the point the block is
 // anchored to (`balloonWidthsFor`), and a height change anchored by `valign` -
@@ -341,12 +358,7 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
       if (k) r = unite(r, ...turnedInk(k, g.rot, cx + g.x, cy + g.y));
     }
   } else {
-    for (let i = 0; i < place.lines.length; i++) {
-      const k = place.inks[i];
-      if (!k) continue;
-      const base = place.blockY + i * place.lineH + place.baseY;
-      r = unite(r, place.lineX[i] + k.left, base - k.ascent, place.lineX[i] + k.right, base + k.descent);
-    }
+    r = linesInkRect(place);
   }
   const ink = inkActive(s.ink) ? inkBounds(s.ink) : null;
   if (ink) r = unite(r, ink.minX, ink.minY, ink.maxX, ink.maxY);
