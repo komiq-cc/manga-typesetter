@@ -1508,23 +1508,26 @@ and zero after, and requires both old pointers to leave the composition and
 postcomposition selection unchanged. Mutation `T2-multiple` reproduces the
 reviewer's exact clear-then-add change. `S1-shown-span`, `S1-direction` and
 `S1-compose` separately target visible-span agreement, reverse focus and
-IME ownership. Their definitions are prepared, not claimed killed yet.
+IME ownership. The coordinator later measured these named mutations killed
+as part of the frozen 47 current catalog; the exact results are in section 13.4.
 
-At this report draft the final delta has not run tests: the coordinator
-reserved the machine for P9's model run. The bounded pinned-source probe
-`p7c-review-repros/partial-selection.mjs` is prepared and unexecuted. Its
-old-source mode expects zero marks but whole-grapheme Cut; fixed mode
-requires three painter/engine-oracle marks with the native direction intact.
-The new mounted file remains compatible with old source `c6b61d4`, so the
-coordinator can copy it into a private archive and require actual named
-assertion failures. The real-engine oracle is a numerical control and is
-not presented as a failing old-source defect reproduction.
+The worker prepared this delta without tests while the coordinator reserved
+the machine for P9's model run. The coordinator subsequently ran the bounded
+pinned-source `p7c-review-repros/partial-selection.mjs` on old `c6b61d4` and
+fixed `0a001247`. The old source drew zero marks yet cut the whole grapheme;
+the fixed source drew three marks with x=5/width=20.16 on rows at y=5/53/101.
+All four native directions/interiors stayed intact; pictured focus moved to
+the correct end, and Cut still copied/deleted the whole grapheme. Logs are
+`p7c-partial-c6b61d49.log` and `p7c-partial-0a001247.log`. These are controlled
+mounted/real-wasm measurements, not native-browser range-generation proof.
+The real-engine oracle reads direct pens/painter placement and is a numerical
+control, not a failing old-source defect reproduction on its own.
 
 ### 13.2.3 Pending composition coverage only
 
 The final delta review, `p7c-last-delta-codex-findings.md`, found no production
-defect. It independently measured236 real-wasm selection checks,32 edits,
-33 composition/pending/default/curve controls and20 native-caret alignment
+defect. It independently measured 236 real-wasm selection checks, 32 edits,
+33 composition/pending/default/curve controls and 20 native-caret alignment
 checks. Actual browser generation of controlled raw ranges and desktop IME
 placement remain inferred. The review's clear-then-add drag mutation failed
 the new multiple-drag assertion, while unmutated candidate behavior passed.
@@ -1542,35 +1545,47 @@ the actual completion callback, repeats the native selection notification,
 and checks that the pending selection direction, hidden caret row/geometry,
 six composed marks and original stored box text persist. Running completion
 then commits the double text and clears composition marks. This is test and
-report work only: production source remains exactly `0a001247`. At preparation
-time the test and new mutation have not run; the coordinator owns those proofs.
+report work only: production source remains exactly `0a001247`. The coordinator
+subsequently ran the pending assertion at test/report HEAD `12ac49f`: one named
+baseline passed, and removing only the `composeText == null` guard failed that
+same assertion without collection/runtime errors. Production was restored and
+all frozen 47 hashes remained unchanged. Exact evidence is
+`p7c-pending-compose-mutation/run-12ac49fd8926-root/results.json`.
 
-The coordinator measured47/47 named assertion kills in the existing catalog
+The coordinator measured 47/47 named assertion kills in the existing catalog
 at `0a001247`. Those scripts, definitions and result files remain byte-for-byte
 frozen; hashes are recorded separately. The new one-guard mutation has its own
 `p7c-pending-compose-mutation/` directory, exact source strings, pinned archive
-runner and named pending test. It has no claimed kill until the coordinator
-runs it. Existing47 evidence is never rewritten into a48-result claim.
+runner and named pending test. Its one measured kill is separate from the
+current 47 catalog. Existing 47 evidence is never rewritten into a 48-result claim.
 
 ### 13.2.4 Historical replay status and test-quality follow-up
 
-The coordinator's exact historical107 replay at `0a001247` measured
-77 named assertion kills,22 obsolete textual targets,4 test-errors and
+The coordinator's exact historical 107 replay at `0a001247` measured
+77 named assertion kills, 22 obsolete textual targets, 4 test-errors and
 4 surviving substitutions. These statuses are retained verbatim. A parse,
 compile, runtime or test-body TypeError is not an assertion kill. There is
-no107-pass claim, and separately measured current-catalog kills are not
+no 107-pass claim, and separately measured current-catalog kills are not
 substituted for any historical nonkill. Exact provenance and explanations
 are in `p7c-historical-followups/SURVIVOR-AUDIT.md`.
 
 Historical C1/M6/M7 included behavioral assertion failures together with
 body TypeErrors, so their broad statuses remain test-error. The coordinator
-prepared a separate clean selected-test runner for the same exact source
-substitutions; its future results are focused follow-up proofs only.
+ran a separate clean selected-test runner for the same exact source
+substitutions at `0a001247`: its four distinct baseline tests passed, then
+C1/M6/M7 each failed their two exact named behavioral assertions with no
+runtime/import/compile/timeout error. These three measured follow-up kills
+are separate from the unchanged original test-error statuses. Evidence is
+`p7c-historical-followups/runs/0a001247edd0683608823be5de3e02d04f7c33b6/latest-results.json`.
 Historical T3 produced a missing `.tpad` and a TypeError at the old test's
 style dereference. The test-only change now explicitly requires that
 necessary overflow pointer pad before measuring it. The exact old T3
-substitution can therefore fail a named behavioral assertion; that fresh
-run remains the coordinator's task and does not relabel the original result.
+substitution now fails a named behavioral assertion in the coordinator's
+separate `12ac49f` full mounted-file follow-up: 107 baseline cases passed,
+then the exact historical T3 produced 106 passes/1 named assertion failure,
+with no runtime/import/compile/timeout error. Its evidence is
+`p7c-t3-followup-12ac/runs/12ac49fd8926ce31ee23d2fbf4f08d49f6ab053f/latest-results.json`.
+The original broad T3 status remains test-error and is not relabelled.
 
 The four historical survivors have a static domain explanation, not an
 invented kill. M18/M19 remove inequalities from lead/trail selection predicates;
@@ -1581,15 +1596,15 @@ advance checks still refuse the covered malformed numeric requests. This
 explains the measured covered error-status survival, not universal malformed
 input equivalence; combined-fault precedence/side effects are not proved.
 
-By comparison, current47 `F4-close`/`F5-close` target redundant menu/curve
+By comparison, current 47 `F4-close`/`F5-close` target redundant menu/curve
 lifecycle cleanup routes together, and current RustR1/R2 remove downstream
 pen/advance guards. The coordinator measured all four killed by their named
-assertions, as part of47/47 current results. Those are different definitions
+assertions, as part of 47/47 current results. Those are different definitions
 with separate evidence and retain their identities. The source-only
 finite-advance/nonfinite-pen test proves the pen check independently.
 
-This commit changes only mounted tests and this report. All production
-files remain byte-identical to `0a001247`, the measured47 scripts/catalog/
+Commit `12ac49f` changes only mounted tests and this report. All production
+files remain byte-identical to `0a001247`, the measured 47 scripts/catalog/
 results remain frozen, and the new pending-text mutation stays in its
 separate directory. No test, build, browser, capture or mutation executed in
 this worker's final test/report pass.
@@ -1613,11 +1628,11 @@ immediately after negative-spacing overflow.
 ### 13.4 Verification and mutations
 
 **Coordinator baseline at1120341, before the six fresh fixes:** engine
-141 tests (45 without default features), full Vitest127 files/3600 tests,
-Tauri301 tests, all3 clippy feature sets/fmt/builds passed. Both captures
+141 tests (45 without default features), full Vitest 127 files/3600 tests,
+Tauri 301 tests, all 3 clippy feature sets/fmt/builds passed. Both captures
 matched their references except `manifest.json`. Chromium at1x/2x passed
-1072 type and84 type2 checks each, pageErrors0; WebKit passed614 presses,
-wrongOffset0 and picture-byte differences0. The coordinator viewed pictures.
+1072 type and 84 type2 checks each, pageErrors0; WebKit passed614 presses,
+wrong offsets 0 and picture byte differences 0. The coordinator viewed pictures.
 Exact commands, logs and JSON: `tp-data/reports/resume-20261009/CHECKPOINT.md`.
 These baseline results do not verify the new source commits.
 
@@ -1644,27 +1659,29 @@ named assertions in49 tests, including a scratch generated zero-advance
 font. This is **historical coordinator evidence**. It does not mean the
 full older mutation tables were repeated. The105 recovered old definitions
 include rewritten/obsolete targets; their results must keep those labels.
-Fresh47 source substitutions and named tests are prepared separately in
-`tp-data/reports/resume-20261009/p7c-worker-mutations/`. They include all six
-fresh fixes, pointercancel, clipboard protection, pen-only guard removal and
-negative-spacing partial-output clearing, all four next-review fixes and the
-menu-mode coverage control, final visible-span agreement and multiple-drag
-ownership. Their exact strings are prepared for the final source;
-preparing them executed no mutation tests. Only named assertion failures
-count as kills; parse/compile/load errors are not successful mutations.
+The coordinator executed the 47 current source substitutions at `0a001247`
+after 259 selected JavaScript and 10 Rust carets baseline tests passed. All 47
+failed their named behavioral assertions; collection/compile/runtime errors
+were excluded. They cover the six fresh fixes, pointercancel, clipboard
+protection, independent pen validation, negative-spacing output clearing,
+the four next-review fixes, menu-mode cleanup, visible-span agreement and
+multiple default-drag ownership. Exact commands, substitutions and names are
+in `p7c-worker-mutations/run-0a001247edd0-root/results.json`. Scripts, catalog
+and results are preserved with hashes. This is current-definition evidence, separate
+from the historical 107 statuses and the new pending-text assertion mutation.
 
-**Coordinator repeated at69e6704:** full Vitest127 files passed/1 skipped,
-3622 tests passed/7 skipped; engine142 default/45 no-default tests passed;
-fmt and all3 clippy feature sets are clean; Tauri301 and the application build
+**Coordinator repeated at69e6704:** full Vitest 127 files passed/1 skipped,
+3622 tests passed/7 skipped; engine 142 default/45 no-default tests passed;
+fmt and all 3 clippy feature sets are clean; Tauri 301 and the application build
 also passed. Rebuilt wasm is unchanged:
 1605271 bytes, SHA256
 `475d90f497f44ec1489e1d41270fd2fd2c5867f54f1f2f2b2af85f108d84bf8d`.
 These are coordinator measurements in `p7c-final-coordinator-*` logs. The
 final sharpened pointer assertions are included in that passing full suite.
 These tests predate the four additional fixes in section13.2.1 and do not
-verify them. Capture/browser/WebKit/mutation and final review gates remain
-pending. The next review found the four accepted defects described above;
-its completion was not merge approval.
+verify them. At that earlier commit the later proof/review gates had not run.
+The next review found the four accepted defects described above; its completion
+was not merge approval. Final coordinator evidence is recorded below.
 
 **This worker measured on `b57dde3` plus the DOM loader correction committed
 as `c6b61d4`:** the authorized four-file Vitest process, with
@@ -1684,25 +1701,78 @@ private resume directory. `git diff --check` was clean. No full suite,
 engine rebuild, browser, capture or mutation process ran in this fix pass.
 
 **Coordinator repeated at source `c6b61d4`/report HEAD `1ae9603`:** wasm
-hash unchanged;142 default/45 no-default engine tests, fmt/all3 clippy sets,
-3648 Vitest cases plus7 skips across127 passing files, Tauri301 plus1 ignored,
+hash unchanged;142 default/45 no-default engine tests, fmt/all 3 clippy sets,
+3648 Vitest cases plus 7 skips across127 passing files, Tauri 301 plus1 ignored,
 and build all passed. Logs are `p7c-final2-*`. The coordinator also copied
 this candidate's mounted/engine tests onto old `69e6704`: five named
 assertion failures proved all four defects, with no import/collection errors.
 Those are coordinator measurements, and they precede section13.2.2's final
 delta. They are not final-source acceptance or mutation evidence.
 
-**Coordinator at `0a001247`:** full Vitest3657 cases passed plus7 skips,
-and the8 earlier plus6 final independent bounded probes passed. The final
-focused review found no production defect, only the pending-text coverage
-gap recorded above. Current47 named mutations were independently killed.
-These coordinator facts predate the final pending/T3 test-only assertions;
-the coordinator will own their baseline/kill, exact T3 fresh repeat, final
-full JavaScript, Chromium1x/2x, WebKit and integration verification.
+**Final production verification, coordinator-measured at `0a001247`:**
+engine 142 default/45 no-default tests passed; fmt and all 3 clippy feature
+sets are clean; Tauri 301 passed/1 ignored and the application build passed.
+Full Vitest 3657 cases passed plus 7 skips, and 8 earlier plus 6 final bounded
+independent probes passed. Exact commands, environments and logs are in
+`p7c-final3-coordinator-proofs.json`. The final focused production review
+found no defect, only the pending-text coverage gap recorded above.
 
-Remaining gates: finish all relevant proofs on the accepted final source,
-view the new pictures, obtain a fresh read-only Codex review, fix any real
-findings, and only then let the coordinator merge and verify `text-port`.
+Both coordinator Node captures at `0a001247` matched their frozen references
+except `manifest.json`: ref-sk/base and Rust new/r4. Each contains 64718 metric
+records, 17538 layouts and 3732 pictures, with 0 errors. The default capture
+recorded 7856 skips; Rust recorded 0. The capture run IDs and exact
+commands/comparisons are in `p7c-final3-coordinator-captures.json`. This proves
+capture correspondence; it does not establish native IME/menu behavior.
+
+**Final test/report verification at `12ac49f`, coordinator-measured:** full
+Vitest 127 files passed/1 skipped, 3658 cases passed/7 skipped. The only paths
+changed from production `0a001247` are the mounted test and this report;
+production and wasm remain identical. Metadata is
+`p7c-final4-coordinator-js.json`; wasm remains 1605271 bytes, SHA256
+`475d90f497f44ec1489e1d41270fd2fd2c5867f54f1f2f2b2af85f108d84bf8d`.
+The separate pending baseline/kill passed as recorded above. Current47 and
+three clean historical follow-up kills are separate measured evidence.
+The historical 107 statuses remain 77 kills/22 obsolete/4 test-error/4 survivors.
+
+The pinned `12ac49f` static Codex test review found two P3 assertion-quality
+gaps, with no production source change requested: resetting selection after
+`compositionend` could heal a synchronous ownership loss, and missing caret
+elements could cause a body TypeError. Test-only `b5e0664` now asserts raw
+`[4,5]` immediately after compositionend, dispatches only selectionchange,
+and asserts initial/pending caret existence before reading either. The
+coordinator inspected that exact delta and repeated full JavaScript: 127 files
+passed/1 skipped, 3658 cases passed/7 skipped (`p7c-final5-root-vitest.log`).
+Production remains byte-identical to the reviewed `0a001247`.
+
+The coordinator separately repeated the pending assertion and same one-guard
+mutation at `b5e0664`: one baseline passed, one named assertion failed, no
+collection/runtime errors, production restored, and both original proof sets'
+hashes unchanged. Evidence is
+`p7c-pending-test-quality/run-b5e066456508-root/results.json`. The original
+`12ac49f` pending proof and current 47 catalog/results remain immutable.
+This repeat is a sharpened-assertion follow-up, not another unique mutation.
+
+**Fresh browser proof, coordinator-measured on unchanged `0a001247` production:**
+Chromium 1x and 2x each passed 1072 type and 84 type2 checks, with 0 failures and
+0 pageErrors. System WebKit checked 13 boxes/614 presses, wrong offsets 0,
+picture byte differences 0, maximum native caret error 0.23 CSS px, errors [].
+Exact summaries and timing records are in `p7c-final4-browser-summary.json`.
+The coordinator viewed `type-2x-03.png`, `type-2x-edges.png` and `type-1x-03.png`:
+rotated/flipped/arc selection marks and carets followed the text. This is
+Chromium automation and a system WKView, not a desktop IME candidate-window,
+Tauri keyboard or native-menu proof. Narrow-grapheme and controlled partial
+native-range cases remain real-wasm/jsdom proofs, not browser-harness cases.
+
+The browser timing record includes normal key tasks over 16 ms: Rust-on
+page-wide 100% at 1x had a 20 ms median and 32 ms maximum over 24 real-key tasks.
+The 20000-glyph line's synthetic key median was 50.1 ms at 1x and 58.9 ms at 2x
+(at 100% zoom). Those measured costs are retained; no universal frame-budget
+claim is made. Quiet-machine comparisons remain deferred to user-approved
+P10 work. The coordinator stopped the proof servers and verified ports 5199,
+8791 and 9377 clear.
+
+P7c feature-branch proofs and review repairs are complete. Only the
+coordinator's merge into `text-port` and post-merge integration checks remain.
 P8 owns uniform rejection of an unknown/freed fallback chain; it is separate
 from the caret arithmetic fix and is not implemented here. No P10 began.
 
@@ -1712,9 +1782,12 @@ Paused commits: `946bd44`, `c96a3dd`, `11b0ab9`, `0e9770b`, `1120341`.
 Resumed source commits: `2935b9d` (editing lifetimes), `746b827` (boundary
 work and full extent), `69e6704` (independent ABI proof), `b57dde3` (whole
 grapheme edits, incoming gesture/menu ownership and selected-piece extents),
-`c6b61d4` (mounted real-fixture loader).
-This report commit corrects the stale second-round claims and writes the
-missing third-round account. Nothing was pushed or merged by this worker.
+`c6b61d4` (mounted real-fixture loader), `0a001247` (visible-span consistency
+and multiple-drag coverage), `12ac49f` (pending-composition and required-pad
+assertions; production unchanged), `b5e0664` (selection observation without resetting
+and explicit caret existence; tests only). Report-only commits record the
+completed third-round findings, corrections and proof provenance. Nothing
+was pushed or merged by this worker.
 No main files, P8 source files, private data or font files were committed.
 No attribution trailers were added.
 
