@@ -118,7 +118,7 @@ async function mounted(id, { zoom = 1, props = {} } = {}) {
   const view = render(TextBox, { box: b, pageFrameEl: document.createElement('div'), pg, ...props });
   await tick();
   const root = view.container.querySelector('.tbox');
-  return { view, root, box: b, pg, canvas: () => root.querySelector('canvas'), paints: () => paintBoxPicture.mock.calls.length };
+  return { view, root, box: b, pg, canvas: () => root.querySelector('canvas'), reach: () => root.querySelector('.reach'), paints: () => paintBoxPicture.mock.calls.length };
 }
 // A turned box is painted at twice the display's scale (TURNED_OVERSAMPLE).
 const turned = (b) => ((b.style.rotation || 0) % 90 ? TURNED_OVERSAMPLE : 1);
@@ -460,16 +460,16 @@ describe('a box nobody can see', () => {
     const m = await mounted('finish');
     const el = m.canvas();
     expect(m.paints()).toBe(1);
-    expect(observed.has(m.root)).toBe(true);
+    expect(observed.has(m.reach())).toBe(true);
     expect(FakeObserver.options).toEqual({ rootMargin: '50%' });
-    say(m.root, true);
+    say(m.reach(), true);
     await tick();
     expect(m.paints()).toBe(1);
-    say(m.root, false);
+    say(m.reach(), false);
     await tick();
     expect([el.width, el.height]).toEqual([0, 0]);
     expect(m.paints()).toBe(1);
-    say(m.root, true);
+    say(m.reach(), true);
     await tick();
     expect(m.paints()).toBe(2);
     expect(el.width * el.height).toBeGreaterThan(0);
@@ -480,42 +480,42 @@ describe('a box nobody can see', () => {
     const el = m.canvas();
     expect(m.paints()).toBe(0);
     expect([el.width, el.height]).toEqual([0, 0]);
-    say(m.root, false);
+    say(m.reach(), false);
     await tick();
     expect(m.paints()).toBe(0);
-    say(m.root, true);
+    say(m.reach(), true);
     await tick();
     expect(m.paints()).toBe(1);
     expect(el.width * el.height).toBeGreaterThan(0);
-    say(m.root, false);
+    say(m.reach(), false);
     await tick();
     expect([el.width, el.height]).toEqual([0, 0]);
   });
 
   it('is asked about again when its page comes back on screen', async () => {
     const m = await mounted('finish');
-    say(m.root, false);
+    say(m.reach(), false);
     await tick();
     expect(m.paints()).toBe(1);
     await m.view.rerender({ shown: false });
     await tick();
-    expect(observed.has(m.root)).toBe(false);
+    expect(observed.has(m.reach())).toBe(false);
     await m.view.rerender({ shown: true });
     await tick();
     // Unknown again, so it paints for the page turn; the observer corrects it a frame later.
-    expect(observed.has(m.root)).toBe(true);
+    expect(observed.has(m.reach())).toBe(true);
     expect(m.paints()).toBe(2);
   });
 
   it('comes back into view during a zoom gesture: painted then, not left blank until the gesture settles', async () => {
     const m = await mounted('finish');
-    say(m.root, false);
+    say(m.reach(), false);
     await tick();
     setZoomLive(true);
     setZoom(0.5);
     await tick();
     expect(m.paints()).toBe(1);
-    say(m.root, true);
+    say(m.reach(), true);
     await tick();
     expect(m.paints()).toBe(2);
     expect(m.canvas().width).toBeGreaterThan(0);
@@ -526,6 +526,57 @@ describe('a box nobody can see', () => {
     const m = await mounted('finish');
     expect(observed.size).toBe(0);
     expect(m.root.querySelector('canvas')).toBe(null);
+    expect(m.reach()).toBe(null);
+  });
+
+  // What is watched is what the picture covers, not the box's rectangle: ink
+  // past the rectangle that is still in view must keep the box painted.
+  it('is judged by its picture\'s footprint: the watched element is laid over it, and stays there when the pixels go', async () => {
+    const m = await mounted('finish', { zoom: 1.5 });
+    const f = footprint(m.box, m.pg);
+    // The stroke, the shadow and the blur reach past the box on every side.
+    expect(f.ox).toBeGreaterThan(8);
+    expect(f.cw).toBeGreaterThan(m.box.w + 16);
+    const el = m.reach();
+    expect(el.parentElement.classList.contains('clipwrap')).toBe(true);
+    const over = () => css(el);
+    expect(over().left).toBeCloseTo(-f.ox * 1.5, 6);
+    expect(over().top).toBeCloseTo(-f.oy * 1.5, 6);
+    expect(over().width).toBeCloseTo(f.cw * 1.5, 0);
+    expect(over().height).toBeCloseTo(f.ch * 1.5, 0);
+    const held = over();
+    say(el, false);
+    await tick();
+    expect([m.canvas().width, m.canvas().height]).toEqual([0, 0]);
+    expect(m.reach()).toBe(el);
+    expect(over()).toEqual(held);
+    // And while the box is typed into, when there is no picture at all.
+    say(el, true);
+    await tick();
+    beginEdit('finish');
+    await tick();
+    expect(m.reach()).toBe(el);
+    expect(observed.has(el)).toBe(true);
+    expect(over()).toEqual(held);
+  });
+
+  it('before anything has been painted the watched element is the box\'s own rectangle', async () => {
+    const m = await mounted('finish', { props: { lazy: true } });
+    expect(m.paints()).toBe(0);
+    const el = m.reach();
+    expect([el.style.left, el.style.top, el.style.width, el.style.height]).toEqual(['0px', '0px', '100%', '100%']);
+    say(el, true);
+    await tick();
+    expect(m.paints()).toBe(1);
+    expect(css(el).left).toBeLessThan(-8);
+  });
+
+  it('follows the picture when the box changes', async () => {
+    const m = await mounted('finish');
+    const before = css(m.reach());
+    m.box.w = 400;
+    await tick();
+    expect(css(m.reach()).width).toBeCloseTo(before.width + 160, 0);
   });
 });
 

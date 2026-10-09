@@ -113,17 +113,31 @@
   // budget - `PICTURE_MAX_PX`).
   const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
   // Whether the box is near the viewport: null until the observer has said.
-  let rootEl = $state(null);
+  //
+  // What is watched is not the box's rectangle but what its picture covers
+  // (`reachEl`, an element with nothing in it, laid over the footprint the
+  // picture was last painted to and over the box until there is one). Ink
+  // goes past the rectangle - an overflowing line, a curve, a shadow, a mesh
+  // - and a box judged by its rectangle let go of ink that was still in view.
+  // The footprint is kept when the pixels are let go, so a box that is far
+  // comes back by the same measure it left by.
+  let reachEl = $state(null);
+  let reach = $state(null);
+  const keepReach = (g) => {
+    if (reach && reach.ox === g.ox && reach.oy === g.oy && reach.cw === g.cw && reach.ch === g.ch) return;
+    reach = { ox: g.ox, oy: g.oy, cw: g.cw, ch: g.ch };
+  };
   let near = $state(null);
   $effect(() => {
-    if (!enginePaints || !shown || !rootEl) {
+    if (!enginePaints || !shown || !reachEl) {
       near = null;
+      if (!enginePaints) reach = null;
       return;
     }
     // Asked again each time the page comes back on screen: an observer tells
     // of changes, and "still off screen" after a page turn is not one.
     near = null;
-    return watchNear(rootEl, (v) => {
+    return watchNear(reachEl, (v) => {
       near = v;
     });
   });
@@ -517,6 +531,7 @@
     warpGeom = engineShown
       ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
       : paintWarpedBox(el, box, pg, z, tips);
+    if (engineShown) keepReach(warpGeom);
   }
 
   // ---- the gizmo's live drag ----
@@ -555,6 +570,7 @@
       warpGeom = engineShown
         ? { ...paintPictureTexture(warpLive, warpTex, box), page: warpGeom?.page }
         : paintWarpedTexture(warpLive, warpTex, box, z);
+      if (engineShown) keepReach(warpGeom);
     },
     end() {
       releaseWarpTex();
@@ -1831,7 +1847,6 @@
   class:flagged={!!review}
   data-id={box.id}
   style={boxStyle}
-  bind:this={rootEl}
   onpointerdown={onBoxPointerDown}
   ondblclick={onDblClick}
 >
@@ -1910,6 +1925,19 @@
     class="clipwrap"
     style="justify-content:{justify};align-items:{alignItems};padding:{pad}px;{pictured ? '' : maskCss}{wrapMirror}"
   >
+  {#if enginePaints}
+    <!-- What tells whether the box is near the viewport (`reach`, above):
+         nothing to see and nothing to click, only a rectangle for the
+         observer. Inside the wrapper so it is mirrored as the picture is. -->
+    <div
+      class="reach"
+      bind:this={reachEl}
+      style={reach
+        ? `left:${-reach.ox * z}px;top:${-reach.oy * z}px;width:${reach.cw * z}px;height:${reach.ch * z}px`
+        : 'left:0;top:0;width:100%;height:100%'}
+      aria-hidden="true"
+    ></div>
+  {/if}
   {#if pictured}
     <!-- The whole box as one picture: type, ink and every filter, carried
          through the mesh by the exporter's painter. Placed off the box's own
@@ -2164,6 +2192,13 @@
     pointer-events: none;
     user-select: none;
     -webkit-user-select: none;
+  }
+  /* The rectangle the near-viewport observer is given for a box shown as the
+     engine's picture. It is geometry only. */
+  .reach {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
   }
   /* The path gizmo. The svg itself lets clicks through to the box; only the
      anchors and handles take the pointer. High-contrast colours so the curve
