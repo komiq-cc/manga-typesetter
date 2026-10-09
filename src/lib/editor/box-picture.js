@@ -70,10 +70,15 @@ export function pictureScale(zoom, dpr, rotation = 0) {
 // Measured in Chromium on a loaded machine, a frame of the drag to the end of
 // its effects: 2 ms for a tenth of a megapixel, 6 to 15 ms for one, 25 ms for
 // 2.4, 72 to 87 ms for the 8.4 a box at the budget above holds. A megapixel
-// is what fits a frame. An ordinary balloon is under it at 100% on any
-// display and at 300% on a 1x one, and is as sharp in the hand as at rest;
-// a page-wide sound effect is soft while it is dragged and is painted in
-// full once, when the handle is let go.
+// is what fits a frame for type with an outline and a shadow. An ordinary
+// balloon is under it at 100% on any display and at 300% on a 1x one, and is
+// as sharp in the hand as at rest; a page-wide sound effect is soft while it
+// is dragged and is painted in full once, when the handle is let go.
+//
+// It bounds the part of a frame that follows the pixels and no more. A box
+// with three bands of outline cost 42 ms a frame at 1.2 megapixels in the same
+// measurement, and 10 ms at a tenth of one: that is the bands' own work, and
+// this budget does not bring it inside a frame.
 export const PICTURE_DRAG_PX = 1024 * 1024;
 
 /**

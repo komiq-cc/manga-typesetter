@@ -658,7 +658,12 @@ if (ONLY.has('limits')) {
   const same = (await ec('sameAsExporter')).find((r) => r.id === 'long');
   report.limits.long = { zoom: z, scale: z * DSF, wouldBe: Math.round(7000 * z * DSF), canvas: long.canvas, dom: long.dom, sameAsExporter: same, pageErrors: cdp.errors.length - errorsBefore };
   log('limits / long box:', JSON.stringify(report.limits.long));
-  save(`limits-long-${DSF}x.png`, (await shot({ x: 0, y: 0, w: WINDOW.w, h: 500 })).canvas);
+  // Its text is in the middle of 7,000 page px: scrolled to, to be looked at.
+  await ec('scrollTo', Math.round(long.rect.x + long.rect.w / 2 - WINDOW.w / 2), 0, 4);
+  const middle = await shot({ x: 0, y: 0, w: WINDOW.w, h: 500 });
+  report.limits.long.inkOnScreen = inkBox(middle, true)?.n ?? 0;
+  save(`limits-long-${DSF}x.png`, middle.canvas);
+  await ec('scrollTo', 0, 0, 2);
 
   const three = async () => Object.fromEntries((await ec('boxesState')).boxes.filter((b) => b.id !== 'long').map((b) => [b.id, { engine: painted(b) && b.canvas.painter === 'engine', dom: b.dom }]));
   const said = async () => (await ec('logged')).filter((m) => /could not be painted/.test(m)).length;
