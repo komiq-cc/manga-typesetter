@@ -24,8 +24,11 @@
 //   1. the switch off: opened as it is today, measured by the stand-in;
 //   2. the switch on: opened from the file again, then left until every font
 //      it sent for is in;
+//      The notice's own counts are read, the chapter is left (what is
+//      written by that), and then kept (what is written by that);
 //   3. the document as step 2 left it, opened with the switch off again: what
-//      a chapter the Rust engine has fitted meets when the user goes back.
+//      a chapter the Rust engine has fitted meets when the user goes back, and
+//      what a save there writes.
 //
 // Nothing is written but under TP_OUT. No time, no path of this machine's
 // home and no random number goes into what is written, so a second run gives
@@ -117,9 +120,13 @@ if (process.env.TP_DRYRUN !== '1') {
     });
 
     // ---- the saver: what would have gone to disk, and when ----
+    // As `writeOpenChapter` (library.svelte.js): the version is stamped as the
+    // snapshot is taken, and the document is then what is on disk. Each entry
+    // is the version that write would carry.
     const writes = [];
     store.setSaver(async () => {
-      writes.push(1);
+      writes.push(store.stampTypesetting().version);
+      store.markSaved();
     });
 
     // What `loadChapter` (library.svelte.js) does to the document once it has
@@ -268,6 +275,11 @@ if (process.env.TP_DRYRUN !== '1') {
       await store.fontsSettling(app.pages);
       const savedAfterFonts = app.saved;
       const rust = snapshot();
+      // What the app's own notice says of this chapter (EngineNotice.svelte).
+      // Its "new line breaks" are counted against the engine that measured
+      // before the switch: here the stand-in, in the app WebKit.
+      const said = store.firstFitChanges();
+      const notice = said ? { grew: said.grew, flagged: said.flagged, cleared: said.cleared, relaid: said.relaid } : null;
       const fontFacts = new Map();
       app.pages.forEach((p, pi) => p.boxes.forEach((b, bi) => {
         const letters = sw.boxLetters(b, p);
@@ -316,15 +328,26 @@ if (process.env.TP_DRYRUN !== '1') {
           }
         }
       }
+      // The notice's Keep: the one thing besides an edit that writes.
+      const beforeKeep = writes.length;
+      await store.keepFirstFit();
+      const writesOnKeep = writes.length - beforeKeep;
+      const versionOnKeep = writesOnKeep ? writes[writes.length - 1] : null;
       const fitted = plainPages();
+      const keptTypesetting = { ...app.typesetting };
       close();
 
       // 3. Back: what the Rust engine left, opened with the switch off.
       await sw.useTextEngine('browser');
       let back = null;
+      let versionBack = null;
       if (mode === 'smart') {
-        open({ ...record, pages: fitted.map((p) => ({ ...p, cleaned: p.cleanedFile })) }, stem);
+        open({ ...record, typesetting: keptTypesetting, pages: fitted.map((p) => ({ ...p, cleaned: p.cleanedFile })) }, stem);
         back = snapshot();
+        // Leaving it there: the browser's save, and the version it writes.
+        const beforeBack = writes.length;
+        await store.flushSave();
+        versionBack = writes.length > beforeBack ? writes[writes.length - 1] : null;
         close();
       }
 
@@ -343,6 +366,7 @@ if (process.env.TP_DRYRUN !== '1') {
       chapters.push({
         chapter: stem, mode, modeFrom: hasMode ? 'file' : 'legacy', version, pages: (record.pages ?? []).length, boxes: stored.size,
         minted, savedAtOpen, savedAfterFonts, writesByOpening: beforeLeave - writesBefore, writesOnLeave,
+        notice, writesOnKeep, versionOnKeep, versionBack,
         browserRun: !!browser, paintFailures: painted.filter((p) => p.includes(' FAILED ')),
       });
     }

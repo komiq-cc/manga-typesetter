@@ -85,7 +85,7 @@ function explain(row, c, wk) {
 }
 
 const blank = () => ({
-  boxes: 0, lettered: 0, compared: 0,
+  boxes: 0, lettered: 0, compared: 0, pending: 0,
   x: 0, w: 0, size: 0, shrank: 0,
   grew: 0, grewNotEngine: 0, grewMax: 0, grewSum: 0, yMoved: 0,
   newlyFlagged: 0, newlyFlaggedNotEngine: 0, unflagged: 0, unflaggedNotEngine: 0, flaggedBefore: 0, flaggedAfter: 0,
@@ -130,6 +130,9 @@ export async function writeReport({ data, out }) {
   for (const row of rows) {
     const t = chapters[row.chapter];
     t.boxes++;
+    // Placed while its font was loading and never solved: the one kind of box
+    // an open lays out afresh, width and size included (`solvePending`).
+    if (row.auto === 'pending') t.pending++;
     if (row.fontFacts?.missing) {
       const f = fontsMissing.get(row.font) ?? { family: row.font, kind: row.fontFacts.kind, drawnIn: row.fontFacts.drawnIn, boxes: 0, lettered: 0, chapters: new Map(), first: null };
       f.boxes++;
@@ -286,9 +289,9 @@ export async function writeReport({ data, out }) {
 // ---- words ----
 const DESIGN = [
   ['What the version number is', 'Every chapter file carries `typesetting.version`. It is 1 in every chapter written so far (or absent, which reads as 1), and until now nothing read it. From here on: **1** means the boxes were last fitted by the browser, **2** means they were last fitted by the Rust engine. It is the only thing in the file that changes meaning; no field is added.'],
-  ['Opening a version 1 chapter with the Rust engine', 'The standing rule is applied in memory: no box changes its width, size or place; a height may grow; a box whose text no longer fits gets the review flag. The queue shows one notice: how many boxes grew, how many are newly flagged, how many are no longer flagged, how many now set a different number of lines. Every box it counts is in the "needs review" list under it until you have kept the changes, so they are stepped through with the list the app already has.'],
-  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. The file is written, with the version set to 2, the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before.'],
-  ['Going back to the browser engine', 'A version 2 chapter opens under the browser engine as any chapter does today: heights may grow, flags are checked again by the browser. A save made there sets the version back to 1, so the Rust engine tells you again the next time.'],
+  ['Opening a version 1 chapter with the Rust engine', 'The standing rule is applied in memory: no box changes its width, size or place; a height may grow; a box whose text no longer fits gets the review flag. The queue shows one notice, above the "needs review" list: how many boxes have new line breaks, how many are newly flagged, how many are no longer flagged, how many grew taller. A flagged box is in the "needs review" list as always. A box whose lines moved and that still fits is listed there too, as "Line breaks changed with the new text engine", until you answer the notice. So the boxes are stepped through with the list the app already has, and "Show first" on the notice goes to the first of them. A chapter the engine changes nothing in shows no notice.'],
+  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. The file is written, with the version set to 2, the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before. The version number is the only thing in the file that is new: which boxes had their lines moved is not stored.'],
+  ['Going back to the browser engine', 'A version 2 chapter opens under the browser engine as any chapter does today: heights may grow, flags are checked again by the browser, and leaving the chapter saves it, as it always has. That save sets the version back to 1, so the Rust engine tells you again the next time. A build of the app from before this change reads a 2 as it reads a 1 and writes it back unchanged.'],
 ];
 
 function summaryLines(t) {
@@ -300,6 +303,7 @@ function summaryLines(t) {
   lines.push(`Boxes whose line breaks changed: **${t.total.lines}** of ${t.total.compared} compared.`);
   lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px).`);
   lines.push(`Boxes set in a font this machine does not have: **${t.fontsToLoad.reduce((n, f) => n + f.boxes, 0)}** (${t.total.missing} with text), in ${t.fontsToLoad.length} families (listed below: these are the font files to load). Boxes that borrow a letter from another font: ${t.total.borrows}.`);
+  lines.push(`Boxes stored as placed but never laid out (\`pending\`), the one kind an open may lay out afresh: **${t.total.pending}**.`);
   lines.push(`Changes with no stated cause: **${t.total.unexplained}**.`);
   return lines;
 }
@@ -316,8 +320,25 @@ function chapterTable(t) {
 }
 
 function openTable(t) {
-  const head = ['chapter', 'version in file', 'marked unsaved by opening', 'after its fonts arrived', 'saves asked for by opening', 'saves on leaving, untouched'];
-  const rows = Object.entries(t.chapters).map(([name, c]) => [name, c.version ?? 'none', c.open.savedAtOpen ? 'no' : 'YES', c.open.savedAfterFonts ? 'no' : 'YES', c.open.writesByOpening, c.open.writesOnLeave]);
+  const head = ['chapter', 'version in file', 'marked unsaved by opening', 'after its fonts arrived', 'saves by opening', 'saves on leaving, untouched', 'saves by Keep', 'version Keep writes', 'version a save back under the browser writes'];
+  const rows = Object.entries(t.chapters).map(([name, c]) => [
+    name, c.version ?? 'none', c.open.savedAtOpen ? 'no' : 'YES', c.open.savedAfterFonts ? 'no' : 'YES', c.open.writesByOpening, c.open.writesOnLeave,
+    c.open.writesOnKeep, c.open.versionOnKeep ?? '-', c.open.versionBack ?? 'not run (plain)',
+  ]);
+  return { head, rows };
+}
+
+// What the app's own notice says per chapter, beside this report's count of
+// the same thing. The first three are the same question asked twice and have
+// to agree. "New line breaks" are not: the app asks the engine that measured
+// before the switch (in this run Skia, in the app WebKit), the report asks
+// Safari's capture.
+function noticeTable(t) {
+  const head = ['chapter', 'notice shown', 'grew taller', 'newly flagged', 'no longer flagged', 'new line breaks (against the stand-in)', 'this report: grew', 'newly flagged', 'no longer', 'lines (against Safari)'];
+  const rows = Object.entries(t.chapters).map(([name, c]) => {
+    const n = c.open.notice;
+    return [name, n && n.grew + n.flagged + n.cleared + n.relaid > 0 ? 'yes' : 'no', n?.grew ?? '-', n?.flagged ?? '-', n?.cleared ?? '-', n?.relaid ?? '-', c.grew, c.newlyFlagged, c.unflagged, c.lines];
+  });
   return { head, rows };
 }
 
@@ -373,6 +394,7 @@ function markdown(t, changed, borrowing) {
   out.push('## 1. What the app does when you open an old chapter', '');
   for (const [title, text] of DESIGN) out.push(`**${title}.** ${text}`, '');
   out.push('Measured on these chapters, with the switch on:', '', mdTable(openTable(t)), '');
+  out.push('What the notice says for each chapter, read from the app\'s own count, beside this report\'s count:', '', mdTable(noticeTable(t)), '');
   out.push('## 2. Per chapter', '', 'A figure in brackets is the part that is not the engine: the file was already behind what the app does on open today.', '', mdTable(chapterTable(t)), '');
   out.push('## 3. Every box that changes', '');
   const unexplained = changed.filter((b) => b.unexplained.length);
@@ -423,6 +445,7 @@ function html(t, changed, borrowing, uris) {
   parts.push('<h2>1. What the app does when you open an old chapter</h2>');
   for (const [title, text] of DESIGN) parts.push(`<p><b>${esc(title)}.</b> ${bold(text)}</p>`);
   parts.push('<p>Measured on these chapters, with the switch on:</p>', table(openTable(t)));
+  parts.push('<p>What the notice says for each chapter, read from the app\'s own count, beside this report\'s count:</p>', table(noticeTable(t)));
   parts.push('<h2>2. Per chapter</h2><p>A figure in brackets is the part that is not the engine: the file was already behind what the app does on open today.</p>', table(chapterTable(t)));
   parts.push('<h2>3. Every box that changes</h2>');
   const unexplained = changed.filter((b) => b.unexplained.length);
