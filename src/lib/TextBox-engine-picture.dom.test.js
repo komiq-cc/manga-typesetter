@@ -625,7 +625,12 @@ describe('when the pixels are handed back', () => {
     expect([el.width, el.height]).toEqual([0, 0]);
   });
 
-  it('when the box starts being typed into, which shows the editable exactly as with the switch off', async () => {
+  // The engine in this file has no `lineCarets`, so a box typed into cannot
+  // stay its picture (TextBox-engine-typing.dom.test.js is the engine that
+  // has): it is handed back to the editable, as every box was before typing
+  // into the picture existed, and as a box the caret model has no answer for
+  // still is.
+  it('when the box starts being typed into under an engine that has no carets, which shows the editable exactly as with the switch off', async () => {
     const m = await mounted('finish');
     const el = m.canvas();
     beginEdit('finish');
@@ -656,7 +661,7 @@ describe('when the pixels are handed back', () => {
     expect(m.root.querySelector('.txt')).toBe(null);
   });
 
-  it('curved text being typed into is its glyph spans and the hidden editable, as with the switch off', async () => {
+  it('curved text being typed into under such an engine is its glyph spans and the hidden editable, as with the switch off', async () => {
     const m = await mounted('arc');
     beginEdit('arc');
     await tick();

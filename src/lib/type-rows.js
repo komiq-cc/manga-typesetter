@@ -36,9 +36,11 @@ function alignOffset(align, advance) {
   return align === 'center' ? -advance / 2 : align === 'right' || align === 'end' ? -advance : 0;
 }
 
-const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+// Made when first asked for: importing this file runs nothing.
+let segmenter;
 // Whether a caret may stand at an offset of `text`: a grapheme boundary.
 function graphemeBounds(text) {
+  if (segmenter === undefined) segmenter = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
   if (!segmenter) return null;
   // Plain text - the usual case - has a boundary at every offset.
   // eslint-disable-next-line no-control-regex
