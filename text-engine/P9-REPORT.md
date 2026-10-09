@@ -1466,8 +1466,11 @@ was the new bounded overlapping-final fixture expecting a third held writer
 after the actual queue had completed following two. All other named cases,
 the preserved33-event seed and the generated20-order classification passed
 (18 completed, two precise browser prefixes, zero unknown,641/661 events).
-That raw failed run is preserved. The probe now expects the measured two
-post-edit snapshots (C's held old choice, then the current choice), while still
-requiring all three final calls and both physical independent choices to settle.
-This narrow fixture correction is unrun. All final-source model, mutation,
+That raw failed run is preserved. An initial unrun fixture correction pinned
+the measured two post-edit snapshots at2b42ed4. Root then required a stronger
+contract: the final probe now releases at most eight held writers, stopping
+when none remains, and asserts the queue empty, all three final calls complete,
+and both physical independent choices current. Hold remains true throughout;
+identity cleanup happens after assertions. Queue coalescing/count is not the
+contract. This bounded fixture correction is unrun. All final-source model, mutation,
 real dry-run, browser, capture and final review proofs remain pending.

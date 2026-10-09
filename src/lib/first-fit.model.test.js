@@ -1559,9 +1559,9 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.editLine();
       // Keep every subsequent writer held. Old source must fail on an extra
       // held writer/pending final before unheld cleanup could enter its loop.
-      // C held the pre-edit snapshot; one new current snapshot must settle it.
-      // A/B already matched, so the completed queue has exactly these two.
-      for (let i = 0; i < 2; i++) {
+      // Queue coalescing is not the contract. Bound release attempts, keep
+      // every writer held, then require all actual receipts/finals to converge.
+      for (let i = 0; i < 8 && hand.writes.length; i++) {
         expect(hand.writes).toHaveLength(1);
         hand.writes.shift().ok();
         await pass(0);
