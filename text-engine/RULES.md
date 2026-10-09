@@ -392,6 +392,11 @@ apart. The rule is pinned by unit tests on the fixture fonts.
 - Each part is shaped by itself with its own font: no kerning across a change
   of font. `advance`, `lineInk`, `glyphInk`, `wrapPlain` and `missing` all go
   through the same parts; `missing` reports what no font of the list has.
+- Whoever has to SAY which font drew a stretch (a PSD type layer's runs) asks
+  for those parts (`Engine::line_fonts`, `mt_line_fonts`; `lineParts` on the
+  adapter) and does not work it out again from what each font covers: "the
+  font the stretch before it is in" cannot be read off a list of missing
+  letters, and a second reckoning cuts inside a cluster.
 - With no list, or when the face has every letter, there is one part and the
   numbers are bit for bit what they were (the fast path shapes with the face
   first and looks further only if a `.notdef` came out).
@@ -673,6 +678,23 @@ instance's.
   `STIXTwoTextRoman-Bold`, Kefa III at 700 `KefaIII-Bold`. [M] CoreText
   names the first one `STIXTwoText_Bold`. [M] Which of the two Photoshop
   looks a font up by has not been seen; see text-engine/P8-REPORT.md.
+  An axis value in a name is the 16.16 number the file can hold, in the
+  fewest decimals that read back as that same number, with no zero before
+  the point and none after the last digit (`650`, `.5`, `-12.25`,
+  `650.00006`): two instances one step of 1/65536 apart have two names. A
+  name longer than 127 characters is not cut: it becomes the prefix, `-`, a
+  128-bit hash of the long name in 32 hex digits, and `...`. [I: the note's
+  format and limit were read; which hash it uses could not be, and FNV-1a is
+  this engine's choice. The name is distinct and stable, and is not
+  promised to be the one another implementation makes.]
+- **An axis that is not a range is not an axis.** A file whose `fvar` gives
+  an axis a minimum above its maximum, a default outside the two, or a
+  number that is not one, is a font without that axis: it is not listed,
+  and a place asked on it is an error (`mt_font_add_instance` answers 0).
+  So is a value that is not a finite number, on any axis. Nothing a font
+  file or a caller says reaches a panic: a panic in the wasm is the engine
+  gone for the session. [M: tests/instance.rs, with files damaged in the
+  test.]
 - A font with no `wght` axis, and every font at the weight its file starts
   at, is the font as it was registered: no instance is made and no number
   moves.
