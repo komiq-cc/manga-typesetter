@@ -12,7 +12,7 @@ import {
 } from './library.svelte.js';
 import { userFontRecords, installFontFace } from './fonts.js';
 import { tagsInUse } from './tags.svelte.js';
-import { app, normalizeLayout, normalizeOcrLanguage, fontsGated, fontFamiliesSettling, fontMissing } from './store.svelte.js';
+import { app, normalizeLayout, normalizeOcrLanguage, fontsGated, fontFamiliesSettling, fontMissing, fontSourceNow } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import {
   buildChapterPackage,
@@ -84,20 +84,29 @@ export function fontsStaying(fonts, named = fonts.map((f) => f.name)) {
 // With the Rust engine switched on: whether the engine draws `name` in a face
 // of that family - the gate's word, which is the editor's "font missing"
 // notice said the other way round.
-const drawnAsItself = (name) => !fontMissing(name);
+const drawnAsItself = (name) => fontSourceNow()?.ready?.(name) !== false && !fontMissing(name);
 const inLibrary = (name) => app.fonts.user.some((f) => f.name === name);
 
-// Resolves when the gate has a lasting answer for each of `names`: a system
-// family is read from disk the first time anything asks about it, and until
-// its file is in, or has been refused, it is neither missing nor not. A wait
-// that gives up (fonts changing without end) is not a reason to fail a
-// package: what is said then is what the gate says at that moment.
-async function familiesKnown(names) {
-  try {
-    await fontFamiliesSettling(names);
-  } catch {
-    /* said as it stands */
+// A lasting answer belongs to the source that settled it. A replacement is
+// waited for too; a failed or still-pending wait cannot describe drawable fonts.
+// Read the statuses synchronously here before returning across another await.
+async function familiesKnown(names, known) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const held = fontSourceNow();
+    if (!held?.settle) return known();
+    try {
+      await fontFamiliesSettling(names);
+    } catch (e) {
+      if (fontSourceNow() !== held) continue;
+      throw new Error(`Could not inspect package fonts: ${e?.message || e}`);
+    }
+    if (fontSourceNow() !== held) continue;
+    if (names.some((name) => held.ready?.(name) === false)) {
+      throw new Error('Could not inspect package fonts: some fonts are still loading. Try again.');
+    }
+    return known();
   }
+  throw new Error('Could not inspect package fonts: the font source kept changing. Try again.');
 }
 
 // One sentence for those families, for whoever tells the user; '' for none.
@@ -154,8 +163,9 @@ export async function exportChapterPackage(projectId, chapterId) {
     app: await appVersion(),
   });
   const name = packageFileName(p.name, record.number);
-  if (fontsGated()) await familiesKnown(named);
-  const staying = fontsStaying(fonts, named);
+  const staying = fontsGated()
+    ? await familiesKnown(named, () => fontsStaying(fonts, named))
+    : fontsStaying(fonts, named);
 
   if (!isTauri()) {
     downloadBytes(bytes, name);
@@ -257,19 +267,27 @@ function engineFontStatus(f) {
 // built-in is a font with no bytes: a chapter set in one would otherwise
 // import without a word and open with every box marked "font missing".
 //
-// With the switch on it first waits for the gate to know each of them
-// (`familiesKnown`); with it off nothing is awaited and the answer is the
-// one it always was.
-export async function packageFontStatuses(pkg) {
-  const used = fontsGated() ? fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? []) : [];
-  if (fontsGated()) await familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...used])]);
+// Synchronous, in both modes: with the switch off this is the list it always
+// was, there when the call returns. With it on, the answer is what the gate
+// says AT THIS MOMENT, and a family nothing has asked about yet is only on
+// its way - so whoever wants the lasting answer awaits `packageFontsKnown`
+// first, as `inspectPackage` does.
+export function packageFontStatuses(pkg) {
   const out = pkg.fonts.map((f) => ({ name: f.name, status: fontStatus(f) }));
   if (!fontsGated()) return out;
   const listed = new Set(pkg.fonts.map((f) => f.name));
-  for (const name of used) {
+  for (const name of fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])) {
     if (!listed.has(name)) out.push({ name, status: engineFontStatus({ name, faces: {}, shipped: false }) });
   }
   return out;
+}
+
+// With the Rust engine switched on: resolves when the gate knows every
+// family `packageFontStatuses` will be asked about (`familiesKnown`). Only
+// ever called with the switch on; with it off there is nothing to wait for
+// and nothing may be awaited (see `inspectPackage`).
+function packageFontsKnown(pkg) {
+  return familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])])], () => packageFontStatuses(pkg));
 }
 
 // Parse a picked file and describe it for the dialog. Throws the reader's
@@ -279,6 +297,10 @@ export async function packageFontStatuses(pkg) {
 export async function inspectPackage(file, projectId = null) {
   const pkg = readChapterPackage(new Uint8Array(await file.arrayBuffer()));
   const { manifest, record } = pkg;
+  // Behind the switch, and not an `await` of something already settled: with
+  // the browser measuring this function awaits the file and nothing else,
+  // as it did before there was a gate.
+  const fonts = fontsGated() ? await packageFontsKnown(pkg) : packageFontStatuses(pkg);
   return {
     pkg,
     summary: {
@@ -293,7 +315,7 @@ export async function inspectPackage(file, projectId = null) {
       projectName: manifest.project?.name ?? '',
       app: manifest.app ?? '',
       exportedAt: manifest.exportedAt ?? '',
-      fonts: await packageFontStatuses(pkg),
+      fonts,
       tags: pkg.tags.map((t) => ({ name: t.name, status: projectTag(projectId, t.name) ? 'known' : 'new' })),
     },
   };

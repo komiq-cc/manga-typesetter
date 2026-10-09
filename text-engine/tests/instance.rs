@@ -461,7 +461,7 @@ fn a_named_instance_has_the_name_the_font_gives_it() {
     let mut e = Engine::new();
     let stated = variable(&mut e, &axes(), &[Named(1, vec![fx(700)], Some(6))]);
     let bold = e.add_instance(stated, &[(WGHT, 700.0)]).unwrap();
-    assert_eq!(name(&e, bold), "ComicNeue-Regular");
+    assert_eq!(name(&e, bold), "ComicNeue_700wght");
     // It states none: the prefix, a hyphen and the instance's style name.
     let unstated = variable(&mut e, &axes(), &[Named(1, vec![fx(700)], None)]);
     let bold = e.add_instance(unstated, &[(WGHT, 700.0)]).unwrap();
@@ -493,4 +493,278 @@ fn an_instance_has_its_own_line_metrics() {
     // Half way up the axis, half the move.
     let half = e.add_instance(font, &[(WGHT, 650.0)]).unwrap();
     assert_eq!(typo(&e, half).ascent - base.ascent, 60.0);
+}
+
+// ---- names: what a font says of itself is not believed unread ----
+
+/// A `name` table of these records and no others, as Windows English.
+fn name_table(records: &[(u16, &str)]) -> Vec<u8> {
+    let mut t = Vec::new();
+    let mut strings: Vec<u8> = Vec::new();
+    for v in [0u16, records.len() as u16, 6 + 12 * records.len() as u16] {
+        t.extend(v.to_be_bytes());
+    }
+    for (id, text) in records {
+        let wide: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        for v in [3u16, 1, 0x409, *id, wide.len() as u16, strings.len() as u16] {
+            t.extend(v.to_be_bytes());
+        }
+        strings.extend(wide);
+    }
+    t.extend(strings);
+    t
+}
+
+/// A font called "Test", with these axes, named instances and further names.
+fn named(engine: &mut Engine, axes: &[Axis], instances: &[Named], more: &[(u16, &str)]) -> FontId {
+    let mut records = vec![(1, "Test"), (2, "Regular"), (6, "Test-Regular")];
+    for &(id, text) in more {
+        records.retain(|(have, _)| *have != id);
+        records.push((id, text));
+    }
+    let mut tables = vec![(b"name", name_table(&records))];
+    if !axes.is_empty() {
+        tables.push((b"fvar", fvar(axes, instances)));
+    }
+    engine
+        .add_font_bytes(with_tables(&comic_bytes(), &tables), 0)
+        .expect("the made font loads")
+}
+
+/// What a PostScript name may be made of: printable ASCII, no space, none
+/// of PostScript's ten delimiters; and no longer than 127.
+fn is_a_postscript_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 127
+        && name
+            .bytes()
+            .all(|b| (33..=126).contains(&b) && !b"[](){}<>/%".contains(&b))
+}
+
+#[test]
+fn two_places_never_share_a_name_whatever_the_axis_tags_are() {
+    // Each pair of tags reads the same, or reads as the other with a digit
+    // of the value, once the bytes a name cannot hold are dropped.
+    let pairs: [(&'static [u8; 4], f32, &'static [u8; 4], f32); 4] = [
+        (b"AB-C", 1.0, b"A-BC", 1.0),   // both "ABC"
+        (b"1abc", 1.0, b"abc ", 11.0),  // "_1" "1abc" and "_11" "abc"
+        (b"----", 312.0, b"12  ", 3.0), // "_312" "" and "_3" "12"
+        (b"wg t", 5.0, b"wgt ", 5.0),   // both "wgt"
+    ];
+    for (one, at_one, other, at_other) in pairs {
+        let mut e = Engine::new();
+        let axes = [Axis(one, 0, 0, fx(1000)), Axis(other, 0, 0, fx(1000))];
+        let font = named(&mut e, &axes, &[], &[]);
+        let a = e.add_instance(font, &[(Tag::new(one), at_one)]).unwrap();
+        let b = e
+            .add_instance(font, &[(Tag::new(other), at_other)])
+            .unwrap();
+        let both = e
+            .add_instance(
+                font,
+                &[(Tag::new(one), at_one), (Tag::new(other), at_other)],
+            )
+            .unwrap();
+        let names = [name(&e, a), name(&e, b), name(&e, both)];
+        assert_ne!(names[0], names[1], "{one:?} {other:?}");
+        assert_ne!(names[0], names[2]);
+        assert_ne!(names[1], names[2]);
+        for n in &names {
+            assert!(is_a_postscript_name(n), "{n}");
+            // Not the note's own form, which cannot tell these apart: the
+            // last resort.
+            assert!(n.starts_with("Test-") && n.ends_with("..."), "{n}");
+        }
+        // The same place is the same name, every time.
+        let again = e.add_instance(font, &[(Tag::new(one), at_one)]).unwrap();
+        assert_eq!(name(&e, again), names[0]);
+    }
+    // A tag that only loses a byte, and is still no other tag of the font,
+    // keeps the note's form.
+    let mut e = Engine::new();
+    let axes = [Axis(b"AB-C", 0, 0, fx(1000)), Axis(b"wght", 0, 0, fx(1000))];
+    let font = named(&mut e, &axes, &[], &[]);
+    let a = e.add_instance(font, &[(Tag::new(b"AB-C"), 1.0)]).unwrap();
+    assert_eq!(name(&e, a), "Test_1ABC");
+    let b = e.add_instance(font, &[(WGHT, 1.0)]).unwrap();
+    assert_eq!(name(&e, b), "Test_1wght");
+}
+
+#[test]
+fn two_named_instances_with_one_name_are_not_both_called_it() {
+    let axes = || [Axis(b"wght", fx(100), fx(400), fx(900))];
+    // The same style name at two places.
+    let mut e = Engine::new();
+    let font = named(
+        &mut e,
+        &axes(),
+        &[
+            Named(256, vec![fx(600)], None),
+            Named(256, vec![fx(700)], None),
+        ],
+        &[(256, "Heavy")],
+    );
+    let (a, b) = (
+        e.add_instance(font, &[(WGHT, 600.0)]).unwrap(),
+        e.add_instance(font, &[(WGHT, 700.0)]).unwrap(),
+    );
+    assert_eq!(name(&e, a), "Test_600wght");
+    assert_eq!(name(&e, b), "Test_700wght");
+    // The same PostScript name stated for two places.
+    let mut e = Engine::new();
+    let font = named(
+        &mut e,
+        &axes(),
+        &[
+            Named(256, vec![fx(600)], Some(258)),
+            Named(257, vec![fx(700)], Some(258)),
+        ],
+        &[(256, "Semi"), (257, "Heavy"), (258, "Test-Stated")],
+    );
+    let (a, b) = (
+        e.add_instance(font, &[(WGHT, 600.0)]).unwrap(),
+        e.add_instance(font, &[(WGHT, 700.0)]).unwrap(),
+    );
+    // Not the name, and not the style either: the place, spelled out.
+    assert_eq!(name(&e, a), "Test_600wght");
+    assert_eq!(name(&e, b), "Test_700wght");
+    // A name stated twice for ONE place is that place's name.
+    let mut e = Engine::new();
+    let font = named(
+        &mut e,
+        &axes(),
+        &[
+            Named(256, vec![fx(700)], Some(258)),
+            Named(257, vec![fx(700)], Some(258)),
+        ],
+        &[(256, "Semi"), (257, "Heavy"), (258, "Test-Stated")],
+    );
+    let a = e.add_instance(font, &[(WGHT, 700.0)]).unwrap();
+    assert_eq!(name(&e, a), "Test-Stated");
+}
+
+#[test]
+fn a_name_the_font_states_is_used_only_when_it_is_a_postscript_name() {
+    let axes = || [Axis(b"wght", fx(100), fx(400), fx(900))];
+    let stated = |text: &str| {
+        let mut e = Engine::new();
+        let font = named(
+            &mut e,
+            &axes(),
+            &[Named(257, vec![fx(700)], Some(256))],
+            &[(256, text), (257, "Heavy")],
+        );
+        let bold = e.add_instance(font, &[(WGHT, 700.0)]).unwrap();
+        name(&e, bold)
+    };
+    // A name that is one is the instance's name, as the font says.
+    assert_eq!(stated("Test_Heavy-1.0"), "Test_Heavy-1.0");
+    assert_eq!(stated("  Test-Stated  "), "Test-Stated");
+    // One that is not is not used, and the instance has the made name.
+    let mut bad = vec![
+        "Bad []/%é Name".to_string(),
+        "Tést".into(),
+        "Te\u{7}st".into(),
+    ];
+    bad.extend(" [](){}<>/%".chars().map(|c| format!("Te{c}st")));
+    bad.push("T".repeat(128));
+    for text in &bad {
+        assert_eq!(stated(text), "Test-Heavy", "{text:?}");
+    }
+
+    // Name ID 6 of a font with no axes, where the engine reads it.
+    let plain = |text: &str| {
+        let mut e = Engine::new();
+        let font = named(&mut e, &[], &[], &[(6, text)]);
+        name(&e, font)
+    };
+    assert_eq!(plain("Test-Regular"), "Test-Regular");
+    assert_eq!(plain("  Test-Regular "), "Test-Regular");
+    for text in &bad {
+        // No name: whoever writes one down makes it from the family.
+        assert_eq!(plain(text), "", "{text:?}");
+    }
+    assert_eq!(plain("   "), "");
+
+    // Name ID 25, the prefix of every made name: letters and digits of it.
+    let mut e = Engine::new();
+    let font = named(&mut e, &axes(), &[], &[(25, "Te st[]/%é(1)")]);
+    let at = e.add_instance(font, &[(WGHT, 650.0)]).unwrap();
+    assert_eq!(name(&e, at), "Test1_650wght");
+    // One with no letter or digit in it is no prefix: the family is.
+    let mut e = Engine::new();
+    let font = named(&mut e, &axes(), &[], &[(25, " []/% ")]);
+    let at = e.add_instance(font, &[(WGHT, 650.0)]).unwrap();
+    assert_eq!(name(&e, at), "Test_650wght");
+}
+
+#[test]
+fn the_last_resort_name_is_within_the_limit_whatever_the_prefix() {
+    let long = "P".repeat(200);
+    let mut e = Engine::new();
+    let axes = [Axis(b"wght", fx(100), fx(400), fx(900))];
+    let font = named(&mut e, &axes, &[], &[(25, &long)]);
+    let (a, b) = (
+        e.add_instance(font, &[(WGHT, 650.0)]).unwrap(),
+        e.add_instance(font, &[(WGHT, 651.0)]).unwrap(),
+    );
+    let (a, b) = (name(&e, a), name(&e, b));
+    for n in [&a, &b] {
+        assert_eq!(n.len(), 127, "{n}");
+        assert!(is_a_postscript_name(n), "{n}");
+        // As much of the prefix as leaves room for `-`, the hash and `...`.
+        assert!(n.starts_with(&format!("{}-", "P".repeat(91))), "{n}");
+        assert!(n.ends_with("..."));
+    }
+    assert_ne!(a, b);
+}
+
+#[test]
+fn default_named_and_unnamed_places_do_not_share_identities() {
+    let axes = [Axis(b"wght", fx(100), fx(400), fx(900))];
+    for (default, stated, style) in [
+        ("Test-Regular", Some("Test-Regular"), "Heavy"),
+        ("Test-Heavy", None, "Heavy"),
+        ("Test-Regular", Some("Test_650wght"), "Heavy"),
+        ("Test_650wght", Some("Test-Heavy"), "Heavy"),
+    ] {
+        let mut e = Engine::new();
+        let mut names = vec![(6, default), (256, style)];
+        if let Some(stated) = stated {
+            names.push((257, stated));
+        }
+        let font = named(
+            &mut e,
+            &axes,
+            &[Named(256, vec![fx(700)], stated.map(|_| 257))],
+            &names,
+        );
+        let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+        let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
+        let names = [name(&e, font), name(&e, middle), name(&e, heavy)];
+        assert_eq!(names[0], default);
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[0], names[2]);
+        assert_ne!(names[1], names[2]);
+        assert!(names.iter().all(|n| is_a_postscript_name(n)));
+        let again = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+        assert_eq!(name(&e, again), names[1]);
+    }
+}
+
+#[test]
+fn non_ascii_families_do_not_suppress_stated_or_unnamed_instance_names() {
+    let mut e = Engine::new();
+    let font = named(
+        &mut e,
+        &[Axis(b"wght", fx(100), fx(400), fx(900))],
+        &[Named(256, vec![fx(700)], Some(257))],
+        &[(1, "漢字"), (256, "Heavy"), (257, "Test-Heavy")],
+    );
+    let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+    let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
+    assert_eq!(name(&e, heavy), "Test-Heavy");
+    assert_eq!(name(&e, middle), "TestRegular_650wght");
+    assert_ne!(name(&e, middle), name(&e, font));
+    assert_ne!(name(&e, middle), name(&e, heavy));
 }

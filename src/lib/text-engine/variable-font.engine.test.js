@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
-import { variableFont } from '../../test/variable-fixture.js';
+import { variableFont, withTables, nameTable } from '../../test/variable-fixture.js';
 import { weightOnAxis } from './rust.js';
 import { createRustGlyphPainter } from './rust-painter.js';
 import { drawnFace, drawnRuns } from './drawn-face.js';
@@ -336,6 +336,86 @@ describe('a variable font made in the test', () => {
     expect(() => addInstance(low, font, { wdth: 150, wght: 700 })).toThrow(/not a range/);
     expect(nextId()).toBe(free);
     low.removeFont(font);
+  });
+
+  it('the third step failing takes BOTH steps before it back out', () => {
+    // Two sound axes first, the damaged one last: two instances are made
+    // before the failure, and neither may stay.
+    const font = low.addFont(variableFont(comic, [['wght', 800, 400, 700], TWO[1], ['slnt', -20, 0, 20]]));
+    // The ids the next two fonts get: the two lowest free ones.
+    const nextTwo = () => {
+      const ids = [low.addFont(comic), low.addFont(comic)];
+      for (const id of ids) low.removeFont(id);
+      return ids;
+    };
+    const free = nextTwo();
+    expect(free[1]).toBe(free[0] + 1);
+    expect(() => addInstance(low, font, { wdth: 150, slnt: -5, wght: 700 })).toThrow(/not a range/);
+    expect(nextTwo()).toEqual(free);
+    low.removeFont(font);
+  });
+
+  it('a name the font states for an instance is passed on only if it is a PostScript name', () => {
+    // Name ID 1 of the file is "Comic Neue": a space in it. Name ID 6 is "ComicNeue-Regular".
+    const at700 = (postScriptName) => {
+      const font = low.addFont(variableFont(comic, [TWO[0]], [{ style: 1, at: [700], postScriptName }]));
+      const bold = addInstance(low, font, { wght: 700 });
+      const name = low.fontInfo(bold).postScriptName;
+      low.removeFont(bold);
+      low.removeFont(font);
+      return name;
+    };
+    // A stated instance cannot reuse the installed default's identity.
+    expect(at700(6)).toBe('ComicNeue_700wght');
+    // Not "Comic Neue": the made name, the prefix and the instance's style (name ID 1 again, its letters).
+    expect(at700(1)).toBe('ComicNeue-ComicNeue');
+  });
+
+  it('default, named and unnamed places have distinct identities, including reserved coordinate names', () => {
+    const cases = [
+      // Named ID 6 equals the default, or a generated named style equals it.
+      { base: 'Test-Regular', stated: 'Test-Regular', style: 'Heavy' },
+      { base: 'Test-Heavy', style: 'Heavy' },
+      // A named place states the spelling of a different unnamed place.
+      { base: 'Test-Regular', stated: 'Test_650wght', style: 'Heavy' },
+      // The default itself occupies the unnamed place's coordinate spelling.
+      { base: 'Test_650wght', stated: 'Test-Heavy', style: 'Heavy' },
+    ];
+    for (const c of cases) {
+      const named = [{ style: 256, at: [700], ...(c.stated ? { postScriptName: 257 } : {}) }];
+      const records = [[1, 'Test'], [2, 'Regular'], [6, c.base], [256, c.style], ...(c.stated ? [[257, c.stated]] : [])];
+      const font = low.addFont(withTables(variableFont(comic, [TWO[0]], named), { name: nameTable(records) }));
+      const ids = [addInstance(low, font, { wght: 400 }), addInstance(low, font, { wght: 650 }), addInstance(low, font, { wght: 700 })];
+      try {
+        const names = ids.map((id) => low.fontInfo(id).postScriptName);
+        expect(names[0]).toBe(c.base);
+        expect(new Set(names).size, JSON.stringify(c)).toBe(3);
+        expect(names.every((name) => name.length <= 127 && /^[!-~]+$/.test(name) && !/[\[\](){}<>/%]/.test(name))).toBe(true);
+        const again = addInstance(low, font, { wght: 650 });
+        expect(low.fontInfo(again).postScriptName).toBe(names[1]);
+        low.removeFont(again);
+      } finally {
+        ids.forEach((id) => low.removeFont(id));
+        low.removeFont(font);
+      }
+    }
+  });
+
+  it('a non-ASCII family keeps a valid stated name and names unnamed places independently', () => {
+    const data = withTables(variableFont(comic, [TWO[0]], [{ style: 256, at: [700], postScriptName: 257 }]), {
+      name: nameTable([[1, '漢字'], [2, 'Regular'], [6, 'Test-Regular'], [256, 'Heavy'], [257, 'Test-Heavy']]),
+    });
+    const font = low.addFont(data);
+    const ids = [addInstance(low, font, { wght: 650 }), addInstance(low, font, { wght: 700 })];
+    try {
+      const names = [low.fontInfo(font).postScriptName, ...ids.map((id) => low.fontInfo(id).postScriptName)];
+      expect(names[2]).toBe('Test-Heavy');
+      expect(new Set(names).size).toBe(3);
+      expect(names[1]).toBe('TestRegular_650wght');
+    } finally {
+      ids.forEach((id) => low.removeFont(id));
+      low.removeFont(font);
+    }
   });
 
   it('an instance on two axes is on both, and the step between is not left behind', () => {

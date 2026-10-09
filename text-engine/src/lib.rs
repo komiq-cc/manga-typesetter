@@ -54,6 +54,7 @@ pub enum Error {
     /// The bytes are not a font this stack can read, or the face index is out
     /// of range.
     BadFont,
+    /// A font or nonzero fallback-chain handle the engine does not hold.
     UnknownFont,
     /// The text buffer did not hold valid UTF-8.
     BadText,
@@ -66,7 +67,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::BadFont => "unreadable font or face index out of range",
-            Self::UnknownFont => "unknown font id",
+            Self::UnknownFont => "unknown font or chain id",
             Self::BadText => "text is not valid UTF-8",
             Self::Shape => "shaping failed",
             Self::BadSpec => "malformed paint spec",

@@ -179,6 +179,7 @@ impl Engine {
         text: &str,
         opts: WrapOptions,
     ) -> Result<Vec<LineRange>, Error> {
+        self.check_chain(face.chain)?;
         self.font(face.font)?;
         let mut lines = Vec::new();
         let mut para_start_utf16 = 0u32;

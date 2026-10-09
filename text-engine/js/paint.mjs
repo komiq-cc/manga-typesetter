@@ -39,7 +39,7 @@ const MAGIC = 0x4a50544d // "MTPJ"
 
 const STATUS = {
   '-1': 'unreadable font or face index out of range',
-  '-2': 'unknown font id',
+  '-2': 'unknown font or chain id',
   '-3': 'text is not valid UTF-8',
   '-4': 'shaping failed',
   '-5': 'malformed paint job, a surface larger than the engine allows, or the job is over the painter\'s memory or run limit',

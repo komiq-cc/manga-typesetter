@@ -19,7 +19,7 @@ const RESULT_SLOTS = 16
 const GLYPH_FIELDS = 6
 const STATUS = {
   '-1': 'unreadable font or face index out of range',
-  '-2': 'unknown font id',
+  '-2': 'unknown font or chain id',
   '-3': 'text is not valid UTF-8',
   '-4': 'shaping failed',
   '-5': 'malformed paint spec',
@@ -212,7 +212,7 @@ function wrap(instance) {
      */
     advance(face, text) {
       const w = ex.mt_advance(face.font, face.size, face.flags, putText(text))
-      if (w !== w) throw new Error('mt-text: advance failed (unknown font or shaping error)')
+      if (w !== w) throw new Error('mt-text: advance failed (unknown font or chain, or shaping error)')
       return w
     },
 

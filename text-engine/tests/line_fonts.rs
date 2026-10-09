@@ -78,3 +78,43 @@ fn a_part_never_ends_inside_a_cluster_and_offsets_are_utf16() {
     assert_eq!((parts[2].2, parts[2].3), (3, 4));
     assert_eq!(parts[1].0, dejavu);
 }
+
+#[test]
+fn a_chain_the_engine_does_not_know_is_an_error_not_no_chain() {
+    let (mut e, face, [comic, ..]) = setup();
+    // Never made.
+    let unknown = Face {
+        chain: 65535,
+        ..face
+    };
+    assert!(e.line_fonts(unknown, "AΩ").is_err());
+    // Made, and freed since.
+    let gone = e.chain_new();
+    assert!(e.chain_free(gone));
+    assert!(e
+        .line_fonts(
+            Face {
+                chain: gone,
+                ..face
+            },
+            "AΩ"
+        )
+        .is_err());
+    // No chain is no chain, and a chain with nothing in it is one.
+    assert_eq!(
+        fonts(&mut e, Face::new(comic, 40.0), "AΩ"),
+        [(comic, 0, 0, 2)]
+    );
+    let empty = e.chain_new();
+    assert_eq!(
+        fonts(
+            &mut e,
+            Face {
+                chain: empty,
+                ..face
+            },
+            "AΩ"
+        ),
+        [(comic, 0, 0, 2)]
+    );
+}

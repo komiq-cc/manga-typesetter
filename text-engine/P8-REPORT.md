@@ -1,19 +1,22 @@
 # P8: everything else that reads a font or draws text
 
-Branch `tp/fonts`, on `58369aa4`. Brief: `tp-data/briefs/p8-consumers.md`.
+First round: branch `tp/fonts`, on `58369aa4`. Brief: `tp-data/briefs/p8-consumers.md`.
 Every figure is marked **[M]** measured here or **[I]** inferred.
 
 A second round followed an outside review (brief
 `tp-data/briefs/p8b-consumers-fixes.md`, on `02ebc2c8`): nine defects, five
 mutations no test caught, the empty type layers and the audit's fit phase.
 It is the section "Second round" at the end. Lines of the first round that
-it made untrue are corrected in place, and the line numbers, the audit's
-tables and the proofs below are those of the final tree.
+it made untrue are corrected in place. The audit and its tables are the
+second round's historical measurements; later proofs are revision-bound
+in "Third round" below. Source line numbers in older sections are historical.
 
-With `textEngine: 'browser'` nothing is reached that was not reached before:
-every new behaviour is behind `engineDraws()` (text-engine/index.js) or
-`fontsGated()` (store.svelte.js:5213), and both are false there. The Skia
-capture is byte for byte the base run [M].
+The first round kept its engine consumers behind `engineDraws()`
+(text-engine/index.js) or `fontsGated()` (store.svelte.js:5213), both false
+with `textEngine: 'browser'`. Third-round export guards and completed-file
+error counts are shared by both modes; the default-path controls and fresh
+Skia capture are recorded below. The capture payload still matches the base
+run byte for byte, with manifest metadata excluded [M].
 
 | item | state |
 |---|---|
@@ -23,7 +26,8 @@ capture is byte for byte the base run [M].
 | 4. variable fonts | `wght` fixed and measured; `ital`, `slnt`, `opsz` not read |
 | 5. the audit | done; two callers left with the switch on |
 
-No file of another worker was touched. `git diff --name-only 58369aa4..HEAD`
+In the first round no file of another worker was touched. Its
+`git diff --name-only 58369aa4..HEAD`
 has no line of `TextBox.svelte`, `edit-lines.js`, `curve-caret.js`,
 `scripts/editor-check.mjs`, `text-engine/src/paint/*`, `abi.rs` or
 `abi_paint.rs` [M]. The variable-font commit added one new Rust file
@@ -32,7 +36,7 @@ has no line of `TextBox.svelte`, `edit-lines.js`, `curve-caret.js`,
 lines of `lib.rs`. The second round added one more of each
 (`text-engine/src/abi_line_fonts.rs`, `text-engine/js/line-fonts.mjs`), two
 more lines of `lib.rs`, and a test helper (`src/test/variable-fixture.js`);
-`git diff --name-only 02ebc2c8..HEAD` has no line of `TextBox.svelte`,
+the second round's `git diff --name-only 02ebc2c8..HEAD` has no line of `TextBox.svelte`,
 `flat-caret.js`, `type-rows.js`, `abi.rs` or `text-engine/src/paint/*` [M].
 
 ## 1. The PSD export
@@ -47,7 +51,7 @@ font list, not from what was drawn. `buildPagePsd` waited on
 
 | what | where |
 |---|---|
-| The name is name ID 6 of the font the engine holds for that weight and slant, user font or system font alike. A name ID 6 of nothing but spaces is no name: the constructed one is written, as before the engine | `engineFontRequest`, psd.js:289; `drawnFace`, text-engine/drawn-face.js:37; `postScriptNameOf`, :23 |
+| The name is name ID 6 of the font the engine holds for that weight and slant, user font or system font alike. An invalid or absent name uses a constructed fallback; the third round replaces the engine fallback with a complete source identity while preserving the browser constructor | `engineFontRequest`, psd.js:289; `drawnFace`, text-engine/drawn-face.js:37; `postScriptNameOf`, :23; final behavior below |
 | `fauxBold` / `fauxItalic` are what the adapter synthesised (`matchSlot`) | same |
 | The wait is the P3c gate; a gate that gives up throws, so no file is written and the export's toast says why | psd.js:939; exporter.js:1325 |
 | `document.fonts.ready` is awaited only when the browser draws | psd.js:941; exporter.js:1314, 1330 |
@@ -584,9 +588,10 @@ the last-resort face.
 - Both wait for the gate to know (`familiesKnown`, :95, through the store's
   new `fontFamiliesSettling`, store.svelte.js:5204): a system family is
   read from disk the first time anything asks, and until then it is neither
-  missing nor not. `packageFontStatuses` is async for that. A wait that
-  gives up does not fail the package; the status is then the gate's at that
-  moment.
+  missing nor not. `inspectPackage` now waits only with the switch on, before
+  the synchronous `packageFontStatuses` reads the known statuses. A wait that
+  gave up was suppressed in this earlier round; the Third-round correction
+  below now exposes that failure and validates the settled source identity.
 - With the switch off nothing of this is reached.
 - Tests: `package-fonts.engine.test.js` (4, new); one more in
   `package-fonts.test.js`, whose stand-in for the gate now answers
@@ -675,7 +680,9 @@ on it makes no browser text call [M].
 5. `install` stays a statement about the lists; a shipped font already in
    the library, unreadable there, is `missing` (finding 8).
 6. A package's font wait that gives up does not fail the package.
-7. `packageFontStatuses` became async; its one caller awaits it.
+7. In this second round `packageFontStatuses` became async. The third
+   round restores its synchronous return value and puts the engine-only
+   wait in `inspectPackage`; see below.
 8. The audit's fit phase writes the squeezed size straight into the box and
    calls `fitBoxNow` in the same turn, not through the mouse: a drag on a
    handle lets the canvas refit before "Fit now" is reached.
@@ -726,3 +733,380 @@ audit count things and time nothing.
 | `161cf8d7`, `5c6f75fa`, `9e1ec38e` | tests the mutations asked for |
 | `69b3758e` | docs(text-engine): rules 10 and 13 |
 | `43284e63` | test(text-port): the audit's fit phase acts; empty type layers in both modes |
+
+
+## Third round
+
+Brief `tp-data/briefs/p8c-consumers-small.md`, starting on `788af55`.
+The paused five commits end at `d72a8f6`. The review is items6–10 of
+`tp-data/reports/codex-round2-review.out`. Fresh-worker instructions:
+`tp-data/briefs/resume-p8c.md`. This round includes one integration fix:
+the chain
+policy previously deferred because `abi.rs` belonged to the typing worker.
+
+The coordinator merged reviewed P8 correction
+`394dfc0fe42ff2bda3e684f28cc7a1563320fc0e` with accepted P7 integration
+`4e5d189047f2f1656b519726d24c842405420586` as frozen combined source
+`9114dfc192fc54ec46cfc48ff183d99ab8bb341e`, tree
+`98c25ac7a0eae9b1ebe953d69d43983aba897d38`. It independently completed the
+full proofs, captures, fourteen fixed probes and strict mutation replay
+below. Earlier worker windows remain historical and revision-bound. [M]
+
+Measured regression outcomes are **[M]** within their recorded test/probe
+scope; mechanisms established by source inspection and real Photoshop/native
+behavior not observed here remain **[I]**. The report-only follow-up does not
+change the source/tests/artifact these proofs establish. P8's merge into
+text-port remains the coordinator's action; P10 still needs the user's word.
+
+### Five review findings and four previously untested cases
+
+| finding | final behavior and bounded behavioral coverage [M: final911 suites] |
+|---|---|
+| Axis tags lose punctuation and two places get one name | `tags_tell_axes_apart` allows readable value/tag names only when every filtered tag starts with a letter and tags remain distinct. Otherwise the last-resort hash includes each exact four-byte tag. `two_places_never_share_a_name_whatever_the_axis_tags_are` covers punctuation, digit-start, empty and distinct tags; shared named-instance words are tested separately. |
+| A font states forbidden PostScript bytes | NameID6 and a named instance's stated name must be printable ASCII, with no space or `[ ] ( ) { } < > / %`, and at most127 bytes. An invalid stated name is not passed to a PSD. NameID25's prefix is reduced to letters and digits at its one reader. Rust and wasm tests construct these name tables in memory from tracked fixtures. |
+| Export switch failure says nothing was written although whole files exist | `EngineSwitched` carries the completed-file count through page, PSD, strip and folder paths. Its message says how many whole files stand and that the current file and remaining files were not written. The tests cover zero, one and two completed files. |
+| Unknown fallback chain silently disappears in `mt_line_fonts` | Unknown and freed nonzero handles are rejected; zero and held empty chains are valid. The whole engine now uses this policy, as described below. |
+| Default package statuses gain a Promise tick | `packageFontStatuses` is synchronous again. `inspectPackage` waits for known statuses only when the switch is on. The default-mode same-tick test detects both an async status function and an extra await. |
+| Line-font output capacity | `room_for_fewer_parts_than_there_are_is_an_error_and_nothing_is_written` offers a large sentinel buffer with a smaller capacity: one integer short, one part, half a part and zero. All bytes, including those beyond capacity, remain untouched on refusal. |
+| Line-font allocation balance | `drawn-face.engine.test.js` counts every allocation/free over1000 calls and on refusal, including empty text. The count and sizes must balance and wasm memory must not grow. |
+| Third variable-axis step fails | The wasm test makes the third step fail and requires both intermediate font instances to be removed; cleanup of only the first must fail. |
+| Last-resort prefix cap | `the_last_resort_name_is_within_the_limit_whatever_the_prefix` uses a long nameID25 and requires the full generated name to fit127 bytes. |
+
+### One fallback-handle rule across consumers
+
+`Engine::check_chain` rejects a nonzero handle the engine does not hold with
+`UnknownFont`. `measure_line` checks before its primary-face fast path and
+clears the previous parts and glyph buffers. Font-box methods and the entry
+of `wrap_plain` use the same check: an empty string or newline-only paragraph
+must not bypass it. Advance, ink, missing glyphs, painter carets and
+`line_fonts` then share that rule. Zero means no list; a live empty list is
+valid. A live populated list still lends the same glyphs. The finite query
+matrix and valid recovery passed on final911; invalid-spec status precedence
+is preserved. [M]
+
+The existing return forms remain: `mt_advance` returns NaN; standard buffered
+measure exports return `Status::UnknownFont` (-2); `mt_line_fonts` has its
+own established -1 unknown / -2 capacity contract. A rejected standard query
+clears the shared output and fixed-size result buffers. A rejected
+`mt_line_fonts` leaves caller-owned memory untouched. JS wrappers throw
+before reading a refused answer, and unknown-handle error text names fonts
+and chains. `ABI_VERSION` stays2. Raw `mt_shape`/`shapeUnits` have no chain
+argument and retain their raw-font meaning. [M: final native/wasm matrices]
+
+New independent coverage: `text-engine/tests/chains.rs` tests every engine
+and ABI query on never-made and freed handles, empty/newline-only text,
+primary-covered text, borrowed text, valid zero/empty/live controls and
+valid→invalid→valid recovery. `src/lib/text-engine/chains.engine.test.js`
+checks the same wrappers on the actual rebuilt wasm and allocation balance
+when `lineFonts` refuses. Focused worker runs passed this matrix on the code committed as
+`1deb27a1fde510ff78144df5abe2cbd445d64550`; measured results follow. [M]
+
+### Mutation provenance
+
+The original25 definitions (14 Rust,11 JS) are preserved intact in
+`tp-data/reports/resume-20261009/p8c-mutations-prep/catalog.json` and
+`originals/`. Their old assertion kills are prior-worker evidence, not a
+fresh proof of this candidate. The original c23 first failed to apply;
+its corrected strip-count substitution was repeated and killed its test.
+Both outcomes are preserved. The moved shared chain check makes c12's
+old `line_fonts`-only substitution obsolete; its equivalent current-policy
+mutation must be labeled as a retarget, not reported as the old source
+mutation. New chain-policy and buffer/recovery mutations will be listed
+with their exact candidate revision and named failed assertions. The final
+replay and separate format audit below preserve every original status and
+explicit retarget rather than rewriting this older evidence. [M]
+
+### Focused worker verification [M]
+
+Code committed as `1deb27a1fde510ff78144df5abe2cbd445d64550`; report/RULES
+edits were pending during the run and do not affect the engine build.
+One command at a time; load4.36–4.49 before each command.
+Logs and full arguments: `tp-data/reports/resume-20261009/p8c-worker-focused/results.json`.
+
+| command | measured result |
+|---|---|
+| `cargo fmt --manifest-path text-engine/Cargo.toml --check` | Clean |
+| `cargo test --manifest-path text-engine/Cargo.toml --test chains` |4 passed |
+| Same with `--no-default-features` |3 passed |
+| `npm run build:engine` |1,611,167 bytes; SHA256 `c073ae5ac4c764988655fa6a46e040f782db9182a875b1e106f386de11f8f1ab` |
+| `vitest run` with the new chain file and original five P8 JS targets, `--maxWorkers=1 --no-file-parallelism` |6 files,82 tests passed |
+
+The target files were `chains.engine.test.js`, `drawn-face.engine.test.js`,
+`variable-font.engine.test.js`, `package-fonts.test.js`,
+`package-fonts.engine.test.js` and `exporter-fonts-gate.test.js`.
+These focused proofs precede the P7 integration merge and are not full-tree
+acceptance. No mutation, capture, full suite or final review ran in this worker window.
+
+The new13 semantic mutation definitions and exact-revision scratch runner
+were prepared at `tp-data/reports/resume-20261009/p8c-chain-mutations/`.
+They cover the shared guard (labeled c12 retarget), its coverage/empty/metric
+entry points, cleared engine runs, shared ABI output/result clearing and JS
+status guards. None ran in that worker window; the coordinator's later
+final911 replay is below. The preserved original25 remain separate.
+
+### Fresh Codex review corrections [M: historical focused proofs]
+
+The independent review of `d7dd4ac254bdcf699dd1f4b07cdf6744c8d5d788`
+recorded seven reproducible gaps in
+`tp-data/reports/resume-20261009/p8c-final-codex-findings.md`.
+Those probes are **[M] for that earlier candidate** and are not fresh
+source-build evidence. Fresh source/tests committed as
+`2b18610158b815516e29c1afa1c4f05764271c9f` passed the focused worker
+proofs below. The behavioral regression claims in this table are **[M]
+for that candidate**; final911 tests and independently pinned probes follow
+below and do not retroactively prove an earlier test tree.
+
+| review gap | correction and focused regression [M] |
+|---|---|
+| Ordinary nested PSD font failure forgets outer completed files | Every writer supplies its completed count for ordinary failures as well as `EngineSwitched`. A nested local “nothing was written” claim is removed once an outer file exists. The PSD test downloads page11, rejects page22 and requires an accurate one-file message. Strip and native failures use the same count wrapper. |
+| Native path/blob/dialog waits outlive the held engine | Checks follow native imports, path resolution, dialog, blob conversion and the actual completed write; the last pre-write check is immediately before `writeFileAtomic`. Tests pause each single-file wait and second-file streamed path/blob waits; a post-write change counts the completed file and suppresses Saved. These are simulated Tauri APIs, not an observed desktop run. |
+| Default/named/unnamed locations collide | Named names are compared after capping against the default and other named places. Coordinate and hash spellings are reserved for generated places; a generated name colliding with default uses an exact-location hash. Native and wasm tests construct default/stated/style/coordinate collisions in memory and require three names plus deterministic recovery. Hash collision freedom is not mathematically promised. |
+| Invalid ID6 falls back to invalid or overlong family names in PSD | Primary and borrowed engine fallback names are sanitized to allowed printable ASCII and capped to127 bytes with a hash of the full raw identity when altered. Actual PSD type-layer tests require valid, distinct, deterministic primary and borrowed names. The browser's previous constructor stays in its original path and has a compatibility assertion. |
+| Non-ASCII family hides valid stated names | Prefix construction always has a usable fallback from ID6 or `Font`, so stated names are checked regardless of ASCII family text. Native and wasm tests require `Test-Heavy` at700 and a separate valid650 name for family `漢字`. |
+| Package source replacement/pending/give-up misreports fonts | A new identity getter is read before/after a bounded family wait. Replacement waits repeat; same-source rejection or pending readiness becomes a visible inspection failure. Statuses are read synchronously inside the settled identity check, before another await can apply that check to a replacement. Pending families never count as drawable in synchronous statuses. Tests cover replacement, rejected old wait, give-up, pending and unending changes, plus the existing default same-tick assertion. |
+| Painter unknown chains bypass empty/no-paint returns | `paint_job_with` validates the shared chain before transform/size/run fast paths. Native and actual wasm tests cover no runs, zero size, singular transform, empty run and no fill; zero/live empty controls, stale-result refusal and valid raster recovery remain covered. |
+
+No Photoshop identity lookup, native OS dialog/write interaction or
+second-machine package observation is claimed by these regressions.
+
+Fresh worker logs and exact commands:
+`tp-data/reports/resume-20261009/p8c-worker-review-focused/*.json`.
+Each command started with load2.78–3.01 and ran sequentially.
+
+| focused command on `2b18610158b815516e29c1afa1c4f05764271c9f` | result [M] |
+|---|---|
+| Engine fmt check | Clean |
+| Native chains + instance tests |5 +18 passed |
+| Same with `--no-default-features` |3 +18 passed |
+| `npm run build:engine` |1,614,463 bytes; SHA256 `2a4651940d4c0a47dcb457a85e4ab8c3a45e34afde7136332d355ab9c2fdbf24` |
+| Original five P8 JS targets plus chain/painter file |6 files,98 tests passed |
+
+The package replacement regression was subsequently strengthened with a
+synchronous new-source call-count assertion before awaiting its signal.
+This detects a removed identity retry with an assertion rather than a
+five-second timeout. No further worker tests ran after the proof window
+closed; the final911 full suite and fixed package-source probe passed the
+strengthened assertion.
+
+Fresh fourteen review-gap mutation definitions were prepared at
+`tp-data/reports/resume-20261009/p8c-review-gap-mutations/` and matched that
+candidate's substitutions exactly once. They remain separate from
+both the preserved original25 and the new13 chain-policy definitions.
+No mutation ran in that window. The final PSD rewrite made q7/q8/q9 obsolete;
+their explicit s6/s7/s8 retargets and final execution results are recorded
+below. The original definitions and results remain untouched.
+
+### Final PSD identity interaction correction [M: bounded final911 regressions]
+
+The seven-fix review, pinned to `2b186101`, found three further measured
+collisions in the final fallback path: family normalization aliased `Bad []`
+and `Bad[]`; an invalid defaultID6 fell back to `Test`, also the valid named700
+identity; real bold `Foo` and regular `Foo-Bold` shared one fallback string.
+`p8c-seven-fixes-codex-findings.md` records **[M] request collisions**;
+Photoshop substitution consequences remain **[I]**. The earlier source and
+focused proofs do not establish this correction.
+
+The new fallback always has a generated namespace and hashes the complete
+unsanitized `[family, real slot, source identity, salt]` tuple. Normalization
+only makes its readable prefix legal, and the complete name fits127 bytes.
+The adapter's source identity contains a compact FNV-1a128 bytes fingerprint,
+collection index and actual clamped variable place. It excludes reusable wasm
+IDs, paint size and faux flags. No second font-byte copy is retained.
+The fingerprint uses uint32 limbs instead of per-byte BigInt work; an
+independent BigInt reference test covers carries and byte/view boundaries.
+Hash collision freedom is not mathematically promised. [I]
+
+Before returning a fallback, the adapter builds a complete set of parsed and
+generated names reachable by the app's real regular/bold requests, including
+variable instances not requested yet. A direct declared/generated alias moves
+the fallback to a deterministic salted hash. The set is cached for the
+registration state; any newly made instances share bytes and are removed with
+their source slot. This prevents font-request order from changing names. [I]
+
+`drawnFace`/`drawnRuns` expose source metadata only when called with
+`{ source: true }`; raw default shapes and raw `fontInfo` names remain the
+existing API. Primary and borrowed PSD fallback paths consume the same
+metadata and retain their actual faux flags. The browser constructor remains
+on its existing path. [I]
+
+New tracked-fixture-only regressions in `psd-identity.engine.test.js` cover
+all three collision reproducers, raw-family distinctions on identical bytes,
+bytes replacement, shared collection indices, reloading/reallocation and
+engine replacement, actual clamped locations, optional metadata, cleanup of
+precomputed instances and direct named aliases in both request orders.
+Existing PSD fallback validity/cap/borrowed/browser assertions are retained,
+with the old bare engine fallback assertion updated to the generated name.
+No tests/builds/probes ran in the33f185a repair window. Final911 subsequently
+passed all seven PSD identity engine tests and the independent fingerprint
+test, including primary/borrowed names, actual collection/location identity,
+ID reuse, optional public shapes, cleanup and namespace collision controls.
+Its complete app build also passed. [M]
+
+Both33f185a and corrected394dfc0 stayed frozen through their separate static
+reviews. The previous
+assertion-only package test follow-up moved HEAD during the seven-fix review;
+that review is therefore evidence for the pinned production source and not
+acceptance of its drifted test tree.
+
+Fresh PSD-specific mutation definitions are prepared separately; original25,
+chain13, seven-gap14 and changed-source retarget catalogs remain untouched.
+Their changed fallback substitutions must be reported as obsolete or explicitly
+retargeted, never silently counted as original-source kills.
+
+### PSD static-review correction [I: discovery; M: final911 regressions]
+
+The read-only review of frozen `33f185ae0e01ffff6c7bfb76da92bb5cba6ccc0e`
+found one P1 load blocker: the optional `source` parameter and the part resolver
+were both bound as `source` inside `drawnRuns`. This is a JavaScript early syntax
+error inferred from source inspection; the reviewer did not run an import.
+The resolver and its one call are now named `sourceFor`, preserving the public
+metadata option and both engine branches. [I]
+
+The regression controls now explicitly require default borrowed and primary
+run shapes to omit source metadata, with positive opt-in lender identities,
+supplementary-character and line-end boundaries. The source test asserts actual
+allocator ID reuse after a collection face is removed and distinguishes fresh
+engine registration orders. Partial-add failure is followed by a successful
+registration at the failed font's reused ID, checked against a fresh engine.
+The declared-alias test warms the name cache, replaces and removes the variable
+registration, checks old base/instance cleanup, and requires fallback names to
+return to the unoccupied identity. No tests, builds or probes ran in the
+394dfc0 correction window. Those assertion definitions subsequently passed
+in final911's seven PSD identity engine cases; the original33f185a load
+blocker remains an inferred static finding, not a successful old-source
+import. [M/I as distinguished]
+
+Static substitution counting confirms the helper rename leaves the existing
+mutation source strings intact, including final PSD s9/s15. All prepared old
+catalogs are preserved. The scoped394dfc0 correction review found nothing
+actionable, as did the final combined911 review. Both were static read-only
+reviews; the coordinator's later exact-revision behavioral proofs are below.
+
+### Final verification on9114dfc [M]
+
+The coordinator ran all ten proof commands on the clean combined source
+9114dfc; every command exited0. Exact commands, environment and logs are in
+`tp-data/reports/resume-20261009/p8c-final911-coordinator-proofs.json`.
+Wasm source/artifact provenance is in `p8c-root-911-wasm.json` in that same
+directory. Native totals below are sums of raw log results, including zero
+doc-test targets; the default total is156. Historical first/second-round
+proofs remain above.
+
+| proof | revision and measured result |
+|---|---|
+| Engine rebuild and wasm SHA256 |1,614,483 bytes; `f71d8563ed9d7663f867a9ffcf7edda119ab2e68efec5a2ffe82a5b48b0e4294` |
+| Engine cargo tests, default / no-default |156 /55 passed;0 failed or ignored |
+| Engine fmt and clippy |Fmt clean; all-targets default, no-default and raster-compare Clippy with warnings denied passed |
+| Full Vitest |3,701 passed +7 skipped;130 files passed +1 skipped |
+| Tauri cargo tests |301 passed +1 ignored; recorded `CARGO_TARGET_DIR=tp-fonts/src-tauri/target` |
+| App build |Passed; informational Vite dynamic-import/chunk-size warnings remain |
+| Fresh default capture against `ref-sk/base` |All payload files equal; manifest alone differs; counts below |
+| Fresh Rust capture against `new/r4` |All payload files equal; manifest alone differs; counts below |
+| Independent fixed seven-finding probes and controls |14/14 passed on911/f71, with named poststates and explicit controlled seams |
+| Original25 and current semantic mutation replay |74 definitions processed; separate corrected audit:63 assertion kills,1 mixed test error,9 obsolete,1 ambiguous; clean c18 follow-up remains separate |
+| Final independent Codex source review |No actionable findings in both parent comparisons and complete31-file P8 delta; static correctness conclusions remain [I] |
+
+The default and Rust captures each record64,718 metric cases,17,538 layouts
+and3,732 pictures, with0 errors. Default has7,856 skips; Rust has0. Runs
+`p8c-final911-coordinator-20261009-204604` and
+`p8c-final911-coordinator-20261009-204818` were clean911 captures. Only each
+manifest differed from its reference, including run/source/host metadata.
+Metadata, recursive diff results and capture logs are preserved in
+`p8c-final911-coordinator-captures.json` and companion logs; the coordinator's
+own run folders were removed after comparison and the references retained.
+
+The independent fixed probe result is
+`p8c-review7-repros/runs/9114dfc192fc54ec46cfc48ff183d99ab8bb341e/fixed/latest-results.json`
+under the private report directory. All14 cases passed named poststates on
+the exact source and f71 artifact: completed ordinary failure, native dialog/
+blob/path boundaries, variable/PSD/non-ASCII names, package replacement and
+give-up, painter no-paint checks, plus default export/PSD/package and native
+identity controls. Earlier d7dd4ac reproductions remain separate. These probes
+load pinned source modules and real wasm/fixture data where stated; nested
+PSD rejection, native waits/writes and font-read failures are controlled.
+They do not measure native OS dialog/filesystem timing or Photoshop matching.
+
+The final static review is
+`p8c-final-combined-codex-findings.md`: exact comparisons394dfc0→9114dfc
+and4e5d189→9114dfc, clean frozen start/end state, retained P7 finite-output
+caret guards and P8 chain/buffer guards. That review ran no behavior checks;
+the measured proof logs above supply the later behavior evidence.
+
+### Final mutation replay and separate classification audit [M]
+
+The first strict private snapshot build exited0 but produced1,630,651 bytes,
+SHA256 `ccc28f8759d82a8eccf8769b771a679239ea97b737a349b27a8265ccad335002`,
+which did not equal root's f71 artifact. It was rejected as `build-error`
+before baseline/mutation acceptance. Private Cargo panic paths affected the
+binary identity. This attempt and its status are preserved. A separately
+frozen v2 reused that private Cargo cache, rebuilt in a fresh target directory
+with the explicit path remap, and produced the exact1,614,483-byte f71 wasm.
+No older artifact was substituted for the fresh build.
+
+The v2 raw replay processed all74 definitions. Its four native baseline
+targets passed29 named tests and its eight-file JS baseline passed106, with
+no assertion/runtime/suite errors. The preserved raw result is34
+`assertion-killed`,30 `test-error`,9 `obsolete`,1 `ambiguous`. It is at
+`p8c-root-strict-mutations-v2/runs/9114dfc192fc54ec46cfc48ff183d99ab8bb341e/root/reports/20261009T205846086441Z.json`.
+The v2 runner SHA256 is
+`0f657cf214e275e7864fabcf0fc860b3c80293a6987713e85fdd4222dbe9425b`.
+
+A separate read-only audit reparsed only recognized Rust thread-PID/Cargo
+test-summary formats and Vitest promise-expectation assertion formats in
+the immutable output. It reran no test/build/probe and rewrote no raw status.
+Audit result:
+`p8c-root-strict-classification/audits/root-format-correction-1/report.json`;
+audit script SHA256
+`1efe18abeec9f85f418d23a2d5ee23d2d1e87b7726454177b47369479c58f5be`.
+Its corrected63 assertion kills,1 test error,9 obsolete and1 ambiguous are
+reported separately from the raw counts:
+
+| preserved group | assertion kills | test errors | obsolete | ambiguous |
+|---|---:|---:|---:|---:|
+| Original25 |17 |1 (c18) |6 |1 (c22) |
+| Chain13 |13 |0 |0 |0 |
+| Seven-gap14 |11 |0 |3 (q7/q8/q9) |0 |
+| Six original retargets |6 |0 |0 |0 |
+| Final PSD16 |16 |0 |0 |0 |
+| Total |63 |1 |9 |1 |
+
+Original c12/c19/c20/c21/c23/c24 are obsolete; c22's old generic substitution
+matches four sites and remains ambiguous. n1 is an explicit c12 semantic
+retarget; the six c19–c24 retargets and PSD s6/s7/s8 replacements for
+q7/q8/q9 remain labeled separately. Original c23's historical failed
+application and corrected repeat are still preserved. No compile/load/suite
+error is counted as a kill, and no obsolete original becomes a final exact
+replay kill by being replaced silently.
+
+Original c18's full-file target genuinely mixed named assertions with two
+`summary.fonts.map` TypeErrors and remains `test-error` in both raw replay
+and corrected audit. Root then ran the exact async-status source mutation
+in a separately labeled narrow proof selecting the existing synchronous
+status test (`the statuses are there at once`). Its clean baseline passed
+one named test, and its mutant failed that one named assertion with no
+runtime/suite errors. This is a clean behavioral follow-up, **not** a kill
+of the original full-target c18 run. Result:
+`p8c-c18-clean-followup/run-root/results.json`; script SHA256
+`bc00942944e56db8a5980e58999468420c551c20aed8682621d4889216b262dd`.
+Its source was911, artifact provenance f71, and source restoration passed.
+Thus there is no universal “64 clean original kills” claim.
+
+All paths in this subsection are under
+`tp-data/reports/resume-20261009/`. Each attempted build, raw classification,
+separate parser audit, original definition/result and later scoped proof is
+frozen independently. The audit records restored source and unchanged
+evidence hashes; it does not replace older evidence with a revised story.
+
+### Scope and remaining desktop work
+
+The chain integration changes `abi.rs`, `engine.rs`, `metrics.rs`, `wrap.rs`
+and the low-level loader on this branch. The no-`abi.rs` statements above
+refer to the first and second consumer rounds only. P8's chain fix itself
+changes no typing component or painter pixel rule; the final combined branch
+also carries the separately accepted P7 typing/finite-caret changes.
+No font binary was added or downloaded. No file from `tp-data` belongs in a
+commit. [I]
+
+The desktop/Photoshop/second-machine checks listed above remain unrun.
+The old package/default built-in rules and the `ital`/`slnt`/`opsz` limits
+remain. The P10 cut-over list is preserved; cut-over needs the user's word.
