@@ -386,6 +386,16 @@ impl Engine {
         idx as ChainId + 1
     }
 
+    /// Whether `chain` is zero (no chain) or a handle `chain_new` gave and
+    /// `chain_free` has not taken back.
+    pub fn chain_known(&self, chain: ChainId) -> bool {
+        chain == 0
+            || self
+                .chains
+                .get((chain as usize).wrapping_sub(1))
+                .is_some_and(Option::is_some)
+    }
+
     /// Appends a font to a chain. Earlier fonts are preferred.
     pub fn chain_push(&mut self, chain: ChainId, font: FontId, synth: Synth) -> Result<(), Error> {
         self.font(font)?;
@@ -570,7 +580,16 @@ impl Engine {
     /// the parts `measure_line` cuts it into, which is what `advance`
     /// measures and what the painter paints. Nobody has to work out from
     /// coverage which family lent a letter: this is the answer itself.
+    ///
+    /// A chain this engine does not hold is an error here (`UnknownFont`:
+    /// a chain is a list of fonts, and there is no error of its own for
+    /// one). `measure_line` reads such a chain as no chain, and so do the
+    /// exports that measure; an answer that NAMES fonts must not name the
+    /// face for letters a chain the caller meant would have lent.
     pub fn line_fonts(&mut self, face: Face, text: &str) -> Result<&[Part], Error> {
+        if !self.chain_known(face.chain) {
+            return Err(Error::UnknownFont);
+        }
         self.measure_line(face, text, ShapeMode::MEASURE)?;
         Ok(&self.parts)
     }
