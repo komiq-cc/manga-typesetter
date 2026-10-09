@@ -996,5 +996,17 @@ mod tests {
             }
             println!("C  the family CoreText picks, of {} sample letters Helvetica Neue lacks: {same} the same", sample.len());
         }
+
+        // The answer the command would send for the code points in a file
+        // (decimal, one to a line), as it goes over the wire, on one line:
+        // `MT_COVERAGE_ASK=/path/to/ask.txt cargo test … -- --ignored --nocapture`
+        if let Ok(path) = std::env::var("MT_COVERAGE_ASK") {
+            let asked: Vec<u32> = std::fs::read_to_string(&path).unwrap().split_whitespace().map(|n| n.parse().unwrap()).collect();
+            let mut seen = Seen::default();
+            let t = Instant::now();
+            let answer = cover(Os::current(), &index, &mut seen, &asked).unwrap();
+            println!("D  {} letters from {path}: {:.2?}, {} families read", asked.len(), t.elapsed(), seen.families_read());
+            println!("ANSWER {}", serde_json::to_string(&answer).unwrap());
+        }
     }
 }
