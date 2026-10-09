@@ -81,7 +81,7 @@
   import { editLines, drawEditLines, rawOffset, domPoint, rawEdit, stepChar } from './edit-lines.js';
   import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
   import { typeModel } from './type-rows.js';
-  import { caretAt as rowCaret, selectionRects, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey } from './flat-caret.js';
+  import { caretAt as rowCaret, selectionRects, rowExtent, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey } from './flat-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   // `shown` and `lazy` are read only while the Rust engine draws (see "the
@@ -2248,8 +2248,9 @@
     let x1 = box.w;
     let y1 = box.h;
     for (const r of typed.rows) {
-      x0 = Math.min(x0, r.xs[0]);
-      x1 = Math.max(x1, r.xs[r.xs.length - 1]);
+      const [from, to] = rowExtent(r);
+      x0 = Math.min(x0, from);
+      x1 = Math.max(x1, to);
       y0 = Math.min(y0, r.top);
       y1 = Math.max(y1, r.top + r.height);
     }

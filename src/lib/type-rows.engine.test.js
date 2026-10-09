@@ -3,7 +3,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { typeModel, canType, linePens } from './type-rows.js';
-import { caretAt, rowOf, offsetAt, selectionRects } from './flat-caret.js';
+import { caretAt, rowOf, offsetAt, selectionRects, moveCaret } from './flat-caret.js';
+import { rawEdit } from './edit-lines.js';
 import { renderBoxTexture } from './exporter.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
@@ -391,3 +392,178 @@ describe('text on a curve', () => {
     expect(m.rows).toHaveLength(1);
   });
 });
+
+// ===========================================================================
+// No caret inside a grapheme, whatever the lines break in
+// ===========================================================================
+// A box can be narrower than one user-perceived character: a flag is two
+// letters to the breaker, a family is seven, a syllable written in jamo is
+// three, and a letter cased to two can have a mark of its own. The lines then
+// break INSIDE it - they are the painter's lines and stay as they are - but a
+// caret may not stand there: a letter typed there would take the thing apart.
+// The rule is one (`caretStops`, flat-caret.js). This is its check on the real
+// engine's rows, for texts chosen to be hard, at widths down to narrower than
+// one letter, in both cases.
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const boundaries = (text) => {
+  const at = new Set([text.length]);
+  for (const { index } of graphemes.segment(text)) at.add(index);
+  return at;
+};
+const HARD = {
+  'two flags': '\u{1F1FA}\u{1F1F8}\u{1F1EF}\u{1F1F5}',
+  'a family between letters': 'a\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}b',
+  'syllables written in jamo': '각한',
+  'a mark with no letter, first': '́abc',
+  'a letter cased to two, with a mark of its own': 'aß́b',
+  'the fi letter, twice': 'ﬁn ﬁ',
+  'variation selectors': '☺️a︎✌️',
+  'a lone surrogate': 'a\uD83Db',
+  'two marks on one letter': 'xé̂x',
+  'among words': 'ab \u{1F1FA}\u{1F1F8} é cd',
+  'on two paragraphs': '\u{1F1FA}\u{1F1F8}\n각',
+};
+const WIDTHS = [900, 120, 55, 40, 25, 8];
+const sorted = (set) => [...set].sort((a, b) => a - b);
+
+describe('a caret never stands inside a grapheme of the text typed', () => {
+  it.each(Object.entries(HARD))('%s', (name, text) => {
+    const B = boundaries(text);
+    let models = 0;
+    for (const w of WIDTHS) {
+      for (const uppercase of [false, true]) {
+        const say = `${name}, ${w} px wide${uppercase ? ', uppercase' : ''}`;
+        const box = boxOf(text, { size: 40, uppercase }, { w, h: 600 });
+        const m = typeModel(box, text);
+        expect(m?.kind, say).toBe('flat');
+        models++;
+        // Every stop the model gives is a boundary of the raw text, and every
+        // boundary is a stop somewhere: nothing is left out of reach.
+        const stops = new Set();
+        for (const r of m.rows) {
+          for (const [k, o] of r.offs.entries()) {
+            expect(B.has(o), `${say}: a stop at ${o}, inside a grapheme`).toBe(true);
+            expect(Number.isFinite(r.xs[k]), `${say}: the stop at ${o} has a place`).toBe(true);
+            stops.add(o);
+          }
+          for (const half of [r.lead, r.trail]) {
+            if (half) expect(B.has(half.o), `${say}: a half names ${half.o}, inside a grapheme`).toBe(true);
+          }
+          // A row that holds nothing but the inside of one says so on both sides.
+          if (!r.offs.length) expect(r.lead && r.trail, `${say}: a row with no stop and no half`).toBeTruthy();
+        }
+        expect(sorted(stops), say).toEqual(sorted(B));
+        // Left and Right from every stop move, by stops, and end.
+        for (const from of stops) {
+          for (const [key, end] of [['ArrowRight', text.length], ['ArrowLeft', 0]]) {
+            let f = from;
+            let steps = 0;
+            while (f !== end) {
+              const to = moveCaret(m.rows, text, { a: f, f }, key);
+              expect(key === 'ArrowRight' ? to.f > f : to.f < f, `${say}: ${key} from ${f} went to ${to.f}`).toBe(true);
+              expect(stops.has(to.f), `${say}: ${key} from ${f} landed on ${to.f}`).toBe(true);
+              expect(caretAt(m.rows, to.f, to.up), `${say}: a caret at ${to.f}`).not.toBeNull();
+              f = to.f;
+              expect(++steps, `${say}: ${key} from ${from} does not end`).toBeLessThanOrEqual(text.length);
+            }
+          }
+        }
+        // A press on either half of every drawn cluster lands on a stop.
+        const place = placeBlock(boxCandidate(box, text));
+        const face = faceFor(box.style, 40);
+        place.lines.forEach((line, i) => {
+          if (line === '') return;
+          const pens = linePens(rust, face, line, 0);
+          const y = place.blockY + (i + 0.5) * place.lineH;
+          pens.at.forEach((_, c) => {
+            const from = place.lineX[i] + pens.x[c];
+            const to = place.lineX[i] + (pens.x[c + 1] ?? pens.end);
+            for (const part of [0.25, 0.75]) {
+              const hit = offsetAt(m.rows, from + (to - from) * part, y);
+              expect(stops.has(hit.o), `${say}: a press on cluster ${c} of line ${i} went to ${hit.o}`).toBe(true);
+              expect(caretAt(m.rows, hit.o, hit.up), `${say}: a caret where the press went`).not.toBeNull();
+            }
+          });
+        });
+        // And a letter typed where any press can go leaves every grapheme
+        // whole. (A mark with no letter before it takes the letter typed in
+        // front of it for its own: that is what the mark is, not a caret
+        // inside anything.)
+        for (const o of stops) {
+          if (/^\p{M}/u.test(text.slice(o))) continue;
+          const typed = rawEdit(text, [o, o], 'insertText', 'X').v;
+          expect([...graphemes.segment(typed)].map((g) => g.segment).filter((g) => g !== 'X').join(''), `${say}: an X typed at ${o}`).toBe(text);
+        }
+      }
+    }
+    expect(models).toBe(WIDTHS.length * 2);
+  });
+
+  it('a flag in a box narrower than it: the lines break inside it and no caret does', () => {
+    const text = '\u{1F1FA}\u{1F1F8}';
+    const box = boxOf(text, { size: 40 }, { w: 25, h: 300 });
+    const m = typeModel(box, text);
+    expect(m.lines).toEqual(['\u{1F1FA}', '\u{1F1F8}']);
+    const [a, b] = m.rows;
+    expect([a.offs, b.offs]).toEqual([[0], [4]]);
+    expect(a.trail.o).toBe(4);
+    expect(b.lead.o).toBe(0);
+    expect(a.soft).toBe(false);
+    // The end of the first row is the flag's end, on the row that has it.
+    const hit = offsetAt(m.rows, a.trail.x + 1, a.top + 5);
+    expect(hit.o).toBe(4);
+    expect(rawEdit(text, [hit.o, hit.o], 'insertText', 'X').v).toBe(`${text}X`);
+    expect(caretAt(m.rows, 4, hit.up)).toMatchObject({ row: 1, x: b.xs[0] });
+    // The flag selected is both its halves.
+    const marks = selectionRects(m.rows, 0, 4);
+    expect(marks.map((r) => r.y)).toEqual([a.top, b.top]);
+    expect(marks.every((r) => r.w > 5)).toBe(true);
+  });
+
+  it('a family and a syllable in jamo, as narrow: rows that hold only the inside of one have no stop', () => {
+    for (const text of ['\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}', '각']) {
+      const box = boxOf(text, { size: 40 }, { w: 25, h: 900 });
+      const m = typeModel(box, text);
+      expect(m.rows.length, text).toBeGreaterThan(2);
+      expect(m.rows.flatMap((r) => r.offs), text).toEqual([0, text.length]);
+      const inner = m.rows.slice(1, -1);
+      expect(inner.every((r) => !r.offs.length && r.lead.o === 0 && r.trail.o === text.length), text).toBe(true);
+      // A press anywhere on it is one of its two sides, and all of it is selected at once.
+      for (const r of m.rows) {
+        for (const x of [r.lead?.x ?? r.xs[0], r.trail?.x ?? r.xs[0]]) expect([0, text.length], text).toContain(offsetAt(m.rows, x, r.top + 5).o);
+      }
+      expect(selectionRects(m.rows, 0, text.length), text).toHaveLength(m.rows.length);
+      // Down from its start is its end, and Up from there its start: no row in between holds the caret.
+      expect(moveCaret(m.rows, text, { a: 0, f: 0 }, 'ArrowDown').f, text).toBe(text.length);
+      expect(moveCaret(m.rows, text, { a: text.length, f: text.length }, 'ArrowUp').f, text).toBe(0);
+    }
+  });
+
+  it('a letter cased to two with a mark of its own, the line broken between the two: the far half names the offset after the mark', () => {
+    // The review's text, size and width: "aß" + U+0301 + "b" drawn "AS" / "S" + U+0301 + "B".
+    const text = 'aß́b';
+    const box = boxOf(text, { size: 40, uppercase: true }, { w: 55, h: 300 });
+    const m = typeModel(box, text);
+    expect(m.lines).toEqual(['AS', 'ŚB']);
+    const [a, b] = m.rows;
+    expect(a.offs).toEqual([0, 1]);
+    expect(b.offs).toEqual([3, 4]);
+    expect(a.trail.o).toBe(3);
+    expect(b.lead.o).toBe(1);
+    // A press on the upper S's far edge is the offset after the letter AND its mark.
+    const hit = offsetAt(m.rows, a.trail.x, a.top + 5);
+    expect(hit.o).toBe(3);
+    expect(rawEdit(text, [hit.o, hit.o], 'insertText', 'X').v).toBe('aß́Xb');
+    // The letter selected, with its mark, is both halves.
+    expect(selectionRects(m.rows, 1, 3)).toHaveLength(2);
+  });
+
+  it('a size the pens overflow at is refused by the engine, as a size that is no number is', () => {
+    const face = faceFor(style(), 60);
+    expect(() => rust.lineCarets({ ...face, size: Number.MAX_VALUE }, 'MMMM')).toThrow(/lineCarets/);
+    expect(() => rust.lineCarets(face, 'MMMM', Number.MAX_VALUE)).toThrow(/lineCarets/);
+    expect(rust.lineCarets({ ...face, size: 1e9 }, 'MMMM').x.every(Number.isFinite)).toBe(true);
+  });
+});
+
