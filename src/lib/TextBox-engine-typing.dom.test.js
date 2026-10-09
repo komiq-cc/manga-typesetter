@@ -1496,9 +1496,150 @@ describe('while an IME composes, nothing the picture answers moves the caret or 
     expect(key(m, 'End').defaultPrevented).toBe(true);
     expect(m.sel()).toEqual([11, 11]);
   });
+
+  it.each(['blur', 'endEdit'])('composition ends with its editable on %s; reentry keeps all the original text', async (way) => {
+    const m = await typing('plain');
+    const original = m.box.text;
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    if (way === 'blur') m.editable().dispatchEvent(new Event('blur'));
+    else endEdit(original);
+    await tick();
+    beginEdit(m.box.id);
+    await tick();
+    expect(m.editable().textContent).toBe(original);
+    nativeSel(m, 4);
+    expect(input(m, 'insertText', 'X').defaultPrevented).toBe(true);
+    await tick();
+    expect(m.box.text).toBe('WAITX FOR ME\nOVER THERE');
+  });
+
+  it('an old composition completion cannot end a composition in a later edit', async () => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const m = await typing('plain');
+      nativeSel(m, 4);
+      composition(m, 'compositionstart');
+      composition(m, 'compositionend');
+      const oldFinish = timers.mock.calls.find((c) => c[0].name === 'finish')[0];
+      endEdit(m.box.text);
+      await tick();
+      beginEdit(m.box.id);
+      await tick();
+      nativeSel(m, 4);
+      composition(m, 'compositionstart');
+      const node = m.editable().querySelector('.el').firstChild;
+      node.data = 'WAITに FOR ME';
+      m.editable().dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      await tick();
+      // A browser task already queued before cancellation must also check
+      // its editable owner; it cannot clear the new composing range.
+      oldFinish();
+      vi.advanceTimersByTime(0);
+      await tick();
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      expect(m.all('.tcomp')).toHaveLength(1);
+      expect(input(m, 'deleteHardLineForward').defaultPrevented).toBe(false);
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      composition(m, 'compositionend');
+      vi.advanceTimersByTime(0);
+      await tick();
+      expect(m.box.text).toBe('WAITに FOR ME\nOVER THERE');
+    } finally {
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['arc', 'plain'])('%s: losing the model during composition keeps the open composition protected', async (id) => {
+    const m = await typing(id);
+    const original = m.box.text;
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    const { lineCarets, ...withoutCarets } = half;
+    setTextEngine(withoutCarets);
+    clearLayoutMemo();
+    app.fontsVersion++;
+    await tick();
+    expect(engineSwitch.painting).toBe(true);
+    expect(m.q('.type-edit')).toBeNull();
+    expect(key(m, 'End').defaultPrevented).toBe(false);
+    expect(m.sel()).toEqual([4, 4]);
+    expect(input(m, 'deleteHardLineForward').defaultPrevented).toBe(false);
+    expect(m.box.text).toBe(original);
+  });
+
+  it('paste and cut leave an open picture composition to the browser too', async () => {
+    const m = await typing('plain');
+    nativeSel(m, 0, 4);
+    composition(m, 'compositionstart');
+    for (const type of ['paste', 'cut']) {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', { value: { getData: () => 'X', setData: vi.fn() } });
+      m.editable().dispatchEvent(ev);
+      await tick();
+      expect(ev.defaultPrevented).toBe(false);
+      expect(m.box.text).toBe('WAIT FOR ME\nOVER THERE');
+      expect(m.sel()).toEqual([0, 4]);
+    }
+  });
 });
 
 describe('a curve drag whose pointer the browser took back is over', () => {
+  it.each(['pointerup', 'pointercancel'])('%s ends only the pointer that began the pictured curve drag', async (type) => {
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, glyphs[2]), 1));
+    const start = m.sel();
+    el.dispatchEvent(ptr(type, m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[6]), 1));
+    const moved = m.sel();
+    expect(moved[0]).toBe(start[0]);
+    expect(moved[1]).toBeGreaterThan(start[1]);
+    el.dispatchEvent(ptr(type, m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 1));
+    expect(m.sel()).toEqual(moved);
+  });
+
+  it.each(['switch', 'model', 'composition', 'endEdit'])('a pictured curve drag ends on %s and never reaches the next edit/mode', async (way) => {
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const glyphs = typeModel(m.box, m.box.text).glyphs;
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, glyphs[2]), 1));
+    const start = m.sel();
+    if (way === 'switch') engineSwitch.painting = false;
+    if (way === 'model') {
+      const { lineCarets, ...withoutCarets } = half;
+      setTextEngine(withoutCarets);
+      clearLayoutMemo();
+      app.fontsVersion++;
+    }
+    if (way === 'composition') m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    if (way === 'endEdit') endEdit(m.box.text);
+    await tick();
+    if (way !== 'endEdit') {
+      el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 2));
+      expect(m.sel()).toEqual(start);
+    }
+    if (way === 'switch') engineSwitch.painting = true;
+    if (way === 'model') {
+      setTextEngine(half);
+      clearLayoutMemo();
+      app.fontsVersion++;
+    }
+    if (way === 'endEdit') beginEdit(m.box.id);
+    await tick();
+    if (way === 'composition') {
+      // Ignoring moves only while composing is not enough: the old gesture
+      // must remain ended when the composition has finished.
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    }
+    const held = m.sel();
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, glyphs[9]), 1));
+    expect(m.sel()).toEqual(held);
+  });
   it('nothing goes on selecting after the capture is lost, and another pointer losing its own ends nothing', async () => {
     const m = await typing('arc');
     const g = typeModel(m.box, boxText(m.box)).glyphs;
@@ -1559,6 +1700,48 @@ describe('the system\'s menu leaves nothing listening', () => {
     };
   }
 
+  it.each(['plain', 'arc'])('%s: an old edit/menu owns neither the later shift nor any surviving listener', async (id) => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const on = listening();
+    const restore = geometry({ native: { left: 100.75, top: 50, width: 0, height: 24 }, mark: { left: 100, top: 50, width: 1.5, height: 24 }, selection: { left: 300, top: 400, width: 40, height: 20 } });
+    try {
+      const m = await typing(id);
+      const old = m.q('.curve-edit, .type-edit');
+      old.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      const oldBack = timers.mock.calls.find((c) => c[1] === 1000)[0];
+      expect(on.left()).toBe(1);
+      endEdit(m.box.text);
+      await tick();
+      expect(on.left()).toBe(0);
+      expect(old.classList.contains('ctx')).toBe(false);
+      beginEdit(m.box.id);
+      await tick();
+      const later = m.q('.curve-edit, .type-edit');
+      later.dispatchEvent(ptr('pointerdown', m, 90, 30, 1, { button: 2 }));
+      const moved = m.editable().style.transform;
+      expect(moved).not.toBe('');
+      expect(on.left()).toBe(1);
+      // Even a callback already queued by the browser owns only its old menu.
+      oldBack();
+      await tick();
+      expect(later.classList.contains('ctx')).toBe(true);
+      expect(m.editable().style.transform).toBe(moved);
+      expect(on.left()).toBe(1);
+      window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      m.view.unmount();
+      expect(on.left()).toBe(0);
+      expect(later.classList.contains('ctx')).toBe(false);
+      vi.runAllTimers();
+      expect(on.left()).toBe(0);
+    } finally {
+      restore();
+      on.restore();
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['plain', 'arc'])('%s: none after the menu event, and none after the second it waits when no menu comes', async (id) => {
     vi.useFakeTimers();
     const on = listening();
@@ -1598,6 +1781,24 @@ describe('the system\'s menu leaves nothing listening', () => {
       on.restore();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('a flat picture drag ends with its mode or composition', () => {
+  it.each(['switch', 'composition'])('%s cannot leave a flat drag to resume later', async (way) => {
+    const m = await typing('plain');
+    const el = m.q('.type-edit');
+    const rows = rowsOf(m.box);
+    el.dispatchEvent(ptr('pointerdown', m, rows[0].xs[1] + 1, rows[0].top + 5, 1));
+    const start = m.sel();
+    if (way === 'switch') engineSwitch.painting = false;
+    else m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    await tick();
+    if (way === 'switch') engineSwitch.painting = true;
+    await tick();
+    if (way === 'composition') m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    el.dispatchEvent(ptr('pointermove', m, rows[0].xs[6] + 1, rows[0].top + 5, 1));
+    expect(m.sel()).toEqual(start);
   });
 });
 
@@ -1677,4 +1878,3 @@ describe('a box narrower than one grapheme, typed into as its picture', () => {
     expect(Number.isFinite(pad.width) && Number.isFinite(pad.height)).toBe(true);
   });
 });
-

@@ -1814,6 +1814,8 @@
   // Where the caret goes when the lines are next drawn, as a raw offset.
   let caretNext = null;
   let composing = false;
+  let compositionTimer = null;
+  let compositionVersion = 0;
   // The editable, for the curve's pointer handlers, and its selection as raw
   // offsets (anchor, focus), which is what the caret on the curve is drawn from.
   let editEl = null;
@@ -1822,8 +1824,19 @@
   // Whether this edit has been a picture at any time: what the editable's
   // teardown has to put back then, and with the switch off never true.
   let pictureEdit = false;
+  function clearComposition() {
+    clearTimeout(compositionTimer);
+    compositionTimer = null;
+    compositionVersion++;
+    composing = false;
+    composeText = null;
+    composeAt = null;
+  }
   function editField(node) {
     let first = true;
+    // A composition belongs to one editable. A new picture edit must not
+    // inherit a composition whose editable has already gone away.
+    if (enginePaints) clearComposition();
     editEl = node;
     const onSel = () => {
       const sel = window.getSelection();
@@ -1843,6 +1856,11 @@
       document.addEventListener('selectionchange', onSel);
       return () => {
         document.removeEventListener('selectionchange', onSel);
+        if (pictureEdit) {
+          clearComposition();
+          menuBack?.(false);
+          curveDrag?.end();
+        }
         if (editEl === node) editEl = null;
         edSel = null;
         if (!pictureEdit) return;
@@ -1977,7 +1995,7 @@
     // browser's (`composing`: an input can arrive in the middle of one without
     // saying so). Nothing is cut from the picture's rows then, and the box's
     // text is not written under the composition.
-    if (typing && composing) return;
+    if (pictureEdit && composing) return;
     e.preventDefault();
     const node = e.currentTarget;
     if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
@@ -1989,6 +2007,7 @@
   }
 
   function onEditPaste(e) {
+    if (pictureEdit && composing) return;
     e.preventDefault();
     const node = e.currentTarget;
     const span = editSpan(node);
@@ -1998,6 +2017,7 @@
   // The browser's copy of the lines has a Return at every wrap and the hidden
   // spaces; what was selected is a slice of the raw text.
   function onEditCopy(e) {
+    if (e.type === 'cut' && pictureEdit && composing) return;
     const node = e.currentTarget;
     const span = editSpan(node);
     if (!span || span[0] === span[1]) return;
@@ -2023,22 +2043,41 @@
     }
   }
   function onCompositionStart() {
+    clearTimeout(compositionTimer);
+    compositionTimer = null;
+    compositionVersion++;
     composing = true;
+    // A drag/menu that began before composition cannot go on changing its
+    // selection, even if the picture falls back to DOM text in the meantime.
+    if (pictureEdit) {
+      typeDrag?.end();
+      curveDrag?.end();
+      menuBack?.(false);
+    }
     // What the composed text takes the place of, to mark it in the picture.
     if (typing) composeAt = edSel ? { from: Math.min(edSel.a, edSel.f), cut: Math.abs(edSel.a - edSel.f) } : null;
   }
   function onCompositionEnd(e) {
     composing = false;
     const node = e.currentTarget;
+    const version = compositionVersion;
+    const pictured = pictureEdit;
     // WebKit ends the composition before its last input lands.
-    setTimeout(() => {
+    const finish = () => {
+      if ((pictured || pictureEdit) && (editEl !== node || compositionVersion !== version)) return;
+      if (pictured) compositionTimer = null;
       composeText = null;
       if (composeAt) composeAt = null;
       readBack(node);
-    });
+    };
+    if (pictured) {
+      clearTimeout(compositionTimer);
+      compositionTimer = setTimeout(finish);
+    } else setTimeout(finish);
   }
 
   function onEditBlur(e) {
+    if (pictureEdit) clearComposition();
     composeText = null;
     endEdit(e.currentTarget.textContent);
   }
@@ -2048,7 +2087,7 @@
     // `isComposing`, so the composition's own start and end are asked too.
     // (With the switch off a curve's keys are what they were; and undo and
     // Escape, below, are as they were with either.)
-    const open = typing && (composing || e.isComposing);
+    const open = pictureEdit && (composing || e.isComposing);
     if (!open && typeFlat && typeKey(e)) return;
     if (!open && (curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
@@ -2124,27 +2163,43 @@
     // The right button, on a curve that is a picture: the path straight text has.
     if (e.button === 2 && typeCurve && editEl && !composing) return typeMenu(e);
     if (e.button !== 0 || !editEl || composing) return;
+    const pictured = typing;
+    if (pictured && curveDrag && curveDrag.id !== e.pointerId) return;
     e.preventDefault();
     const el = e.currentTarget;
     const o = curveOffset(el, e);
     const anchor = e.shiftKey && edSel ? edSel.a : o;
     setRawSel(anchor, o);
-    el.setPointerCapture?.(e.pointerId);
+    if (pictured) {
+      try {
+        el.setPointerCapture?.(e.pointerId);
+      } catch {
+        // A pen press may end before capture; the caret is still placed.
+      }
+    } else el.setPointerCapture?.(e.pointerId);
     // On a picture the drag is the pointer's that began it: another pointer
     // moving over the curve, or let go, is not it. (With the switch off the
     // handlers are what they were.)
-    const mine = (ev) => !typing || ev.pointerId === e.pointerId;
-    const move = (ev) => mine(ev) && setRawSel(anchor, curveOffset(el, ev));
+    const mine = (ev) => !pictured || ev.pointerId === e.pointerId;
+    const move = (ev) => mine(ev) && (!pictured || (typeCurve && !composing)) && setRawSel(anchor, curveOffset(el, ev));
     // And it is over when the browser takes the pointer back, as when the
     // button is let go: a release outside the curve is never heard here.
-    const pictured = typing;
+    const drag = { id: e.pointerId, end: null };
     const up = (ev) => {
       if (!mine(ev)) return;
+      drag.end();
+    };
+    drag.end = () => {
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
       if (pictured) el.removeEventListener('lostpointercapture', up);
+      if (curveDrag === drag) curveDrag = null;
     };
+    if (pictured) {
+      curveDrag?.end();
+      curveDrag = drag;
+    }
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
@@ -2293,6 +2348,16 @@
   // what picks one (`pick`) and the one the press took (`base`), which stays
   // selected whichever way the pointer goes.
   let typeDrag = null;
+  let curveDrag = null;
+  let menuBack = null;
+  // A picture's drag/menu belongs to its current editing mode. Switching,
+  // failure or a different model ends it; switching back never revives it.
+  $effect(() => {
+    const mode = typing ? typed.kind : null;
+    if (mode !== 'flat') typeDrag?.end();
+    if (mode !== 'curve') curveDrag?.end();
+    if (!mode) menuBack?.(false);
+  });
   function onTypePointerDown(e) {
     if (!editEl || composing || !typeFlat) return;
     // A second pointer while one is dragging is not a press of the text.
@@ -2311,7 +2376,7 @@
     }
     const drag = { id: e.pointerId, pick: null, base: null, end: null };
     const move = (ev) => {
-      if (ev.pointerId !== drag.id || !typeFlat) return;
+      if (ev.pointerId !== drag.id || !typeFlat || composing) return;
       const [x, y] = maskLocal(ev);
       if (!drag.pick) {
         const h = offsetAt(typed.rows, x, y);
@@ -2371,6 +2436,7 @@
   // own selection under the pointer (`menuShift`): the press is then on the
   // selection, the system leaves it alone, and the menu is that selection's.
   function typeMenu(e) {
+    menuBack?.(false);
     const el = e.currentTarget;
     const held = editEl.textContent;
     const lo = edSel ? Math.min(edSel.a, edSel.f) : 0;
@@ -2401,18 +2467,27 @@
       menuShift = { x, y };
       flushSync();
     }
-    const back = () => {
+    let afterTimer = null;
+    const back = (align = true) => {
       clearTimeout(timer);
+      clearTimeout(afterTimer);
       window.removeEventListener('contextmenu', after, true);
       el.classList.remove('ctx');
-      if (!menuShift) return;
+      if (menuBack !== back) return;
+      menuBack = null;
       menuShift = null;
       // Back where its caret belongs.
-      flushSync();
-      if (editEl === node && typing) alignNative(node);
+      if (align && editEl === node && typing) {
+        flushSync();
+        alignNative(node);
+      }
     };
-    const after = () => setTimeout(back);
+    const after = () => {
+      clearTimeout(afterTimer);
+      afterTimer = setTimeout(back);
+    };
     const timer = setTimeout(back, 1000);
+    menuBack = back;
     window.addEventListener('contextmenu', after, true);
   }
   // A rectangle of the editable's own selection, on screen: of what is
