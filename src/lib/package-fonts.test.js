@@ -196,6 +196,7 @@ describe('the import says what each font will be on this machine', () => {
   it('inspection waits again when the font source is replaced, including when the old wait rejects', async () => {
     for (const rejectOld of [false, true]) {
       let endOld, endNew, askedNew;
+      let newCalls = 0;
       const newAsked = new Promise((resolve) => (askedNew = resolve));
       const oldWait = new Promise((resolve, reject) => (endOld = rejectOld ? () => reject(new Error('old source gave up')) : resolve));
       setFontSource({ ready: () => true, missing: () => false, settle: () => oldWait });
@@ -204,10 +205,12 @@ describe('the import says what each font will be on this machine', () => {
       for (let i = 0; i < 10; i++) await Promise.resolve();
       let pending = true;
       const newWait = new Promise((resolve) => (endNew = () => { pending = false; resolve(); }));
-      setFontSource({ ready: () => !pending, missing: () => !pending, settle: () => (askedNew(), newWait) });
+      setFontSource({ ready: () => !pending, missing: () => !pending, settle: () => (newCalls++, askedNew(), newWait) });
       let finished = false;
       inspected.then(() => { finished = true; });
       endOld();
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      expect(newCalls).toBe(1);
       await newAsked;
       expect(finished).toBe(false);
       endNew();

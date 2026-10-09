@@ -588,8 +588,8 @@ the last-resort face.
   read from disk the first time anything asks, and until then it is neither
   missing nor not. `inspectPackage` now waits only with the switch on, before
   the synchronous `packageFontStatuses` reads the known statuses. A wait that
-  gives up does not fail the package; the status is then the gate's at that
-  moment.
+  gave up was suppressed in this earlier round; the Third-round correction
+  below now exposes that failure and validates the settled source identity.
 - With the switch off nothing of this is reached.
 - Tests: `package-fonts.engine.test.js` (4, new); one more in
   `package-fonts.test.js`, whose stand-in for the gate now answers
@@ -830,17 +830,18 @@ They cover the shared guard (labeled c12 retarget), its coverage/empty/metric
 entry points, cleared engine runs, shared ABI output/result clearing and JS
 status guards. None has been executed. The preserved original25 remain separate.
 
-### Fresh Codex review corrections [I: implementation; proofs pending]
+### Fresh Codex review corrections [M: focused worker proofs; combined acceptance pending]
 
 The independent review of `d7dd4ac254bdcf699dd1f4b07cdf6744c8d5d788`
 recorded seven reproducible gaps in
 `tp-data/reports/resume-20261009/p8c-final-codex-findings.md`.
 Those probes are **[M] for that earlier candidate** and are not fresh
-source-build evidence. The corrections below are implemented with
-regressions; their acceptance remains **[I]** until the focused/repeated
-proof logs are recorded.
+source-build evidence. Fresh source/tests committed as
+`2b18610158b815516e29c1afa1c4f05764271c9f` passed the focused worker
+proofs below. The behavioral regression claims in this table are **[M]
+for that candidate**, while final combined-source acceptance stays pending.
 
-| review gap | correction and regression [I] |
+| review gap | correction and focused regression [M] |
 |---|---|
 | Ordinary nested PSD font failure forgets outer completed files | Every writer supplies its completed count for ordinary failures as well as `EngineSwitched`. A nested local “nothing was written” claim is removed once an outer file exists. The PSD test downloads page11, rejects page22 and requires an accurate one-file message. Strip and native failures use the same count wrapper. |
 | Native path/blob/dialog waits outlive the held engine | Checks follow native imports, path resolution, dialog, blob conversion and the actual completed write; the last pre-write check is immediately before `writeFileAtomic`. Tests pause each single-file wait and second-file streamed path/blob waits; a post-write change counts the completed file and suppresses Saved. These are simulated Tauri APIs, not an observed desktop run. |
@@ -852,9 +853,31 @@ proof logs are recorded.
 
 No Photoshop identity lookup, native OS dialog/write interaction or
 second-machine package observation is claimed by these regressions.
-The added mutation definitions will remain separate from both the preserved
-original25 and the new13 chain-policy definitions, with exact-revision logs
-required for each executed kill.
+
+Fresh worker logs and exact commands:
+`tp-data/reports/resume-20261009/p8c-worker-review-focused/*.json`.
+Each command started with load2.78–3.01 and ran sequentially.
+
+| focused command on `2b18610158b815516e29c1afa1c4f05764271c9f` | result [M] |
+|---|---|
+| Engine fmt check | Clean |
+| Native chains + instance tests |5 +18 passed |
+| Same with `--no-default-features` |3 +18 passed |
+| `npm run build:engine` |1,614,463 bytes; SHA256 `2a4651940d4c0a47dcb457a85e4ab8c3a45e34afde7136332d355ab9c2fdbf24` |
+| Original five P8 JS targets plus chain/painter file |6 files,98 tests passed |
+
+The package replacement regression was subsequently strengthened with a
+synchronous new-source call-count assertion before awaiting its signal.
+This detects a removed identity retry with an assertion rather than a
+five-second timeout. That assertion-only follow-up requires the coordinator's
+scheduled repeat; no further worker tests ran after the proof window closed.
+
+Fresh fourteen review-gap mutation definitions are prepared at
+`tp-data/reports/resume-20261009/p8c-review-gap-mutations/` and match the
+committed source substitutions exactly once. They remain separate from
+both the preserved original25 and the new13 chain-policy definitions.
+No mutation was executed; every future kill requires its exact-revision log
+and named failed assertion.
 
 ### Final verification [not yet run]
 
