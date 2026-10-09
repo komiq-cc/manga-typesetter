@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>p9 check</title>
+    <style>
+      /* The editor's canvas beside the text queue, as the editor has them,
+         without the window chrome around either. */
+      html, body { margin: 0; height: 100%; }
+      #stage { display: flex; height: 100%; }
+      #app { flex: 1 1 auto; min-width: 0; height: 100%; position: relative; }
+      #queue { flex: 0 0 360px; height: 100%; overflow: auto; background: var(--panel); border-left: 1px solid var(--line2); }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="app"></div>
+      <div id="queue"></div>
+    </div>
+    <script type="module" src="/src/test/p9-check/host.js"></script>
+  </body>
+</html>
