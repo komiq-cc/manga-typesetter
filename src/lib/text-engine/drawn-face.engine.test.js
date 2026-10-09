@@ -3,6 +3,7 @@ import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
 import { blankName } from '../../test/variable-fixture.js';
 import { createRustGlyphPainter } from './rust-painter.js';
 import { drawnFace, drawnRuns, postScriptNameOf } from './drawn-face.js';
+import { lineFonts } from '../../../text-engine/js/line-fonts.mjs';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './index.js';
 import { clearLayoutMemo } from '../measure.js';
 import { textLayerFor, BORROWED_MARK } from '../psd.js';
@@ -131,6 +132,60 @@ describe('a borrowed stretch', () => {
     const fromEngine = perUnit(rust.lineParts(face('Comic Neue', { size: 30 }), text), (p) => rust.low.fontInfo(p.font).postScriptName);
     expect(fromLayer).toEqual(fromEngine);
     expect(fromLayer).toEqual(['ComicNeue-Regular', 'Bangers-Regular', 'ComicNeue-Regular', 'DejaVuSans', 'DejaVuSans', 'ComicNeue-Regular', 'DejaVuSans', 'DejaVuSans', 'ComicNeue-Regular']);
+  });
+});
+
+describe('asking the engine for a line’s fonts (`lineFonts`)', () => {
+  // The wasm's allocator, counted: every `mt_alloc` and every `mt_free`,
+  // with the bytes of each.
+  const counted = () => {
+    const ex = rust.low.exports;
+    const seen = { allocs: 0, frees: 0, held: new Map() };
+    const exports = {
+      memory: ex.memory,
+      mt_line_fonts: ex.mt_line_fonts,
+      mt_alloc: (bytes) => {
+        const ptr = ex.mt_alloc(bytes);
+        seen.allocs++;
+        seen.held.set(ptr, bytes);
+        return ptr;
+      },
+      mt_free: (ptr, bytes) => {
+        seen.frees++;
+        // Freed as it was allocated: the same pointer, the same size.
+        expect(seen.held.get(ptr)).toBe(bytes);
+        seen.held.delete(ptr);
+        return ex.mt_free(ptr, bytes);
+      },
+    };
+    return { engine: { exports }, seen };
+  };
+
+  it('gives back everything it allocated, call after call', () => {
+    rust.setFallbacks(['Bangers', 'DejaVu Sans']);
+    const handle = rust.handle(face('Comic Neue'));
+    const { engine, seen } = counted();
+    const pages = rust.low.exports.memory.buffer.byteLength;
+    for (let i = 0; i < 1000; i++) {
+      const text = ['AĦ ΩĦB', '', 'A', 'ΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩ'][i % 4];
+      expect(lineFonts(engine, handle, text).reduce((n, p) => n + (p.end - p.start), 0)).toBe(text.length);
+    }
+    // Two allocations a call with text (the text, the answer), one without.
+    expect(seen.allocs).toBe(750 + 1000);
+    expect(seen.frees).toBe(seen.allocs);
+    expect(seen.held.size).toBe(0);
+    // And the heap did not grow for it.
+    expect(rust.low.exports.memory.buffer.byteLength).toBe(pages);
+  });
+
+  it('gives it back when the engine refuses, too', () => {
+    const handle = rust.handle(face('Comic Neue'));
+    const { engine, seen } = counted();
+    // A chain nobody made, and a font nobody added.
+    expect(() => lineFonts(engine, { font: handle.font, flags: 65535 << 8 }, 'AΩ')).toThrow(/unknown font or chain/);
+    expect(() => lineFonts(engine, { font: 987654, flags: 0 }, 'AΩ')).toThrow(/unknown font or chain/);
+    expect(seen.allocs).toBe(4);
+    expect(seen.held.size).toBe(0);
   });
 });
 

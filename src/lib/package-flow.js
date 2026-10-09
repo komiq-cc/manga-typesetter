@@ -257,19 +257,27 @@ function engineFontStatus(f) {
 // built-in is a font with no bytes: a chapter set in one would otherwise
 // import without a word and open with every box marked "font missing".
 //
-// With the switch on it first waits for the gate to know each of them
-// (`familiesKnown`); with it off nothing is awaited and the answer is the
-// one it always was.
-export async function packageFontStatuses(pkg) {
-  const used = fontsGated() ? fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? []) : [];
-  if (fontsGated()) await familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...used])]);
+// Synchronous, in both modes: with the switch off this is the list it always
+// was, there when the call returns. With it on, the answer is what the gate
+// says AT THIS MOMENT, and a family nothing has asked about yet is only on
+// its way - so whoever wants the lasting answer awaits `packageFontsKnown`
+// first, as `inspectPackage` does.
+export function packageFontStatuses(pkg) {
   const out = pkg.fonts.map((f) => ({ name: f.name, status: fontStatus(f) }));
   if (!fontsGated()) return out;
   const listed = new Set(pkg.fonts.map((f) => f.name));
-  for (const name of used) {
+  for (const name of fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])) {
     if (!listed.has(name)) out.push({ name, status: engineFontStatus({ name, faces: {}, shipped: false }) });
   }
   return out;
+}
+
+// With the Rust engine switched on: resolves when the gate knows every
+// family `packageFontStatuses` will be asked about (`familiesKnown`). Only
+// ever called with the switch on; with it off there is nothing to wait for
+// and nothing may be awaited (see `inspectPackage`).
+function packageFontsKnown(pkg) {
+  return familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])])]);
 }
 
 // Parse a picked file and describe it for the dialog. Throws the reader's
@@ -279,6 +287,10 @@ export async function packageFontStatuses(pkg) {
 export async function inspectPackage(file, projectId = null) {
   const pkg = readChapterPackage(new Uint8Array(await file.arrayBuffer()));
   const { manifest, record } = pkg;
+  // Behind the switch, and not an `await` of something already settled: with
+  // the browser measuring this function awaits the file and nothing else,
+  // as it did before there was a gate.
+  if (fontsGated()) await packageFontsKnown(pkg);
   return {
     pkg,
     summary: {
@@ -293,7 +305,7 @@ export async function inspectPackage(file, projectId = null) {
       projectName: manifest.project?.name ?? '',
       app: manifest.app ?? '',
       exportedAt: manifest.exportedAt ?? '',
-      fonts: await packageFontStatuses(pkg),
+      fonts: packageFontStatuses(pkg),
       tags: pkg.tags.map((t) => ({ name: t.name, status: projectTag(projectId, t.name) ? 'known' : 'new' })),
     },
   };

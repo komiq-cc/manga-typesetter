@@ -30,7 +30,7 @@ vi.mock('./library.svelte.js', () => ({
 
 const { app, setFontSource } = await import('./store.svelte.js');
 const { addFontFile, removeUserFont, installFontFace, systemFontEntry } = await import('./fonts.js');
-const { exportChapterPackage, inspectPackage, importChapterPackage, fontStatus, fontsStaying, stayingNote } = await import('./package-flow.js');
+const { exportChapterPackage, inspectPackage, importChapterPackage, fontStatus, fontsStaying, stayingNote, packageFontStatuses } = await import('./package-flow.js');
 const { readChapterPackage, buildChapterPackage } = await import('./package.js');
 
 const comic = fixtureFont('ComicNeue-Regular.ttf');
@@ -173,6 +173,24 @@ describe('the import says what each font will be on this machine', () => {
     // A system font is "missing", a built-in is "builtin", and a family the manifest does not list is not listed.
     expect(await statuses(incoming())).toEqual({ 'Shipped Font': 'install', Arial: 'missing', 'Gone Font': 'missing', Mine: 'present' });
     expect(await statuses(incoming(['Shipped Font', 'Comic Neue'], ['Shipped Font', 'Comic Neue', 'Bangers']))).toEqual({ 'Shipped Font': 'install', 'Comic Neue': 'builtin' });
+  });
+
+  it('with the switch off the statuses are there at once: no promise, and not a tick later than before', async () => {
+    await addFontFile(fontFile('Mine.ttf', comic));
+    const bytes = incoming();
+    // The list itself, not a promise of it.
+    const out = packageFontStatuses(readChapterPackage(bytes));
+    expect(Array.isArray(out)).toBe(true);
+    expect(Object.fromEntries(out.map((f) => [f.name, f.status]))).toEqual({ 'Shipped Font': 'install', Arial: 'missing', 'Gone Font': 'missing', Mine: 'present' });
+    // `inspectPackage` awaits the file's bytes and nothing else. Set beside
+    // a function that awaits exactly that and was started AFTER it: one
+    // more await anywhere in it, and the other finishes first.
+    const order = [];
+    const file = asFile(bytes);
+    const inspected = inspectPackage(file, 'p1').then(() => order.push('inspectPackage'));
+    const beside = (async () => void (await file.arrayBuffer()))().then(() => order.push('one await'));
+    await Promise.all([inspected, beside]);
+    expect(order).toEqual(['inspectPackage', 'one await']);
   });
 
   it('a shipped font is present once every face of it is in the library, in either mode', async () => {
