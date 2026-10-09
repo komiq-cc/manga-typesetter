@@ -35,7 +35,7 @@ import { FONTS, fmt } from './common.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const genDir = resolve(here, '../js/generated')
-const outDir = resolve(genDir, 'paint')
+const outDir = resolve(process.env.MT_TEXT_PAINT_OUT ?? resolve(genDir, 'paint'))
 mkdirSync(outDir, { recursive: true })
 const wasm = resolve(genDir, process.env.MT_TEXT_WASM ?? 'mt_text.compare.wasm')
 if (!existsSync(wasm)) {

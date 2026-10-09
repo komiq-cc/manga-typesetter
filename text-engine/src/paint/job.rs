@@ -121,18 +121,17 @@ impl Tile {
         if rgba.len() != n.checked_mul(4)? {
             return None;
         }
-        let texels = rgba
-            .chunks_exact(4)
-            .map(|p| {
-                let a = f32::from(p[3]) / 255.0;
-                [
-                    f32::from(p[0]) / 255.0 * a,
-                    f32::from(p[1]) / 255.0 * a,
-                    f32::from(p[2]) / 255.0 * a,
-                    a,
-                ]
-            })
-            .collect();
+        let mut texels = Vec::new();
+        super::budget::reserve_raw(&mut texels, n).ok()?;
+        texels.extend(rgba.chunks_exact(4).map(|p| {
+            let a = f32::from(p[3]) / 255.0;
+            [
+                f32::from(p[0]) / 255.0 * a,
+                f32::from(p[1]) / 255.0 * a,
+                f32::from(p[2]) / 255.0 * a,
+                a,
+            ]
+        }));
         Some(Self {
             width,
             height,
@@ -234,14 +233,12 @@ impl<'a> Reader<'a> {
 
     fn stops(&mut self) -> Result<Vec<Stop>, Error> {
         let n = self.count(12)?;
-        (0..n)
-            .map(|_| {
-                Ok(Stop {
-                    pos: self.f64()?,
-                    color: self.rgba()?,
-                })
+        super::budget::collect((0..n).map(|_| {
+            Ok(Stop {
+                pos: self.f64()?,
+                color: self.rgba()?,
             })
-            .collect()
+        }))
     }
 
     fn fill(&mut self) -> Result<Option<Fill>, Error> {
@@ -329,41 +326,43 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
     };
     let letter_spacing = r.f64()?;
     let silhouette = r.rgba()?;
-    let bands = (0..r.count(20)?)
-        .map(|_| {
-            Ok(Band {
-                color: r.rgba()?,
-                opacity: r.f64()?,
-                line: r.f64()?,
-            })
+    let bands = super::budget::collect((0..r.count(20)?).map(|_| {
+        Ok(Band {
+            color: r.rgba()?,
+            opacity: r.f64()?,
+            line: r.f64()?,
         })
-        .collect::<Result<Vec<_>, Error>>()?;
+    }))?;
     let fill = r.fill()?;
-    let runs = (0..r.count(32)?)
-        .map(|_| {
-            let (x, y, rot) = (r.f64()?, r.f64()?, r.f64()?);
-            let fill = r.fill()?;
-            let len = r.u32()? as usize;
-            let text = core::str::from_utf8(r.take(len)?).map_err(|_| Error::BadText)?;
-            Ok(Run {
-                text: text.to_owned(),
-                x,
-                y,
-                rot,
-                fill,
-            })
+    let runs = super::budget::collect((0..r.count(32)?).map(|_| {
+        let (x, y, rot) = (r.f64()?, r.f64()?, r.f64()?);
+        let fill = r.fill()?;
+        let len = r.u32()? as usize;
+        if len > super::budget::MAX_RUN_BYTES {
+            return Err(Error::BadSpec);
+        }
+        let text = core::str::from_utf8(r.take(len)?).map_err(|_| Error::BadText)?;
+        let mut owned = Vec::new();
+        super::budget::reserve_raw(&mut owned, text.len())?;
+        owned.extend_from_slice(text.as_bytes());
+        // Valid UTF-8 was checked above; this conversion does not allocate.
+        let text = String::from_utf8(owned).map_err(|_| Error::BadText)?;
+        Ok(Run {
+            text,
+            x,
+            y,
+            rot,
+            fill,
         })
-        .collect::<Result<Vec<_>, Error>>()?;
-    let tiles = (0..r.count(8)?)
-        .map(|_| {
-            let (width, height) = (r.u32()?, r.u32()?);
-            if width > MAX_TILE_SIDE || height > MAX_TILE_SIDE {
-                return Err(Error::BadSpec);
-            }
-            let len = width as usize * height as usize * 4;
-            Tile::from_rgba(width, height, r.take(len)?).ok_or(Error::BadSpec)
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    }))?;
+    let tiles = super::budget::collect((0..r.count(8)?).map(|_| {
+        let (width, height) = (r.u32()?, r.u32()?);
+        if width > MAX_TILE_SIDE || height > MAX_TILE_SIDE {
+            return Err(Error::BadSpec);
+        }
+        let len = width as usize * height as usize * 4;
+        Tile::from_rgba(width, height, r.take(len)?).ok_or(Error::BadSpec)
+    }))?;
     if r.at != bytes.len() {
         return Err(Error::BadSpec);
     }

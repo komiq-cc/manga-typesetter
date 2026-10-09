@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDir, '..')
 const crateDir = resolve(repoRoot, 'text-engine')
-const builtWasm = resolve(crateDir, 'target/wasm32-unknown-unknown/release/mt_text.wasm')
+const builtWasm = resolve(crateDir, process.env.CARGO_TARGET_DIR ?? 'target', 'wasm32-unknown-unknown/release/mt_text.wasm')
 const outDir = resolve(crateDir, 'js/generated')
 const outName = process.env.MT_TEXT_OUT ?? 'mt_text.wasm'
 const outWasm = resolve(outDir, outName)

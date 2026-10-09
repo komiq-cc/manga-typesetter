@@ -42,7 +42,7 @@ const STATUS = {
   '-2': 'unknown font id',
   '-3': 'text is not valid UTF-8',
   '-4': 'shaping failed',
-  '-5': 'malformed paint job, or a surface larger than the engine allows',
+  '-5': 'malformed paint job, a surface larger than the engine allows, or the job is over the painter\'s memory or run limit',
 }
 
 const HEX = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
