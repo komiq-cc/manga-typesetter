@@ -814,7 +814,7 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
 /* For the system's menu (TextBox.svelte `typeMenu`): the overlay lets the
    press through to the editable under it, which is what the menu is for. */
 .type-edit.ctx, .curve-edit.ctx{ pointer-events:none; }
-.type-edit.ctx ~ .txt.editable.unseen, .curve-edit.ctx ~ .txt.editable.unseen{ pointer-events:auto; }
+.type-edit.ctx ~ .txt.editable.unseen, .curve-edit.ctx ~ .txt.editable.unseen{ pointer-events:auto; overflow:visible; }
 
 /* curved (arc) text */
 .tbox .arc{ position:absolute; inset:0; }

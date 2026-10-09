@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
 import { typeModel, canType, linePens } from './type-rows.js';
-import { caretAt, rowOf, offsetAt } from './flat-caret.js';
+import { caretAt, rowOf, offsetAt, selectionRects } from './flat-caret.js';
 import { renderBoxTexture } from './exporter.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
@@ -174,6 +174,36 @@ describe('the engine can say where a caret stands', () => {
     expect(() => linePens(answer({ x: [0, NaN] }), null, 'ab', 0)).toThrow(/not a number/);
     expect(() => linePens(answer({ advance: Infinity }), null, 'ab', 0)).toThrow(/not a number/);
     expect(() => linePens(answer({ at: [NaN, 1] }), null, 'ab', 0)).toThrow(/not a number/);
+  });
+});
+
+describe('a letter drawn as two, with the line broken between the two', () => {
+  it('the real breaker makes it, and neither row has a caret between the halves', () => {
+    // A box too narrow for "ASSB" at this size, with no shape to hold a word whole.
+    const box = boxOf('aßb', { uppercase: true, size: 40, shape: 'off' }, { w: 60, h: 300 });
+    const m = typeModel(box, 'aßb');
+    expect(m.kind).toBe('flat');
+    expect(m.lines).toEqual(['AS', 'SB']);
+    const [a, b] = m.rows;
+    expect(a.offs).toEqual([0, 1]);
+    expect(b.offs).toEqual([2, 3]);
+    expect(a.soft).toBe(false);
+    // The halves` far edges: the end of the first S, the start of the second.
+    const pens = linePens(rust, faceFor(box.style, 40), 'AS', 0);
+    expect(a.trail).toEqual({ x: a.xs[0] + pens.end, o: 2 });
+    expect(b.lead).toEqual({ x: b.xs[0] - (linePens(rust, faceFor(box.style, 40), 'SB', 0).x[1]), o: 1 });
+    // The letter selected is on both rows; a caret at either side of it is
+    // at a stop, never at an edge between.
+    const marks = selectionRects(m.rows, 1, 2);
+    expect(marks).toHaveLength(2);
+    expect(marks[0]).toMatchObject({ x: a.xs[1], y: a.top, w: a.trail.x - a.xs[1] });
+    expect(marks[1]).toMatchObject({ x: b.lead.x, y: b.top, w: b.xs[0] - b.lead.x });
+    expect(marks[0].w).toBeGreaterThan(10);
+    expect(marks[1].w).toBeCloseTo(marks[0].w, 6);
+    for (const up of [false, true]) {
+      expect(caretAt(m.rows, 1, up)).toMatchObject({ row: 0, x: a.xs[1] });
+      expect(caretAt(m.rows, 2, up)).toMatchObject({ row: 1, x: b.xs[0] });
+    }
   });
 });
 

@@ -2248,8 +2248,9 @@
     let x1 = box.w;
     let y1 = box.h;
     for (const r of typed.rows) {
-      x0 = Math.min(x0, r.xs[0]);
-      x1 = Math.max(x1, r.xs[r.xs.length - 1]);
+      // (With the half of a letter the row draws and has no stop for.)
+      x0 = Math.min(x0, r.lead ? r.lead.x : r.xs[0]);
+      x1 = Math.max(x1, r.trail ? r.trail.x : r.xs[r.xs.length - 1]);
       y0 = Math.min(y0, r.top);
       y1 = Math.max(y1, r.top + r.height);
     }
@@ -2371,20 +2372,28 @@
         setTypeSel(to.a, to.f, to.up);
       }
     }
-    // The marks and the editable's own caret, as they are for this selection.
+    // The marks and the editable's own caret, as they are for this selection;
+    // and the editable as it is while the overlay stands aside (a curve's is
+    // clipped to the box at any other time, and what is clipped takes no
+    // pointer), which is what is measured.
     flushSync();
-    const at = menuRect(editEl);
+    el.classList.add('ctx');
+    const node = editEl;
+    const at = menuRect(node);
     if (at) {
       const [x, y] = boxDelta(e.clientX - (at.left + at.width / 2), e.clientY - (at.top + at.height / 2));
       menuShift = { x, y };
       flushSync();
     }
-    el.classList.add('ctx');
     const back = () => {
       clearTimeout(timer);
       window.removeEventListener('contextmenu', after, true);
       el.classList.remove('ctx');
+      if (!menuShift) return;
       menuShift = null;
+      // Back where its caret belongs.
+      flushSync();
+      if (editEl === node && typing) alignNative(node);
     };
     const after = () => setTimeout(back);
     const timer = setTimeout(back, 1000);
