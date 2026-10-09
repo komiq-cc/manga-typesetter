@@ -3,6 +3,12 @@ import { app, loadProjectPages, setFontSource } from './store.svelte.js';
 import { exportImages } from './exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { releaseAllPageImages } from './page-images.js';
+import { fsx } from './fsx.js';
+
+// The native side of a folder export, for the one test that takes it: the
+// folder dialog answers '/out', and a path is its parts joined.
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: async () => '/out', save: async () => null }));
+vi.mock('@tauri-apps/api/path', () => ({ join: async (...parts) => parts.join('/') }));
 
 // Every file an export writes waits for the fonts its pages need
 // (`fontsSettling` in the store, which the Rust engine's switch answers; what
@@ -254,44 +260,76 @@ describe('an export waits for the fonts its pages need', () => {
       });
     }
 
-    it('a whole chapter: the pages written before the switch stand, the page it happened on and the rest are not written', async () => {
+    // The engine on, its fonts in, and the switch thrown off at the first
+    // canvas asked for once `count()` files have been written.
+    function switchedAfter(n, count = () => downloaded.length) {
       const rust = stand();
       setTextEngine(rust.engine);
       setGlyphPainter(rust.painter);
       gate().open();
       neverReady();
-      // The second page's first canvas: page 11 is already written by then.
       const create = globalThis.document.createElement;
       globalThis.document.createElement = (tag) => {
-        if (tag === 'canvas' && downloaded.length === 1) {
+        if (tag === 'canvas' && count() === n) {
           setTextEngine(was.engine);
           setGlyphPainter(was.painter);
         }
         return create(tag);
       };
+    }
+    // WHAT IT SAYS is what happened: how many files were written (each one
+    // whole, each painted by the one engine), and that the rest were not.
+    const ONE = /text engine was switched.* 1 file was written before that, whole, and stays; the one being made and the rest were not written/;
+    const NONE = /text engine was switched.* Nothing was written\./;
+
+    for (const fmt of ['PNG', 'PSD']) {
+      it(`a whole chapter as ${fmt}: the page written before the switch stands and is counted, the page it happened on and the rest are not written`, async () => {
+        switchedAfter(1);
+        expect(await exportImages(fmt, 'all')).toBe(false);
+        expect(downloaded).toEqual([`ch01-11.${fmt.toLowerCase()}`]);
+        expect(app.toast?.msg).toMatch(ONE);
+        expect(app.toast?.msg).not.toMatch(NONE);
+      });
+
+      it(`one page as ${fmt}: nothing was written, and it says nothing was`, async () => {
+        switchedAfter(0);
+        expect(await exportImages(fmt, 'current')).toBe(false);
+        expect(downloaded).toEqual([]);
+        expect(app.toast?.msg).toMatch(NONE);
+      });
+    }
+
+    it('three pages, switched on the third: two files, said as two', async () => {
+      loadProjectPages([11, 22, 33].map((id) => ({ id, w: 800, h: 1200, lines: [], boxes: [] })));
+      switchedAfter(2);
       expect(await exportImages('PNG', 'all')).toBe(false);
-      expect(downloaded).toEqual(['ch01-11.png']);
+      expect(downloaded).toEqual(['ch01-11.png', 'ch01-22.png']);
+      expect(app.toast?.msg).toMatch(/ 2 files were written before that, whole, and stay; the one being made and the rest were not written/);
     });
 
-    it('strip slices: the slices written before the switch stand, the one it happened on and the rest are not written', async () => {
+    it('strip slices: the slice written before the switch stands and is counted, the one it happened on and the rest are not written', async () => {
       app.projectLayout = 'longstrip';
       app.stripSliceH = 1000;
-      const rust = stand();
-      setTextEngine(rust.engine);
-      setGlyphPainter(rust.painter);
-      gate().open();
-      neverReady();
-      const create = globalThis.document.createElement;
-      globalThis.document.createElement = (tag) => {
-        if (tag === 'canvas' && downloaded.length === 1) {
-          setTextEngine(was.engine);
-          setGlyphPainter(was.painter);
-        }
-        return create(tag);
-      };
+      switchedAfter(1);
       expect(await exportImages('PNG', 'all')).toBe(false);
       expect(downloaded).toEqual(['ch01-strip-01.png']);
-      expect(app.toast?.msg).toMatch(/text engine was switched/);
+      expect(app.toast?.msg).toMatch(ONE);
+    });
+
+    it('into a folder (the desktop app): the folder holds the one whole file, and it is counted', async () => {
+      vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+      const wrote = [];
+      vi.spyOn(fsx, 'writeFileAtomic').mockImplementation(async (path, bytes) => void wrote.push([path, bytes.byteLength]));
+      try {
+        switchedAfter(1, () => wrote.length);
+        expect(await exportImages('PNG', 'all')).toBe(false);
+        // The blob the canvas gave, all of it, and no second file.
+        expect(wrote).toEqual([['/out/ch01-11.png', 1]]);
+        expect(downloaded).toEqual([]);
+        expect(app.toast?.msg).toMatch(ONE);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     // Either half of "the engine" changing is the engine changing: a font

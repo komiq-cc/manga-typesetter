@@ -1151,7 +1151,7 @@ async function exportStripImages(fmt, held) {
     // memory budget when the next line asks for another few hundred megapixels.
     canvas.width = 0;
     canvas.height = 0;
-    enginesHeld(held);
+    enginesHeld(held, written);
     const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
     if (dir) await writeItemTo(dir, name, blob);
     else downloadBlob(blob, name);
@@ -1282,7 +1282,10 @@ export async function exportTextJson(scope) {
 //     file is written. Another engine by then means the file was measured or
 //     painted, in part or whole, from fonts nobody waited for: it is not
 //     written, nor is any file after it, and the export says why. Files
-//     already written were each painted by the one engine and stand.
+//     already written were each painted by the one engine and stand - so
+//     the folder, or the downloads, hold only whole files of one engine -
+//     and what the export says counts them (`EngineSwitched`): "was not
+//     written" of a chapter with eleven pages on disk is not what happened.
 //
 // It does not ask again at each page instead: a chapter whose first pages are
 // the engine's and whose last are the browser's is the half-and-half file
@@ -1297,9 +1300,24 @@ export async function enginesSettled(pages) {
   } while (!enginesAre(held));
   return held;
 }
-export function enginesHeld(held) {
-  if (enginesAre(held)) return;
-  throw new Error('the text engine was switched while this was being written, so it was not written. Export again.');
+// `written` is how many files the export had written, each of them whole,
+// when it stopped. Whoever knows the count says it: a loop that writes files
+// passes its own to `enginesHeld`, and puts it on an `EngineSwitched` that
+// comes up from something it called which could not know (`buildPagePsd`
+// builds one file and has written none).
+export class EngineSwitched extends Error {
+  constructor(written = 0) {
+    const before =
+      written > 0
+        ? `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the one being made and the rest were not written.`
+        : 'Nothing was written.';
+    super(`the text engine was switched while this was being exported. ${before} Export again.`);
+    this.name = 'EngineSwitched';
+    this.written = written;
+  }
+}
+export function enginesHeld(held, written = 0) {
+  if (!enginesAre(held)) throw new EngineSwitched(written);
 }
 
 // Public entry: scope = 'current' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
@@ -1360,21 +1378,27 @@ export async function exportImages(fmt, scope) {
       // that: the page is minted if the window does not already hold it, pinned
       // so a page turn mid-export cannot revoke the image being drawn, and
       // handed back when its file is written.
-      const blob = await withPageImages(p, async () => {
-        if (fmt === 'PSD') {
-          // Layered, editable PSD carrying the full project as embedded JSON so
-          // it round-trips losslessly (one .psd per page). Lazily imported so
-          // ag-psd isn't pulled into the raster-export path.
-          const { buildPagePsd } = await import('./psd.js');
-          const bytes = await buildPagePsd(p);
-          return new Blob([bytes], { type: MIME.PSD });
-        }
-        if (isLongstrip() && RASTER.has(fmt)) {
-          return await renderStripPageBlob(p, fmt);
-        }
-        return await renderPageBlob(p, fmt);
-      });
-      enginesHeld(held);
+      let blob;
+      try {
+        blob = await withPageImages(p, async () => {
+          if (fmt === 'PSD') {
+            // Layered, editable PSD carrying the full project as embedded JSON so
+            // it round-trips losslessly (one .psd per page). Lazily imported so
+            // ag-psd isn't pulled into the raster-export path.
+            const { buildPagePsd } = await import('./psd.js');
+            const bytes = await buildPagePsd(p);
+            return new Blob([bytes], { type: MIME.PSD });
+          }
+          if (isLongstrip() && RASTER.has(fmt)) {
+            return await renderStripPageBlob(p, fmt);
+          }
+          return await renderPageBlob(p, fmt);
+        });
+      } catch (e) {
+        // A PSD finds the switch itself, and knows of no file but its own.
+        throw e instanceof EngineSwitched ? new EngineSwitched(written) : e;
+      }
+      enginesHeld(held, written);
       const name = `${baseName}-${p.id}.${ext}`;
       if (streamDir) {
         await writeItemTo(streamDir, name, blob);
