@@ -2248,9 +2248,8 @@
     let x1 = box.w;
     let y1 = box.h;
     for (const r of typed.rows) {
-      // (With the half of a letter the row draws and has no stop for.)
-      x0 = Math.min(x0, r.lead ? r.lead.x : r.xs[0]);
-      x1 = Math.max(x1, r.trail ? r.trail.x : r.xs[r.xs.length - 1]);
+      x0 = Math.min(x0, r.xs[0]);
+      x1 = Math.max(x1, r.xs[r.xs.length - 1]);
       y0 = Math.min(y0, r.top);
       y1 = Math.max(y1, r.top + r.height);
     }

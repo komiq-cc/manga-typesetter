@@ -1304,7 +1304,8 @@ describe('while keys are coming a large box is painted within a smaller budget',
     await tick();
     expect(last().ss).toBeLessThan(1);
     expect(waiting()).toHaveLength(1);
-    endEdit('big');
+    // As the blur ends it: with the text the editable holds.
+    endEdit(m.editable().textContent);
     await tick();
     expect(waiting()).toHaveLength(0);
     expect(m.paints()).toBe(3);

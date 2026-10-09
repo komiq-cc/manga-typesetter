@@ -2017,10 +2017,16 @@ if (ONLY.has('typecost')) {
     const out = (report.typeCost[mode === 'rust' ? 'on' : 'off'] = {});
     for (const zoom of [1, 3]) {
       await ec('zoom', zoom);
-      for (const id of ['balloon', 'effect', 'page-wide']) {
+      for (const id of ['balloon', 'effect', 'page-wide', 'long-line']) {
         await ec('reveal', id);
+        // The rows of the box, made from its text: what the caret is drawn by.
+        const rows = mode === 'rust' ? await ec('timeModel', id, 9) : null;
+        // And its paint alone, in full and within the budget a key is given.
+        const paint = mode === 'rust' ? await ec('timePaint', id, 7) : null;
         await ec('edit', id);
-        const r = await ec('timeType', 20);
+        const r = await ec('timeType', id === 'long-line' ? 6 : 20);
+        r.rows = rows;
+        r.paint = paint;
         // And from real keys: heard by the page to the first frame after.
         await ec('keyTimes', true);
         for (let i = 0; i < 12; i++) {
@@ -2037,7 +2043,8 @@ if (ONLY.has('typecost')) {
         await ec('endEdit');
         await ec('select', null);
         out[`${id}@${zoom * 100}%`] = r;
-        log(`typecost / switch ${mode === 'rust' ? 'ON ' : 'OFF'} ${id.padEnd(9)} at ${zoom * 100}%: a keystroke ${r.error ?? ms(r.sync)} ms to the end of its effects, ${r.error ? '' : ms(r.toNextFrame)} to the next frame; canvas ${r.canvas ? `${((r.canvas[0] * r.canvas[1]) / 1e6).toFixed(2)} MP` : 'none'}; real keys (n ${r.realKeys.n}): task ${r.realKeys.taskMedian?.toFixed(1)} median, ${r.realKeys.taskMax.toFixed(1)} max; to the frame ${r.realKeys.frameMedian?.toFixed(1)} median`);
+        const mp = (c) => (c ? `${((c[0] * c[1]) / 1e6).toFixed(2)} MP` : 'none');
+        log(`typecost / switch ${mode === 'rust' ? 'ON ' : 'OFF'} ${id.padEnd(9)} at ${zoom * 100}%: a keystroke ${r.error ?? ms(r.sync)} ms to the end of its effects, ${r.error ? '' : ms(r.toNextFrame)} to the next frame; canvas ${mp(r.canvas)} at rest, ${mp(r.during)} while keys come${r.soft ? `, ${mp(r.afterKey)} after one key and ${mp(r.afterPause)} after the pause; the edit ending inside the pause ${r.endingMs.toFixed(1)} ms` : `; the edit ending ${r.endingMs?.toFixed(1)} ms`}${rows ? `; rows of ${rows.letters} letters (${rows.rows} rows, ${rows.stops} stops) ${ms(rows.ms)} ms; the paint alone ${ms(paint.full)} ms at ${paint.fullMP} MP, ${ms(paint.key)} ms at ${paint.keyMP} MP` : ''}; real keys (n ${r.realKeys.n}): task ${r.realKeys.taskMedian?.toFixed(1)} median, ${r.realKeys.taskMax.toFixed(1)} max; to the frame ${r.realKeys.frameMedian?.toFixed(1)} median`);
       }
     }
   }

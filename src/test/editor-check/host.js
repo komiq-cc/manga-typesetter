@@ -21,7 +21,7 @@ import { engineSwitch, useTextEngine } from '../../lib/engine-switch.svelte.js';
 import { textEngine, glyphPainter } from '../../lib/text-engine/index.js';
 import { flipTestPaint } from './refuse.js';
 import { renderPageCanvas, warpTexture } from '../../lib/exporter.js';
-import { pictureScale, pictureTexture } from '../../lib/editor/box-picture.js';
+import { pictureScale, pictureTexture, PICTURE_MAX_PX, PICTURE_DRAG_PX } from '../../lib/editor/box-picture.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
 import { boxText } from '../../lib/store.svelte.js';
 import { typeModel } from '../../lib/type-rows.js';
@@ -953,6 +953,27 @@ window.__ec = {
     }
     return { letters: text.length, rows, stops, ms: stats(ms) };
   },
+  // What the paint of a box alone takes, at the scale the editor shows it
+  // at: within the budget a box at rest has, and within the one a key's
+  // paint is given. The texture only, `n` times each, in turn.
+  timePaint(id, n = 7) {
+    const b = boxOf(id);
+    const pg = page();
+    const scale = pictureScale(app.zoom, devicePixelRatio, b.style.rotation);
+    const out = {};
+    const ms = { full: [], key: [] };
+    for (let i = 0; i < n; i++) {
+      for (const [name, budget] of [['full', PICTURE_MAX_PX], ['key', PICTURE_DRAG_PX]]) {
+        const t0 = performance.now();
+        const tex = pictureTexture(b, pg, null, scale, budget);
+        ms[name].push(performance.now() - t0);
+        out[`${name}MP`] = +((tex.canvas.width * tex.canvas.height) / 1e6).toFixed(2);
+        tex.canvas.width = 0;
+        tex.canvas.height = 0;
+      }
+    }
+    return { ...out, full: stats(ms.full), key: stats(ms.key) };
+  },
   // A paste or a cut, as the event the browser sends, carrying its own
   // clipboard: the system's is the user's and is not read or written here.
   clip(type, text = null) {
@@ -1050,7 +1071,8 @@ window.__ec = {
     const pictured = cnv?.dataset.painter === 'engine';
     const unseen = ed.classList.contains('unseen');
     const t0 = performance.now();
-    endEdit(id);
+    // As the blur ends it: with the text the editable holds.
+    endEdit(ed.textContent);
     flushSync();
     document.body.getBoundingClientRect();
     const ending = performance.now() - t0;
@@ -1242,6 +1264,9 @@ const TYPE_COST_SPEC = { pages: [{ w: 1400, h: 1700, boxes: [
   { id: 'balloon', x: 60, y: 60, w: 220, h: 110 },
   { id: 'effect', x: 60, y: 260, w: 600, h: 400, over: { size: 90, strokes: [{ color: '#d02020', width: 4, opacity: 1 }], shadows: [{ x: 4, y: 4, blur: 6, color: '#000000', opacity: 0.6 }], blur: 1 } },
   { id: 'page-wide', x: 60, y: 760, w: 1100, h: 800, over: { size: 150, strokes: [{ color: '#d02020', width: 6, opacity: 1 }], shadows: [{ x: 6, y: 6, blur: 8, color: '#000000', opacity: 0.6 }] } },
+  // One word of twenty thousand letters: the breaker keeps a word whole, so
+  // it is one line, and one row of twenty thousand stops.
+  { id: 'long-line', x: 60, y: 1600, w: 1100, h: 60, over: { size: 20, align: 'left', valign: 'top' }, text: LONG_LINE },
 ] }] };
 const consoleErrors = [];
 {
