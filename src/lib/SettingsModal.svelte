@@ -606,11 +606,16 @@
             this computer's fonts, the same on every system. A font this
             computer does not have, the built-in web fonts included, is set in
             {engineSwitch.lastResort} and listed as missing in the Text Queue.
+            A chapter lettered before this engine is not changed on disk by
+            opening it: the Text Queue says what the engine changed, and that
+            is saved when you edit the chapter or keep the changes.
           {:else}
             Off: text is measured by the browser, as before. On, line breaks
             and box sizes are measured from your font files and this computer's
-            fonts instead. Drawing is unchanged. This computer only; chapters
-            are not marked.
+            fonts instead. Drawing is unchanged. The switch is this computer's.
+            A chapter saved with it on is marked as fitted by the engine; one
+            that is not is told so in the Text Queue the first time it is
+            opened with the switch on, and nothing is saved by opening it.
           {/if}
         </div>
       </div>
