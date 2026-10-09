@@ -372,7 +372,11 @@ name" is the one to delete.
 
 ## Mutations
 
-Each run in a scratch copy under `node_modules/.cache/p8/mut` [M].
+Each run in a scratch copy under `node_modules/.cache/p8/mut` [M]. These
+are the first round's, run on its tree. Two of them name code the second
+round rewrote ("no borrowed runs", "an installed font is called missing");
+what stands in their place is mutated in "Second round" (b8 to b12, b22 to
+b26).
 
 | mutation | tests that fail |
 |---|---|
