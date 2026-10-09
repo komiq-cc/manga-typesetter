@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { flushSync, tick } from 'svelte';
 
 // The two paints are the real ones, on the lane's stand-in canvas, wrapped so
 // a case can count them; and the roughening's phase, which a browser measures
@@ -12,8 +12,9 @@ vi.mock('./editor/box-picture.js', async (original) => {
   return { ...mod, paintBoxPicture: vi.fn(mod.paintBoxPicture), paintPictureTexture: vi.fn(mod.paintPictureTexture) };
 });
 vi.mock('./exporter.js', async (original) => {
-  const real = await original();
-  return { ...real, paintWarpedBox: vi.fn(real.paintWarpedBox) };
+  const mod = await original();
+  real.paintWarpedBox = mod.paintWarpedBox;
+  return { ...mod, paintWarpedBox: vi.fn(mod.paintWarpedBox) };
 });
 const noise = { gate: null };
 vi.mock('./text-paint.js', async (original) => {
@@ -912,6 +913,35 @@ describe('a paint that throws', () => {
     await tick();
     isDom(m);
     expect(said).toHaveBeenCalledTimes(1);
+  });
+
+  it('with the switch off nothing here catches: a warped box whose paint throws keeps the picture it had, and the throw goes where it always went', async () => {
+    // Default mode is what it was before the engine's picture existed: the
+    // effect called the paint and an exception left it. No release, no log.
+    engineSwitch.painting = false;
+    const m = await mounted('warped');
+    const el = m.canvas();
+    const had = [el.width, el.height];
+    expect(had[0] * had[1]).toBeGreaterThan(0);
+    try {
+      paintWarpedBox.mockImplementationOnce(() => {
+        throw new Error('refused, with the switch off');
+      });
+      m.box.style.color = '#ff0000';
+      let thrown = null;
+      try {
+        flushSync();
+      } catch (err) {
+        thrown = err;
+      }
+      // (Svelte adds where it was thrown to the message.)
+      expect(String(thrown?.message)).toContain('refused, with the switch off');
+      expect([el.width, el.height]).toEqual(had);
+      expect(said).not.toHaveBeenCalled();
+      expect(m.root.querySelector('canvas')).toBe(el);
+    } finally {
+      paintWarpedBox.mockImplementation(real.paintWarpedBox);
+    }
   });
 
   it('a box that painted and then throws lets go of the picture it had', async () => {

@@ -571,8 +571,17 @@
   // once for the box, not once a frame of a drag that keeps failing. A warped
   // box painted the old way has no DOM text to fall back to - a mesh is not
   // something CSS can state - and is left empty until its key changes.
+  //
+  // ONLY WITH THE ENGINE PAINTING. With the switch off the effect calls the
+  // paint bare, as it did before there was an engine's picture, and whatever a
+  // paint throws leaves the effect as it always has: nothing is released and
+  // nothing is logged here that was not before.
   let failSaid = false;
   function tryPaint(el, tips, key) {
+    if (!enginePaints) {
+      paintWarp(el, tips);
+      return true;
+    }
     try {
       paintWarp(el, tips);
       failSaid = false;
