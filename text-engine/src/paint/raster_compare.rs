@@ -9,6 +9,7 @@
 
 use super::geom::{IBox, Polys};
 use super::raster::{Coverage, Exact, Part, Rasterizer};
+use crate::Error;
 
 /// The parts as one path for a rasteriser that fills one path by the
 /// non-zero rule, which is what all three of these are.
@@ -50,7 +51,7 @@ impl Coverage for Mask8 {
         out: &mut [f32],
         stride: usize,
         spans: &mut [(u32, u32)],
-    ) {
+    ) -> Result<(), Error> {
         let width = self.bx.width();
         for (r, y) in (y0..y1).enumerate() {
             let row = (y - self.bx.y0) as usize;
@@ -60,6 +61,7 @@ impl Coverage for Mask8 {
             }
             spans[r] = (0, width as u32);
         }
+        Ok(())
     }
 }
 
@@ -70,7 +72,7 @@ pub struct TinySkia;
 
 #[cfg(feature = "raster-tiny-skia")]
 impl Rasterizer for TinySkia {
-    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Result<Box<dyn Coverage>, Error> {
         let polys = &one_path(parts);
         let (w, h) = (bx.width(), bx.height());
         let mut data = vec![0u8; w * h];
@@ -100,7 +102,7 @@ impl Rasterizer for TinySkia {
             );
             data.copy_from_slice(mask.data());
         }
-        Box::new(Mask8 { data, bx })
+        Ok(Box::new(Mask8 { data, bx }))
     }
 }
 
@@ -111,7 +113,7 @@ pub struct Zeno;
 
 #[cfg(feature = "raster-zeno")]
 impl Rasterizer for Zeno {
-    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Result<Box<dyn Coverage>, Error> {
         let polys = &one_path(parts);
         use zeno::{Command, Fill, Format, Vector};
         let (w, h) = (bx.width(), bx.height());
@@ -136,7 +138,7 @@ impl Rasterizer for Zeno {
             .format(Format::Alpha)
             .size(w as u32, h as u32)
             .render_into(&mut data, None);
-        Box::new(Mask8 { data, bx })
+        Ok(Box::new(Mask8 { data, bx }))
     }
 }
 
@@ -148,7 +150,7 @@ pub struct Vello;
 
 #[cfg(feature = "raster-vello")]
 impl Rasterizer for Vello {
-    fn prepare(&self, parts: &[Part], bx: IBox) -> Box<dyn Coverage> {
+    fn prepare(&self, parts: &[Part], bx: IBox) -> Result<Box<dyn Coverage>, Error> {
         let polys = &one_path(parts);
         use vello_cpu::color::palette::css::WHITE;
         use vello_cpu::kurbo::BezPath;
@@ -180,6 +182,6 @@ impl Rasterizer for Vello {
                 *o = px[3];
             }
         }
-        Box::new(Mask8 { data, bx })
+        Ok(Box::new(Mask8 { data, bx }))
     }
 }

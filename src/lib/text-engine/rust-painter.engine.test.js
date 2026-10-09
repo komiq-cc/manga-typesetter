@@ -3,6 +3,7 @@ import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
 import { fileURLToPath } from 'node:url';
 import { rustEngine, FIXTURE_FACES } from '../../test/rust-engine.js';
 import { createRustGlyphPainter } from './rust-painter.js';
+import { paintJob } from '../../../text-engine/js/paint.mjs';
 import { createBrowserGlyphPainter } from './browser-painter.js';
 
 // The painter makes its scratch canvas, and text-paint.js its pattern tiles,
@@ -141,23 +142,44 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     // with a band first, so the kept scratch holds ink to the right of where
     // the narrow job's raster ends.
     const wide = job({ bands: [{ color: '#ffffff', opacity: 1, line: 6 }], runs: [{ text: 'WAIT WHAT', x: 20, y: 60 }] });
-    const narrow = job({ runs: [{ text: 'WAIT', x: 20, y: 60 }] });
-    const pixels = (painter, prepare) => {
-      const { canvas } = drawn(painter, narrow, { prepare });
-      return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-    };
+    // Black survives the canvas's premultiplied storage byte for byte,
+    // even at the lowest edge alpha. Compare with the engine, at its origin.
+    const narrow = job({ fill: { kind: 'solid', color: '#000000' }, runs: [{ text: 'WAIT', x: 20, y: 60 }] });
     const used = createRustGlyphPainter(rust);
     drawn(used, wide);
-    const smoothed = pixels(used, (c) => {
-      c.imageSmoothingEnabled = true;
-      c.imageSmoothingQuality = 'high';
+    const canvas = createCanvas(400, 200);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(2, 0, 0, 2, 14, 6);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    const m = ctx.getTransform();
+    const face = rust.handle(narrow.face);
+    const raster = paintJob(rust.low, {
+      job: narrow, font: face.font, size: face.size, synth: face.flags,
+      transform: [m.a, m.b, m.c, m.d, m.e, m.f],
     });
-    const plain = pixels(createRustGlyphPainter(rust), (c) => {
-      c.imageSmoothingEnabled = false;
-    });
-    let differing = 0;
-    for (let i = 0; i < plain.length; i++) if (plain[i] !== smoothed[i]) differing++;
-    expect(differing).toBe(0);
+    expect(raster).not.toBe(null);
+    used.paint(ctx, narrow);
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let inside = 0, outside = 0;
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        const rx = x - raster.x, ry = y - raster.y;
+        const inRaster = rx >= 0 && ry >= 0 && rx < raster.width && ry < raster.height;
+        for (let c = 0; c < 4; c++) {
+          const expected = inRaster ? raster.data[(ry * raster.width + rx) * 4 + c] : 0;
+          if (pixels[i + c] !== expected) {
+            if (inRaster) inside++;
+            else outside++;
+          }
+        }
+      }
+    }
+    expect(inside, 'canvas differs from engine raster at x,y').toBe(0);
+    expect(outside, 'pixels outside the engine raster are empty').toBe(0);
+    expect(ctx.imageSmoothingEnabled).toBe(true);
+    expect(ctx.imageSmoothingQuality).toBe('high');
   });
 
   it('draws a synthesised bold the way the engine measured it', () => {
@@ -211,6 +233,13 @@ describe('the Rust engine behind the glyph-painter seam', () => {
   it('is refused a job buffer no job could need, and paints the next job', () => {
     expect(rust.low.exports.mt_paint_job_reserve(0xffffffff)).toBe(0);
     expect(ink(drawn(createRustGlyphPainter(rust), job()).canvas)).not.toBe(null);
+  });
+
+  it('reports the painter run limit and paints the next job', () => {
+    const painter = createRustGlyphPainter(rust);
+    const tooLong = job({ runs: [{ text: 'I'.repeat(262_145), x: 20, y: 60 }] });
+    expect(() => drawn(painter, tooLong)).toThrow(/over the painter's memory or run limit/);
+    expect(ink(drawn(painter, job()).canvas)).not.toBe(null);
   });
 
   it('refuses a job whose font the engine does not have', () => {

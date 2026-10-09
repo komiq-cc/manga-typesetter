@@ -87,28 +87,29 @@ pub fn sweep(src: &Polys, v: Pt, away: Side, out: &mut Polys) {
         let n = c.len();
         // Per edge: does it lead (moves by `v`), trail (stays), or run along
         // `v` and do neither.
-        let leads: Vec<Option<bool>> = (0..n)
-            .map(|i| {
-                let s = away.sign() * c[(i + 1) % n].minus(c[i]).cross(v);
-                (s != 0.0).then_some(s > 0.0)
-            })
-            .collect();
-        // An edge along `v` starts where the edge before it left off and
-        // ends where the edge after it begins, so it is lengthened or
-        // shortened and never doubled back on. `before[i]` is the last edge
-        // at or before `i` that decides, `after[i]` the first at or after.
-        let decided = |order: &mut dyn Iterator<Item = usize>| -> Vec<bool> {
-            let order: Vec<usize> = order.collect();
-            let mut state = order.iter().rev().find_map(|&i| leads[i]).unwrap_or(false);
-            let mut out = vec![false; n];
-            for i in order {
-                state = leads[i].unwrap_or(state);
-                out[i] = state;
-            }
-            out
+        let Ok(mut leads) = super::budget::filled(n, None) else {
+            return;
         };
-        let before = decided(&mut (0..n));
-        let after = decided(&mut (0..n).rev());
+        for (i, lead) in leads.iter_mut().enumerate() {
+            let s = away.sign() * c[(i + 1) % n].minus(c[i]).cross(v);
+            *lead = (s != 0.0).then_some(s > 0.0);
+        }
+        let Ok(mut before) = super::budget::filled(n, false) else {
+            return;
+        };
+        let Ok(mut after) = super::budget::filled(n, false) else {
+            return;
+        };
+        let mut state = leads.iter().rev().find_map(|&s| s).unwrap_or(false);
+        for i in 0..n {
+            state = leads[i].unwrap_or(state);
+            before[i] = state;
+        }
+        state = leads.iter().find_map(|&s| s).unwrap_or(false);
+        for i in (0..n).rev() {
+            state = leads[i].unwrap_or(state);
+            after[i] = state;
+        }
         let by = |moved: bool| if moved { v } else { Pt::new(0.0, 0.0) };
         for i in 0..n {
             // Where the edge into this point ends, then where the edge out

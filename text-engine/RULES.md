@@ -546,6 +546,88 @@ Where the rule stops:
   said to be unread if not. While a face of the loaded font is still being
   decoded, the letter waits.
 
+## 12. Signed-area painting and refusals
+
+The painter accumulates signed area within each glyph, then unites glyphs.
+It does not integrate the non-zero winding rule within a pixel. Oppositely
+wound pieces of one glyph can cancel inside a pixel even when they do not
+overlap. Two rectangles ending at x=2.3 and starting at x=2.5 cover 0.8 of
+column 2 together. The painter reads 0.2: 51 alpha levels instead of 204,
+an error of 153 levels [M, P5c]. An L with a reversed square in its notch
+reads 0.740 instead of about 0.838 at (4,4), and 0.600 instead of about
+0.797 at (4,6): errors of 25 and 50 levels [M, 64x reference].
+
+An exact per-row winding sweep was removed. It slowed ordinary French,
+Japanese and Korean glyphs by 3–20 times. A separate-contour union candidate
+preserved their bytes but also exceeded the 1.05 timing gate [M, P5C-REPORT.md].
+Ordinary holes retain the original signed-area treatment. No weight behavior
+was changed; the application keeps text weight at zero on every OS.
+
+Parts are united by estimating their shared coverage from the cosine between
+coverage slopes: facing edges share `max(a+b-1, 0)`, parallel edges share
+`min(a,b)`, perpendicular or unknown directions share `a*b`; intermediate
+angles interpolate. The result is clamped to one. The direction is the sum
+of the retained slopes after each union, using one rule at every band width.
+Coverage at or below **1e-6** contributes neither coverage nor direction
+(0.000255 alpha levels). An incoming slope with **gx² + gy² < 1e-8**
+(length below **1e-4**) is counted as unknown once, before storing or uniting
+it. A zero slope, including cancellation of retained directions, is unknown
+and counts as perpendicular [I].
+
+Three or more parts sharing a pixel remain an approximation. Against 16x
+supersampled truth, the final errors below are maximum / pixels over 16 /
+mean over inked pixels. Bangers is size 34 with letters pulled 9.5 over each
+other; DejaVu `IIII` is size 40, four runs 0.2 job units apart [M, P5c].
+
+| band px | Bangers final truth error | IIII final truth error |
+|---|---|---|
+| 0.3 | 109 / 637 / 4.12 | 150 / 73 / 11.19 |
+| 0.6 | 100 / 891 / 5.05 | 97 / 12 / 2.89 |
+| 0.99 | 103 / 454 / 2.76 | 48 / 2 / 0.53 |
+| 1.5 | 79 / 190 / 1.38 | 8 / 0 / 0.22 |
+| 5 | 63 / 32 / 0.24 | 11 / 0 / 0.15 |
+
+At 0.6 px, the removed clear-after-union rule's `IIII` mean error was 15.32
+levels; the final rule reads 2.89. The 0.99/1.01-px geometry step still reaches
+46 levels on three Bangers pixels and three levels on `IIII`, compared with
+80 on 338 and 96 on 27 under the removed width exception. Cut hairline scenes
+now agree with larger-scene crops within one level (previously up to 56) [M].
+`four_hairline_parts_stay_near_supersampled_truth` checks mean error below four;
+`hairline_crop_ignores_rounding_noise_in_incoming_slopes` checks a crop delta
+at most one. Restoring the exception or removing the floor respectively
+fails those tests at 15.322 mean error and 55 levels [M, native mutations].
+
+The order of parts can move coverage where three or more share a pixel.
+The q4 hairline rows below measure all permutations: worst alpha delta /
+worst count over 16. I3/I4/I5 are `I` parts 0.2 apart; O4 is `OXVW` 3 apart,
+O5 is `OXVWA` 5 apart, A5 is `AVAVA` 9 apart [M, P5C-REPORT.md]. Text order
+is fixed in real jobs; agreement between permutations is not a truth test.
+
+| parts | DejaVu final order delta | Bangers final order delta |
+|---|---|---|
+| I3 | 21 / 53 | 21 / 1 |
+| I4 | 52 / 4 | 68 / 14 |
+| I5 | 42 / 5 | 92 / 24 |
+| O4 | 91 / 24 | 90 / 20 |
+| O5 | 85 / 36 | 85 / 18 |
+| A5 | 63 / 12 | 49 / 2 |
+
+The live painter-buffer cap is **1152 MiB** (`MAX_PAINT_BYTES`). The eleven
+review page/editor jobs peak at 1007.0 MiB (6554 English glyphs, four bands,
+scale 2); 1152 is the smallest 128-MiB step leaving at least a tenth of the
+limit spare, below 1536 MiB [M]. Growth checks the replacement while the old
+buffer is live; drop and owned-iterator drop refund its charge. Scene
+buffers are charged again to later calls. Decoded job vectors remain charged
+through the call. The raster's known RGBA bytes are checked before edges
+(job) or bands (Scene); per-glyph Part estimates were removed [I].
+Every paint run is capped at **262144 UTF-8 bytes** before decode copies,
+before any job run is shaped, and at the shaping entry point. Measurement
+APIs keep their existing behavior. Painter-buffer overflow, allocation
+failure, run-limit refusal, malformed jobs and surfaces above the existing
+**16384-pixel side / 67108864-pixel area** bounds return `BadSpec` (ABI -5);
+no partial raster is returned. Font bytes, the ABI input buffer and retained
+engine shaping buffers are outside the painter-buffer accounting [I].
+
 ## What was looked at and found to be a property of a reference
 
 - Both browser captures were taken on macOS. `ref-cr` stands for Windows in

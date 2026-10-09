@@ -53,8 +53,9 @@ if (process.argv.includes('--hash')) {
     }
     const parts = [u32(here.each.length)]
     for (const e of here.each) parts.push(u32(e.rule === 'webkit' ? 1 : 0), u32(e.bytes.length), Buffer.from(e.bytes))
-    mkdirSync(resolve(genDir, 'paint'), { recursive: true })
-    const dump = resolve(genDir, 'paint/hash-jobs.bin')
+    const outDir = resolve(process.env.MT_TEXT_PAINT_OUT ?? resolve(genDir, 'paint'))
+    mkdirSync(outDir, { recursive: true })
+    const dump = resolve(outDir, 'hash-jobs.bin')
     writeFileSync(dump, Buffer.concat(parts))
     const run = spawnSync('cargo', ['run', '--quiet', '--release', '--example', 'paint_hash', '--', dump], { cwd: crateDir, encoding: 'utf8' })
     if (run.status !== 0) {
