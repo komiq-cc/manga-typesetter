@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // The paint is the real one, on the lane's stand-in canvas, wrapped so a case
 // can count it, read what it was asked to paint, and make it throw.
@@ -24,7 +26,7 @@ import { rawOffset, domPoint } from './edit-lines.js';
 import { isMacKeyboard, setMacKeyboard } from './shortcuts.svelte.js';
 import { caretAt as curveCaretAt } from './curve-caret.js';
 import { installFakeCanvas } from '../test/fake-canvas.js';
-import { rustEngine } from '../test/rust-engine.js';
+import { createRustTextEngine } from './text-engine/rust.js';
 
 // ===========================================================================
 // A box typed into while the Rust engine draws: still its picture
@@ -1992,7 +1994,12 @@ describe('a box narrower than one grapheme, typed into as its picture', () => {
 describe('browser ranges on a real picture broken inside a raw grapheme', () => {
   const SYLLABLE = '\u1100\u1161\u11A8';
   async function realJamo() {
-    setTextEngine(await rustEngine());
+    // The DOM lane gives import.meta.url an http origin. Resolve these tracked
+    // fixtures from Vitest's project root instead of using the engine lane's
+    // file-URL loader; the adapter and built wasm are still the real ones.
+    const rust = await createRustTextEngine(readFileSync(resolve('text-engine/js/generated/mt_text.wasm')));
+    rust.addFace('Comic Neue', 'regular', readFileSync(resolve('src/test/fonts/ComicNeue-Regular.ttf')));
+    setTextEngine(rust);
     clearLayoutMemo();
     KINDS.realJamo = box('realJamo', { size: 40, shape: 'off' }, { text: SYLLABLE, w: 25, h: 120 });
     try {
