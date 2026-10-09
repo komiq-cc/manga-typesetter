@@ -560,7 +560,7 @@ async function sourceLine(url, line, column) {
   return `${path}:${line}`;
 }
 
-const PHASES = ['load the fonts', 'switch the engine on', 'open the chapter', 'turn pages', 'select and move a box', 'resize it', 'Inspector: font', 'Inspector: size', 'Inspector: bold, italic', 'auto-fit', 'auto-typeset a page', 'export PNG', 'export PSD', 'export .mtchapter'];
+const PHASES = ['boot', 'load the fonts', 'switch the engine on', 'open the chapter', 'turn pages', 'select and move a box', 'resize it', 'Inspector: font', 'Inspector: size', 'Inspector: bold, italic', 'auto-fit', 'auto-typeset a page', 'export PNG', 'export PSD', 'export .mtchapter'];
 async function table(run) {
   const rows = new Map();
   for (const [key, n] of Object.entries(run.counts)) {
