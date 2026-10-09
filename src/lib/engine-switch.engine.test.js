@@ -53,6 +53,10 @@ function fakeInvoke() {
   const calls = [];
   const invoke = async (cmd, args) => {
     calls.push(cmd === 'system_font_face' ? `${args.family}/${args.slot}` : cmd);
+    // Asked which installed family has a letter: on this machine, none does.
+    // (Refused, the question would be one nobody answered, and the letters
+    // would not be said to be in no font.)
+    if (cmd === 'system_font_coverage') return { families: [], none: args.codePoints };
     if (cmd !== 'system_font_face') throw new Error(`unexpected command ${cmd}`);
     const file = (FILES[args.family] ?? []).find((f) => args.slot in f.slots);
     if (!file) throw new Error(`no font called '${args.family}' is installed on this computer`);
