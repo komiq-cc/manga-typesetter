@@ -215,6 +215,13 @@ fn an_answer_with_a_position_that_is_not_finite_is_an_error() {
         answer(font, 30.0, "MMMM", -f64::MAX),
         Status::BadSpec as i32
     );
+    // One letter: its pen is 0 and written, and the advance alone is not a
+    // number. Nothing is left of the pen.
+    assert_eq!(
+        answer(font, f64::MAX, "M", f64::MAX),
+        Status::BadSpec as i32
+    );
+    assert_eq!(mt_out_len(), 0);
     // Large, and every position still a number: answered.
     assert_eq!(answer(font, 1.0e9, "MMMM", 0.0), 4);
     let c = carets(font, 1.0e9, 0, "MMMM", 0.0);
