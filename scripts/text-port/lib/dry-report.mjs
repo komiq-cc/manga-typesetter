@@ -68,7 +68,8 @@ function explain(row, c, wk) {
     const also = browser && browser.h > row.h;
     const stale = row.safariNeeds != null && row.safariNeeds > row.h + 0.01;
     const ink = stale && row.rust.state.h - row.safariNeeds > 0.5 ? `; ${px(row.rust.state.h - row.safariNeeds)} px of it is for ink past the line boxes` : '';
-    if (missing) say('grew', `${missing}, which needs more height`, 'D2b');
+    if (!row.rust.lay) say('grew', `not the engine: the box has no text, and an empty box is grown to the height one line of its font needs${also ? ` (the stand-in browser grows it by ${px(browser.h - row.h)} px on open as well)` : ''}`, 'stale file');
+    else if (missing) say('grew', `${missing}, which needs more height`, 'D2b');
     else if (stale) say('grew', `not the engine: Safari's own ${wk.lines.length} lines need ${px(row.safariNeeds)} px and the file has ${px(row.h)} px, so today's app grows this box on open too${also ? ` (the stand-in browser grows it by ${px(browser.h - row.h)} px)` : ''}${ink}`, 'stale file');
     else if (also && Math.abs(browser.h - row.rust.state.h) <= 1) say('grew', `not the engine: the stand-in browser grows it by ${px(browser.h - row.h)} px on open as well`, 'stale file');
     else if (c.lines) say('grew', 'follows from the new line breaks', 'see lines');
@@ -143,8 +144,11 @@ export async function writeReport({ data, out }) {
       }
       fontsMissing.set(row.font, f);
     }
-    if (!row.rust?.lay) continue;
-    t.lettered++;
+    if (!row.rust) continue;
+    // A box with no text has no lines and no picture, but it is a box the
+    // open can still grow (to the height one line of its font needs).
+    const lettered = !!row.rust.lay;
+    if (lettered) t.lettered++;
     const w = wk.get(row.id) ?? null;
     const c = changeOf({ stored: row, rust: row.rust, wk: w, font: row.fontFacts });
     if (c.compared) t.compared++;
@@ -194,7 +198,8 @@ export async function writeReport({ data, out }) {
       id: row.id, chapter: row.chapter, page: row.pageIndex + 1, mode: row.mode, font: row.font, size: row.size, bold: row.bold, italic: row.italic,
       stored: { x: row.x, y: row.y, w: row.w, h: row.h, size: row.size, review: row.review },
       after: row.rust.state,
-      linesBefore: w?.lines ?? null, linesAfter: row.rust.lay.lines, curve: row.rust.lay.curve,
+      empty: !lettered,
+      linesBefore: w?.lines ?? null, linesAfter: row.rust.lay?.lines ?? null, curve: !!row.rust.lay?.curve,
       change: c, causes, unexplained: unexplained.map((x) => x.what),
       before: hasBefore ? `img/before/${row.id}.png` : null,
       picture: existsSync(`${out}/img/after/${row.id}.png`) ? `img/after/${row.id}.png` : null,
@@ -297,7 +302,7 @@ const DESIGN = [
 
 function summaryLines(t) {
   const lines = [];
-  lines.push(`${t.total.boxes} boxes in ${Object.keys(t.chapters).length} chapters; ${t.total.lettered} have text; Safari's capture has ${t.total.compared} of those to compare lines and positions with.`);
+  lines.push(`${t.total.boxes} boxes in ${Object.keys(t.chapters).length} chapters; ${t.total.lettered} have text (the others are counted for their rectangle and have no lines or picture); Safari's capture has ${t.total.compared} of those to compare lines and positions with.`);
   lines.push(`Width, size or horizontal position changed: **${t.total.x + t.total.w + t.total.size}**. Heights that shrank: **${t.total.shrank}**.`);
   lines.push(`Top edge moved: ${t.total.yMoved}, each a box that grew (a box grows about its vertical anchor: down from the top, both ways from the middle, up from the bottom). Top edge moved without the height growing: **${t.total.yAlone}**.`);
   lines.push(`Boxes that grew taller: **${t.total.grew}** (${t.total.grewNotEngine} of them not because of the engine: the stored height was already under what today's app gives the box on open). Largest growth ${px(t.total.grewMax)} px.`);
@@ -406,11 +411,11 @@ function markdown(t, changed, borrowing) {
     if (!g.count) out.push('None.', '');
     if (g.count !== g.list.length) out.push(`${g.count - g.list.length} of them are shown above, under another heading.`, '');
     for (const b of g.list) {
-      out.push(`#### \`${b.id}\` (page ${b.page}, ${b.font} ${px(b.size)} px${b.bold ? ' bold' : ''}${b.italic ? ' italic' : ''}, ${b.mode})`, '');
+      out.push(`#### \`${b.id}\` (page ${b.page}, ${b.font} ${px(b.size)} px${b.bold ? ' bold' : ''}${b.italic ? ' italic' : ''}, ${b.mode}${b.empty ? ', no text' : ''})`, '');
       out.push(...whatChanged(b).map((p) => `- ${p}`));
       for (const c of b.causes) out.push(`- cause of "${c.what}": ${c.cause ?? 'NOT EXPLAINED'}${c.rule ? ` [${c.rule}]` : ''}`);
       if (b.change.lines) out.push('', 'before:', '', '```', ...b.linesBefore, '```', '', 'after:', '', '```', ...b.linesAfter, '```');
-      out.push('', `before: ${b.before ? `![before](${b.before})` : 'Safari\'s capture has no picture of this box'} after: ${b.picture ? `![after](${b.picture})` : 'not painted'}`, '');
+      out.push('', b.empty ? 'No text: nothing to draw.' : `before: ${b.before ? `![before](${b.before})` : 'Safari\'s capture has no picture of this box'} after: ${b.picture ? `![after](${b.picture})` : 'not painted'}`, '');
     }
   }
   out.push('## 4. Fonts to load', '');
@@ -457,10 +462,10 @@ function html(t, changed, borrowing, uris) {
     if (!g.count) parts.push('<p>None.</p>');
     if (g.count !== g.list.length) parts.push(`<p>${g.count - g.list.length} of them are shown above, under another heading.</p>`);
     for (const b of g.list) {
-      parts.push(`<section class="box" id="${esc(b.id)}"><h4><code>${esc(b.id)}</code> <span>page ${b.page}, ${esc(b.font)} ${px(b.size)} px${b.bold ? ' bold' : ''}${b.italic ? ' italic' : ''}, ${b.mode}</span></h4>`);
+      parts.push(`<section class="box" id="${esc(b.id)}"><h4><code>${esc(b.id)}</code> <span>page ${b.page}, ${esc(b.font)} ${px(b.size)} px${b.bold ? ' bold' : ''}${b.italic ? ' italic' : ''}, ${b.mode}${b.empty ? ', no text' : ''}</span></h4>`);
       parts.push(`<ul>${whatChanged(b).map((p) => `<li>${esc(p)}</li>`).join('')}${b.causes.map((c) => `<li class="${c.cause ? 'cause' : 'open'}">cause of "${esc(c.what)}": ${esc(c.cause ?? 'NOT EXPLAINED')}${c.rule ? ` <em>[${esc(c.rule)}]</em>` : ''}</li>`).join('')}</ul>`);
       if (b.change.lines) parts.push(`<div class="lines"><div><b>before</b><pre>${esc(b.linesBefore.join('\n'))}</pre></div><div><b>after</b><pre>${esc(b.linesAfter.join('\n'))}</pre></div></div>`);
-      parts.push(`<div class="pics"><figure>${img(b.before, 'before')}<figcaption>before (Safari)</figcaption></figure><figure>${img(b.picture, 'after')}<figcaption>after (Rust engine)</figcaption></figure></div></section>`);
+      parts.push(b.empty ? '<p class="none">No text: nothing to draw.</p></section>' : `<div class="pics"><figure>${img(b.before, 'before')}<figcaption>before (Safari)</figcaption></figure><figure>${img(b.picture, 'after')}<figcaption>after (Rust engine)</figcaption></figure></div></section>`);
     }
   }
   parts.push('<h2>4. Fonts to load</h2>');

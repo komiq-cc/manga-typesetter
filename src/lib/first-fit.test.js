@@ -277,6 +277,23 @@ describe('opened with the Rust engine on', () => {
   });
 });
 
+describe('a version 1 chapter with no boxes, opened with the Rust engine on', () => {
+  it('is not written by leaving either, has nothing to say, and is stamped 2 by the first edit', async () => {
+    await useTextEngine('rust');
+    open({ pages: [{ id: 1, w: 800, h: 1200, lines: [], boxes: [] }], typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    expect(firstFitChanges()).toEqual({ grew: 0, flagged: 0, cleared: 0, relaid: 0, first: null, kept: false });
+    await flushSave();
+    expect(saves).toHaveLength(0);
+    // A box the user adds is theirs: it is not counted, and its save is the stamp.
+    app.pages[0].boxes.push(box('new', 'Narrow', 'AA BB', 60, 100));
+    markUnsaved();
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].typesetting.version).toBe(LAYOUT_VERSION_RUST);
+    expect(firstFitChanges()).toMatchObject({ grew: 0, flagged: 0, cleared: 0, relaid: 0 });
+  });
+});
+
 describe('the switch turned on over an open chapter', () => {
   it('notes the boxes as the browser left them, counts the same, and schedules no write', async () => {
     const file = lettered();

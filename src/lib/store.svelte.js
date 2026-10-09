@@ -1243,7 +1243,6 @@ const rustMeasuring = () => !!fontSource?.measuring?.();
 function beginFirstFit() {
   resetFirstFit();
   if (!fontSource || app.typesetting.version >= LAYOUT_VERSION_RUST) return;
-  if (!app.pages.some((p) => p.boxes.length)) return;
   noted = new WeakMap();
   const lines = linesBefore();
   for (const p of app.pages) {
