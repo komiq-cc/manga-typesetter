@@ -2173,7 +2173,11 @@
     const anchor = e.shiftKey && edSel ? edSel.a : hit.o;
     goalX = null;
     setTypeSel(anchor, hit.o, hit.up);
-    el.setPointerCapture?.(e.pointerId);
+    try {
+      el.setPointerCapture?.(e.pointerId);
+    } catch {
+      // A pointer the browser no longer has: the press still placed the caret.
+    }
     const move = (ev) => {
       if (!typeFlat) return;
       const h = typeAt(ev);
@@ -2281,15 +2285,25 @@
   function nativeCaret(node) {
     const sel = window.getSelection();
     if (!sel.rangeCount || !node.contains(sel.focusNode)) return null;
+    const { focusNode: n, focusOffset: o } = sel;
     const r = document.createRange();
-    r.setStart(sel.focusNode, sel.focusOffset);
+    r.setStart(n, o);
     r.collapse(true);
     const rect = r.getClientRects?.()?.[0];
     if (rect) return rect;
-    // A place that is not in text - the `<br>` of a line with nothing on it -
-    // has no rectangle of its own; the `<br>` has.
-    const at = sel.focusNode.nodeType === 1 ? sel.focusNode.childNodes[sel.focusOffset] : null;
-    return at?.nodeName === 'BR' ? at.getBoundingClientRect() : null;
+    // Some places have no rectangle of their own (measured, Chromium 155). In
+    // front of a Return that starts its text node - the end of a line, which
+    // `drawEditLines` writes as a node of its own - the Return has one, as
+    // wide as nothing, where the caret is.
+    if (n.nodeType === 3) {
+      if (n.data[o] !== '\n') return null;
+      r.setEnd(n, o + 1);
+      return r.getClientRects?.()?.[0] ?? null;
+    }
+    // A line with nothing on it: its `<br>` has one.
+    const at = n.childNodes[o] ?? n;
+    const br = at.nodeName === 'BR' ? at : !at.textContent ? at.querySelector?.('br') : null;
+    return br?.getBoundingClientRect() ?? null;
   }
   function alignNative(node) {
     try {
