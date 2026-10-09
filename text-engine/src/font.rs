@@ -170,6 +170,12 @@ impl FontEntry {
     /// to its end, and an axis the font does not have is ignored - so on a
     /// font with no axes this is the font again.
     ///
+    /// Nothing a font file or a caller says can make this panic. A value
+    /// that is not a number is `BadSpec`. So is a value for an axis the file
+    /// describes as no range at all (`axis_is_a_range`): a damaged `fvar` is
+    /// a font with that axis missing, never a number to clamp between a
+    /// minimum above its maximum.
+    ///
     /// The bytes are shared, not copied. Shaping, advances, outlines, bounds
     /// and the line box are all read at the new place; the PostScript name
     /// is the instance's (`instance_postscript_name`). Everything else in
@@ -185,7 +191,14 @@ impl FontEntry {
             let Some(axis) = font.axes().iter().find(|a| a.tag() == tag) else {
                 continue;
             };
-            let value = value.clamp(axis.min_value(), axis.max_value());
+            let (min, default, max) = (axis.min_value(), axis.default_value(), axis.max_value());
+            if !axis_is_a_range(min, default, max) {
+                return Err(Error::BadSpec);
+            }
+            // `max` then `min`, not `clamp`: `clamp` panics on a range that
+            // is not one, and the check above is not to be the only thing
+            // between a font file and a trap.
+            let value = value.max(min).min(max);
             match location.iter_mut().find(|(t, _)| *t == tag) {
                 Some(at) => at.1 = value,
                 None => location.push((tag, value)),
@@ -296,9 +309,12 @@ fn read_info(font: &FontRef<'_>, hb: &harfrust::Font, bytes: &[u8]) -> FontInfo 
         }),
         use_typo_metrics: metrics.use_typo_metrics,
     };
+    // Only the axes that are ranges: one that is not is not offered, so
+    // nobody asks for a place on it.
     let axes = font
         .axes()
         .iter()
+        .filter(|a| axis_is_a_range(a.min_value(), a.default_value(), a.max_value()))
         .map(|a| AxisInfo {
             tag: a.tag().to_string(),
             min: a.min_value(),
@@ -327,6 +343,85 @@ fn read_info(font: &FontRef<'_>, hb: &harfrust::Font, bytes: &[u8]) -> FontInfo 
     }
 }
 
+/// Whether an `fvar` axis record describes a range a value can be put on:
+/// three numbers, minimum not above the default, default not above the
+/// maximum. A file can say anything; an axis that fails this is treated as
+/// absent everywhere (`read_info`, `FontEntry::instance`, the name).
+fn axis_is_a_range(min: f32, default: f32, max: f32) -> bool {
+    min.is_finite() && default.is_finite() && max.is_finite() && min <= default && default <= max
+}
+
+/// An axis value as the 16.16 number `fvar` holds, which is what two places
+/// are compared by and what a name spells out.
+fn fixed(value: f32) -> i64 {
+    (f64::from(value) * 65536.0).round() as i64
+}
+
+/// A 16.16 number in decimal, as Technical Note 5902 writes an axis value:
+/// the fewest decimal places that read back as the same 16.16 number, no
+/// leading and no trailing zeroes, no point without a fraction, and zero as
+/// `0`. `650`, `87.5`, `.5`, `-.25`, `650.00006`.
+///
+/// Five places always suffice (a step of 1/65536 is 0.000015), so two
+/// different 16.16 numbers never share a spelling.
+fn fixed_decimal(value: i64) -> String {
+    let magnitude = value.unsigned_abs() as u128;
+    let mut out = String::new();
+    if value < 0 {
+        out.push('-');
+    }
+    let mut scale: u128 = 1;
+    for places in 0..=5usize {
+        // The nearest multiple of 1/scale, and the 16.16 number it reads as.
+        let q = (magnitude * scale + 32768) / 65536;
+        let back = (q * 65536 + scale / 2) / scale;
+        if back == magnitude || places == 5 {
+            let (whole, frac) = (q / scale, q % scale);
+            if whole > 0 || frac == 0 {
+                out.push_str(&whole.to_string());
+            }
+            if frac > 0 {
+                let digits = format!("{frac:0places$}");
+                out.push('.');
+                out.push_str(digits.trim_end_matches('0'));
+            }
+            break;
+        }
+        scale *= 10;
+    }
+    if out == "-0" {
+        out = "0".into();
+    }
+    out
+}
+
+/// The longest PostScript name the note allows.
+const PS_NAME_MAX: usize = 127;
+/// What follows the prefix in a last-resort name: `-`, 32 hex digits, `...`.
+const LAST_RESORT_TAIL: usize = 1 + 32 + 3;
+
+/// The note's last resort, for a name that came out longer than 127
+/// characters: the family prefix (as much of it as leaves room), `-`, a
+/// 128-bit hash of the whole long name in 32 hex digits, and `...`. Cutting
+/// the long name instead would give two instances one name.
+///
+/// The hash is FNV-1a, 128 bits. The note's own choice of hash could not be
+/// read when this was written (text-engine/P8-REPORT.md): the name is
+/// distinct per instance and stable, and is not promised to be the one
+/// another implementation makes.
+fn last_resort_name(prefix: &str, long: &str) -> String {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut hash = OFFSET;
+    for byte in long.bytes() {
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    // The prefix is ASCII letters and digits by now, so bytes are characters.
+    let keep = prefix.len().min(PS_NAME_MAX - LAST_RESORT_TAIL);
+    format!("{}-{hash:032X}...", &prefix[..keep])
+}
+
 /// The PostScript name of a variable font at `location`, by Adobe's rule for
 /// naming instances (Technical Note 5902), or `None` at the font's default,
 /// whose name is the font's own name ID 6.
@@ -338,13 +433,15 @@ fn read_info(font: &FontRef<'_>, hb: &harfrust::Font, bytes: &[u8]) -> FontInfo 
 ///   instance's subfamily name (letters and digits only) when the place is a
 ///   named instance, or `_<value><tag>` for every axis away from its default
 ///   when it is not: `STIXTwoTextRoman-Bold`, `STIXTwoTextRoman_650wght`.
+///   The value is `fixed_decimal`.
+/// - A name longer than 127 characters is replaced by `last_resort_name`.
 ///
-/// The note's last step, a hash in place of a name longer than 127
-/// characters, is not taken: the name is cut at 127.
+/// Places are compared as the 16.16 numbers the file holds, never by a
+/// tolerance: two instances a step apart are two instances.
 fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Option<String> {
     let axes = font.axes();
     // Every axis' value at this place, in the font's axis order.
-    let at: Vec<f32> = axes
+    let at: Vec<i64> = axes
         .iter()
         .map(|a| {
             location
@@ -352,11 +449,12 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
                 .find(|(tag, _)| *tag == a.tag())
                 .map_or(a.default_value(), |(_, v)| *v)
         })
+        .map(fixed)
         .collect();
     if axes
         .iter()
         .zip(&at)
-        .all(|(a, v)| (a.default_value() - v).abs() < 1e-3)
+        .all(|(a, v)| fixed(a.default_value()) == *v)
     {
         return None;
     }
@@ -364,51 +462,58 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
         font.localized_strings(id)
             .english_or_first()
             .map(|s| s.to_string())
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     };
     let plain = |s: String| -> String { s.chars().filter(char::is_ascii_alphanumeric).collect() };
     let named = font.named_instances().iter().find(|inst| {
-        let coords: Vec<f32> = inst.user_coords().collect();
-        coords.len() == at.len() && coords.iter().zip(&at).all(|(a, b)| (a - b).abs() < 1e-3)
+        let coords: Vec<i64> = inst.user_coords().map(fixed).collect();
+        coords == at
     });
     if let Some(name) = named
         .as_ref()
         .and_then(|inst| inst.postscript_name_id())
         .and_then(text)
+        .filter(|name| name.len() <= PS_NAME_MAX)
     {
         return Some(name);
     }
-    let prefix = text(NameId::VARIATIONS_POSTSCRIPT_NAME_PREFIX)
-        .or_else(|| text(NameId::TYPOGRAPHIC_FAMILY_NAME).map(plain))
-        .or_else(|| text(NameId::FAMILY_NAME).map(plain))
-        .filter(|s| !s.is_empty())?;
-    let mut name = prefix;
-    match named.and_then(|inst| text(inst.subfamily_name_id())) {
+    let prefix = [
+        NameId::VARIATIONS_POSTSCRIPT_NAME_PREFIX,
+        NameId::TYPOGRAPHIC_FAMILY_NAME,
+        NameId::FAMILY_NAME,
+    ]
+    .into_iter()
+    .find_map(|id| text(id).map(plain).filter(|s| !s.is_empty()))?;
+    let mut name = prefix.clone();
+    match named
+        .and_then(|inst| text(inst.subfamily_name_id()))
+        .map(plain)
+        .filter(|style| !style.is_empty())
+    {
         Some(style) => {
             name.push('-');
-            name.push_str(&plain(style));
+            name.push_str(&style);
         }
         None => {
             for (axis, value) in axes.iter().zip(&at) {
-                if (axis.default_value() - value).abs() < 1e-3 {
+                if fixed(axis.default_value()) == *value {
                     continue;
                 }
-                // Whole numbers as they are, the rest to three places with
-                // the trailing zeroes gone.
-                let mut number = format!("{value:.3}");
-                if number.contains('.') {
-                    number = number
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string();
-                }
                 name.push('_');
-                name.push_str(&number);
-                name.push_str(axis.tag().to_string().trim());
+                name.push_str(&fixed_decimal(*value));
+                name.extend(
+                    axis.tag()
+                        .to_string()
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric),
+                );
             }
         }
     }
-    name.truncate(127);
+    if name.len() > PS_NAME_MAX {
+        name = last_resort_name(&prefix, &name);
+    }
     Some(name)
 }
 
