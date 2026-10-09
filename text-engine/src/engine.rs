@@ -121,6 +121,10 @@ pub struct Part {
     pub font: FontId,
     pub synth: Synth,
     pub glyphs: Range<usize>,
+    /// The text it was shaped from, in UTF-16 units of the line. The parts of
+    /// a line cover it end to end, in order, and one never ends inside a
+    /// cluster: a letter and the marks on it are one font's.
+    pub text: Range<u32>,
 }
 
 /// How one stretch of text is shaped.
@@ -454,6 +458,7 @@ impl Engine {
                 font: face.font,
                 synth: face.synth,
                 glyphs: 0..self.line.len(),
+                text: 0..text.encode_utf16().count() as u32,
             });
             return Ok(());
         }
@@ -510,6 +515,7 @@ impl Engine {
         }
         for (range, base16, i) in cuts {
             let (font, synth) = fonts[i];
+            let len16 = text[range.clone()].encode_utf16().count() as u32;
             self.shape_mode(font, &text[range], base16, mode)?;
             let from = self.line.len();
             self.line.extend_from_slice(&self.run);
@@ -517,6 +523,7 @@ impl Engine {
                 font,
                 synth,
                 glyphs: from..self.line.len(),
+                text: base16..base16 + len16,
             });
         }
         Ok(())
@@ -557,6 +564,15 @@ impl Engine {
     /// The parts of the last measured line.
     pub fn parts(&self) -> &[Part] {
         &self.parts
+    }
+
+    /// Which font each stretch of `text` is drawn in, as one line of `face`:
+    /// the parts `measure_line` cuts it into, which is what `advance`
+    /// measures and what the painter paints. Nobody has to work out from
+    /// coverage which family lent a letter: this is the answer itself.
+    pub fn line_fonts(&mut self, face: Face, text: &str) -> Result<&[Part], Error> {
+        self.measure_line(face, text, ShapeMode::MEASURE)?;
+        Ok(&self.parts)
     }
 
     /// Code points of `text` the font has no glyph for (shaped to `.notdef`),

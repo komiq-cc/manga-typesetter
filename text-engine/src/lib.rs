@@ -23,6 +23,8 @@ pub mod abi;
 #[cfg(feature = "paint")]
 pub mod abi_instance;
 #[cfg(feature = "paint")]
+pub mod abi_line_fonts;
+#[cfg(feature = "paint")]
 pub mod abi_paint;
 mod engine;
 mod font;

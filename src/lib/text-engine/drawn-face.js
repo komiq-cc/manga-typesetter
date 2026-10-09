@@ -14,10 +14,15 @@
 // `engine` is the adapter `createRustTextEngine` makes; a `face` is what
 // `faceFor` (measure.js) makes of a style.
 
-/** The PostScript name (name ID 6) of one engine font; '' when the font states none. */
+/**
+ * The PostScript name (name ID 6) of one engine font; '' when the font states
+ * none. A name of nothing but spaces is none: the parser this replaces
+ * (`parsePostScriptName`, fonts.js) trimmed and refused it, and a type layer
+ * that names its font "   " names no font.
+ */
 export function postScriptNameOf(engine, font) {
   try {
-    return engine.low.fontInfo(font).postScriptName || '';
+    return String(engine.low.fontInfo(font).postScriptName ?? '').trim();
   } catch {
     return '';
   }
@@ -41,60 +46,76 @@ export function drawnFace(engine, face) {
   };
 }
 
+const LINE_END = /\r\n|\r|\n/g;
+
 /**
  * `text` cut into the stretches that are drawn from one face each, in order,
  * as `[{ start, end, own, family, slot, fauxBold, fauxItalic, postScriptName }]`
  * (UTF-16 offsets, `end` exclusive; together they cover the text).
  *
  * `own` is the face that was asked for. Every other run is a family of the
- * engine's fallback list lending the letters the face lacks: the FIRST of
- * the list that has the letter, with the face of it the engine lends to this
- * weight and slant. A letter nothing has is drawn as the face's own empty
- * box, so it stays in the face's own run; so does everything that is not a
- * letter the face lacks - spaces and line ends among them.
+ * engine's fallback list lending letters the face lacks.
  *
- * Null for a family the engine does not hold.
+ * WHICH family, and where a stretch ends, is the engine's answer and not a
+ * reckoning made here: `engine.lineParts` is the cut the engine measures the
+ * line in and paints it in. So a letter is in the lender the engine kept for
+ * it - the one before it, when that one has it, whatever the list puts first
+ * - and no run ends inside a cluster: a letter and the mark on it are one
+ * font's. `fauxBold` and `fauxItalic` are what the engine synthesised of the
+ * font it drew, not what the list would have said.
+ *
+ * `text` may be several lines (a type layer's text is its lines joined).
+ * Each is asked about by itself, as each is painted by itself; what parts
+ * two lines is nobody's glyph and stays in the face's own run.
+ *
+ * Null for a family the engine does not hold. From an engine that cannot say
+ * (`lineParts` absent or null) the whole text is the face's own run: nothing
+ * is claimed that was not asked.
  */
 export function drawnRuns(engine, face, text) {
   const own = drawnFace(engine, face);
   if (!own) return null;
   const whole = [{ start: 0, end: text.length, own: true, ...own }];
-  const lacking = engine.missing(face, text, 0);
-  if (!lacking.length) return whole;
-  const lenders = engine.lenders(face.bold, face.italic);
-  // code point -> index of the family that draws it; absent when none does.
-  const from = new Map();
-  let left = lacking;
-  for (let depth = 1; depth <= lenders.length && left.length; depth++) {
-    const still = engine.missing(face, text, depth);
-    for (const cp of left) if (!still.includes(cp) && lenders[depth - 1]) from.set(cp, depth - 1);
-    left = still;
-  }
-  if (!from.size) return whole;
+  if (typeof engine.lineParts !== 'function') return whole;
+  const ownFont = engine.handle(face).font;
+  // engine font -> the family and slot it is, among the families that lend.
+  let lenders = null;
+  const lender = (font) => {
+    lenders ??= engine.lenders(face.bold, face.italic).filter(Boolean);
+    return lenders.find((l) => l.font === font) ?? null;
+  };
   const named = new Map();
-  const lender = (i) => {
-    if (!named.has(i)) {
-      const { family, slot, font, fauxBold, fauxItalic } = lenders[i];
-      named.set(i, { family, slot, fauxBold, fauxItalic, postScriptName: postScriptNameOf(engine, font) });
+  const source = (part) => {
+    if (part.font === ownFont) return own;
+    const key = `${part.font}/${part.bold ? 'b' : ''}${part.italic ? 'i' : ''}`;
+    if (!named.has(key)) {
+      const from = lender(part.font);
+      named.set(key, { family: from?.family ?? null, slot: from?.slot ?? 'regular', fauxBold: part.bold, fauxItalic: part.italic, postScriptName: postScriptNameOf(engine, part.font) });
     }
-    return named.get(i);
+    return named.get(key);
   };
   const runs = [];
-  let at = 0;
-  let source = -1;
-  let start = 0;
-  const close = (end) => {
-    if (end > start) runs.push({ start, end, own: source < 0, ...(source < 0 ? own : lender(source)) });
-    start = end;
+  const put = (start, end, from) => {
+    if (end <= start) return;
+    const last = runs[runs.length - 1];
+    if (last && last.from === from) last.end = end;
+    else runs.push({ start, end, from });
   };
-  for (const ch of text) {
-    const next = from.get(ch.codePointAt(0)) ?? -1;
-    if (next !== source) {
-      close(at);
-      source = next;
+  let at = 0;
+  const line = (end) => {
+    if (end > at) {
+      const parts = engine.lineParts(face, text.slice(at, end));
+      if (!parts) return false;
+      for (const part of parts) put(at + part.start, at + part.end, source(part));
     }
-    at += ch.length;
+    return true;
+  };
+  for (const cut of text.matchAll(LINE_END)) {
+    if (!line(cut.index)) return whole;
+    put(cut.index, cut.index + cut[0].length, own);
+    at = cut.index + cut[0].length;
   }
-  close(text.length);
-  return runs;
+  if (!line(text.length)) return whole;
+  if (!runs.length) return whole;
+  return runs.map(({ start, end, from }) => ({ start, end, own: from === own, ...from }));
 }

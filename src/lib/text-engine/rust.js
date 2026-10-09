@@ -13,6 +13,7 @@
 // solved against a font nobody sees.
 import { createEngine, SYNTH_BOLD, SYNTH_OBLIQUE, CHAIN_SHIFT, RULES } from '../../../text-engine/js/engine.mjs';
 import { addInstance, instancesSupported } from '../../../text-engine/js/instance.mjs';
+import { lineFonts, lineFontsSupported } from '../../../text-engine/js/line-fonts.mjs';
 import { FACE_SLOTS } from '../data.js';
 
 const ITALIC_SLOTS = new Set(['italic', 'boldItalic']);
@@ -455,6 +456,18 @@ export async function createRustTextEngine(source, options = {}) {
      */
     lenders(bold, italic) {
       return fallbacks.map((f) => (families.has(f.family) ? lend(f, !!bold, !!italic) : null));
+    },
+    /**
+     * `text`, as ONE line of `face`, cut into the stretches drawn from one
+     * engine font each: `[{ font, bold, italic, start, end }]`, UTF-16
+     * offsets, covering the text in order. `bold` and `italic` are what is
+     * synthesised of that font. These are the parts the engine measures the
+     * line in and paints it in - asked, not worked out: a letter stays with
+     * the lender before it when that lender has it (RULES.md rule 10), which
+     * no list of missing letters shows. Null from a wasm too old to say.
+     */
+    lineParts(face, text) {
+      return lineFontsSupported(low) ? lineFonts(low, resolve(face), text) : null;
     },
 
     /**
