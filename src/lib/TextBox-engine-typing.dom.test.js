@@ -21,6 +21,7 @@ import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js
 import { defaultStyle, normalizeStyle } from './data.js';
 import { typeModel } from './type-rows.js';
 import { rawOffset } from './edit-lines.js';
+import { caretAt as curveCaretAt } from './curve-caret.js';
 import { installFakeCanvas } from '../test/fake-canvas.js';
 
 // ===========================================================================
@@ -59,6 +60,7 @@ const KINDS = {
   arc: box('arc', { curve: 40, align: 'center' }),
   warped: box('warped', { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [310, 12], [-6, 126], [300, 120]] } }),
   upper: box('upper', { uppercase: true }, { text: 'straße' }),
+  upperArc: box('upperArc', { uppercase: true, curve: 40, align: 'center' }, { text: 'straße' }),
 };
 
 const typeset = typesetEnabled();
@@ -417,6 +419,16 @@ describe('the keys that go by lines go by the picture\'s lines', () => {
     // Back at 5 by Left: the lower side, at the row's start.
     expect(m.sel()).toEqual([5, 5]);
     expect(px(m.q('.tcaret'))).toMatchObject({ top: rows[1].top, left: rows[1].xs[0] });
+    // The keys know which side the caret is on: Home from the upper row's end
+    // is that row's start, not the lower row's (which is where it stands).
+    press(m, rows[0].xs[1] + 1, rows[0].top + 5);
+    release(m);
+    key(m, 'End');
+    await tick();
+    expect(m.sel()).toEqual([5, 5]);
+    key(m, 'Home');
+    await tick();
+    expect(m.sel()).toEqual([0, 0]);
   });
 
   it('a key with Alt or Control, and a key while an IME composes, is left to the browser', async () => {
@@ -596,10 +608,29 @@ describe('text on a curve, and text whose casing changes its length', () => {
     expect(parseFloat(marks[0].style.width)).toBeGreaterThan(glyphs[0].w * 2 * 0.9);
     expect(parseFloat(marks[0].style.width)).toBeLessThan(glyphs[0].w * 2 * 1.2);
     expect(m.q('.ccaret').classList.contains('off')).toBe(true);
+    // The caret - not shown over a selection, and what the editable's own
+    // caret is brought under - is at the selection's focus, the end here.
+    const zoomed = glyphs.map((g) => ({ ...g, x: g.x * 2, y: g.y * 2, w: g.w * 2 }));
+    const atEnd = curveCaretAt(zoomed, glyphs.length);
+    expect(atEnd.x).not.toBe(curveCaretAt(zoomed, 0).x);
+    expect(m.q('.ccaret').style.transform).toContain(`+ ${atEnd.x}px`);
     // And a target a glyph for the pointer: an arc leaves its frame.
     const pads = m.all('.curve-edit .tpad');
     expect(pads).toHaveLength(glyphs.length);
     expect(parseFloat(pads[0].style.width)).toBeCloseTo(glyphs[0].w * 2, 6);
+  });
+
+  it('a curve whose casing makes a letter two is typed into on its picture all the same, a mark a drawn glyph', async () => {
+    const m = await typing('upperArc');
+    expect(m.canvas().dataset.painter).toBe('engine');
+    expect(m.q('.curve-edit')).not.toBe(null);
+    expect(m.editable().classList.contains('ghost')).toBe(true);
+    expect(m.editable().classList.contains('unseen')).toBe(true);
+    const model = typeModel(m.box, boxText(m.box));
+    // "straße" is six letters and seven glyphs.
+    expect(model.glyphs).toHaveLength(7);
+    expect(m.all('.csel')).toHaveLength(7);
+    expect(m.all('.curve-edit .tpad')).toHaveLength(7);
   });
 
   it('uppercase that makes a letter two: the caret after it stands after both', async () => {

@@ -127,6 +127,8 @@ describe('the Returns the layout trims have rows of their own, outside the block
     ]);
     expect(caretAt(rows, 3)).toEqual({ x: 12, top: 120, height: H, row: 1 });
     expect(caretAt(rows, 4)).toEqual({ x: 12, top: 140, height: H, row: 2 });
+    // And a third: each a line further down, not all on one.
+    expect(rowsFor('AB\n\n\n', ['AB']).map((r) => r.top)).toEqual([100, 120, 140, 160]);
   });
 
   it('leading Returns: one row a line height above for each', () => {
@@ -155,6 +157,11 @@ describe('clusters and graphemes', () => {
     const segs = editLines('fi!', 'fi!', ['fi!']);
     const tight = buildRows('fi!', segs, [{ top: 0, height: H, anchor: 0, at: [0, 2], x: [0, 13], end: 20 }]);
     expect(stops(tight[0])).toEqual([[0, 0], [1, 6.5], [2, 13], [3, 20]]);
+    // The divisions are graphemes, not code units: a cluster of three units
+    // of which the first two are one grapheme has one stop inside it, half way.
+    const three = editLines('abc', 'abc', ['abc']);
+    const one = buildRows('abc', three, [{ top: 0, height: H, anchor: 0, at: [0], x: [0], end: 30 }], { bounds: (o) => o !== 1 });
+    expect(stops(one[0])).toEqual([[0, 0], [2, 15], [3, 30]]);
   });
 
   it('a base and its combining mark are one stop apart from the next: none stands between them', () => {
@@ -185,6 +192,8 @@ describe('a point on the rows', () => {
       expect(offsetAt(rows, k * W + 2.5, 130).o).toBe(6 + k);
       expect(offsetAt(rows, k * W + 7.5, 130).o).toBe(7 + k);
     }
+    // Exactly between two stops is the later one.
+    expect(offsetAt(rows, 5, 110).o).toBe(1);
   });
 
   it('past the end of a wrapped row is its last stop, with upstream affinity', () => {
@@ -371,6 +380,9 @@ describe('casing that changes the length', () => {
 
   it('a cased text that is not the letters cased one by one has no map', () => {
     expect(caseMap('ß', 'XYZ')).toBe(false);
+    // As long as the letters cased would be, and not them.
+    expect(caseMap('ß', 'XY')).toBe(false);
+    // The letters cased, and then more.
     expect(caseMap('aß', 'ASSS')).toBe(false);
   });
 
