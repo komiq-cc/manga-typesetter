@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { editLines } from './edit-lines.js';
-import { buildRows, rowOf, caretAt, selectionRects, offsetAt, wordAround, wordPress, linePress, rowSpan, moveCaret, lineDeleteSpan, caseMap, mapRows, rawAtDrawn } from './flat-caret.js';
+import { buildRows, rowOf, caretAt, selectionRects, offsetAt, wordAround, wordPress, linePress, rowSpan, moveCaret, lineDeleteSpan, boundKey, caseMap, mapRows, rawAtDrawn } from './flat-caret.js';
 
 // ===========================================================================
 // The caret on straight text that is a picture: arithmetic on rows
@@ -349,16 +349,88 @@ describe('line deletes are cut from our rows', () => {
     expect(lineDeleteSpan(rows, text, 12, false, 'deleteSoftLineBackward')).toEqual([12, 12]);
   });
 
-  it('the hard-line deletes take the paragraph', () => {
-    expect(lineDeleteSpan(rows, text, 13, false, 'deleteHardLineBackward')).toEqual([0, 13]);
-    expect(lineDeleteSpan(rows, text, 4, false, 'deleteHardLineForward')).toEqual([4, 14]);
+  it('the deletes that name a paragraph take the row too: in the editable a paragraph is a drawn line', () => {
+    // (The system`s WebKit sends Cmd+Backspace as `deleteHardLineBackward`.)
+    expect(lineDeleteSpan(rows, text, 13, false, 'deleteHardLineBackward')).toEqual([12, 13]);
+    expect(lineDeleteSpan(rows, text, 4, false, 'deleteHardLineForward')).toEqual([4, 12]);
     expect(lineDeleteSpan(rows, text, 20, false, 'deleteHardLineBackward')).toEqual([15, 20]);
     expect(lineDeleteSpan(rows, text, 20, false, 'deleteHardLineForward')).toEqual([20, text.length]);
+    expect(lineDeleteSpan(rows, text, 12, true, 'deleteHardLineBackward')).toEqual([0, 12]);
+    expect(lineDeleteSpan(rows, text, 12, true, 'deleteHardLineForward')).toEqual([12, 12]);
+    expect(lineDeleteSpan(rows, text, 12, false, 'deleteHardLineForward')).toEqual([12, 14]);
   });
 
   it('any other input is left to the browser`s own range', () => {
     expect(lineDeleteSpan(rows, text, 4, false, 'deleteWordBackward')).toBeNull();
     expect(lineDeleteSpan(rows, text, 4, false, 'insertText')).toBeNull();
+  });
+});
+
+describe('the keys a Mac binds to a move or a cut by lines', () => {
+  const ctrl = (key, shiftKey = false) => boundKey({ key, ctrlKey: true, altKey: false, metaKey: false, shiftKey });
+  const opt = (key, shiftKey = false) => boundKey({ key, ctrlKey: false, altKey: true, metaKey: false, shiftKey });
+
+  it('Control with a letter is the key the system binds it to, and Shift extends', () => {
+    expect(ctrl('a')).toEqual({ key: 'Home', shift: false });
+    expect(ctrl('e')).toEqual({ key: 'End', shift: false });
+    expect(ctrl('p')).toEqual({ key: 'ArrowUp', shift: false });
+    expect(ctrl('n')).toEqual({ key: 'ArrowDown', shift: false });
+    expect(ctrl('b')).toEqual({ key: 'ArrowLeft', shift: false });
+    expect(ctrl('f')).toEqual({ key: 'ArrowRight', shift: false });
+    expect(ctrl('v')).toEqual({ key: 'PageDown', shift: false });
+    expect(ctrl('k')).toEqual({ key: 'Kill', shift: false });
+    expect(ctrl('ArrowLeft')).toEqual({ key: 'Home', shift: false });
+    expect(ctrl('ArrowRight')).toEqual({ key: 'End', shift: false });
+    // With Shift the key arrives as the capital.
+    expect(ctrl('A', true)).toEqual({ key: 'Home', shift: true });
+    expect(ctrl('N', true)).toEqual({ key: 'ArrowDown', shift: true });
+    expect(ctrl('ArrowRight', true)).toEqual({ key: 'End', shift: true });
+    // Nothing is bound to Control+Shift+K.
+    expect(ctrl('K', true)).toBeNull();
+  });
+
+  it('Option+Up and Down are a step and a row`s end; with Shift, Up and Down; Option+PageUp and PageDown the text`s ends', () => {
+    expect(opt('ArrowUp')).toEqual({ key: 'LineUp', shift: false });
+    expect(opt('ArrowDown')).toEqual({ key: 'LineDown', shift: false });
+    expect(opt('ArrowUp', true)).toEqual({ key: 'ArrowUp', shift: true });
+    expect(opt('ArrowDown', true)).toEqual({ key: 'ArrowDown', shift: true });
+    expect(opt('PageUp')).toEqual({ key: 'PageUp', shift: false });
+    expect(opt('PageDown', true)).toEqual({ key: 'PageDown', shift: true });
+  });
+
+  it('anything else is the browser`s', () => {
+    for (const k of ['d', 'h', 't', 'o', 'y', 'l', 'x', 'ArrowUp', 'ArrowDown', 'Backspace', 'Home']) expect(ctrl(k), `Control+${k}`).toBeNull();
+    for (const k of ['ArrowLeft', 'ArrowRight', 'Backspace', 'a', 'Home']) expect(opt(k), `Option+${k}`).toBeNull();
+    // Both, neither, or with Cmd.
+    expect(boundKey({ key: 'f', ctrlKey: true, altKey: true })).toBeNull();
+    expect(boundKey({ key: 'a', ctrlKey: false, altKey: false })).toBeNull();
+    expect(boundKey({ key: 'a', ctrlKey: true, altKey: false, metaKey: true })).toBeNull();
+    expect(boundKey({ key: 'ArrowUp', ctrlKey: false, altKey: true, metaKey: true })).toBeNull();
+  });
+
+  it('a step and then the end of the row arrived at (Option+Up, Option+Down)', () => {
+    // "HELLO THERE" wraps to "MY", which ends at a Return; then "DEAR FRIENDS".
+    const text = 'HELLO THERE MY\nDEAR FRIENDS';
+    const rows = rowsFor(text, ['HELLO THERE', 'MY', 'DEAR FRIENDS']);
+    const go = (sel, key) => moveCaret(rows, text, sel, key);
+    // On from 4: 5, on row 1, whose end is the wrap - on its upper side.
+    expect(go({ a: 4, f: 4 }, 'LineDown')).toMatchObject({ a: 12, f: 12, up: true, goal: null });
+    // From there, on either side of the wrap: on to 13, row 2, and its end.
+    expect(go({ a: 12, f: 12, up: true }, 'LineDown')).toMatchObject({ f: 14, up: false });
+    expect(go({ a: 12, f: 12 }, 'LineDown')).toMatchObject({ f: 14, up: false });
+    // At the Return: over it, and the end of the row after.
+    expect(go({ a: 14, f: 14 }, 'LineDown')).toMatchObject({ f: text.length });
+    expect(go({ a: text.length, f: text.length }, 'LineDown')).toMatchObject({ f: text.length });
+    // Back from 13: 12, which from this side is row 2`s start.
+    expect(go({ a: 13, f: 13 }, 'LineUp')).toMatchObject({ a: 12, f: 12, up: false });
+    // And from a row`s start: the start of the row before.
+    expect(go({ a: 12, f: 12 }, 'LineUp')).toMatchObject({ f: 0 });
+    expect(go({ a: 12, f: 12, up: true }, 'LineUp')).toMatchObject({ f: 0 });
+    expect(go({ a: 15, f: 15 }, 'LineUp')).toMatchObject({ f: 12 });
+    expect(go({ a: 0, f: 0 }, 'LineUp')).toMatchObject({ f: 0 });
+    // A selection closes on its own end, and the row is that end`s.
+    expect(go({ a: 3, f: 8 }, 'LineUp')).toMatchObject({ a: 0, f: 0 });
+    expect(go({ a: 8, f: 3 }, 'LineDown')).toMatchObject({ a: 12, f: 12, up: true });
   });
 });
 

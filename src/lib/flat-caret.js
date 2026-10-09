@@ -349,6 +349,9 @@ export function rowSpan(rows, o, up = false) {
 //   Cmd+Left/Right    affinity where the row wrapped)
 //   Cmd+Up/Down,      the text's start and end
 //   PageUp/PageDown
+//   LineUp, LineDown  one step back and then that row's start; one step on
+//                     and then that row's end (what the system does for
+//                     Option+Up and Option+Down: `boundKey`)
 export function moveCaret(rows, text, sel, key, mods = {}, goal = null) {
   const v = String(text ?? '');
   const { a, f } = sel;
@@ -366,6 +369,16 @@ export function moveCaret(rows, text, sel, key, mods = {}, goal = null) {
     const dir = k === 'ArrowLeft' ? -1 : 1;
     if (!shift && a !== f) return done(dir < 0 ? Math.min(a, f) : Math.max(a, f));
     return done(stepChar(v, f, dir));
+  }
+  if (k === 'LineUp' || k === 'LineDown') {
+    const back = k === 'LineUp';
+    // The step is the system's `moveBackward` / `moveForward`: a selection
+    // closes on its start or its end instead. The offset it arrives at is
+    // looked for on the side the step came from.
+    const o = a !== f ? (back ? Math.min(a, f) : Math.max(a, f)) : stepChar(v, f, back ? -1 : 1);
+    const to = rows[rowOf(rows, o, !back)];
+    if (!to) return null;
+    return back ? done(first(to)) : done(last(to), to.soft);
   }
   const i = rowOf(rows, f, up);
   if (i < 0) return null;
@@ -390,20 +403,56 @@ export function moveCaret(rows, text, sel, key, mods = {}, goal = null) {
 // then takes one character, as it does for any delete over nothing
 // (`rawEdit`).
 //
-//   deleteSoftLineBackward / Forward   to the row's start / end: OUR row,
-//                                      which the hidden editable's own
-//                                      wrapping knows nothing of
-//   deleteHardLineBackward / Forward   to the paragraph's start / end in the
-//                                      raw text
+// All four go to the start or the end of OUR row, which the hidden
+// editable's own blocks know nothing of. The "hard" ones name a paragraph,
+// and in the editable the app draws a paragraph IS a drawn line: each line
+// is a block of its own (`drawEditLines`), so with the switch off the
+// browser's target for them is the line the caret is on. The system's WebKit
+// sends Cmd+Backspace as `deleteHardLineBackward` (run: P7-REPORT, "Second
+// round"); Chromium sends it as `deleteSoftLineBackward`.
 export function lineDeleteSpan(rows, text, f, up, inputType) {
-  const v = String(text ?? '');
-  if (inputType === 'deleteSoftLineBackward') return [Math.min(rowSpan(rows, f, up)[0], f), f];
-  if (inputType === 'deleteSoftLineForward') return [f, Math.max(rowSpan(rows, f, up)[1], f)];
-  if (inputType === 'deleteHardLineBackward') return [f <= 0 ? 0 : v.lastIndexOf('\n', f - 1) + 1, f];
-  if (inputType === 'deleteHardLineForward') {
-    const e = v.indexOf('\n', f);
-    return [f, e < 0 ? v.length : e];
+  if (inputType === 'deleteSoftLineBackward' || inputType === 'deleteHardLineBackward') return [Math.min(rowSpan(rows, f, up)[0], f), f];
+  if (inputType === 'deleteSoftLineForward' || inputType === 'deleteHardLineForward') return [f, Math.max(rowSpan(rows, f, up)[1], f)];
+  return null;
+}
+
+// ----- the keys the system binds -----
+//
+// macOS binds Control and Option keys to moves and a cut that go by lines
+// and paragraphs (AppKit's StandardKeyBinding.dict), and a browser answers
+// each on the blocks of the editable. In the editable the app draws, every
+// line of the picture is a block, so the system's "paragraph" is a drawn
+// line there; and with the editable unseen under a picture its blocks are not
+// where the caret is drawn (a caret on the upper side of a wrap is, to the
+// browser, at the start of the row below). So each is answered on our rows,
+// as the key of `moveCaret` that does there what the browser did on its
+// blocks with the switch off (every one run in the system's WebKit:
+// P7-REPORT, "Second round"):
+//
+//   Ctrl+A, Ctrl+Left      Home         Ctrl+E, Ctrl+Right    End
+//   Ctrl+P                 ArrowUp      Ctrl+N                ArrowDown
+//   Ctrl+B                 ArrowLeft    Ctrl+F                ArrowRight
+//   Ctrl+V, Opt+PageDown   PageDown     Opt+PageUp            PageUp
+//   Opt+Up                 LineUp       Opt+Down              LineDown
+//   Opt+Shift+Up, Down     Shift+ArrowUp, Shift+ArrowDown (the same column
+//                          of the paragraph before and after: the row's)
+//   Ctrl+K                 Kill: the cut from the caret to the row's end
+//
+// Shift extends, as the system's "AndModifySelection" forms do. As `{ key,
+// shift }`, or null for a key that is the browser's as it was: Ctrl+D, H, T,
+// O and Y arrive as a `beforeinput` at a raw offset, Option+Left and Right
+// step by the words of the raw text, and Ctrl+Up and Down scroll.
+const CTRL_KEYS = { a: 'Home', e: 'End', p: 'ArrowUp', n: 'ArrowDown', b: 'ArrowLeft', f: 'ArrowRight', v: 'PageDown', k: 'Kill', ArrowLeft: 'Home', ArrowRight: 'End' };
+export function boundKey({ key, ctrlKey, altKey, metaKey, shiftKey }) {
+  if (metaKey || ctrlKey === altKey) return null;
+  const shift = !!shiftKey;
+  if (ctrlKey) {
+    const to = CTRL_KEYS[key.length === 1 ? key.toLowerCase() : key];
+    if (!to || (to === 'Kill' && shift)) return null;
+    return { key: to, shift };
   }
+  if (key === 'ArrowUp' || key === 'ArrowDown') return shift ? { key, shift } : { key: key === 'ArrowUp' ? 'LineUp' : 'LineDown', shift };
+  if (key === 'PageUp' || key === 'PageDown') return { key, shift };
   return null;
 }
 
