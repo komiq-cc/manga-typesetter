@@ -113,6 +113,21 @@ describe('a flag the open raises or clears', () => {
     expect(cause(flagged(), wkOf({ verdict: { fits: false, overflow: over } }), 'newlyFlagged').rule).toBe('stale file');
   });
 
+  // Past the top, so not the sideways overhang: the second way a new flag is
+  // the ink boxes, when the stand-in browser, which measures real ink too,
+  // flags it as well. That is not enough without Safari's own check.
+  it('past the top or bottom, the stand-in flagging it too is not enough without Safari\'s check', () => {
+    const top = { l: 0, t: 2, r: 0, b: 0 };
+    const row = () => rowOf(layOf({ fits: false, overflow: top }), {
+      rust: { state: { ...geom, review: { reason: 'no longer fits', overflow: top, stored: true } }, lay: layOf({ fits: false, overflow: top }) },
+      browser: { state: { ...geom, review: { reason: 'no longer fits', overflow: top, stored: true } } },
+    });
+    expect(cause(row(), wkOf(), 'newlyFlagged').rule).toBe('rule 4');
+    expect(cause(row(), null, 'newlyFlagged').cause).toBe(null);
+    // Without the stand-in's agreement either: unexplained.
+    expect(cause({ ...row(), browser: null }, wkOf(), 'newlyFlagged').cause).toBe(null);
+  });
+
   it('and a flag cleared likewise', () => {
     const cleared = rowOf(layOf(), { review: { reason: 'no longer fits', overflow: over, stored: true } });
     expect(cause(cleared, wkOf({ verdict: { fits: false, overflow: over } }), 'unflagged').rule).toBe('rule 4');

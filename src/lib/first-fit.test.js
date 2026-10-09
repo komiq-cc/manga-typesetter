@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   app, loadProjectPages, page, autoFitBox, reviewOf, flaggedBoxes, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave,
-  firstFit, firstFitChanges, keepFirstFit, stampTypesetting, fitBoxNow, placeActiveAt,
+  firstFit, firstFitChanges, keepFirstFit, stampTypesetting, fitBoxNow, placeActiveAt, relayoutAll,
 } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
@@ -421,6 +421,28 @@ describe('a change to the document that nobody marked', () => {
     // Back to what was noted, but a save has carried it: leaving writes.
     await flushSave();
     expect(saves).toHaveLength(2);
+  });
+
+  it('a page taken away without a mark is written by leaving, though every page left is as it was noted', async () => {
+    app.pages.pop();
+    expect(app.saved).toBe(true);
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages).toHaveLength(1);
+  });
+
+  // A fit of the engine's that comes by while the hand still has the box - a
+  // font landing - does not make the hand's height the engine's.
+  it('a handle held down while a font lands: the box is still the hand\'s, written by leaving and not counted', async () => {
+    const before = firstFitChanges();
+    const b = by('same');
+    b.h += 50;
+    relayoutAll();
+    expect(app.saved).toBe(true);
+    expect(firstFitChanges()).toMatchObject({ grew: before.grew, flagged: before.flagged });
+    await flushSave();
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0].h).toBe(b.h);
   });
 
   it('a line of the queue changed without a mark is written by leaving', async () => {
@@ -923,6 +945,10 @@ describe('Keep, when the write fails', () => {
     await expect(flushSave()).rejects.toThrow('disk full');
     expect(firstFitChanges()).toMatchObject({ kept: false });
     expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+    // Nor does its number wait for whoever next says the disk is current.
+    markSaved();
+    expect(app.typesetting.version).toBe(LAYOUT_VERSION);
+    expect(firstFit.kept).toBe(false);
     app.saveFailed = false;
   });
 });
