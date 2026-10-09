@@ -15,14 +15,16 @@
 // `faceFor` (measure.js) makes of a style.
 
 /**
- * The PostScript name (name ID 6) of one engine font; '' when the font states
- * none. A name of nothing but spaces is none: the parser this replaces
- * (`parsePostScriptName`, fonts.js) trimmed and refused it, and a type layer
- * that names its font "   " names no font.
+ * The PostScript name of one engine font; '' when it has none. The engine
+ * answers a name only if it IS a PostScript name (`is_postscript_name`,
+ * text-engine/src/font.rs, where name ID 6 is read): trimmed, printable
+ * ASCII with no space and no PostScript delimiter. A name of nothing but
+ * spaces, or one with a bracket or a slash in it, is none - a type layer
+ * that names its font "   " names no font - and whoever asked makes one.
  */
 export function postScriptNameOf(engine, font) {
   try {
-    return String(engine.low.fontInfo(font).postScriptName ?? '').trim();
+    return String(engine.low.fontInfo(font).postScriptName ?? '');
   } catch {
     return '';
   }

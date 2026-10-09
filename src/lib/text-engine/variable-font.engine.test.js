@@ -338,6 +338,38 @@ describe('a variable font made in the test', () => {
     low.removeFont(font);
   });
 
+  it('the third step failing takes BOTH steps before it back out', () => {
+    // Two sound axes first, the damaged one last: two instances are made
+    // before the failure, and neither may stay.
+    const font = low.addFont(variableFont(comic, [['wght', 800, 400, 700], TWO[1], ['slnt', -20, 0, 20]]));
+    // The ids the next two fonts get: the two lowest free ones.
+    const nextTwo = () => {
+      const ids = [low.addFont(comic), low.addFont(comic)];
+      for (const id of ids) low.removeFont(id);
+      return ids;
+    };
+    const free = nextTwo();
+    expect(free[1]).toBe(free[0] + 1);
+    expect(() => addInstance(low, font, { wdth: 150, slnt: -5, wght: 700 })).toThrow(/not a range/);
+    expect(nextTwo()).toEqual(free);
+    low.removeFont(font);
+  });
+
+  it('a name the font states for an instance is passed on only if it is a PostScript name', () => {
+    // Name ID 1 of the file is "Comic Neue": a space in it. Name ID 6 is "ComicNeue-Regular".
+    const at700 = (postScriptName) => {
+      const font = low.addFont(variableFont(comic, [TWO[0]], [{ style: 1, at: [700], postScriptName }]));
+      const bold = addInstance(low, font, { wght: 700 });
+      const name = low.fontInfo(bold).postScriptName;
+      low.removeFont(bold);
+      low.removeFont(font);
+      return name;
+    };
+    expect(at700(6)).toBe('ComicNeue-Regular');
+    // Not "Comic Neue": the made name, the prefix and the instance's style (name ID 1 again, its letters).
+    expect(at700(1)).toBe('ComicNeue-ComicNeue');
+  });
+
   it('an instance on two axes is on both, and the step between is not left behind', () => {
     const font = low.addFont(variableFont(comic, TWO));
     const free = nextId();

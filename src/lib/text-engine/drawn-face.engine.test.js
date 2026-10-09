@@ -138,7 +138,8 @@ describe('a font whose PostScript name is only spaces', () => {
   it('has no name of its own, and the type layer is given the constructed one', () => {
     const bytes = blankName(fixtureFont('Bangers-Regular.ttf'));
     const font = rust.low.addFont(bytes);
-    expect(rust.low.fontInfo(font).postScriptName).toMatch(/^ +$/);
+    // The engine does not pass it on (font.rs, where name ID 6 is read).
+    expect(rust.low.fontInfo(font).postScriptName).toBe('');
     expect(postScriptNameOf(rust, font)).toBe('');
     rust.low.removeFont(font);
 
