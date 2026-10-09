@@ -582,6 +582,129 @@ describe('a box nobody can see', () => {
   });
 });
 
+describe('what takes the pointer while the box is a picture', () => {
+  // The canvas takes none (it is `.warpl`, and its footprint has padding that
+  // would take clicks meant for what is under it). With the switch off the
+  // letters themselves are elements and take the pointer wherever they are,
+  // outside the frame too; with it on, something has to stand where they stood.
+  const press = (el) => el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+  // Where a glyph's element is centred, zoomed px from the box's centre.
+  const centre = (el) => /translate\(calc\(-50% \+ (-?[\d.e-]+)px\), calc\(-50% \+ (-?[\d.e-]+)px\)\)/.exec(el.getAttribute('style')).slice(1).map(Number);
+  const outside = (m, el) => {
+    const [x, y] = centre(el);
+    return Math.abs(x) > (m.box.w * app.zoom) / 2 || Math.abs(y) > (m.box.h * app.zoom) / 2;
+  };
+  // An arc that leaves its frame at both ends.
+  const arcOut = async (on, zoom = 1) => {
+    engineSwitch.painting = on;
+    const m = await mounted('arc', { zoom });
+    m.box.w = 120;
+    m.box.style.curve = 70;
+    await tick();
+    return m;
+  };
+
+  it('with the switch off a letter of an arc outside the frame selects the box', async () => {
+    const m = await arcOut(false);
+    const letters = [...m.root.querySelectorAll('.arcstack .arc:last-child .arc-ch')];
+    const out = letters.filter((el) => outside(m, el));
+    expect(out.length).toBeGreaterThan(3);
+    press(out[0]);
+    expect(app.selectedId).toBe('arc');
+  });
+
+  it('and with it on: one target per glyph, where the glyph\'s own element was, and a press on one outside the frame selects the box', async () => {
+    const off = await arcOut(false, 1.5);
+    const was = [...off.root.querySelectorAll('.arcstack .arc:last-child .arc-ch')].map((el) => centre(el));
+    cleanup();
+    const m = await arcOut(true, 1.5);
+    const hits = [...m.root.querySelectorAll('.hit')];
+    expect(hits).toHaveLength(was.length);
+    hits.forEach((el, i) => {
+      const [x, y] = centre(el);
+      expect(x).toBeCloseTo(was[i][0], 6);
+      expect(y).toBeCloseTo(was[i][1], 6);
+      // A glyph's advance wide and a line high, turned as the glyph is.
+      expect(parseFloat(el.style.width)).toBeGreaterThan(0);
+      expect(parseFloat(el.style.height)).toBeCloseTo(m.box.style.size * 1.5 * m.box.style.lineHeight, 6);
+      expect(el.getAttribute('style')).toMatch(/rotate\(-?[\d.e-]+rad\)/);
+    });
+    const out = hits.filter((el) => outside(m, el));
+    expect(out.length).toBeGreaterThan(3);
+    expect(app.selectedId).toBe(null);
+    press(out.at(-1));
+    expect(app.selectedId).toBe('arc');
+    // Inside the wrapper that carries the flip, as the picture is; and the
+    // canvas is still no target.
+    expect(out[0].parentElement.classList.contains('clipwrap')).toBe(true);
+    expect(m.canvas().classList.contains('warpl')).toBe(true);
+  });
+
+  it('a double click on one opens the edit, as on a letter', async () => {
+    const m = await arcOut(true);
+    const out = [...m.root.querySelectorAll('.hit')].filter((el) => outside(m, el));
+    out[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    await tick();
+    expect(app.editingId).toBe('arc');
+    // Typed into, the glyphs are elements again and the targets are gone.
+    expect(m.root.querySelector('.hit')).toBe(null);
+  });
+
+  it('follows the hand tool like the rest of the box: it states no pointer-events of its own', async () => {
+    const m = await arcOut(true);
+    for (const el of m.root.querySelectorAll('.hit')) expect(el.style.pointerEvents).toBe('');
+  });
+
+  it('straight text that fits its box needs none: the box is the target', async () => {
+    const m = await mounted('straight');
+    expect(m.root.querySelector('.hit')).toBe(null);
+  });
+
+  it('straight text that overflows its box gets one target, the block\'s rectangle, and a press on it selects the box', async () => {
+    const m = await mounted('straight', { zoom: 2 });
+    m.box.style.autoHeight = false;
+    m.box.h = 20;
+    await tick();
+    const hits = [...m.root.querySelectorAll('.hit')];
+    expect(hits).toHaveLength(1);
+    const r = css(hits[0]);
+    // Two lines of 30 px type at line height 1.1, centred on a box 20 high:
+    // the block starts above the box and ends below it.
+    const blockH = 2 * 30 * m.box.style.lineHeight * 2;
+    expect(r.height).toBeCloseTo(blockH, 6);
+    expect(r.top).toBeLessThan(-20);
+    expect(r.top + r.height).toBeGreaterThan(20 * 2 + 20);
+    expect(r.left).toBeGreaterThanOrEqual(0);
+    expect(r.left + r.width).toBeLessThanOrEqual(m.box.w * 2);
+    press(hits[0]);
+    expect(app.selectedId).toBe('straight');
+    // Roomy again, the target goes.
+    m.box.h = 200;
+    await tick();
+    expect(m.root.querySelector('.hit')).toBe(null);
+  });
+
+  it('a line wider than its box is covered across', async () => {
+    const m = await mounted('straight');
+    m.box.text = 'UNBREAKABLEWORDTHATISLONG';
+    m.box.w = 60;
+    await tick();
+    const r = css(m.root.querySelector('.hit'));
+    expect(r.left).toBeLessThan(0);
+    expect(r.left + r.width).toBeGreaterThan(60);
+  });
+
+  it('a warped box has none, as it has none with the switch off', async () => {
+    const m = await mounted('warped');
+    expect(m.root.querySelector('.hit')).toBe(null);
+  });
+
+  it('there is none with the switch off', async () => {
+    const m = await arcOut(false);
+    expect(m.root.querySelector('.hit')).toBe(null);
+  });
+});
+
 describe('a paint that throws', () => {
   // The painter can refuse a job (the engine throws for one it will not
   // paint). The box must not keep a stale picture or an empty one: it is its

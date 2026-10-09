@@ -238,6 +238,26 @@ export function placeBlock(cand, opts) {
   };
 }
 
+// A straight block's line boxes as one box-local rectangle: each line's
+// advance, at the x it is drawn at, across; the block's line heights down.
+// Null for a curve, which has no block. This is the rectangle the exporter
+// grows a box's footprint to hold (`layoutBox`), and the one the editor lays
+// over a box shown as a picture so that text past the frame still takes the
+// pointer - the place the lines' own elements stand with the switch off.
+export function blockRect(place) {
+  if (!place || place.isCurve) return null;
+  const s = place.s;
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  place.lines.forEach((ln, i) => {
+    const w = lineWidth(ln, s, s.size);
+    const x = s.align === 'center' ? place.lineX[i] - w / 2 : s.align === 'right' ? place.lineX[i] - w : place.lineX[i];
+    x0 = Math.min(x0, x);
+    x1 = Math.max(x1, x + w);
+  });
+  return { x0, y0: place.blockY, x1, y1: place.blockY + place.blockH };
+}
+
 // The same placement after a change of height alone. Line breaking reads the
 // height only through the balloon's rows, which hang from the point the block is
 // anchored to (`balloonWidthsFor`), and a height change anchored by `valign` -

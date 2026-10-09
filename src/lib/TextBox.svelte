@@ -61,6 +61,7 @@
   } from './text-paint.js';
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
+  import { boxCandidate, placeBlock, blockRect } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
   import { PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
@@ -967,6 +968,30 @@
   // the finished picture, so a vertically mirrored block is shifted the other
   // way on the page, and here it is too.
   const stackTransform = $derived(inkShift ? `transform:translateY(${inkShift}px);` : '');
+
+  // ---- what takes the pointer while the box is the engine's picture ----
+  //
+  // With the switch off the letters are elements, and a press on one selects
+  // the box wherever the letter is - outside the frame too, where an arc or an
+  // overflowing block puts it. The picture's canvas takes no pointer and must
+  // not: its footprint is the ink plus padding on every side, and it would
+  // take presses meant for whatever lies under that padding. So while the box
+  // is a picture, transparent targets stand where the letters' elements stood:
+  // one per glyph of a curve (in the markup, from `layout`), and for straight
+  // text the block's own rectangle - only when it reaches past the box, since
+  // inside it the box is the target already. `blockRect` is the rectangle the
+  // exporter sizes the footprint by. Not for a warped box: its letters are
+  // where the mesh carried them, and it had no such targets before either.
+  const hitsOn = $derived(engineShown && !warped);
+  const hitBlock = $derived.by(() => {
+    if (!hitsOn || !shaped) return null;
+    app.fontsVersion;
+    const r = blockRect(placeBlock(boxCandidate(box, text)));
+    if (!r || !(r.x1 > r.x0) || (r.x0 >= 0 && r.y0 >= 0 && r.x1 <= box.w && r.y1 <= box.h)) return null;
+    return r;
+  });
+  // A glyph's element with the switch off is its advance wide and a line high.
+  const hitLine = $derived(effSize * (s.lineHeight > 0 ? s.lineHeight : 1));
 
   // Reactive auto-fit effect for text metrics.
   //
@@ -2009,6 +2034,18 @@
         : 'left:0;top:0;width:0;height:0'}
       aria-hidden="true"
     ></canvas>
+    {#if hitsOn}
+      <!-- What takes the pointer for text outside the frame (`hitsOn`, above).
+           No pointer-events of their own: they follow the box, which the hand
+           tool makes deaf. -->
+      {#if layout}
+        {#each layout as g, i (i)}
+          <span class="hit" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+        {/each}
+      {:else if hitBlock}
+        <span class="hit" style="left:{hitBlock.x0 * z}px;top:{hitBlock.y0 * z}px;width:{(hitBlock.x1 - hitBlock.x0) * z}px;height:{(hitBlock.y1 - hitBlock.y0) * z}px"></span>
+      {/if}
+    {/if}
   {:else}
     {#if layout}
       <!-- Curved text is placed glyph by glyph, so each layer of the stack is a
@@ -2233,6 +2270,13 @@
   .warpl {
     position: absolute;
     pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* A transparent pointer target over text that the engine's picture shows
+     outside the box's frame. */
+  .hit {
+    position: absolute;
     user-select: none;
     -webkit-user-select: none;
   }

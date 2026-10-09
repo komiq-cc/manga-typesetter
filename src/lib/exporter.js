@@ -1,8 +1,8 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, PAGE_W, PAGE_H } from './store.svelte.js';
-import { faceFor, lineWidth, textInset, contentWidth } from './measure.js';
+import { faceFor, textInset, contentWidth } from './measure.js';
 import { glyphPainter } from './text-engine/index.js';
-import { boxCandidate, placeBlock } from './contain.js';
+import { boxCandidate, placeBlock, blockRect } from './contain.js';
 import {
   strokeBands,
   strokeExtent,
@@ -273,14 +273,7 @@ function layoutBox(box, p) {
     // draws it at: a flush line in a balloon is set in from the edge to its
     // row's (`lineIndents`), so the widest line is not always the one that
     // reaches furthest.
-    let x0 = Infinity;
-    let x1 = -Infinity;
-    lines.forEach((ln, i) => {
-      const w = lineWidth(ln, s, s.size);
-      const x = s.align === 'center' ? lineX[i] - w / 2 : s.align === 'right' ? lineX[i] - w : lineX[i];
-      x0 = Math.min(x0, x);
-      x1 = Math.max(x1, x + w);
-    });
+    const { x0, x1 } = blockRect(place);
     blockX = x0;
 
     topExtra = Math.max(0, -blockY);
