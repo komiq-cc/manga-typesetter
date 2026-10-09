@@ -153,6 +153,58 @@ describe('the scale a texture is painted at', () => {
   });
 });
 
+describe('the longest side of one texture', () => {
+  it('with no limit given the scale is what it was: every caller that names none computes what it computed', () => {
+    for (const [cw, ch, scale, maxPx] of [[100, 50, 2], [7024, 108, 2], [30000, 40, 2], [1000, 500, 8, 2e6], [400, 300, 16, 8 * 1024 * 1024]]) {
+      const before = (() => {
+        const area = cw * ch * scale * scale;
+        return maxPx !== undefined && area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
+      })();
+      expect(textureScale(cw, ch, scale, maxPx)).toBe(before);
+      expect(textureScale(cw, ch, scale, maxPx, Infinity)).toBe(before);
+    }
+  });
+
+  it('leaves a footprint whose sides are inside the limit alone', () => {
+    expect(textureScale(1000, 500, 4, Infinity, 16384)).toBe(4);
+    expect(textureScale(4096, 100, 4, Infinity, 16384)).toBe(4);
+  });
+
+  it('lowers the scale until the longer side fits, whichever side that is, and never a pixel over', () => {
+    for (const [cw, ch, scale] of [[7024, 108, 3], [108, 7024, 3], [5461.4, 30, 3.0001], [16385, 10, 1], [9999.99, 7, 6.6]]) {
+      const ss = textureScale(cw, ch, scale, Infinity, 16384);
+      expect(ss).toBeLessThan(scale);
+      // The canvas is cut to whole pixels outwards (`renderBoxTexture`).
+      expect(Math.ceil(Math.max(cw, ch) * ss)).toBeLessThanOrEqual(16384);
+      // To the limit and not far under it.
+      expect(Math.max(cw, ch) * ss).toBeGreaterThan(16383);
+    }
+  });
+
+  it('holds together with the area budget: both are met, by the lower of the two scales', () => {
+    // Long and thin: the area budget alone leaves it 24,000 px wide.
+    const byArea = textureScale(8000, 100, 6, 8 * 1024 * 1024);
+    expect(8000 * byArea).toBeGreaterThan(16384);
+    const both = textureScale(8000, 100, 6, 8 * 1024 * 1024, 16384);
+    expect(Math.ceil(8000 * both)).toBeLessThanOrEqual(16384);
+    // Squarer: the area budget is the one that binds, and the side limit adds nothing.
+    expect(textureScale(1600, 2300, 6, 8 * 1024 * 1024, 16384)).toBe(textureScale(1600, 2300, 6, 8 * 1024 * 1024));
+  });
+
+  it('is applied by the painter: the same footprint in the same place, on a canvas inside the limit', () => {
+    const box = boxOf();
+    const full = paint(box, 6);
+    const limit = Math.floor(full.canvas.width / 2);
+    const r = renderBoxTexture(box, pageOf(box), null, 6, Infinity, limit);
+    expect(r.canvas.width).toBeLessThanOrEqual(limit);
+    expect(r.canvas.width).toBeGreaterThan(limit - 2);
+    expect(r.ss).toBeLessThan(6);
+    expect([r.ox, r.oy]).toEqual([full.ox, full.oy]);
+    expect(r.cw).toBeCloseTo(full.cw, 0);
+    expect(r.ch).toBeCloseTo(full.ch, 0);
+  });
+});
+
 describe('the pixel budget of one texture', () => {
   it('leaves the scale alone under the budget, and with none', () => {
     expect(textureScale(100, 50, 2)).toBe(2);

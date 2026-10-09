@@ -31,6 +31,10 @@ export function onTextEngineChange(cb) {
 
 // Painting needs only the context it is handed, even where measurement has no
 // engine. Jobs carry plain data; the painter owns the platform's paint objects.
+// A painter is `{ paint(ctx, job) }`, and may say `maxSide`: the longest side,
+// in device pixels, of what it will paint for one job. One that says nothing
+// has no such limit (a canvas draws text of any extent); the Rust engine's
+// does (rust-painter.js), and a canvas sized for it must be within it.
 let painter = createBrowserGlyphPainter();
 export function glyphPainter() {
   return painter;

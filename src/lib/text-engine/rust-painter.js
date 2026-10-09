@@ -22,6 +22,15 @@ import { patternTileCanvas, patternTilePx, TILE_SS } from '../text-paint.js';
 // megabytes for the rest of the session.
 export const SCRATCH_KEEP_PX = 2048 * 2048;
 
+// The longest side of a raster the engine will paint: `MAX_SIDE` in
+// text-engine/src/paint/mod.rs. A job whose ink is wider or taller than this
+// in device pixels is refused (`paintJob` throws), and the engine does not say
+// the number over the wire, so it is stated here, once, for the page - the
+// painter carries it as `maxSide` and whoever sizes a canvas for it asks the
+// painter. rust-painter-limit.test.js reads the Rust source and holds the two
+// together.
+export const MAX_RASTER_SIDE = 16384;
+
 /**
  * @param {object} rust the engine `createRustTextEngine` made; it holds the faces a job names
  * @param {{ boldDraw?: 'outset' | 'smear', weight?: number }} [options]
@@ -108,5 +117,5 @@ export function createRustGlyphPainter(rust, options = {}) {
     }
   }
 
-  return { id: 'rust', paint };
+  return { id: 'rust', paint, maxSide: MAX_RASTER_SIDE };
 }

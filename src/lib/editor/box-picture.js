@@ -18,6 +18,7 @@
 // arithmetic and the two paints, kept out of the component so they can be
 // tested without one.
 import { renderBoxTexture, warpTexture } from '../exporter.js';
+import { glyphPainter } from '../text-engine/index.js';
 
 // The most pixels one box's canvas holds: 8 megapixels, 32 MB of RGBA.
 //
@@ -26,9 +27,24 @@ import { renderBoxTexture, warpTexture } from '../exporter.js';
 // resolution on nearly any display, so lowering ITS scale costs sharpness only
 // on a box that is already bigger than the screen - a full-page sound effect
 // at 400% - and costs every ordinary box nothing: a 300 x 200 balloon is under
-// 4 MP at 400% on a 2x display. It is also far inside what a canvas may be
-// (16384 a side, 64 MP: warp-paint.js) and what the engine will paint (67 MP).
+// 4 MP at 400% on a 2x display. It is also far inside the AREA a canvas may
+// have (64 MP: warp-paint.js) and the engine will paint (67 MP).
+//
+// It says nothing about a SIDE. A box 7000 page px long and 100 high is under
+// the budget at 300% and 21,000 px wide, and the engine paints no raster with
+// a side over its own limit - it throws. That limit is the painter's to state
+// (`maxSide`, text-engine/index.js) and is asked of it where the texture is
+// made, below, beside this budget.
 export const PICTURE_MAX_PX = 8 * 1024 * 1024;
+
+/**
+ * A box's texture as the editor paints it: at `scale`, within the pixel budget
+ * and within the longest side the installed painter will paint. Every picture
+ * the editor shows is made here, so the two limits are applied in one place.
+ */
+export function pictureTexture(box, p, tips, scale, maxPx = PICTURE_MAX_PX) {
+  return renderBoxTexture(box, p, tips, scale, maxPx, glyphPainter().maxSide ?? Infinity);
+}
 
 // A turned box is painted finer than the screen. Its turn is CSS's, so the
 // compositor resamples the picture whatever it is painted at, and a picture
@@ -93,7 +109,7 @@ function show(el, r, maxPx, release) {
  * `cw` x `ch` page px it spans - what `pictureCss` places the canvas by.
  */
 export function paintBoxPicture(el, box, p, scale, tips, maxPx = PICTURE_MAX_PX) {
-  return show(el, warpTexture(renderBoxTexture(box, p, tips, scale, maxPx), box), maxPx, true);
+  return show(el, warpTexture(pictureTexture(box, p, tips, scale, maxPx), box), maxPx, true);
 }
 
 /**

@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../../test/rust-engine.js';
-import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture } from './box-picture.js';
+import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture, pictureTexture } from './box-picture.js';
 import { renderBoxTexture, warpTexture } from '../exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../text-engine/index.js';
-import { createRustGlyphPainter, SCRATCH_KEEP_PX } from '../text-engine/rust-painter.js';
+import { createRustGlyphPainter, SCRATCH_KEEP_PX, MAX_RASTER_SIDE } from '../text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from '../measure.js';
 import { defaultStyle, normalizeStyle } from '../data.js';
 
@@ -168,6 +168,48 @@ describe('what it holds', () => {
     expect(g.cw).toBeCloseTo(uncapped.cw, 0);
     expect(g.ch).toBeCloseTo(uncapped.ch, 0);
     expect(inked(bytes(el))).toBeGreaterThan(10000);
+  });
+
+  // The outside review's box: 7000 x 100, a hundred W at size 80, at 150% on a
+  // 2x display. Under the pixel budget, and 21,000 px wide: the engine paints
+  // no raster with a side over its limit, and the paint threw.
+  const LONG = () => boxOf({ size: 80 }, 'W'.repeat(100), { x: 0, y: 0, w: 7000, h: 100 });
+
+  it('the engine refuses a raster with a side over its limit, which is the limit the painter states', () => {
+    const box = LONG();
+    expect(glyphPainter().maxSide).toBe(MAX_RASTER_SIDE);
+    // Asked for with no side limit, as before: still within the area budget, and it throws.
+    expect(() => renderBoxTexture(box, pageOf(box), null, 3, PICTURE_MAX_PX)).toThrow(/larger than the engine allows/);
+    // And at 2, where the line is 14,000 px, it does not.
+    expect(() => renderBoxTexture(box, pageOf(box), null, 2, PICTURE_MAX_PX)).not.toThrow();
+  });
+
+  it('a box longer than the engine\'s side limit is painted at a lower scale and still spans its footprint', () => {
+    const box = LONG();
+    const p = pageOf(box);
+    const el = createCanvas(1, 1);
+    const g = paintBoxPicture(el, box, p, 3, null);
+    expect(el.width).toBeLessThanOrEqual(MAX_RASTER_SIDE);
+    expect(el.width).toBeGreaterThan(MAX_RASTER_SIDE - 2);
+    expect(inked(bytes(el))).toBeGreaterThan(100000);
+    const at2 = renderBoxTexture(box, p, null, 2);
+    expect([g.ox, g.oy]).toEqual([at2.ox, at2.oy]);
+    expect(g.cw).toBeCloseTo(at2.cw, 0);
+    expect(g.ch).toBeCloseTo(at2.ch, 0);
+    // The same on its side, turned boxes being painted at twice the scale:
+    // 1500 x 44 at 400% on a 2x display, turned, is asked for at 16.
+    const turned = boxOf({ size: 30 }, 'W'.repeat(60), { x: 0, y: 0, w: 1500, h: 44 });
+    const el2 = createCanvas(1, 1);
+    expect(() => paintBoxPicture(el2, turned, pageOf(turned), 16, null)).not.toThrow();
+    expect(Math.max(el2.width, el2.height)).toBeLessThanOrEqual(MAX_RASTER_SIDE);
+    expect(inked(bytes(el2))).toBeGreaterThan(100000);
+  });
+
+  it('and the texture the mesh gizmo holds through a drag is made within the same limits', () => {
+    const box = LONG();
+    const tex = pictureTexture(box, pageOf(box), null, 3);
+    expect(tex.canvas.width).toBeLessThanOrEqual(MAX_RASTER_SIDE);
+    expect(tex.ss).toBeLessThan(3);
   });
 
   it('the mesh gizmo\'s texture is the gesture\'s: painted from again and again, and not released', () => {

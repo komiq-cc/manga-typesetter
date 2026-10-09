@@ -62,7 +62,7 @@
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
   import { engineSwitch } from './engine-switch.svelte.js';
-  import { PICTURE_MAX_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture } from './editor/box-picture.js';
+  import { PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
@@ -558,7 +558,7 @@
     begin() {
       releaseWarpTex();
       warpTex = engineShown
-        ? renderBoxTexture(box, pg, warpTips, pictureRes, PICTURE_MAX_PX)
+        ? pictureTexture(box, pg, warpTips, pictureRes)
         : renderBoxTexture(box, pg, warpTips);
       warpDragging = true;
     },

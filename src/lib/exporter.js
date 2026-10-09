@@ -500,12 +500,26 @@ function paintShadows(ctx, box, L, SS) {
 
 // How many device px per page px a box's texture is painted at: the scale asked
 // for, lowered - for this box only - until its footprint holds no more than
-// `maxPx` pixels. Resolution gives way, the geometry does not: the footprint is
-// the same page px either way. With no budget the scale asked for is the answer,
-// untouched.
-export function textureScale(cw, ch, scale, maxPx = Infinity) {
+// `maxPx` pixels and neither of its sides is longer than `maxSide`. Resolution
+// gives way, the geometry does not: the footprint is the same page px either
+// way. With no budget and no limit the scale asked for is the answer, untouched.
+//
+// The two are different facts and one does not imply the other: a line across
+// a page is few pixels and very long. The area is the caller's budget; the side
+// is the painter's limit (`maxSide` in text-engine/index.js) - the Rust engine
+// refuses a raster longer than its own, and a refusal there is a throw.
+export function textureScale(cw, ch, scale, maxPx = Infinity, maxSide = Infinity) {
   const area = cw * ch * scale * scale;
-  return area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
+  let ss = area > maxPx ? scale * Math.sqrt(maxPx / area) : scale;
+  // Judged as the canvas is cut - to whole pixels, outwards (`renderBoxTexture`)
+  // - so the side that results is the one that is inside the limit.
+  const side = Math.max(cw, ch);
+  if (Math.ceil(side * ss) > maxSide) {
+    ss = maxSide / side;
+    // A quotient times its divisor can land a hair over, and a hair is a pixel.
+    while (Math.ceil(side * ss) > maxSide) ss *= 1 - Number.EPSILON;
+  }
+  return ss;
 }
 
 // Render a box to its own supersampled offscreen canvas. Used for un-rotated
@@ -546,11 +560,12 @@ export function renderBox(box, p, tips) {
 // above 200% and wasted below, and `maxPx` is the most pixels it will hold for
 // one box (`textureScale`). Everything below is stated in page px and applied
 // at `SS`, so the picture is the same picture at any scale and only its
-// resolution moves. The scale that was really used comes back as `ss`.
-export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity) {
+// resolution moves. `maxSide` is the longest side the canvas may have, for a
+// painter that has a limit. The scale that was really used comes back as `ss`.
+export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxSide = Infinity) {
   const L = layoutBox(box, p);
   const s = L.s;
-  const SS = textureScale(L.cw, L.ch, scale, maxPx);
+  const SS = textureScale(L.cw, L.ch, scale, maxPx, maxSide);
   const cnv = document.createElement('canvas');
   // Whole pixels, outwards: at a scale that is not a whole number the footprint
   // does not land on one, and a canvas cut short would lose its last row.

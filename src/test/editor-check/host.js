@@ -19,8 +19,8 @@ import { initHistory } from '../../lib/editor/history.svelte.js';
 import { restoreFonts, scanSystemFonts, addFontFile } from '../../lib/fonts.js';
 import { engineSwitch, useTextEngine } from '../../lib/engine-switch.svelte.js';
 import { textEngine, glyphPainter } from '../../lib/text-engine/index.js';
-import { renderBoxTexture, renderPageCanvas, warpTexture } from '../../lib/exporter.js';
-import { PICTURE_MAX_PX, pictureScale } from '../../lib/editor/box-picture.js';
+import { renderPageCanvas, warpTexture } from '../../lib/exporter.js';
+import { pictureScale, pictureTexture } from '../../lib/editor/box-picture.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
 
 const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -275,7 +275,7 @@ window.__ec = {
       const cnv = boxEl(b.id)?.querySelector('canvas.warpl[data-painter="engine"]');
       if (!cnv) return { id: b.id, canvas: false };
       if (!cnv.width) return { id: b.id, canvas: true, painted: false };
-      const tex = renderBoxTexture(b, pg, null, scale, PICTURE_MAX_PX);
+      const tex = pictureTexture(b, pg, null, scale);
       const r = warpTexture(tex, b);
       const out = { id: b.id, canvas: true, painted: true, editor: [cnv.width, cnv.height], exporter: [r.canvas.width, r.canvas.height], ss: tex.ss, scale };
       if (cnv.width === r.canvas.width && cnv.height === r.canvas.height) Object.assign(out, differ(pixelsOf(cnv), pixelsOf(r.canvas)), { total: cnv.width * cnv.height * 4 });
