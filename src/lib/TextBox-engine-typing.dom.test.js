@@ -1601,3 +1601,80 @@ describe('the system\'s menu leaves nothing listening', () => {
   });
 });
 
+describe('a box narrower than one grapheme, typed into as its picture', () => {
+  // A syllable written in three jamo, in a box narrower than one of them:
+  // three rows, and one grapheme. The plain wrapper is the engine's own here
+  // (jsdom lays nothing out): it breaks wherever the width is used up, in the
+  // middle of anything, as the real one does (type-rows.engine.test.js).
+  const SYLLABLE = '\u1100\u1161\u11A8';
+  async function jamo() {
+    setTextEngine({
+      ...half,
+      wrapPlain: (face, text, { width }) => {
+        const n = Math.max(1, Math.floor(width / (face.size * 0.5)));
+        const out = [];
+        for (let i = 0; i < text.length; i += n) out.push(text.slice(i, i + n));
+        return out.length ? out : [''];
+      },
+    });
+    clearLayoutMemo();
+    KINDS.jamo = box('jamo', { shape: 'off' }, { text: SYLLABLE, w: 12, h: 120 });
+    try {
+      return await typing('jamo');
+    } finally {
+      delete KINDS.jamo;
+    }
+  }
+
+  it('its rows break inside the grapheme, and the caret, the selection and the pointer do not', async () => {
+    const m = await jamo();
+    const rows = rowsOf(m.box);
+    expect(rows.map((r) => r.offs)).toEqual([[0], [], [3]]);
+    // All of it is selected on the first focus: a rectangle on each row.
+    expect(m.sel()).toEqual([0, 3]);
+    const sel = m.all('.tsel').map(px);
+    expect(sel).toHaveLength(3);
+    expect(sel.map((r) => r.top)).toEqual(rows.map((r) => r.top));
+    expect(sel.every((r) => r.width === 10)).toBe(true);
+    // A press on any row is before it or after it; the caret is drawn on the
+    // row that has that stop, never on the row between.
+    const el = m.q('.type-edit');
+    for (const [i, x, want, row] of [[0, 1, 0, 0], [0, 9, 3, 2], [1, 2, 0, 0], [1, 8, 3, 2], [2, 2, 0, 0], [2, 9, 3, 2]]) {
+      el.dispatchEvent(ptr('pointerdown', m, rows[i].lead?.x ?? rows[i].xs[0], rows[i].top + 5, 1));
+      el.dispatchEvent(ptr('pointerup', m, 0, 0, 1));
+      el.dispatchEvent(ptr('pointerdown', m, (rows[i].lead?.x ?? rows[i].xs[0]) + x, rows[i].top + 5, 1));
+      el.dispatchEvent(ptr('pointerup', m, 0, 0, 1));
+      await tick();
+      expect(m.sel(), `row ${i}, ${x} px in`).toEqual([want, want]);
+      expect(px(m.q('.tcaret')).top, `row ${i}, ${x} px in`).toBe(rows[row].top);
+    }
+    // Down from its start is its end; a letter typed there leaves it whole.
+    nativeSel(m, 0);
+    await tick();
+    key(m, 'ArrowDown');
+    expect(m.sel()).toEqual([3, 3]);
+    key(m, 'ArrowLeft');
+    expect(m.sel()).toEqual([0, 0]);
+    key(m, 'ArrowRight');
+    expect(m.sel()).toEqual([3, 3]);
+    input(m, 'insertText', 'X');
+    await tick();
+    expect(m.box.text).toBe('각X');
+  });
+
+  it('what takes the pointer past the frame reaches as far as the parts of it the rows draw', async () => {
+    const m = await jamo();
+    const rows = rowsOf(m.box);
+    // Each row draws a letter 10 wide from the inset, in a box 12 wide; the
+    // middle row has no stop at all, and the last has its one at its far end.
+    const far = Math.max(...rows.map((r) => r.trail?.x ?? r.xs[r.xs.length - 1]));
+    const near = Math.min(...rows.map((r) => r.lead?.x ?? r.xs[0]));
+    expect(far - near).toBe(10);
+    expect(far).toBeGreaterThan(m.box.w);
+    const pad = px(m.q('.tpad'));
+    expect(pad.left).toBe(Math.min(0, near));
+    expect(pad.left + pad.width).toBe(far);
+    expect(Number.isFinite(pad.width) && Number.isFinite(pad.height)).toBe(true);
+  });
+});
+
