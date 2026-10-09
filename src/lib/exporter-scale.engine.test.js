@@ -214,14 +214,17 @@ const KINDS = {
   circle: { circle: { on: true, angle: 0, inside: false, r: 0 } },
 };
 
-// What `mean` may be. Sharp edges sit near 8 (a point sample against an
-// average of nine); the passes that soften are well under that, so theirs are
-// set where leaving the scale out of the pass fails: unscaled, the blur reads
-// 27, the smear 13, a blurred shadow 20 and the roughening 39 against the 3,
-// 2, 4 and 27 they read scaled (measured by breaking each in turn). The
-// roughening is high either way because its displacement is rounded to whole
-// device px, which at 1 is a whole page px and at 3 a third of one.
-const LIMIT = { blur: 6, smear: 6, 'shadow, blurred': 8, roughen: 32 };
+// What `mean` may be. Sharp edges read under 1 now that the painter copies the
+// engine's pixels unfiltered (they sat near 8 while that copy was smoothed).
+// The passes that soften have limits set where leaving the scale out of the
+// pass fails: unscaled, the blur read 27, the smear 13 and a blurred shadow 20
+// against the 3, 2 and 2 they read scaled (measured by breaking each in turn,
+// the unscaled figures on the smoothed copy). The roughening is high either
+// way because its displacement is rounded to whole device px, which at 1 is a
+// whole page px and at 3 a third of one: it reads 37 scaled and 79 unscaled
+// on unfiltered pixels (27 and 39 on the smoothed copy, whose soft edges hid
+// both the difference and the defect).
+const LIMIT = { blur: 6, smear: 6, 'shadow, blurred': 8, roughen: 48 };
 
 describe('the same picture at another resolution', () => {
   const rows = {};
