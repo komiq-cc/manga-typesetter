@@ -145,6 +145,15 @@
   // (`dragSoft`). When the moves stop coming, `settleResize` forgets what was
   // drawn for a soft picture, and the paint effect, which reads `resizing`,
   // paints it once in full; for a box that was never lowered it does nothing.
+  //
+  // The moves stop coming in more ways than a pointer coming up over the
+  // document, and each of them settles it: the pointer cancelled, the window
+  // losing the focus (a pointer let go over another window is never heard
+  // of), the handle losing the pointer's capture, and the handles going away
+  // under the drag (`handlesOn`: the box deselected, which is what Escape
+  // does, another box selected, the box typed into). A drag whose handles
+  // are gone can still move the box, as it always could, and is then painted
+  // in full: the flag is only ever set while there is a handle to end it.
   let resizing = $state(false);
   let dragSoft = false;
   function settleResize() {
@@ -811,6 +820,14 @@
       effectsSubTab.id === 'transform',
   );
 
+  // The resize and rotate handles are on the box: while it is selected and
+  // nothing else has its controls. A resize whose handles go away has had its
+  // last frame as far as the picture is concerned (`settleResize`).
+  const handlesOn = $derived(selected && !editing && !bulkOn && !warpGizmoOn);
+  $effect(() => {
+    if (!handlesOn) settleResize();
+  });
+
   // Padded by the content box's inset - the padding plus the outline's reach
   // (`textInset`, measure.js) - so the flex layout and `text-align` put the block
   // exactly where the exporter and the PSD writer anchor it, with room for its
@@ -1231,7 +1248,8 @@
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const handle = e.currentTarget;
+    handle.setPointerCapture?.(e.pointerId);
     focusPage(pg);
     if (!selected) selectBox(box.id);
     settleEdits();
@@ -1286,7 +1304,7 @@
         const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
         // From the first move, not from the press: a handle pressed and let
         // go changes nothing and must repaint nothing.
-        resizing = true;
+        if (enginePaints && handlesOn) resizing = true;
         resizeBox(
           pageId,
           box.id,
@@ -1341,6 +1359,11 @@
     document.addEventListener('pointermove', move, { signal: ac.signal });
     document.addEventListener('pointerup', end, { signal: ac.signal });
     document.addEventListener('pointercancel', end, { signal: ac.signal });
+    // The ways the moves stop without either of those (`settleResize`). They
+    // settle the picture and leave the gesture as it is: if the moves do come
+    // again it goes on, and its end is still `end`.
+    window.addEventListener('blur', settleResize, { signal: ac.signal });
+    handle.addEventListener('lostpointercapture', settleResize, { signal: ac.signal });
   }
 
   // Drag one bezier-path anchor or handle. `which` is 'a' (the anchor itself),
@@ -2320,7 +2343,7 @@
        ones the sub-tab was opened for, so they win by being the only ones there
        - and the box still MOVES by its body, because a warp handle stops its own
        pointerdown from reaching it. -->
-  {#if selected && !editing && !bulkOn && !warpGizmoOn}
+  {#if handlesOn}
     <div class="rotate-stem"></div>
     {#each corners as [kind, dir] (dir)}
       <div class="handle {kind} {dir}" onpointerdown={(e) => startTransform(e, dir)}></div>

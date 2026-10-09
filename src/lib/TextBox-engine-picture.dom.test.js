@@ -422,6 +422,97 @@ describe('while a handle is resizing the box', () => {
     expect(m.canvas().width * m.canvas().height).toBe(after.cw * 6 * after.ch * 6);
   });
 
+  // ---- every way a drag ends ----
+  // The lower picture is for the frames of the drag. However the drag stops
+  // coming - and not all of the ways are a pointer coming up over the
+  // document - the box must be back at the scale it has at rest, and the
+  // next thing that repaints it must paint it in full.
+  const full = (m) => {
+    const f = footprint(m.box, m.pg);
+    return f.cw * f.ch;
+  };
+  const px = (m) => m.canvas().width * m.canvas().height;
+  async function dragging(id = 'huge') {
+    const m = await grabbed(id);
+    document.dispatchEvent(ev('pointermove', 520));
+    await tick();
+    expect(px(m)).toBeLessThan(PICTURE_DRAG_PX * 1.05);
+    expect(full(m)).toBeGreaterThan(PICTURE_DRAG_PX * 3);
+    return m;
+  }
+  const settled = async (m) => {
+    await tick();
+    expect(px(m)).toBe(full(m));
+    // And what repaints it next is painted in full too.
+    m.box.text = 'SOMETHING ELSE';
+    await tick();
+    expect(px(m)).toBe(full(m));
+  };
+
+  it('the pointer coming up', async () => {
+    const m = await dragging();
+    document.dispatchEvent(ev('pointerup', 520));
+    await settled(m);
+  });
+  it('the pointer cancelled', async () => {
+    const m = await dragging();
+    document.dispatchEvent(ev('pointercancel', 520));
+    await settled(m);
+  });
+  it('the window losing the focus, with no pointer event at all', async () => {
+    const m = await dragging();
+    window.dispatchEvent(new Event('blur'));
+    await settled(m);
+  });
+  it('the handle losing the pointer\'s capture', async () => {
+    const m = await dragging();
+    m.root.querySelector('.handle.side.e').dispatchEvent(new Event('lostpointercapture', { bubbles: true }));
+    await settled(m);
+  });
+  it('the box deselected under the drag, which is what Escape does', async () => {
+    const m = await dragging();
+    deselect();
+    await tick();
+    expect(m.root.querySelector('.handle')).toBe(null);
+    await settled(m);
+  });
+  it('another box selected under the drag', async () => {
+    const m = await dragging();
+    selectBox('straight');
+    await settled(m);
+  });
+  it('the box typed into under the drag: when the edit ends it is painted in full', async () => {
+    const m = await dragging();
+    beginEdit('huge');
+    await tick();
+    endEdit(null);
+    await tick();
+    expect(px(m)).toBe(full(m));
+  });
+  it('the box deleted under the drag: nothing is painted for it again and nothing throws', async () => {
+    const m = await dragging();
+    const el = m.canvas();
+    const before = m.paints();
+    m.view.unmount();
+    expect([el.width, el.height]).toEqual([0, 0]);
+    document.dispatchEvent(ev('pointermove', 560));
+    document.dispatchEvent(ev('pointerup', 560));
+    await tick();
+    expect(m.paints()).toBe(before);
+  });
+  it('and a drag that goes on after the window came back is lowered again, and settles when the pointer comes up', async () => {
+    const m = await dragging();
+    window.dispatchEvent(new Event('blur'));
+    await tick();
+    expect(px(m)).toBe(full(m));
+    document.dispatchEvent(ev('pointermove', 540));
+    await tick();
+    expect(px(m)).toBeLessThan(PICTURE_DRAG_PX * 1.05);
+    document.dispatchEvent(ev('pointerup', 540));
+    await tick();
+    expect(px(m)).toBe(full(m));
+  });
+
   it('the rotate handle turns the box and repaints nothing, as a turn does', async () => {
     // 'finish' is turned already: another angle is the same picture.
     const m = await mounted('finish');
