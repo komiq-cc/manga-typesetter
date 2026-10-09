@@ -17,7 +17,19 @@
 //   raw/, img/    what the lane wrote
 //
 // `--legacy-mode` is what a chapter saved before it carried its own mode is
-// opened with (the machine's frozen preference; the corpus was cut with smart).
+// opened with. It has no default, and the run stops at the first such chapter
+// without it: the app opens that chapter with what this machine's typesetting
+// switch said when the build that added the field first ran
+// (`legacyTypesetting`, data.js), which no copy carries, and the two modes
+// break lines differently. For the 13 copies it is `smart`, which is what the
+// corpus was cut with; 5 of them have no mode of their own.
+//
+// Exit code: 0; 2 when the report cannot be signed as it stands - a box
+// changed its x, width or size, a height shrank, a top edge moved without its
+// height growing (gate G6, as pages or as a long strip), or a chapter was not
+// opened because a page of it is repaired from its picture; 1 when the run
+// failed (a stored box with no partner after the open and a box with text
+// and no layout are failures: no report is written from them).
 //
 // `--load-fixtures yes` hands the Rust engine the repository's fixture fonts
 // too, as fonts the user has loaded. They carry the names of two former
@@ -51,8 +63,10 @@ try {
   console.log(`dry run: ${out}/report.html`);
   console.log(JSON.stringify(totals.total));
   // G6: no box changes x, w or size on open, heights only grow, and a top
-  // edge moves only with the height it belongs to.
-  if (totals.total.x || totals.total.w || totals.total.size || totals.total.shrank || totals.total.yAlone) process.exitCode = 2;
+  // edge moves only with the height it belongs to - as pages and as a long
+  // strip. And nothing can be said of a chapter that was not opened.
+  if (totals.refused.length) console.error(`dry run: NOT OPENED: ${totals.refused.map((r) => r.chapter).join(', ')} (a page is repaired from its picture on open)`);
+  if (totals.total.x || totals.total.w || totals.total.size || totals.total.shrank || totals.total.yAlone || totals.total.stripBreach || totals.refused.length) process.exitCode = 2;
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

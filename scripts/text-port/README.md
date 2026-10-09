@@ -283,9 +283,31 @@ browser write. Reads copies only and writes only under `--out`; two runs give
 the same bytes. `--load-fixtures yes` also hands the engine the repository's
 fixture fonts as loaded fonts (they carry the names of two former built-ins,
 Bangers and Comic Neue): what is left of the report once those are loaded.
-Exit code 2 when a box changed its x, width or size, a
-height shrank, or a top edge moved without its height growing (gate G6); 1
-when the run failed.
+Exit code 2 when the report cannot be signed as it stands: a box changed its
+x, width or size, a height shrank, or a top edge moved without its height
+growing (gate G6, checked with the project as pages and as a long strip), or
+a chapter was not opened. 1 when the run failed.
+
+What the tool will not guess:
+
+- `--legacy-mode` has no default. A chapter saved before it carried its own
+  mode is opened by the app with what this machine's typesetting switch said
+  when the build that added the field first ran; no copy carries that, and
+  the two modes break lines differently. The run stops at the first such
+  chapter without the flag. For the 13 copies it is `smart`.
+- The project's layout is not in the copies, and it decides how far a box may
+  grow. Every chapter is opened as pages and as a long strip; the report is
+  the open as pages and lists the boxes that differ as a long strip.
+- A page whose art was replaced at another size (`needsRespace`), or with no
+  size, is repaired from its picture when the app opens it: x, width and
+  size are rescaled. The copies have no pictures, so such a chapter is not
+  opened; it is named at the top of the report.
+- A stored box is matched to the box the open made of it by its place in the
+  file, never by an id the load may repair. A stored box with no partner, or
+  a box with text and no layout, fails the run.
+- A cause is given only where the run's numbers bear it out. A block that
+  moved is put down to the ink boxes (rule 4) only when the shift the two
+  engines' ink boxes predict is the shift seen; otherwise it is unexplained.
 
 ```
 node scripts/text-port/p9-check.mjs --data <dir> [--out <dir>] [--chapter <stem>]

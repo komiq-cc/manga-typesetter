@@ -7,10 +7,12 @@
 // not the engine at all (the file was already behind today's app; the font is
 // a former built-in; a letter is borrowed; the box grew, so what is in it
 // moved with it). Each is decided from a fact the run recorded, named in the
-// sentence. A change none of them accounts for is listed as unexplained.
+// sentence, and a rule is named only where the run's own numbers bear it out
+// (`explain`). A change none of them accounts for is listed as unexplained:
+// there is no cause of last resort.
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { guardedPath } from './common.mjs';
-import { changeOf, MOVED_PX } from './dry-compare.mjs';
+import { changeOf, MOVED_PX, INK_TOL_PX } from './dry-compare.mjs';
 
 const KINDS = [
   ['geometry', 'Width, size or horizontal position changed (must be none)'],
@@ -29,7 +31,23 @@ const sideNames = { l: 'left', t: 'top', r: 'right', b: 'bottom' };
 const overflowWords = (o) => sides(o).map((k) => `${px(o[k])} px past the ${sideNames[k]}`).join(', ') || 'no edge';
 
 // The cause of each thing that changed for one box.
-function explain(row, c, wk) {
+//
+// Rule 4 (ink boxes) is the one cause that is the engine's and is not read
+// off a single recorded fact, so it is said only when it can be checked:
+//
+//   a flag raised or cleared   Safari's own check of the stored box says the
+//                              opposite (its verdict is in the capture), on
+//                              the same lines: the two engines' ink boxes are
+//                              then all that differs.
+//   a block that moved         the block is set in the middle of its box,
+//                              which is the one alignment that is centred on
+//                              ink; it did not move sideways; and the shift
+//                              the two ink boxes predict (`change.ink`,
+//                              dry-compare.mjs) is the shift seen, within
+//                              `INK_TOL_PX`.
+//
+// Anything else is unexplained.
+export function explain(row, c, wk) {
   const out = [];
   const say = (what, cause, rule = '') => out.push({ what, cause, rule });
   const font = row.fontFacts ?? {};
@@ -54,14 +72,14 @@ function explain(row, c, wk) {
     else if (c.flaggedBySafari) say('newlyFlagged', `not the engine: Safari's own check already finds this box overflowing as stored (${overflowWords(wk?.verdict?.overflow)}), so today's app flags it on open too; the file had no flag`, 'stale file');
     else if (borrowed) say('newlyFlagged', `${borrowed} (${where})`, 'rules 10, 11');
     else if (c.lines) say('newlyFlagged', `follows from the new line breaks (${where})`, 'see lines');
-    else if (sides(o).every((k) => k === 'l' || k === 'r')) say('newlyFlagged', `true overhang: ${where}. WebKit reports a line's advance as its left and right ink edges and so never saw it; the engine measures the outline`, 'rule 4');
-    else if (browser?.review) say('newlyFlagged', `${where}; the stand-in browser, which also measures real ink, flags it too. WebKit's ink box is stepped to 1/64 px and the engine's is exact`, 'rule 4');
+    else if (c.compared && c.flaggedBySafari === false && sides(o).length && sides(o).every((k) => k === 'l' || k === 'r')) say('newlyFlagged', `true overhang: ${where}. Safari's own check passes the same lines in the same box: WebKit reports a line's advance as its left and right ink edges and so never saw it; the engine measures the outline`, 'rule 4');
+    else if (c.compared && c.flaggedBySafari === false && browser?.review) say('newlyFlagged', `${where}; Safari's own check passes the same lines in the same box, and the stand-in browser, which also measures real ink, flags it too. WebKit's ink box is stepped to 1/64 px and the engine's is exact`, 'rule 4');
     else say('newlyFlagged', null);
   }
   if (c.unflagged) {
     if (c.flaggedBySafari === false) say('unflagged', "not the engine: Safari's own check passes this box as stored, so today's app clears the flag on open too; the flag in the file was out of date", 'stale file');
     else if (missing) say('unflagged', missing, 'D2b');
-    else if (c.flaggedBySafari === true) say('unflagged', `Safari finds ${overflowWords(wk?.verdict?.overflow)}; by the outline's own box the ink is inside`, 'rule 4');
+    else if (c.compared && !c.lines && c.flaggedBySafari === true) say('unflagged', `Safari finds ${overflowWords(wk?.verdict?.overflow)} on the same lines in the same box; by the outline's own box the ink is inside`, 'rule 4');
     else say('unflagged', null);
   }
   if (c.grew) {
@@ -80,17 +98,31 @@ function explain(row, c, wk) {
     if (missing) say('moved', missing, 'D2b');
     else if (c.lines) say('moved', 'follows from the new line breaks', 'see lines');
     else if (borrowed) say('moved', borrowed, 'rules 10, 11');
-    else say('moved', `the block is centred on its ink, and the engine's ink box is the outline's where WebKit's is stepped and, sideways, the advance (${c.blockDy != null ? `${px(c.blockDy)} px down` : ''}${c.blockDx ? `, ${px(c.blockDx)} px right` : ''})`, 'rule 4');
+    else if (inkMoved(row, c)) say('moved', `the block is set in the middle of its box, so it is centred on its ink, and the two engines' ink boxes differ: against the line boxes the engine's ink is ${px(c.ink.top)} px lower at the top and ${px(c.ink.bottom)} px lower at the bottom than WebKit's, which puts the block ${px(c.ink.predictedDy)} px down; it is ${px(c.blockDy)} px down`, 'rule 4');
+    else say('moved', null);
   }
   return out;
 }
+
+// Whether a block that moved, and nothing else of its box did, moved because
+// the two engines' ink boxes differ: see `explain`.
+export function inkMoved(row, c) {
+  if (row.valign !== 'middle' || !c.ink || c.blockDy == null) return false;
+  if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
+  return Math.abs(c.ink.predictedDy - c.blockDy) <= INK_TOL_PX;
+}
+
+// G6 for one box as an open left it: nothing across, and no height lost.
+const breach = (stored, after) => after.x !== stored.x || after.w !== stored.w || (stored.size != null && after.size !== stored.size) || after.h < stored.h || (after.y !== stored.y && !(after.h > stored.h));
 
 const blank = () => ({
   boxes: 0, lettered: 0, compared: 0, pending: 0,
   x: 0, w: 0, size: 0, shrank: 0,
   grew: 0, grewNotEngine: 0, grewMax: 0, grewSum: 0, yMoved: 0, yAlone: 0,
   newlyFlagged: 0, newlyFlaggedNotEngine: 0, unflagged: 0, unflaggedNotEngine: 0, flaggedBefore: 0, flaggedAfter: 0,
-  lines: 0, moved: 0, movedOver2: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
+  lines: 0, moved: 0, movedOver2: 0, movedAlone: 0, movedByInk: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
+  // The same open as a long strip: boxes that come out differently, and G6 there.
+  stripDiffers: 0, stripBreach: 0, idsRepaired: 0,
   back: { run: 0, grew: 0, newlyFlagged: 0, unflagged: 0, x: 0, w: 0, size: 0 },
   safariBack: { newlyFlagged: 0, unflagged: 0 },
 });
@@ -122,8 +154,12 @@ export async function writeReport({ data, out }) {
   }
   mkdirSync(`${out}/img/before`, { recursive: true });
   const chapters = {};
-  for (const c of run.chapters) chapters[c.chapter] = { ...blank(), mode: c.mode, modeFrom: c.modeFrom, version: c.version, pages: c.pages, open: c };
+  // A chapter the lane would not open: a page of it is repaired from its
+  // picture by the app's loader, and the copies have no pictures.
+  const refused = run.chapters.filter((c) => c.refused).map((c) => ({ chapter: c.chapter, pages: c.pages, boxes: c.boxes, why: c.refused }));
+  for (const c of run.chapters) if (!c.refused) chapters[c.chapter] = { ...blank(), mode: c.mode, modeFrom: c.modeFrom, version: c.version, pages: c.pages, open: c, idsRepaired: c.idsRepaired.length };
   const total = blank();
+  const stripList = [];
   const changed = [];
   const fontsMissing = new Map();
   const borrowing = [];
@@ -144,13 +180,22 @@ export async function writeReport({ data, out }) {
       }
       fontsMissing.set(row.font, f);
     }
-    if (!row.rust) continue;
+    // Every stored box has its partner after the open, or the run is wrong:
+    // a row skipped here would be a box whose changes nobody counted.
+    if (!row.rust || !row.strip) throw new Error(`${row.id}: the stored box has no partner after the open; the run is not a report`);
     // A box with no text has no lines and no picture, but it is a box the
     // open can still grow (to the height one line of its font needs).
     const lettered = !!row.rust.lay;
     if (lettered) t.lettered++;
     const w = wk.get(row.id) ?? null;
-    const c = changeOf({ stored: row, rust: row.rust, wk: w, font: row.fontFacts });
+    const c = changeOf({ id: row.id, stored: row, rust: row.rust, wk: w, font: row.fontFacts });
+    // The same file opened as a long strip.
+    const a = row.rust.state;
+    if (['x', 'y', 'w', 'h', 'size'].some((k) => row.strip[k] !== a[k]) || !!row.strip.review !== !!a.review) {
+      t.stripDiffers++;
+      stripList.push({ id: row.id, pages: { y: a.y, h: a.h, flagged: !!a.review }, strip: { y: row.strip.y, h: row.strip.h, flagged: !!row.strip.review } });
+    }
+    if (breach(row, row.strip)) t.stripBreach++;
     if (c.compared) t.compared++;
     for (const k of ['x', 'w', 'size', 'shrank', 'grew', 'newlyFlagged', 'unflagged', 'lines', 'moved', 'missing', 'borrows']) if (c[k]) t[k]++;
     if (row.review) t.flaggedBefore++;
@@ -162,6 +207,10 @@ export async function writeReport({ data, out }) {
       t.grewSum += c.dh;
     }
     if (c.blockDy != null && Math.abs(c.blockDy) > 2) t.movedOver2++;
+    if (c.moved && !c.grew && !c.dy) {
+      t.movedAlone++;
+      if (!c.missing && !c.lines && !c.borrows && inkMoved(row, c)) t.movedByInk++;
+    }
     // Back under the browser: the stand-in's own run, and what Safari's check says.
     if (row.back) {
       t.back.run++;
@@ -207,6 +256,12 @@ export async function writeReport({ data, out }) {
       browser: row.browser?.state ?? null,
     });
   }
+  // The blocks that moved by their ink, largest first: the shift the two ink
+  // boxes predict beside the shift seen.
+  const inkShifts = changed
+    .filter((b) => b.causes.some((x) => x.what === 'moved' && x.rule === 'rule 4'))
+    .map((b) => ({ id: b.id, font: b.font, inkTop: b.change.ink.top, inkBottom: b.change.ink.bottom, predicted: b.change.ink.predictedDy, seen: b.change.blockDy }))
+    .sort((a, b) => Math.abs(b.seen) - Math.abs(a.seen) || (a.id < b.id ? -1 : 1));
   for (const t of Object.values(chapters)) add(total, { ...t, mode: undefined, modeFrom: undefined, version: undefined, pages: undefined, open: undefined });
   for (const k of ['mode', 'modeFrom', 'version', 'pages', 'open']) delete total[k];
 
@@ -223,7 +278,8 @@ export async function writeReport({ data, out }) {
 
   const totals = {
     run: { wasm: run.wasm, legacyMode: run.legacyMode, loadFixtures: !!run.loadFixtures, userFamilies: run.userFamilies, installedFamilies: run.installedFamilies, lastResort: run.lastResort, safariCases: run.wkCases },
-    total, chapters,
+    total, chapters, refused,
+    stripDiffers: stripList, inkShifts,
     fontsToLoad: missingList, borrowing: borrowing.length,
     lettersAsked: run.lettersAsked, systemFacesServed: run.systemFacesServed,
   };
@@ -295,20 +351,23 @@ export async function writeReport({ data, out }) {
 // ---- words ----
 const DESIGN = [
   ['What the version number is', 'Every chapter file carries `typesetting.version`. It is 1 in every chapter written so far (or absent, which reads as 1), and until now nothing read it. From here on: **1** means the boxes were last fitted by the browser, **2** means they were last fitted by the Rust engine. It is the only thing in the file that changes meaning; no field is added.'],
-  ['Opening a version 1 chapter with the Rust engine', 'The standing rule is applied in memory: no box changes its width, size or place; a height may grow; a box whose text no longer fits gets the review flag. The queue shows one notice, above the "needs review" list: how many boxes have new line breaks, how many are newly flagged, how many are no longer flagged, how many grew taller. A flagged box is in the "needs review" list as always. A box whose lines moved and that still fits is listed there too, as "Line breaks changed with the new text engine", until you answer the notice. So the boxes are stepped through with the list the app already has, and "Show first" on the notice goes to the first of them. A chapter the engine changes nothing in shows no notice.'],
-  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. The file is written, with the version set to 2, the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before. The version number is the only thing in the file that is new: which boxes had their lines moved is not stored.'],
+  ['Opening a version 1 chapter with the Rust engine', 'The standing rule is applied in memory: no box changes its width, size or place; a height may grow; a box whose text no longer fits gets the review flag. The queue shows one notice, above the "needs review" list: how many boxes have new line breaks, how many are newly flagged, how many are no longer flagged, how many grew taller. A flagged box is in the "needs review" list as always. A box whose lines moved and that still fits is listed there too, as "Line breaks changed with the new text engine", until you answer the notice. So the boxes are stepped through with the list the app already has, and "Show first" on the notice goes to the first of them. A chapter the engine changes nothing in shows no notice. The notice counts what the engine did: a box you have since edited is no longer counted. One kind of box is laid out by an open, under either engine: a box placed while its font was still loading and never laid out. The notice counts it as "laid out for the first time".'],
+  ['What is written, and when', 'Opening writes nothing. Leaving the chapter untouched writes nothing. Turning the engine off again puts every box back as the file has it. "Untouched" is decided by comparing the chapter with what was read from the file, not by a flag: anything of yours that differs is written when you leave, a handle still held down included. The file is written, with the grown heights and the flags, on the first save one of your own edits causes, or when you press "Keep" on the notice. Never before. That save sets the version to 2 when every box has been fitted by the engine. While a box still waits for its font, your edit is written at once at the version the file had, and the 2 follows with a save of its own when the font is in. "Keep" waits for the fonts. Every save writes `chapter.json` and, as every save always has, the `translations.json` beside it. The version number is the only thing in the file that is new: which boxes had their lines moved is not stored. If the write fails, nothing was kept: the notice stays, and the save indicator says the chapter is not saved.'],
   ['Going back to the browser engine', 'A version 2 chapter opens under the browser engine as any chapter does today: heights may grow, flags are checked again by the browser, and leaving the chapter saves it, as it always has. That save sets the version back to 1, so the Rust engine tells you again the next time. A build of the app from before this change reads a 2 as it reads a 1 and writes it back unchanged.'],
 ];
 
 function summaryLines(t) {
   const lines = [];
+  if (t.refused.length) lines.push(`**NOT A COMPLETE REPORT. ${t.refused.length} chapter${t.refused.length === 1 ? ' was' : 's were'} not opened** (${t.refused.map((r) => `${r.chapter}, ${r.boxes} boxes`).join('; ')}): a page of it is repaired from its picture when the app opens it, which can change a box's x, width and size, and the copies have no pictures. Nothing below is about ${t.refused.length === 1 ? 'that chapter' : 'those chapters'}.`);
   lines.push(`${t.total.boxes} boxes in ${Object.keys(t.chapters).length} chapters; ${t.total.lettered} have text (the others are counted for their rectangle and have no lines or picture); Safari's capture has ${t.total.compared} of those to compare lines and positions with.`);
   lines.push(`Width, size or horizontal position changed: **${t.total.x + t.total.w + t.total.size}**. Heights that shrank: **${t.total.shrank}**.`);
   lines.push(`Top edge moved: ${t.total.yMoved}, each a box that grew (a box grows about its vertical anchor: down from the top, both ways from the middle, up from the bottom). Top edge moved without the height growing: **${t.total.yAlone}**.`);
   lines.push(`Boxes that grew taller: **${t.total.grew}** (${t.total.grewNotEngine} of them not because of the engine: the stored height was already under what today's app gives the box on open). Largest growth ${px(t.total.grewMax)} px.`);
   lines.push(`Boxes newly flagged "needs review": **${t.total.newlyFlagged}** (${t.total.newlyFlaggedNotEngine} of them already overflow in Safari today and only lacked the flag in the file). Boxes no longer flagged: **${t.total.unflagged}** (${t.total.unflaggedNotEngine} of them pass Safari's check today as well).`);
   lines.push(`Boxes whose line breaks changed: **${t.total.lines}** of ${t.total.compared} compared.`);
-  lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px).`);
+  lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px). In ${t.total.movedAlone} of them nothing else of the box changed; ${t.total.movedByInk} of those moved by the two engines' ink boxes, each checked: the shift the ink boxes predict is the shift seen, within ${INK_TOL_PX} px.`);
+  lines.push(`The same files opened as a long strip (the project's layout is not in the copies; it decides how far a box may grow): ${t.total.stripDiffers} boxes come out differently. Width, size or position across changed, or a height lost, as a long strip: **${t.total.stripBreach}**.`);
+  lines.push(`Boxes whose id the load repairs (none, or one another box has): ${t.total.idsRepaired}. Every stored box is matched to the box the open made of it by its place in the file.`);
   lines.push(`Boxes set in a font this machine does not have: **${t.fontsToLoad.reduce((n, f) => n + f.boxes, 0)}** (${t.fontsToLoad.reduce((n, f) => n + f.withText, 0)} with text), in ${t.fontsToLoad.length} families (listed below: these are the font files to load). Boxes that borrow a letter from another font: ${t.total.borrows}.`);
   lines.push(`Boxes stored as placed but never laid out (\`pending\`), the one kind an open may lay out afresh: **${t.total.pending}**.`);
   lines.push(`Changes with no stated cause: **${t.total.unexplained}**.`);
@@ -341,10 +400,10 @@ function openTable(t) {
 // before the switch (in this run Skia, in the app WebKit), the report asks
 // Safari's capture.
 function noticeTable(t) {
-  const head = ['chapter', 'notice shown', 'grew taller', 'newly flagged', 'no longer flagged', 'new line breaks (against the stand-in)', 'this report: grew', 'newly flagged', 'no longer', 'lines (against Safari)'];
+  const head = ['chapter', 'notice shown', 'grew taller', 'newly flagged', 'no longer flagged', 'laid out for the first time', 'new line breaks (against the stand-in)', 'this report: grew', 'newly flagged', 'no longer', 'lines (against Safari)'];
   const rows = Object.entries(t.chapters).map(([name, c]) => {
     const n = c.open.notice;
-    return [name, n && n.grew + n.flagged + n.cleared + n.relaid > 0 ? 'yes' : 'no', n?.grew ?? '-', n?.flagged ?? '-', n?.cleared ?? '-', n?.relaid ?? '-', c.grew, c.newlyFlagged, c.unflagged, c.lines];
+    return [name, n && n.grew + n.flagged + n.cleared + n.relaid + n.laid > 0 ? 'yes' : 'no', n?.grew ?? '-', n?.flagged ?? '-', n?.cleared ?? '-', n?.laid ?? '-', n?.relaid ?? '-', c.grew, c.newlyFlagged, c.unflagged, c.lines];
   });
   return { head, rows };
 }
@@ -356,6 +415,21 @@ function backTable(t) {
   rows.push(['**total**', b.run, b.x + b.w + b.size, b.grew, b.newlyFlagged, b.unflagged, t.total.safariBack.newlyFlagged, t.total.safariBack.unflagged]);
   return { head, rows };
 }
+
+// The blocks that moved by their ink: what the two ink boxes predict, and
+// what was seen.
+function inkTable(t) {
+  const head = ['box', 'font', 'ink top lower by (px)', 'ink bottom lower by (px)', 'shift predicted (px)', 'shift seen (px)', 'difference'];
+  const rows = t.inkShifts.map((r) => [r.id, r.font, px(r.inkTop), px(r.inkBottom), (Math.round(r.predicted * 1000) / 1000).toString(), (Math.round(r.seen * 1000) / 1000).toString(), (Math.round((r.predicted - r.seen) * 1000) / 1000).toString()]);
+  return { head, rows };
+}
+function stripTable(t) {
+  const head = ['box', 'as pages: top', 'height', 'flagged', 'as a long strip: top', 'height', 'flagged'];
+  const rows = t.stripDiffers.map((r) => [r.id, px(r.pages.y), px(r.pages.h), r.pages.flagged ? 'yes' : 'no', px(r.strip.y), px(r.strip.h), r.strip.flagged ? 'yes' : 'no']);
+  return { head, rows };
+}
+const STRIP_WORDS = "The project's layout decides how far a box may grow on open: to the foot of its page, or, in a long strip, over the seam into the next. The copies do not say which layout their project has, so every chapter was opened under both. Everything else in this report is the open as pages. The boxes that come out differently as a long strip:";
+const INK_WORDS = `A block set in the middle of its box is centred on its ink, so it moves when the two engines measure the ink of the same lines differently, by minus half of what the ink's top and bottom moved against the line boxes. Both ink boxes are measurements (Safari's is in its capture, the engine's was taken at the open), so the shift they predict can be set beside the shift seen. A moved block is given this cause only when the two agree within ${INK_TOL_PX} px; otherwise it is unexplained.`;
 
 const mdTable = ({ head, rows }) => [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.join(' | ')} |`)].join('\n');
 
@@ -403,6 +477,8 @@ function markdown(t, changed, borrowing) {
   out.push('Measured on these chapters, with the switch on:', '', mdTable(openTable(t)), '');
   out.push('What the notice says for each chapter, read from the app\'s own count, beside this report\'s count:', '', mdTable(noticeTable(t)), '');
   out.push('## 2. Per chapter', '', 'A figure in brackets is the part that is not the engine: the file was already behind what the app does on open today.', '', mdTable(chapterTable(t)), '');
+  out.push('### The same files as a long strip', '', STRIP_WORDS, '', t.stripDiffers.length ? mdTable(stripTable(t)) : 'None.', '');
+  out.push('### Blocks that moved by their ink (rule 4), checked', '', INK_WORDS, '', t.inkShifts.length ? mdTable(inkTable(t)) : 'None.', '');
   out.push('## 3. Every box that changes', '');
   const unexplained = changed.filter((b) => b.unexplained.length);
   out.push(`### Unexplained (${unexplained.length})`, '', unexplained.length ? unexplained.map((b) => `- \`${b.id}\`: ${b.unexplained.join(', ')}`).join('\n') : 'None.', '');
@@ -433,7 +509,9 @@ function markdown(t, changed, borrowing) {
   out.push('The document as the Rust engine left it, opened again with the switch off. Measured with the stand-in browser (Skia in node, smart-mode chapters only). The last two columns are inferred from Safari\'s capture: boxes the engine flags and Safari\'s check passes, and the reverse, among the boxes whose height did not change.', '', mdTable(backTable(t)), '');
   out.push('## 7. How this was made', '');
   out.push(`- Engine: the wasm with sha256 \`${t.run.wasm}\`. Fonts: ${t.run.userFamilies} families of the user's, ${t.run.installedFamilies} installed families found on this Mac. Last resort: ${t.run.lastResort}.`);
-  out.push(`- A chapter saved before it carried its own mode was opened as \`${t.run.legacyMode ?? 'n/a'}\`.`);
+  out.push(`- A chapter saved before it carried its own mode was opened as \`${t.run.legacyMode ?? 'n/a'}\` (\`--legacy-mode\`). The tool has no default for it: the app opens such a chapter with what this machine's typesetting switch said when the build that added the field first ran, and the copies do not carry that.`);
+  out.push('- A stored box is matched to the box the open made of it by its place in the file. A stored box with no partner, or a box with text that has no layout, stops the run: no report is written from it.');
+  out.push('- A chapter with a page the app repairs from its picture on open (art replaced at another size, or no size) is not opened: the copies have no pictures. It is named at the top and the command exits 2.');
   if (t.run.loadFixtures) out.push('- **This run handed the engine the repository\'s fixture fonts as loaded fonts (Bangers, Comic Neue). It is not the report to sign.**');
   out.push('- "Before" is the file (position, size, height, flag) and Safari\'s capture `runs/ref-wk/base` (lines, block position, its own overflow check, the picture). "After" is the app\'s own open path under the Rust engine, in node.');
   out.push('- The answers of the app\'s native side (a system font\'s bytes, which installed font has a letter) are re-made in node from the same rules; they decide only the boxes of sections 4 and 5.');
@@ -455,6 +533,8 @@ function html(t, changed, borrowing, uris) {
   parts.push('<p>Measured on these chapters, with the switch on:</p>', table(openTable(t)));
   parts.push('<p>What the notice says for each chapter, read from the app\'s own count, beside this report\'s count:</p>', table(noticeTable(t)));
   parts.push('<h2>2. Per chapter</h2><p>A figure in brackets is the part that is not the engine: the file was already behind what the app does on open today.</p>', table(chapterTable(t)));
+  parts.push('<h3>The same files as a long strip</h3>', `<p>${esc(STRIP_WORDS)}</p>`, t.stripDiffers.length ? table(stripTable(t)) : '<p>None.</p>');
+  parts.push('<h3>Blocks that moved by their ink (rule 4), checked</h3>', `<p>${esc(INK_WORDS)}</p>`, t.inkShifts.length ? table(inkTable(t)) : '<p>None.</p>');
   parts.push('<h2>3. Every box that changes</h2>');
   const unexplained = changed.filter((b) => b.unexplained.length);
   parts.push(`<h3>Unexplained (${unexplained.length})</h3>`, unexplained.length ? `<ul>${unexplained.map((b) => `<li><a href="#${esc(b.id)}"><code>${esc(b.id)}</code></a>: ${esc(b.unexplained.join(', '))}</li>`).join('')}</ul>` : '<p>None.</p>');
@@ -487,7 +567,9 @@ function html(t, changed, borrowing, uris) {
   parts.push('<p>The document as the Rust engine left it, opened again with the switch off. Measured with the stand-in browser (Skia in node, smart-mode chapters only). The last two columns are inferred from Safari\'s capture: boxes the engine flags and Safari\'s check passes, and the reverse, among the boxes whose height did not change.</p>', table(backTable(t)));
   parts.push('<h2>7. How this was made</h2><ul>');
   parts.push(`<li>Engine: the wasm with sha256 <code>${esc(t.run.wasm)}</code>. Fonts: ${t.run.userFamilies} families of the user's, ${t.run.installedFamilies} installed families found on this Mac. Last resort: ${esc(t.run.lastResort)}.</li>`);
-  parts.push(`<li>A chapter saved before it carried its own mode was opened as <code>${esc(t.run.legacyMode ?? 'n/a')}</code>.</li>`);
+  parts.push(`<li>A chapter saved before it carried its own mode was opened as <code>${esc(t.run.legacyMode ?? 'n/a')}</code> (<code>--legacy-mode</code>). The tool has no default for it: the app opens such a chapter with what this machine's typesetting switch said when the build that added the field first ran, and the copies do not carry that.</li>`);
+  parts.push('<li>A stored box is matched to the box the open made of it by its place in the file. A stored box with no partner, or a box with text that has no layout, stops the run: no report is written from it.</li>');
+  parts.push('<li>A chapter with a page the app repairs from its picture on open (art replaced at another size, or no size) is not opened: the copies have no pictures. It is named at the top and the command exits 2.</li>');
   if (t.run.loadFixtures) parts.push('<li><b>This run handed the engine the repository\'s fixture fonts as loaded fonts (Bangers, Comic Neue). It is not the report to sign.</b></li>');
   parts.push('<li>"Before" is the file (position, size, height, flag) and Safari\'s capture <code>runs/ref-wk/base</code> (lines, block position, its own overflow check, the picture). "After" is the app\'s own open path under the Rust engine, in node.</li>');
   parts.push('<li>The answers of the app\'s native side (a system font\'s bytes, which installed font has a letter) are re-made in node from the same rules; they decide only the boxes of sections 4 and 5.</li>');
