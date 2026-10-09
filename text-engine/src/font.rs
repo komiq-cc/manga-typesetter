@@ -507,18 +507,32 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
     .find_map(|id| text(id).map(plain).filter(|s| !s.is_empty()))
     // A family written without ASCII still has usable instance identities.
     // A stated name does not depend on this prefix; unnamed places do.
-    .or_else(|| text(NameId::POSTSCRIPT_NAME).map(plain).filter(|s| !s.is_empty()))
+    .or_else(|| {
+        text(NameId::POSTSCRIPT_NAME)
+            .map(plain)
+            .filter(|s| !s.is_empty())
+    })
     .unwrap_or_else(|| "Font".to_string());
     let default_name = text(NameId::POSTSCRIPT_NAME).filter(|s| is_postscript_name(s));
     let bounded = |name: String| {
-        if name.len() > PS_NAME_MAX { last_resort_name(&prefix, &name) } else { name }
+        if name.len() > PS_NAME_MAX {
+            last_resort_name(&prefix, &name)
+        } else {
+            name
+        }
     };
     // Reserve the coordinate spelling and last-resort spelling for generated
     // places. A font may state either string for another named place.
     let reserved = |name: &str| {
         name.strip_prefix(&format!("{prefix}_"))
-            .is_some_and(|tail| tail.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.'))
-            || name.strip_prefix(&format!("{}-", &prefix[..prefix.len().min(PS_NAME_MAX - LAST_RESORT_TAIL)]))
+            .is_some_and(|tail| {
+                tail.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
+            })
+            || name
+                .strip_prefix(&format!(
+                    "{}-",
+                    &prefix[..prefix.len().min(PS_NAME_MAX - LAST_RESORT_TAIL)]
+                ))
                 .and_then(|tail| tail.strip_suffix("..."))
                 .is_some_and(|hash| hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
     };
@@ -547,9 +561,10 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
         .find(|inst| place(inst) == at)
         .and_then(|inst| candidate(&inst))
     {
-        let shared = default_name.as_ref() == Some(&name) || instances
-            .iter()
-            .any(|other| place(&other) != at && candidate(&other).as_ref() == Some(&name));
+        let shared = default_name.as_ref() == Some(&name)
+            || instances
+                .iter()
+                .any(|other| place(&other) != at && candidate(&other).as_ref() == Some(&name));
         if !shared {
             return Some(name);
         }
@@ -582,8 +597,12 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
     // A default ID 6 (or a long named style after capping) can itself be the
     // generated string. Keep the default's installed identity and move this
     // non-default place to a stable name hashed over its exact coordinates.
-    let collision = |name: &String| default_name.as_ref() == Some(name)
-        || instances.iter().any(|inst| candidate(&inst).as_ref() == Some(name));
+    let collision = |name: &String| {
+        default_name.as_ref() == Some(name)
+            || instances
+                .iter()
+                .any(|inst| candidate(&inst).as_ref() == Some(name))
+    };
     let mut salt = 0;
     while collision(&name) {
         name = last_resort_name(&prefix, &format!("{exact}#instance{salt}"));

@@ -730,8 +730,15 @@ fn default_named_and_unnamed_places_do_not_share_identities() {
     ] {
         let mut e = Engine::new();
         let mut names = vec![(6, default), (256, style)];
-        if let Some(stated) = stated { names.push((257, stated)); }
-        let font = named(&mut e, &axes, &[Named(256, vec![fx(700)], stated.map(|_| 257))], &names);
+        if let Some(stated) = stated {
+            names.push((257, stated));
+        }
+        let font = named(
+            &mut e,
+            &axes,
+            &[Named(256, vec![fx(700)], stated.map(|_| 257))],
+            &names,
+        );
         let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
         let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
         let names = [name(&e, font), name(&e, middle), name(&e, heavy)];
@@ -748,9 +755,12 @@ fn default_named_and_unnamed_places_do_not_share_identities() {
 #[test]
 fn non_ascii_families_do_not_suppress_stated_or_unnamed_instance_names() {
     let mut e = Engine::new();
-    let font = named(&mut e, &[Axis(b"wght", fx(100), fx(400), fx(900))],
+    let font = named(
+        &mut e,
+        &[Axis(b"wght", fx(100), fx(400), fx(900))],
         &[Named(256, vec![fx(700)], Some(257))],
-        &[(1, "漢字"), (256, "Heavy"), (257, "Test-Heavy")]);
+        &[(1, "漢字"), (256, "Heavy"), (257, "Test-Heavy")],
+    );
     let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
     let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
     assert_eq!(name(&e, heavy), "Test-Heavy");
