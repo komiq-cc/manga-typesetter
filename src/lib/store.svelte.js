@@ -1325,11 +1325,16 @@ function forgetRelaid(b) {
 // it as it shows any other; no edge is crossed, so every side reads 0. Never
 // written, and not a flag: `box.review` is not touched, `reviewOf` does not
 // answer with it, and the note goes with the notice.
-const RELAID = Object.freeze({ kind: 'overflow', overflow: Object.freeze({ l: 0, t: 0, r: 0, b: 0 }), reason: REVIEW_REASONS.relaid });
+//
+// Made when first asked for, not as the module loads: the reasons come from a
+// module that imports this one back, and are not there yet in every load order.
+let relaidFlag = null;
 function relaidNote(b) {
   if (!firstFit.open || firstFit.dismissed) return null;
   firstFit.seen;
-  return noted.get(b)?.relaid ? RELAID : null;
+  if (!noted.get(b)?.relaid) return null;
+  relaidFlag ??= Object.freeze({ kind: 'overflow', overflow: Object.freeze({ l: 0, t: 0, r: 0, b: 0 }), reason: REVIEW_REASONS.relaid });
+  return relaidFlag;
 }
 
 /**
