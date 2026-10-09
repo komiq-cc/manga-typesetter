@@ -1300,7 +1300,7 @@
         // with them while the box's face is arriving and these lines are a
         // stand-in's. `shaped` is null for curved and path text, which
         // auto-height does not fit either.
-        const floor = edgeDragFloor(box, shaped ? shaped.length : null, pg);
+        const floor = edgeDragFloor(box, dir, shaped ? shaped.length : null, pg);
         const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
         // From the first move, not from the press: a handle pressed and let
         // go changes nothing and must repaint nothing.

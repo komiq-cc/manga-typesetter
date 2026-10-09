@@ -86,6 +86,7 @@ import {
   REVIEW_REASONS,
 } from './contain.js';
 import { neededHeight, growToFit, hasHangul } from './typeset.js';
+import { takesHeightFloor } from './resize-math.js';
 // The pixel half of balloon fitting, and the two halves of getting pixels to it.
 // `balloon.js` is pure and knows nothing about this app; `page-pixels.js` is the
 // app's answer to "where do the pixels come from", and it answers null wherever
@@ -3081,8 +3082,11 @@ function holdFit(b) {
   fitsAwaitingFace.add(b);
   fitsAwaited++;
 }
-// How short a drag of a box's top or bottom edge may leave it (the corner
-// drags scale the type and take no floor: resize-math.js). Auto height keeps
+// How short a drag of the handle `dir` may leave a box. That is a matter for
+// the top and bottom edges only (`takesHeightFloor`, resize-math.js: a corner
+// scales the type and takes no floor, a left or right edge leaves the height
+// alone); for any other handle it is the plain minimum and nothing else
+// happens here. Auto height keeps
 // its promise through the drag - an edge can make the box roomier, never
 // shorter than its text - so the floor is what `lineCount` lines need, capped
 // at the page as the fit itself is, and the plain minimum for a box that is
@@ -3093,11 +3097,15 @@ function holdFit(b) {
 // in a stand-in, and a floor taken from it is a height nobody chose written
 // into the document by a one-pixel drag - upward, which is never undone. So
 // then the floor is the plain minimum, and the fit is held for when the face
-// lands, as an edit's is. With no font source `faceArriving` is always false
-// and this is the number the drag always used.
+// lands, as an edit's is - only then: a fit is owed where a floor stood down,
+// and a drag that takes none has stood nothing down. A fit held for a corner
+// drag re-set the box when the face landed, to a width and a place the user
+// had not chosen. With no font source `faceArriving` is always false and this
+// is the number the drag always used.
 export const EDGE_DRAG_MIN = 30;
-export function edgeDragFloor(b, lineCount, p = page()) {
+export function edgeDragFloor(b, dir, lineCount, p = page()) {
   const s = b?.style;
+  if (!takesHeightFloor(dir)) return EDGE_DRAG_MIN;
   if (!s || s.autoHeight === false || lineCount == null) return EDGE_DRAG_MIN;
   if (faceArriving(s)) {
     holdFit(b);
