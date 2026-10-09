@@ -972,6 +972,16 @@
   // way on the page, and here it is too.
   const stackTransform = $derived(inkShift ? `transform:translateY(${inkShift}px);` : '');
 
+  // ---- what a screen reader is told while the box is the engine's picture ----
+  //
+  // With the switch off the words are text nodes and are read as such. As a
+  // picture they are pixels on a canvas that is hidden from the accessibility
+  // tree, so the box says them itself: its text as its name, and the role a
+  // name needs (one on a plain div is not announced). Only then - typed into,
+  // or with the switch off, the text is in the document and a name over it
+  // would be read twice.
+  const spoken = $derived(engineShown && text ? text : null);
+
   // ---- what takes the pointer while the box is the engine's picture ----
   //
   // With the switch off the letters are elements, and a press on one selects
@@ -1918,6 +1928,8 @@
   class:flagged={!!review}
   data-id={box.id}
   style={boxStyle}
+  role={spoken ? 'group' : undefined}
+  aria-label={spoken ?? undefined}
   onpointerdown={onBoxPointerDown}
   ondblclick={onDblClick}
 >

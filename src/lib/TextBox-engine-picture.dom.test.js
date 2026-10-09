@@ -582,6 +582,43 @@ describe('a box nobody can see', () => {
   });
 });
 
+describe('what a screen reader is told while the box is a picture', () => {
+  // The words are pixels then: the canvas is hidden from the accessibility
+  // tree and there is no text node. The box itself says them.
+  it('the box carries its text as its name, and a role that may have one', async () => {
+    const m = await mounted('straight');
+    expect(m.root.getAttribute('aria-label')).toBe('WAIT FOR ME\nOVER THERE');
+    expect(m.root.getAttribute('role')).toBe('group');
+    expect(m.canvas().getAttribute('aria-hidden')).toBe('true');
+  });
+  it('the name follows the text', async () => {
+    const m = await mounted('arc');
+    m.box.text = 'SOMETHING ELSE';
+    await tick();
+    expect(m.root.getAttribute('aria-label')).toBe('SOMETHING ELSE');
+  });
+  it('typed into, the text is in the document again and the box says nothing of its own', async () => {
+    const m = await mounted('straight');
+    beginEdit('straight');
+    await tick();
+    expect(m.root.hasAttribute('aria-label')).toBe(false);
+    expect(m.root.hasAttribute('role')).toBe(false);
+  });
+  it('with the switch off there is neither: the letters are elements', async () => {
+    engineSwitch.painting = false;
+    const m = await mounted('straight');
+    expect(m.root.hasAttribute('aria-label')).toBe(false);
+    expect(m.root.hasAttribute('role')).toBe(false);
+  });
+  it('a box with no text has no name to give', async () => {
+    const m = await mounted('straight');
+    m.box.text = '';
+    await tick();
+    expect(m.root.hasAttribute('aria-label')).toBe(false);
+    expect(m.root.hasAttribute('role')).toBe(false);
+  });
+});
+
 describe('what takes the pointer while the box is a picture', () => {
   // The canvas takes none (it is `.warpl`, and its footprint has padding that
   // would take clicks meant for what is under it). With the switch off the
