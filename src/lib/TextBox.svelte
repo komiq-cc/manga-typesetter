@@ -1973,6 +1973,11 @@
   function onEditBeforeInput(e) {
     const t = e.inputType;
     if (e.isComposing || t.includes('Composition')) return;
+    // On a picture, while a composition is open the text is the IME's and the
+    // browser's (`composing`: an input can arrive in the middle of one without
+    // saying so). Nothing is cut from the picture's rows then, and the box's
+    // text is not written under the composition.
+    if (typing && composing) return;
     e.preventDefault();
     const node = e.currentTarget;
     if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
@@ -2038,8 +2043,14 @@
     endEdit(e.currentTarget.textContent);
   }
   function onEditKey(e) {
-    if (typeFlat && !composing && !e.isComposing && typeKey(e)) return;
-    if ((curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
+    // No key the picture answers moves the caret or cuts text while a
+    // composition is open; and a key can arrive in the middle of one without
+    // `isComposing`, so the composition's own start and end are asked too.
+    // (With the switch off a curve's keys are what they were; and undo and
+    // Escape, below, are as they were with either.)
+    const open = typing && (composing || e.isComposing);
+    if (!open && typeFlat && typeKey(e)) return;
+    if (!open && (curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       stepField(e.currentTarget, e.shiftKey);
@@ -2124,15 +2135,20 @@
     // handlers are what they were.)
     const mine = (ev) => !typing || ev.pointerId === e.pointerId;
     const move = (ev) => mine(ev) && setRawSel(anchor, curveOffset(el, ev));
+    // And it is over when the browser takes the pointer back, as when the
+    // button is let go: a release outside the curve is never heard here.
+    const pictured = typing;
     const up = (ev) => {
       if (!mine(ev)) return;
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', up);
+      if (pictured) el.removeEventListener('lostpointercapture', up);
     };
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
     el.addEventListener('pointercancel', up);
+    if (pictured) el.addEventListener('lostpointercapture', up);
   }
 
   // A double-click selects the word, and is the box's no further: the box's

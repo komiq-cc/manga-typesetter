@@ -1418,3 +1418,186 @@ describe('while keys are coming a large box is painted within a smaller budget',
     expect(set.mock.calls.filter((c) => c[1] === 150)).toHaveLength(0);
   });
 });
+
+// ===========================================================================
+// Third round
+// ===========================================================================
+
+describe('while an IME composes, nothing the picture answers moves the caret or changes the text', () => {
+  let was;
+  beforeEach(() => {
+    was = isMacKeyboard();
+    setMacKeyboard(true);
+  });
+  afterEach(() => setMacKeyboard(was));
+  const composition = (m, type) => m.editable().dispatchEvent(new CompositionEvent(type, { bubbles: true }));
+  // Every key the picture's rows, or a curve's glyphs, answer. Each arrives
+  // WITHOUT `isComposing`, as a key can in the middle of a composition: the
+  // one thing that says so is that a composition was started and has not ended.
+  const KEYS = [
+    ['k', { ctrlKey: true }], ['e', { ctrlKey: true }], ['a', { ctrlKey: true }], ['n', { ctrlKey: true }], ['p', { ctrlKey: true }],
+    ['f', { ctrlKey: true }], ['b', { ctrlKey: true }], ['v', { ctrlKey: true }], ['ArrowLeft', { ctrlKey: true }],
+    ['ArrowDown', { altKey: true }], ['ArrowUp', { altKey: true }], ['PageDown', { altKey: true }], ['ArrowDown', { altKey: true, shiftKey: true }],
+    ['ArrowUp', {}], ['ArrowDown', {}], ['ArrowLeft', {}], ['ArrowRight', {}], ['Home', {}], ['End', {}], ['End', { shiftKey: true }],
+    ['ArrowLeft', { metaKey: true }], ['ArrowDown', { metaKey: true }], ['PageUp', {}],
+  ];
+
+  it.each(['arc', 'upperArc', 'wrapped', 'plain'])('%s: no key, no line delete, no press', async (id) => {
+    const m = await typing(id);
+    const text = m.box.text;
+    nativeSel(m, 4);
+    await tick();
+    composition(m, 'compositionstart');
+    for (const [k, more] of KEYS) {
+      const ev = key(m, k, more);
+      const say = `${Object.keys(more).join('+')} ${k}`;
+      expect(ev.defaultPrevented, say).toBe(false);
+      expect(m.sel(), say).toEqual([4, 4]);
+      await tick();
+      expect(m.box.text, say).toBe(text);
+    }
+    // A delete to the line's start or end is not cut from the picture's rows
+    // either: it is the browser's, in the text it is composing in.
+    for (const t of ['deleteSoftLineBackward', 'deleteHardLineBackward', 'deleteSoftLineForward', 'deleteHardLineForward']) {
+      expect(input(m, t).defaultPrevented, t).toBe(false);
+      await tick();
+      expect(m.box.text, t).toBe(text);
+      expect(m.sel(), t).toEqual([4, 4]);
+    }
+    // Nor does a press, a double press or the right button.
+    const el = m.q('.curve-edit, .type-edit');
+    for (const [type, more] of [['pointerdown', {}], ['pointerdown', { button: 2 }], ['mousedown', { detail: 2 }], ['dblclick', {}]]) {
+      el.dispatchEvent(ptr(type, m, 150, 30, 1, more));
+      expect(m.sel(), type).toEqual([4, 4]);
+      expect(el.classList.contains('ctx'), type).toBe(false);
+    }
+    el.dispatchEvent(ptr('pointerup', m, 150, 30, 1));
+    // The composition over, the keys are the picture's again.
+    vi.useFakeTimers();
+    try {
+      composition(m, 'compositionend');
+      vi.runAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
+    await tick();
+    nativeSel(m, 4);
+    const ev = key(m, 'e', { ctrlKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+    expect(m.sel()[0]).toBeGreaterThan(4);
+    expect(m.box.text).toBe(text);
+  });
+
+  it('with the switch off a curve takes its keys as it did, composing or not', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    nativeSel(m, 4);
+    composition(m, 'compositionstart');
+    expect(key(m, 'End').defaultPrevented).toBe(true);
+    expect(m.sel()).toEqual([11, 11]);
+  });
+});
+
+describe('a curve drag whose pointer the browser took back is over', () => {
+  it('nothing goes on selecting after the capture is lost, and another pointer losing its own ends nothing', async () => {
+    const m = await typing('arc');
+    const g = typeModel(m.box, boxText(m.box)).glyphs;
+    const el = m.q('.curve-edit');
+    el.dispatchEvent(ptr('pointerdown', m, ...onGlyph(m, g[2]), 1));
+    const from = m.sel();
+    // Another pointer's capture going is not this drag's.
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[6]), 1));
+    const held = m.sel();
+    expect(held[0]).toBe(from[0]);
+    expect(held[1]).toBeGreaterThan(from[1] + 2);
+    // Its own: the button is let go somewhere the curve never hears of.
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[9]), 1));
+    expect(m.sel()).toEqual(held);
+    el.dispatchEvent(ptr('pointermove', m, ...onGlyph(m, g[1]), 1));
+    expect(m.sel()).toEqual(held);
+  });
+
+  it('and so is one on straight text', async () => {
+    const m = await typing('plain');
+    const rows = rowsOf(m.box);
+    const el = m.q('.type-edit');
+    el.dispatchEvent(ptr('pointerdown', m, rows[0].xs[1] + 1, rows[0].top + 5, 1));
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 2));
+    el.dispatchEvent(ptr('pointermove', m, rows[0].xs[6] + 1, rows[0].top + 5, 1));
+    expect(m.sel()).toEqual([1, 6]);
+    el.dispatchEvent(ptr('lostpointercapture', m, 0, 0, 1));
+    el.dispatchEvent(ptr('pointermove', m, rows[1].xs[3] + 1, rows[1].top + 5, 1));
+    expect(m.sel()).toEqual([1, 6]);
+  });
+
+  it('with the switch off a curve has the listeners it had, and no other', async () => {
+    engineSwitch.painting = false;
+    const m = await typing('arc');
+    const el = m.q('.curve-edit');
+    const add = vi.spyOn(el, 'addEventListener');
+    try {
+      el.dispatchEvent(ptr('pointerdown', m, 150, 30, 1));
+      expect(add.mock.calls.map((c) => c[0]).sort()).toEqual(['pointercancel', 'pointermove', 'pointerup']);
+    } finally {
+      add.mockRestore();
+    }
+  });
+});
+
+describe('the system\'s menu leaves nothing listening', () => {
+  // Every listener for the menu event put on the window and not taken off again.
+  function listening() {
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    const same = (a, b) => a[0] === b[0] && a[1] === b[1] && !!(a[2]?.capture ?? a[2]) === !!(b[2]?.capture ?? b[2]);
+    return {
+      added: () => add.mock.calls.filter((c) => c[0] === 'contextmenu').length,
+      left: () => add.mock.calls.filter((c) => c[0] === 'contextmenu' && !remove.mock.calls.some((r) => same(c, r))).length,
+      restore: () => (add.mockRestore(), remove.mockRestore()),
+    };
+  }
+
+  it.each(['plain', 'arc'])('%s: none after the menu event, and none after the second it waits when no menu comes', async (id) => {
+    vi.useFakeTimers();
+    const on = listening();
+    try {
+      const m = await typing(id);
+      const el = m.q('.curve-edit, .type-edit');
+      el.dispatchEvent(ptr('pointerdown', m, 150, 30, 1));
+      el.dispatchEvent(ptr('pointerup', m, 150, 30, 1));
+      const menu = () => el.dispatchEvent(ptr('pointerdown', m, 60, 30, 1, { button: 2 }));
+      // The menu comes.
+      menu();
+      expect(on.added()).toBe(1);
+      expect(on.left()).toBe(1);
+      window.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      vi.runAllTimers();
+      expect(on.left()).toBe(0);
+      // No menu comes: the second passes.
+      menu();
+      expect(on.added()).toBe(2);
+      expect(on.left()).toBe(1);
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      // Two right presses, one after the other, before either is over.
+      menu();
+      menu();
+      expect(on.added()).toBe(4);
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      // And the edit ending while it stands aside.
+      menu();
+      endEdit(m.editable().textContent);
+      await tick();
+      vi.advanceTimersByTime(1000);
+      expect(on.left()).toBe(0);
+      expect(on.added()).toBe(5);
+    } finally {
+      on.restore();
+      vi.useRealTimers();
+    }
+  });
+});
+
