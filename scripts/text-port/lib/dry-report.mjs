@@ -112,6 +112,19 @@ export function inkMoved(row, c) {
   return Math.abs(c.ink.predictedDy - c.blockDy) <= INK_TOL_PX;
 }
 
+// Two tops this near are one top: what `(y + top) - top` loses.
+const STRIP_NOISE_PX = 1e-6;
+
+// One box as the pages open left it against the same box opened as a long
+// strip: 'same', 'noise' (it differs by less than the strip's own arithmetic:
+// a top edge that went into the strip's coordinates and back differs from
+// itself in the last bits) or 'differs'. A flag is never noise.
+export function stripAgainst(pages, strip) {
+  const keys = ['x', 'y', 'w', 'h', 'size'];
+  if (!!strip.review !== !!pages.review || keys.some((k) => Math.abs(strip[k] - pages[k]) > STRIP_NOISE_PX)) return 'differs';
+  return keys.some((k) => strip[k] !== pages[k]) ? 'noise' : 'same';
+}
+
 // G6 for one box as an open left it: nothing across, and no height lost.
 const breach = (stored, after) => after.x !== stored.x || after.w !== stored.w || (stored.size != null && after.size !== stored.size) || after.h < stored.h || (after.y !== stored.y && !(after.h > stored.h));
 
@@ -122,7 +135,7 @@ const blank = () => ({
   newlyFlagged: 0, newlyFlaggedNotEngine: 0, unflagged: 0, unflaggedNotEngine: 0, flaggedBefore: 0, flaggedAfter: 0,
   lines: 0, moved: 0, movedOver2: 0, movedAlone: 0, movedByInk: 0, missing: 0, borrows: 0, changed: 0, unexplained: 0,
   // The same open as a long strip: boxes that come out differently, and G6 there.
-  stripDiffers: 0, stripBreach: 0, idsRepaired: 0,
+  stripDiffers: 0, stripNoise: 0, stripBreach: 0, idsRepaired: 0,
   back: { run: 0, grew: 0, newlyFlagged: 0, unflagged: 0, x: 0, w: 0, size: 0 },
   safariBack: { newlyFlagged: 0, unflagged: 0 },
 });
@@ -191,10 +204,11 @@ export async function writeReport({ data, out }) {
     const c = changeOf({ id: row.id, stored: row, rust: row.rust, wk: w, font: row.fontFacts });
     // The same file opened as a long strip.
     const a = row.rust.state;
-    if (['x', 'y', 'w', 'h', 'size'].some((k) => row.strip[k] !== a[k]) || !!row.strip.review !== !!a.review) {
+    const asStrip = stripAgainst(a, row.strip);
+    if (asStrip === 'differs') {
       t.stripDiffers++;
       stripList.push({ id: row.id, pages: { y: a.y, h: a.h, flagged: !!a.review }, strip: { y: row.strip.y, h: row.strip.h, flagged: !!row.strip.review } });
-    }
+    } else if (asStrip === 'noise') t.stripNoise++;
     if (breach(row, row.strip)) t.stripBreach++;
     if (c.compared) t.compared++;
     for (const k of ['x', 'w', 'size', 'shrank', 'grew', 'newlyFlagged', 'unflagged', 'lines', 'moved', 'missing', 'borrows']) if (c[k]) t[k]++;
@@ -366,7 +380,7 @@ function summaryLines(t) {
   lines.push(`Boxes newly flagged "needs review": **${t.total.newlyFlagged}** (${t.total.newlyFlaggedNotEngine} of them already overflow in Safari today and only lacked the flag in the file). Boxes no longer flagged: **${t.total.unflagged}** (${t.total.unflaggedNotEngine} of them pass Safari's check today as well).`);
   lines.push(`Boxes whose line breaks changed: **${t.total.lines}** of ${t.total.compared} compared.`);
   lines.push(`Boxes whose text block sits more than ${MOVED_PX} px from where Safari puts it: ${t.total.moved} (${t.total.movedOver2} by more than 2 px). In ${t.total.movedAlone} of them nothing else of the box changed; ${t.total.movedByInk} of those moved by the two engines' ink boxes, each checked: the shift the ink boxes predict is the shift seen, within ${INK_TOL_PX} px.`);
-  lines.push(`The same files opened as a long strip (the project's layout is not in the copies; it decides how far a box may grow): ${t.total.stripDiffers} boxes come out differently. Width, size or position across changed, or a height lost, as a long strip: **${t.total.stripBreach}**.`);
+  lines.push(`The same files opened as a long strip (the project's layout is not in the copies; it decides how far a box may grow): ${t.total.stripDiffers} boxes come out differently, each a box that grew (listed below). ${t.total.stripNoise} more differ only in the last bits of their top edge (under ${STRIP_NOISE_PX} px: the strip's arithmetic), each also a box that grew. Width, size or position across changed, a height lost, or a top edge moved without its height, as a long strip: **${t.total.stripBreach}**.`);
   lines.push(`Boxes whose id the load repairs (none, or one another box has): ${t.total.idsRepaired}. Every stored box is matched to the box the open made of it by its place in the file.`);
   lines.push(`Boxes set in a font this machine does not have: **${t.fontsToLoad.reduce((n, f) => n + f.boxes, 0)}** (${t.fontsToLoad.reduce((n, f) => n + f.withText, 0)} with text), in ${t.fontsToLoad.length} families (listed below: these are the font files to load). Boxes that borrow a letter from another font: ${t.total.borrows}.`);
   lines.push(`Boxes stored as placed but never laid out (\`pending\`), the one kind an open may lay out afresh: **${t.total.pending}**.`);

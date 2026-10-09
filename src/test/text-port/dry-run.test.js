@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { at, storedIds, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
-import { explain, inkMoved } from '../../../scripts/text-port/lib/dry-report.mjs';
+import { explain, inkMoved, stripAgainst } from '../../../scripts/text-port/lib/dry-report.mjs';
 
 // The dry run of P9 (scripts/text-port/dry-run.mjs) says "0 boxes changed
 // their width" and "0 changes unexplained" of the user's chapters. These are
@@ -117,5 +117,22 @@ describe('a flag the open raises or clears', () => {
     const cleared = rowOf(layOf(), { review: { reason: 'no longer fits', overflow: over, stored: true } });
     expect(cause(cleared, wkOf({ verdict: { fits: false, overflow: over } }), 'unflagged').rule).toBe('rule 4');
     expect(cause(cleared, null, 'unflagged').cause).toBe(null);
+  });
+});
+
+describe('the same box opened as a long strip', () => {
+  const pages = { x: 10, y: 214.97986469072166, w: 200, h: 48, size: 20, review: null };
+  it('is the same box when nothing differs', () => {
+    expect(stripAgainst(pages, { ...pages })).toBe('same');
+  });
+  it('differs only by the strip\'s arithmetic when its top came back in other last bits', () => {
+    expect(stripAgainst(pages, { ...pages, y: 214.97986469072157 })).toBe('noise');
+  });
+  it('differs when a number does: a top the page held at its edge and the strip did not', () => {
+    expect(stripAgainst({ ...pages, y: 0 }, { ...pages, y: -15.85 })).toBe('differs');
+    expect(stripAgainst(pages, { ...pages, h: 48.01 })).toBe('differs');
+  });
+  it('differs when the flag does, whatever the numbers', () => {
+    expect(stripAgainst(pages, { ...pages, review: { reason: 'overflow' } })).toBe('differs');
   });
 });
