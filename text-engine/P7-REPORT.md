@@ -889,7 +889,12 @@ figures were 3,437 tests, 103 Rust tests, 1072 of 1072.)
 The captures, the suite and the build were run at `d32b28f`. The one later
 commit before this report (`a4859f3`) touches only the check script and the
 check page, which neither the suite, the build nor the capture reads; the
-suite and the build were run once more after it with the same figures.
+suite and the build were run again on the final tree. The build built. The
+suite's first run there, with the load average at 42, had three tests time
+out (two of `src/test/text-port/compare/cli.test.js` at 5 s and
+`solver-perf.realfont.test.js` at 60 s, none of them this task's) and one
+worker timeout; run again with the load average at 16 it passed with the
+figures above.
 
 The first whole 2x run of the check had one failure, in `type2`: "while
 keys are coming it is painted within a megapixel" read 8.39 MP. The script
