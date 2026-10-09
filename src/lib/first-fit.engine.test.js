@@ -266,10 +266,16 @@ describe('a version 1 chapter opened with the Rust engine on', () => {
   it('is written by Keep: the grown heights, and the one integer', async () => {
     await useTextEngine('rust');
     const old = await record();
+    const before = await digest();
     await openChapter(p.id, c.id);
     await _engineSwitchSync().settled();
     const grown = boxes().map((b) => ({ id: b.id, x: b.x, y: b.y, w: b.w, h: b.h }));
     await keepFirstFit();
+    // What every save writes, and no other file of the chapter's: the
+    // record, and the translations derived from it.
+    const after = await digest();
+    expect(Object.keys(after).filter((name) => after[name] !== before[name]).sort()).toEqual(['/chapter.json', '/translations.json']);
+    expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
     const rec = await record();
     expect(rec.typesetting).toEqual({ mode: 'smart', version: 2 });
     expect(rec.pages[0].boxes.map((b) => ({ id: b.id, x: b.x, y: b.y, w: b.w, h: b.h }))).toEqual(grown);

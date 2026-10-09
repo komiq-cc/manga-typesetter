@@ -4,7 +4,7 @@
 // engine. See src/lib/text-port-dryrun.realfont.test.js for what is run and
 // lib/dry-report.mjs for what is written.
 //
-//   node scripts/text-port/dry-run.mjs --data <tp-data> --out <dir> [--legacy-mode smart|plain]
+//   node scripts/text-port/dry-run.mjs --data <tp-data> --out <dir> [--legacy-mode smart|plain] [--load-fixtures yes]
 //
 // Reads `<data>/chapters/*.json` (copies), `<data>/fonts/` and Safari's
 // capture `<data>/runs/ref-wk/base`. Writes only under `--out`:
@@ -18,6 +18,12 @@
 //
 // `--legacy-mode` is what a chapter saved before it carried its own mode is
 // opened with (the machine's frozen preference; the corpus was cut with smart).
+//
+// `--load-fixtures yes` hands the Rust engine the repository's fixture fonts
+// too, as fonts the user has loaded. They carry the names of two former
+// built-ins (Bangers, Comic Neue), so this is the run that says what is left
+// once those are loaded. Not the report to sign: the user's machine has no
+// such files.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -25,7 +31,7 @@ import { flags, root, dataDir } from './lib/common.mjs';
 import { writeReport } from './lib/dry-report.mjs';
 
 try {
-  const args = flags(['--data', '--out', '--legacy-mode', '--report-only']);
+  const args = flags(['--data', '--out', '--legacy-mode', '--report-only', '--load-fixtures']);
   if (!args.out) throw new Error('--out <dir> is required');
   const data = dataDir(args.data);
   const out = resolve(args.out);
@@ -36,7 +42,7 @@ try {
     const run = spawnSync(
       `${root}node_modules/.bin/vitest`,
       ['run', '--project', 'realfont', 'src/lib/text-port-dryrun.realfont.test.js'],
-      { cwd: root, env: { ...process.env, TP_DRYRUN: '1', TP_DATA: data, TP_OUT: out, TP_LEGACY_MODE: args['legacy-mode'] ?? '' }, stdio: 'inherit' },
+      { cwd: root, env: { ...process.env, TP_DRYRUN: '1', TP_DATA: data, TP_OUT: out, TP_LEGACY_MODE: args['legacy-mode'] ?? '', TP_LOAD_FIXTURES: args['load-fixtures'] === 'yes' ? '1' : '' }, stdio: 'inherit' },
     );
     if (run.error) throw run.error;
     if (run.status !== 0) throw new Error(`the dry run's lane failed (exit ${run.status})`);

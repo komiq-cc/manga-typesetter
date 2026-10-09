@@ -63,6 +63,11 @@ if (process.env.TP_DRYRUN !== '1') {
     // browser fetches those and the Rust engine has no bytes for them. So the
     // fixtures go to the stand-in browser, which draws them as the app's
     // browser does, and never to the Rust engine.
+    //
+    // Unless asked (`--load-fixtures`): then they are handed over as fonts
+    // the user has loaded, which is the question "what is left of this
+    // report once I load Bangers and Comic Neue".
+    const loadFixtures = process.env.TP_LOAD_FIXTURES === '1';
     const list = JSON.parse(readFileSync(guardedPath(data, 'fonts/fonts.json')));
     const userFaces = [];
     const browserFamilies = new Set();
@@ -74,7 +79,7 @@ if (process.env.TP_DRYRUN !== '1') {
         if (!GlobalFonts.registerFromPath(path, f.family)) throw new Error(`Cannot register font ${path} as '${f.family}'`);
       }
       browserFamilies.add(f.family);
-      if (!FIXTURE_SOURCE.test(f.source)) userFaces.push({ name: f.family, slot: f.slot, data: new Uint8Array(bytes) });
+      if (loadFixtures || !FIXTURE_SOURCE.test(f.source)) userFaces.push({ name: f.family, slot: f.slot, data: new Uint8Array(bytes) });
     }
 
     const store = await import('./store.svelte.js');
@@ -100,7 +105,10 @@ if (process.env.TP_DRYRUN !== '1') {
     const installed = scanInstalled();
     const native = nativeStandIn(installed);
     app.fonts = {
-      builtin: dataJs.BUILTIN_FONTS.slice(),
+      // A family handed over as loaded is not also a built-in: the app
+      // refuses a user font under a built-in's name while that list stands
+      // (fonts.js), so this is the state after the list has gone.
+      builtin: dataJs.BUILTIN_FONTS.filter((f) => !groups.has(f.name)),
       user: [...groups.values()],
       system: systemList(installed).map((f) => fonts.systemFontEntry(f)),
     };
@@ -378,7 +386,7 @@ if (process.env.TP_DRYRUN !== '1') {
     const asked = Object.fromEntries([...native.asked].sort((a, b) => a[0] - b[0]).map(([cp, family]) => [`U+${cp.toString(16).toUpperCase().padStart(4, '0')}`, family]));
     const builtinNames = dataJs.BUILTIN_FONTS.map((f) => f.name);
     writeFileSync(`${out}/raw/run.json`, JSON.stringify({
-      wasm: sha256(wasm), legacyMode: legacyMode || null,
+      wasm: sha256(wasm), legacyMode: legacyMode || null, loadFixtures,
       userFamilies: groups.size, userFaces: userFaces.length, installedFamilies: installed.size,
       lastResort, systemFacesServed: served, lettersAsked: asked,
       builtinInstalled: builtinNames.filter((n) => installed.has(n)),

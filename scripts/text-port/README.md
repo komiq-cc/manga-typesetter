@@ -269,7 +269,7 @@ Chromium and in Safari against node; 32 of the 174 with a host step.
 ## Old chapters under the Rust engine
 
 ```
-node scripts/text-port/dry-run.mjs --data <dir> --out <dir> [--legacy-mode smart|plain]
+node scripts/text-port/dry-run.mjs --data <dir> --out <dir> [--legacy-mode smart|plain] [--load-fixtures yes]
 ```
 
 Opens every chapter copy the way the app opens one, with the switch on, and
@@ -280,7 +280,10 @@ Safari's capture `runs/ref-wk/base`; "after" is the store's own load, the real
 switch, the wasm and the user's fonts, in node. It also reads the counts the
 app's notice would show, and what leaving, Keep and a save back under the
 browser write. Reads copies only and writes only under `--out`; two runs give
-the same bytes. Exit code 2 when a box changed its x, width or size, a
+the same bytes. `--load-fixtures yes` also hands the engine the repository's
+fixture fonts as loaded fonts (they carry the names of two former built-ins,
+Bangers and Comic Neue): what is left of the report once those are loaded.
+Exit code 2 when a box changed its x, width or size, a
 height shrank, or a top edge moved without its height growing (gate G6); 1
 when the run failed.
 

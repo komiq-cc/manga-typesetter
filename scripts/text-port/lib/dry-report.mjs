@@ -222,7 +222,7 @@ export async function writeReport({ data, out }) {
   }
 
   const totals = {
-    run: { wasm: run.wasm, legacyMode: run.legacyMode, userFamilies: run.userFamilies, installedFamilies: run.installedFamilies, lastResort: run.lastResort, safariCases: run.wkCases },
+    run: { wasm: run.wasm, legacyMode: run.legacyMode, loadFixtures: !!run.loadFixtures, userFamilies: run.userFamilies, installedFamilies: run.installedFamilies, lastResort: run.lastResort, safariCases: run.wkCases },
     total, chapters,
     fontsToLoad: missingList, borrowing: borrowing.length,
     lettersAsked: run.lettersAsked, systemFacesServed: run.systemFacesServed,
@@ -434,6 +434,7 @@ function markdown(t, changed, borrowing) {
   out.push('## 7. How this was made', '');
   out.push(`- Engine: the wasm with sha256 \`${t.run.wasm}\`. Fonts: ${t.run.userFamilies} families of the user's, ${t.run.installedFamilies} installed families found on this Mac. Last resort: ${t.run.lastResort}.`);
   out.push(`- A chapter saved before it carried its own mode was opened as \`${t.run.legacyMode ?? 'n/a'}\`.`);
+  if (t.run.loadFixtures) out.push('- **This run handed the engine the repository\'s fixture fonts as loaded fonts (Bangers, Comic Neue). It is not the report to sign.**');
   out.push('- "Before" is the file (position, size, height, flag) and Safari\'s capture `runs/ref-wk/base` (lines, block position, its own overflow check, the picture). "After" is the app\'s own open path under the Rust engine, in node.');
   out.push('- The answers of the app\'s native side (a system font\'s bytes, which installed font has a letter) are re-made in node from the same rules; they decide only the boxes of sections 4 and 5.');
   out.push('- System faces handed to the engine: ' + (Object.entries(t.systemFacesServed).map(([f, s]) => `${f} (${Object.keys(s).join(', ')})`).join('; ') || 'none') + '.');
@@ -487,6 +488,7 @@ function html(t, changed, borrowing, uris) {
   parts.push('<h2>7. How this was made</h2><ul>');
   parts.push(`<li>Engine: the wasm with sha256 <code>${esc(t.run.wasm)}</code>. Fonts: ${t.run.userFamilies} families of the user's, ${t.run.installedFamilies} installed families found on this Mac. Last resort: ${esc(t.run.lastResort)}.</li>`);
   parts.push(`<li>A chapter saved before it carried its own mode was opened as <code>${esc(t.run.legacyMode ?? 'n/a')}</code>.</li>`);
+  if (t.run.loadFixtures) parts.push('<li><b>This run handed the engine the repository\'s fixture fonts as loaded fonts (Bangers, Comic Neue). It is not the report to sign.</b></li>');
   parts.push('<li>"Before" is the file (position, size, height, flag) and Safari\'s capture <code>runs/ref-wk/base</code> (lines, block position, its own overflow check, the picture). "After" is the app\'s own open path under the Rust engine, in node.</li>');
   parts.push('<li>The answers of the app\'s native side (a system font\'s bytes, which installed font has a letter) are re-made in node from the same rules; they decide only the boxes of sections 4 and 5.</li>');
   parts.push(`<li>System faces handed to the engine: ${esc(Object.entries(t.systemFacesServed).map(([f, s]) => `${f} (${Object.keys(s).join(', ')})`).join('; ') || 'none')}.</li></ul>`);
