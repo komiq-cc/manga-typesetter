@@ -347,3 +347,38 @@ fn line_fonts_also_refuses_a_freed_chain_without_touching_caller_memory() {
         }
     }
 }
+
+#[cfg(feature = "paint")]
+#[test]
+fn painter_validates_chains_before_every_no_paint_return_and_recovers() {
+    use mt_text::paint::{paint_job, Affine, Align, Fill, Job, Request, Rgba, Run};
+    let mut engine = Engine::new();
+    let font = load(&mut engine, "ComicNeue-Regular.ttf");
+    let empty = engine.chain_new();
+    let gone = engine.chain_new();
+    assert!(engine.chain_free(gone));
+    for (texts, size, transform, fill) in [
+        (vec![], 30., Affine::IDENTITY, true),
+        (vec!["WAIT!"], 0., Affine::IDENTITY, true),
+        (vec!["WAIT!"], 30., Affine([0.; 6]), true),
+        (vec![""], 30., Affine::IDENTITY, true),
+        (vec!["WAIT!"], 30., Affine::IDENTITY, false),
+    ] {
+        let mut request = Request {
+            face: Face::new(font, size), bold_draw: None, weight: 0., transform, tiles: vec![],
+            job: Job { curved: false, align: Align::Left, letter_spacing: 0., bands: vec![], silhouette: None,
+                fill: fill.then_some(Fill::Solid(Rgba([0, 0, 0, 255]))),
+                runs: texts.into_iter().map(|text| Run { text: text.into(), x: 10., y: 50., rot: 0., fill: None }).collect() },
+        };
+        for chain in [0, empty] {
+            request.face.chain = chain;
+            assert!(paint_job(&mut engine, &request).unwrap().is_none());
+        }
+        for chain in [65535, gone] {
+            request.face.chain = chain;
+            assert_eq!(paint_job(&mut engine, &request).err(), Some(Error::UnknownFont));
+        }
+        request.face.chain = empty;
+        assert!(paint_job(&mut engine, &request).unwrap().is_none());
+    }
+}

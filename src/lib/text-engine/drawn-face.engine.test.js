@@ -1,12 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { rustEngine, fixtureFont } from '../../test/rust-engine.js';
-import { blankName } from '../../test/variable-fixture.js';
+import { blankName, withTables, nameTable } from '../../test/variable-fixture.js';
 import { createRustGlyphPainter } from './rust-painter.js';
 import { drawnFace, drawnRuns, postScriptNameOf } from './drawn-face.js';
 import { lineFonts } from '../../../text-engine/js/line-fonts.mjs';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './index.js';
 import { clearLayoutMemo } from '../measure.js';
-import { textLayerFor, BORROWED_MARK } from '../psd.js';
+import { textLayerFor, fontRequestFor, BORROWED_MARK } from '../psd.js';
+import { app } from '../store.svelte.js';
 
 // ===========================================================================
 // Which font drew each stretch of a text: asked of the engine, not reckoned
@@ -215,6 +216,41 @@ describe('a font whose PostScript name is only spaces', () => {
       setTextEngine(before.engine);
       setGlyphPainter(before.painter);
       rust.removeFamily('Blank Name');
+    }
+  });
+});
+
+describe('engine PSD names after rejecting the file name', () => {
+  it('sanitizes/caps family fallbacks for primary and borrowed faces, preserves distinctions and leaves the browser constructor compatible', () => {
+    const oldSystem = app.fonts.system;
+    const families = ['Bad[](){}<>/%é\u0007\u007f', 'X'.repeat(140), '漢字', 'Bad[]', 'Bad()'];
+    const invalidName = (filename) => withTables(fixtureFont(filename), { name: nameTable([[1, 'Fixture'], [2, 'Regular'], [6, 'Bad/Name']]) });
+    const style = (font) => ({ font, size: 30, bold: false, italic: false, lineHeight: 1.1, align: 'left', valign: 'top', color: '#000000', strokes: [] });
+    const valid = (name) => name.length > 0 && name.length <= 127 && /^[!-~]+$/.test(name) && !/[\[\](){}<>/%]/.test(name);
+    try {
+      app.fonts.system = [...oldSystem, ...families.map((name) => ({ name, css: `"${name}"` }))];
+      setTextEngine(rust);
+      setGlyphPainter(createRustGlyphPainter(rust));
+      const names = [];
+      for (const family of families) {
+        rust.addFace(family, 'regular', invalidName('DejaVuSans.ttf'));
+        expect(drawnFace(rust, face(family)).postScriptName).toBe('');
+        const request = fontRequestFor(style(family));
+        expect(valid(request.name), JSON.stringify(family)).toBe(true);
+        expect(fontRequestFor(style(family)).name).toBe(request.name);
+        names.push(request.name);
+        rust.setFallbacks([family]);
+        const layer = textLayerFor({ lines: [] }, { id: 'b', lineN: null, text: 'AΩ', x: 0, y: 0, w: 200, h: 100, style: style('Comic Neue') }, null);
+        expect(layer.text.styleRuns.find((run) => run.style.font)?.style.font.name).toBe(request.name);
+      }
+      expect(new Set(names).size).toBe(families.length);
+      expect(names[1]).toHaveLength(127);
+      setTextEngine(before.engine);
+      setGlyphPainter(before.painter);
+      expect(fontRequestFor(style('Bad[]')).name).toBe('Bad[]');
+    } finally {
+      families.forEach((name) => rust.removeFamily(name));
+      app.fonts.system = oldSystem;
     }
   });
 });

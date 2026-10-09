@@ -702,15 +702,21 @@ instance's.
   instance's PostScript name - is passed on only if it is printable ASCII
   with no space and none of `[ ] ( ) { } < > / %`, at most 127 long; else
   the font has no name of its own (ID 6) or the instance gets the made one.
-  A named instance's name, stated or made from its style, is used only if no
-  named instance at another place comes out with the same; else the place is
-  spelled out. And the place is spelled `_<value><tag>` only where that can
+  A named instance's name, stated or made from its style, is used only if it
+  differs from the installed default and every other named place after capping,
+  and is outside the coordinate/hash namespace reserved for generated places;
+  else the place is spelled out. A generated name equal to the default uses
+  the exact-location hash. A non-ASCII family still accepts a valid stated name
+  and has a prefix fallback for unnamed places. [I: new native/wasm regressions,
+  fresh combined proof pending.] And the place is spelled `_<value><tag>` only where that can
   be read back: every axis tag, cut down to its letters and digits, begins
   with a letter and is no other axis' tag. Tags `AB-C` and `A-BC` both read
   `ABC`, and `_1` + `1abc` is `_11` + `abc`: such a font's instances get the
   last-resort form, hashed over the tags as the file has them. [M:
-  tests/instance.rs.] Not covered: a font that states, as the name of one
-  place, exactly the name this rule makes for another.
+  tests/instance.rs, historical.] Engine PSD fallback names after missing or
+  invalid ID6 are sanitized and capped to127 bytes with a full-identity hash
+  when altered; this applies to primary and borrowed runs. The browser keeps
+  its earlier constructor. [I: fresh PSD regression pending.]
 - **An axis that is not a range is not an axis.** A file whose `fvar` gives
   an axis a minimum above its maximum, a default outside the two, or a
   number that is not one, is a font without that axis: it is not listed,

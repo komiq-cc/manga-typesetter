@@ -363,8 +363,9 @@ pub fn paint_job_with(
     } = request;
     let face: Face = *face;
     let bold_draw = bold_draw.unwrap_or(BoldDraw::for_rule(engine.rules.bold_advance));
-    // Checks that the font exists even when there is nothing to draw.
+    // Validate both handles even when the job has no runs or draws nothing.
     engine.font(face.font)?;
+    engine.check_chain(face.chain)?;
     if !transform.is_finite() || transform.invert().is_none() || !positive(face.size) {
         return Ok(None);
     }

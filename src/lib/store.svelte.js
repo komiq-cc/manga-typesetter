@@ -5169,6 +5169,11 @@ export function setFontSource(source) {
   fontSource = source ?? null;
 }
 
+// Identity of the source a lasting font-status wait belongs to.
+export function fontSourceNow() {
+  return fontSource;
+}
+
 // What an export waits for before it paints `pages`: every face their boxes
 // are set in, and every family a letter of theirs is borrowed from, in the
 // Rust engine or known not to be coming, and the boxes that waited for them

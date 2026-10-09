@@ -12,7 +12,7 @@ import {
 } from './library.svelte.js';
 import { userFontRecords, installFontFace } from './fonts.js';
 import { tagsInUse } from './tags.svelte.js';
-import { app, normalizeLayout, normalizeOcrLanguage, fontsGated, fontFamiliesSettling, fontMissing } from './store.svelte.js';
+import { app, normalizeLayout, normalizeOcrLanguage, fontsGated, fontFamiliesSettling, fontMissing, fontSourceNow } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import {
   buildChapterPackage,
@@ -84,20 +84,29 @@ export function fontsStaying(fonts, named = fonts.map((f) => f.name)) {
 // With the Rust engine switched on: whether the engine draws `name` in a face
 // of that family - the gate's word, which is the editor's "font missing"
 // notice said the other way round.
-const drawnAsItself = (name) => !fontMissing(name);
+const drawnAsItself = (name) => fontSourceNow()?.ready?.(name) !== false && !fontMissing(name);
 const inLibrary = (name) => app.fonts.user.some((f) => f.name === name);
 
-// Resolves when the gate has a lasting answer for each of `names`: a system
-// family is read from disk the first time anything asks about it, and until
-// its file is in, or has been refused, it is neither missing nor not. A wait
-// that gives up (fonts changing without end) is not a reason to fail a
-// package: what is said then is what the gate says at that moment.
-async function familiesKnown(names) {
-  try {
-    await fontFamiliesSettling(names);
-  } catch {
-    /* said as it stands */
+// A lasting answer belongs to the source that settled it. A replacement is
+// waited for too; a failed or still-pending wait cannot describe drawable fonts.
+// Read the statuses synchronously here before returning across another await.
+async function familiesKnown(names, known) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const held = fontSourceNow();
+    if (!held?.settle) return known();
+    try {
+      await fontFamiliesSettling(names);
+    } catch (e) {
+      if (fontSourceNow() !== held) continue;
+      throw new Error(`Could not inspect package fonts: ${e?.message || e}`);
+    }
+    if (fontSourceNow() !== held) continue;
+    if (names.some((name) => held.ready?.(name) === false)) {
+      throw new Error('Could not inspect package fonts: some fonts are still loading. Try again.');
+    }
+    return known();
   }
+  throw new Error('Could not inspect package fonts: the font source kept changing. Try again.');
 }
 
 // One sentence for those families, for whoever tells the user; '' for none.
@@ -154,8 +163,9 @@ export async function exportChapterPackage(projectId, chapterId) {
     app: await appVersion(),
   });
   const name = packageFileName(p.name, record.number);
-  if (fontsGated()) await familiesKnown(named);
-  const staying = fontsStaying(fonts, named);
+  const staying = fontsGated()
+    ? await familiesKnown(named, () => fontsStaying(fonts, named))
+    : fontsStaying(fonts, named);
 
   if (!isTauri()) {
     downloadBytes(bytes, name);
@@ -277,7 +287,7 @@ export function packageFontStatuses(pkg) {
 // ever called with the switch on; with it off there is nothing to wait for
 // and nothing may be awaited (see `inspectPackage`).
 function packageFontsKnown(pkg) {
-  return familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])])]);
+  return familiesKnown([...new Set([...pkg.fonts.map((f) => f.name), ...fontFamiliesUsed(pkg.record?.pages ?? [], pkg.tags ?? [])])], () => packageFontStatuses(pkg));
 }
 
 // Parse a picked file and describe it for the dialog. Throws the reader's
@@ -290,7 +300,7 @@ export async function inspectPackage(file, projectId = null) {
   // Behind the switch, and not an `await` of something already settled: with
   // the browser measuring this function awaits the file and nothing else,
   // as it did before there was a gate.
-  if (fontsGated()) await packageFontsKnown(pkg);
+  const fonts = fontsGated() ? await packageFontsKnown(pkg) : packageFontStatuses(pkg);
   return {
     pkg,
     summary: {
@@ -305,7 +315,7 @@ export async function inspectPackage(file, projectId = null) {
       projectName: manifest.project?.name ?? '',
       app: manifest.app ?? '',
       exportedAt: manifest.exportedAt ?? '',
-      fonts: packageFontStatuses(pkg),
+      fonts,
       tags: pkg.tags.map((t) => ({ name: t.name, status: projectTag(projectId, t.name) ? 'known' : 'new' })),
     },
   };

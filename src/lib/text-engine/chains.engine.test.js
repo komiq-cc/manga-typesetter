@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createEngine } from '../../../text-engine/js/engine.mjs';
 import { lineFonts } from '../../../text-engine/js/line-fonts.mjs';
+import { paintJob } from '../../../text-engine/js/paint.mjs';
 import { engineWasm, fixtureFont } from '../../test/rust-engine.js';
 
 let engine;
@@ -123,6 +124,40 @@ describe('one fallback-chain rule for every measurement and caret query', () => 
       }
     } finally {
       expect(engine.chainFree(empty)).toBe(true);
+    }
+  });
+});
+
+describe('painter handle validation precedes no-paint returns', () => {
+  it('rejects freed/unknown chains for no runs, zero size, singular transform, empty runs and no fill; zero/live empty recover', () => {
+    const empty = engine.chainNew();
+    const gone = engine.chainNew();
+    expect(engine.chainFree(gone)).toBe(true);
+    const job = (texts, fill = { kind: 'solid', color: '#000000' }) => ({
+      curved: false, align: 'left', letterSpacing: 0, bands: [], silhouette: null, fill,
+      runs: texts.map((text) => ({ text, x: 10, y: 50 })),
+    });
+    const ex = engine.exports;
+    const result = () => Array.from(new Float64Array(ex.memory.buffer, ex.mt_paint_job_result(), 4));
+    try {
+      for (const part of [
+        { job: job([]) }, { job: job(['WAIT!']), size: 0 },
+        { job: job(['WAIT!']), transform: [0, 0, 0, 0, 0, 0] },
+        { job: job(['']) }, { job: job(['WAIT!'], null) },
+      ]) {
+        for (const chain of [0, empty]) expect(paintJob(engine, { font, size: 30, chain, ...part })).toBeNull();
+        for (const chain of [65535, gone]) {
+          // Put raster dimensions into the shared answer before each refusal.
+          const valid = { font, size: 30, chain: empty, job: job(['WAIT!']) };
+          const before = paintJob(engine, valid);
+          expect(before.width).toBeGreaterThan(0);
+          expect(() => paintJob(engine, { font, size: 30, chain, ...part })).toThrow(/unknown font or chain/);
+          expect(result()).toEqual([0, 0, 0, 0]);
+          expect(paintJob(engine, valid)).toEqual(before);
+        }
+      }
+    } finally {
+      engine.chainFree(empty);
     }
   });
 });

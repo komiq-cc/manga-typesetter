@@ -461,7 +461,7 @@ fn a_named_instance_has_the_name_the_font_gives_it() {
     let mut e = Engine::new();
     let stated = variable(&mut e, &axes(), &[Named(1, vec![fx(700)], Some(6))]);
     let bold = e.add_instance(stated, &[(WGHT, 700.0)]).unwrap();
-    assert_eq!(name(&e, bold), "ComicNeue-Regular");
+    assert_eq!(name(&e, bold), "ComicNeue_700wght");
     // It states none: the prefix, a hyphen and the instance's style name.
     let unstated = variable(&mut e, &axes(), &[Named(1, vec![fx(700)], None)]);
     let bold = e.add_instance(unstated, &[(WGHT, 700.0)]).unwrap();
@@ -717,4 +717,44 @@ fn the_last_resort_name_is_within_the_limit_whatever_the_prefix() {
         assert!(n.ends_with("..."));
     }
     assert_ne!(a, b);
+}
+
+#[test]
+fn default_named_and_unnamed_places_do_not_share_identities() {
+    let axes = [Axis(b"wght", fx(100), fx(400), fx(900))];
+    for (default, stated, style) in [
+        ("Test-Regular", Some("Test-Regular"), "Heavy"),
+        ("Test-Heavy", None, "Heavy"),
+        ("Test-Regular", Some("Test_650wght"), "Heavy"),
+        ("Test_650wght", Some("Test-Heavy"), "Heavy"),
+    ] {
+        let mut e = Engine::new();
+        let mut names = vec![(6, default), (256, style)];
+        if let Some(stated) = stated { names.push((257, stated)); }
+        let font = named(&mut e, &axes, &[Named(256, vec![fx(700)], stated.map(|_| 257))], &names);
+        let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+        let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
+        let names = [name(&e, font), name(&e, middle), name(&e, heavy)];
+        assert_eq!(names[0], default);
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[0], names[2]);
+        assert_ne!(names[1], names[2]);
+        assert!(names.iter().all(|n| is_a_postscript_name(n)));
+        let again = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+        assert_eq!(name(&e, again), names[1]);
+    }
+}
+
+#[test]
+fn non_ascii_families_do_not_suppress_stated_or_unnamed_instance_names() {
+    let mut e = Engine::new();
+    let font = named(&mut e, &[Axis(b"wght", fx(100), fx(400), fx(900))],
+        &[Named(256, vec![fx(700)], Some(257))],
+        &[(1, "漢字"), (256, "Heavy"), (257, "Test-Heavy")]);
+    let middle = e.add_instance(font, &[(WGHT, 650.)]).unwrap();
+    let heavy = e.add_instance(font, &[(WGHT, 700.)]).unwrap();
+    assert_eq!(name(&e, heavy), "Test-Heavy");
+    assert_eq!(name(&e, middle), "TestRegular_650wght");
+    assert_ne!(name(&e, middle), name(&e, font));
+    assert_ne!(name(&e, middle), name(&e, heavy));
 }

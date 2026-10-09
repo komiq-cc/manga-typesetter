@@ -284,6 +284,21 @@ function postScriptName(family) {
 // PostScript name keeps the constructed one, from the face that was drawn.
 const SLOT_SUFFIX = { regular: '', bold: '-Bold', italic: '-Italic', boldItalic: '-BoldItalic' };
 
+// A rejected/missing ID 6 still needs a valid PSD identity. Keep the browser's
+// historical constructor above; the engine fallback hashes the complete raw
+// name whenever sanitizing or capping it, so different families stay distinct.
+function engineFallbackName(family, slot) {
+  const raw = postScriptName(family) + SLOT_SUFFIX[slot];
+  const clean = [...raw].filter((c) => c.charCodeAt(0) >= 33 && c.charCodeAt(0) <= 126 && !'[](){}<>/%'.includes(c)).join('');
+  if (clean === raw && raw.length <= 127) return raw;
+  let hash = 0x6c62272e07bb014262b821756295c58dn;
+  for (const byte of new TextEncoder().encode(raw)) {
+    hash = BigInt.asUintN(128, (hash ^ BigInt(byte)) * 0x0000000001000000000000000000013bn);
+  }
+  const prefix = clean || 'MyriadPro-Regular';
+  return `${prefix.slice(0, 91)}-${hash.toString(16).toUpperCase().padStart(32, '0')}...`;
+}
+
 // The engine's own account of the face `s` is drawn in, or null when it is
 // not the one drawing - the browser path, which is everything below it.
 function engineFontRequest(s) {
@@ -293,7 +308,7 @@ function engineFontRequest(s) {
   const drawn = drawnFace(engine, faceFor(s, s.size));
   if (!drawn) return null;
   return {
-    name: drawn.postScriptName || postScriptName(drawn.family) + SLOT_SUFFIX[drawn.slot],
+    name: drawn.postScriptName || engineFallbackName(drawn.family, drawn.slot),
     fauxBold: drawn.fauxBold,
     fauxItalic: drawn.fauxItalic,
   };
@@ -487,7 +502,7 @@ function borrowedRuns(s, content) {
     style: r.own
       ? {}
       : {
-          font: { name: r.postScriptName || postScriptName(r.family) + SLOT_SUFFIX[r.slot] },
+          font: { name: r.postScriptName || engineFallbackName(r.family, r.slot) },
           fauxBold: r.fauxBold,
           fauxItalic: r.fauxItalic,
         },

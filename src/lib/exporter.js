@@ -1141,21 +1141,27 @@ async function exportStripImages(fmt, held) {
   // them across the whole column meant holding the entire chapter's encoded
   // output at once behind the directory dialog.
   const dir = isTauri() ? await pickExportDir() : null;
+  enginesHeld(held);
   if (isTauri() && !dir) return true; // user cancelled
   let written = 0;
-  for (let i = 0; i < n; i++) {
-    const canvas = await renderStripSliceCanvas(pages, tops, cuts[i], cuts[i + 1]);
-    const blob = await new Promise((res) => canvas.toBlob(res, MIME[fmt], QUALITY[fmt]));
-    // Hand the slice's pixels back before the next one is allocated. A canvas
-    // held only by a local is collectable anyway, but "eventually" is not a
-    // memory budget when the next line asks for another few hundred megapixels.
-    canvas.width = 0;
-    canvas.height = 0;
-    enginesHeld(held, written);
-    const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
-    if (dir) await writeItemTo(dir, name, blob);
-    else downloadBlob(blob, name);
-    written++;
+  try {
+    for (let i = 0; i < n; i++) {
+      const canvas = await renderStripSliceCanvas(pages, tops, cuts[i], cuts[i + 1]);
+      const blob = await new Promise((res) => canvas.toBlob(res, MIME[fmt], QUALITY[fmt]));
+      // Hand the slice's pixels back before the next one is allocated. A canvas
+      // held only by a local is collectable anyway, but "eventually" is not a
+      // memory budget when the next line asks for another few hundred megapixels.
+      canvas.width = 0;
+      canvas.height = 0;
+      enginesHeld(held, written);
+      const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
+      if (dir) await writeItemTo(dir, name, blob, held, written);
+      else downloadBlob(blob, name);
+      written++;
+      enginesHeld(held, written);
+    }
+  } catch (e) {
+    throw exportFailure(e, written);
   }
   if (dir) {
     saveExportPrefs(dir, app.exportName);
@@ -1208,41 +1214,62 @@ async function pickExportDir() {
 }
 
 // Write one export item into a directory picked by `pickExportDir`.
-async function writeItemTo(dir, name, blob) {
+async function writeItemTo(dir, name, blob, held, written = 0) {
   const { join } = await import('@tauri-apps/api/path');
-  await fsx.writeFileAtomic(await join(dir, name), await blobBytes(blob));
+  enginesHeld(held, written);
+  const path = await join(dir, name);
+  enginesHeld(held, written);
+  const bytes = await blobBytes(blob);
+  enginesHeld(held, written);
+  await fsx.writeFileAtomic(path, bytes);
 }
 
 // Native single-file save via the OS dialog + filesystem (Tauri). Returns the
 // directory used. Batch scopes do not come through here any more: they pick a
 // directory up front (`pickExportDir`) and stream each file as it is rendered,
 // so nothing ever accumulates a chapter's worth of blobs behind a dialog.
-async function saveNative(items, fmt) {
-  const [{ save }, { join, dirname, basename }] = await Promise.all([
-    import('@tauri-apps/plugin-dialog'),
-    import('@tauri-apps/api/path'),
-  ]);
-  const ext = EXT[fmt];
-  const first = items[0];
-  const defaultPath = app.exportDir ? await join(app.exportDir, first.name) : first.name;
-  const path = await save({
-    defaultPath,
-    filters: [{ name: fmt, extensions: [ext] }],
-  });
-  if (!path) return null; // user cancelled
-  await fsx.writeFileAtomic(path, await blobBytes(first.blob));
-  const dir = await dirname(path);
-  // Learn the base name from a page file only - the JSON export's name carries
-  // a "-text" suffix that must not become the project's export base.
-  // Only strip the suffix if it matches the current page id appended by export.
-  const stem = (await basename(path)).replace(/\.[^.]+$/, '');
-  const base =
-    fmt === 'JSON'
-      ? app.exportName
-      : stripPageSuffix(stem, first?.page?.id);
-  saveExportPrefs(dir, base || app.exportName);
-  toast(`Saved to ${path}`);
-  return dir;
+async function saveNative(items, fmt, held) {
+  let written = 0;
+  const check = () => { if (held) enginesHeld(held, written); };
+  try {
+    const [{ save }, { join, dirname, basename }] = await Promise.all([
+      import('@tauri-apps/plugin-dialog'),
+      import('@tauri-apps/api/path'),
+    ]);
+    check();
+    const ext = EXT[fmt];
+    const first = items[0];
+    const defaultPath = app.exportDir ? await join(app.exportDir, first.name) : first.name;
+    check();
+    const path = await save({
+      defaultPath,
+      filters: [{ name: fmt, extensions: [ext] }],
+    });
+    check();
+    if (!path) return null; // user cancelled
+    const bytes = await blobBytes(first.blob);
+    check();
+    await fsx.writeFileAtomic(path, bytes);
+    written++;
+    check();
+    const dir = await dirname(path);
+    check();
+    // Learn the base name from a page file only - the JSON export's name carries
+    // a "-text" suffix that must not become the project's export base.
+    // Only strip the suffix if it matches the current page id appended by export.
+    const savedName = await basename(path);
+    check();
+    const stem = savedName.replace(/\.[^.]+$/, '');
+    const base =
+      fmt === 'JSON'
+        ? app.exportName
+        : stripPageSuffix(stem, first?.page?.id);
+    saveExportPrefs(dir, base || app.exportName);
+    toast(`Saved to ${path}`);
+    return dir;
+  } catch (e) {
+    throw exportFailure(e, written);
+  }
 }
 
 // The detected/typeset text for a scope: one document, not one file per page,
@@ -1251,7 +1278,7 @@ async function saveNative(items, fmt) {
 // serialisers for one file format would drift the moment either was touched.
 // Does NOT set app.exporting: exportImages already holds it across this call,
 // and every other caller wraps it the same way.
-export async function exportTextJson(scope) {
+export async function exportTextJson(scope, held) {
   const pages = scope === 'all' ? app.pages : [page()];
   const suffix = scope === 'all' ? 'text' : `${pages[0].id}-text`;
   const baseName = sanitizeExportName(app.exportName);
@@ -1264,7 +1291,7 @@ export async function exportTextJson(scope) {
   ];
   if (isTauri()) {
     // Always the single-file save dialog - 'all' is still one document.
-    await saveNative(items, 'JSON');
+    await saveNative(items, 'JSON', held);
   } else {
     downloadBlob(items[0].blob, items[0].name);
     toast(`Exported text for ${pages.length} page(s) as JSON (browser download)`);
@@ -1320,9 +1347,22 @@ export function enginesHeld(held, written = 0) {
   if (!enginesAre(held)) throw new EngineSwitched(written);
 }
 
+// Nested builders have written no file of their own. The writer supplies the
+// chapter's count for every failure, including a font wait or disk failure.
+function exportFailure(error, written) {
+  if (error instanceof EngineSwitched) return new EngineSwitched(Math.max(written, error.written));
+  if (!written || (error?.exportWritten ?? 0) >= written) return error;
+  const reason = String(error?.message || error).replace(/nothing was written\.?/gi, '').trim();
+  const before = `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the remaining files were not written.`;
+  const failure = new Error(`${reason} ${before}`);
+  failure.exportWritten = written;
+  return failure;
+}
+
 // Public entry: scope = 'current' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
 export async function exportImages(fmt, scope) {
   app.exporting = true;
+  let written = 0;
   try {
     let held = enginesNow();
     // The browser's own font set is the browser path's wait, and with the
@@ -1352,7 +1392,7 @@ export async function exportImages(fmt, scope) {
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
-    if (fmt === 'JSON') return await exportTextJson(scope);
+    if (fmt === 'JSON') return await exportTextJson(scope, held);
 
     // A whole longstrip chapter is one column, and the files it ships as are
     // slices of that column rather than its source pages. Only 'all' - a single
@@ -1369,9 +1409,9 @@ export async function exportImages(fmt, scope) {
     // encoded page in memory at once, across a dialog the user may sit on:
     // a 100-page PSD export is gigabytes of blobs for no better dialog.
     const streamDir = isTauri() && scope === 'all' ? await pickExportDir() : null;
+    enginesHeld(held);
     if (isTauri() && scope === 'all' && !streamDir) return true; // cancelled
     const items = [];
-    let written = 0;
     for (const p of pages) {
       // Only five pages' pictures are in memory at a time (see page-images.js),
       // and a whole-chapter export needs all of them - one at a time. This is
@@ -1396,13 +1436,14 @@ export async function exportImages(fmt, scope) {
         });
       } catch (e) {
         // A PSD finds the switch itself, and knows of no file but its own.
-        throw e instanceof EngineSwitched ? new EngineSwitched(written) : e;
+        throw exportFailure(e, written);
       }
       enginesHeld(held, written);
       const name = `${baseName}-${p.id}.${ext}`;
       if (streamDir) {
-        await writeItemTo(streamDir, name, blob);
+        await writeItemTo(streamDir, name, blob, held, written);
         written++;
+        enginesHeld(held, written);
       } else if (!isTauri() && scope === 'all') {
         downloadBlob(blob, name);
         written++;
@@ -1414,7 +1455,7 @@ export async function exportImages(fmt, scope) {
       saveExportPrefs(streamDir, app.exportName);
       toast(`Saved ${written} file(s) to ${streamDir}`);
     } else if (isTauri()) {
-      await saveNative(items, fmt);
+      await saveNative(items, fmt, held);
     } else if (scope === 'all') {
       toast(`Exported ${written} image(s) as ${fmt} (browser download)`);
     } else {
@@ -1423,7 +1464,8 @@ export async function exportImages(fmt, scope) {
     }
     return true;
   } catch (e) {
-    toast('Export failed: ' + (e?.message || e));
+    const failure = exportFailure(e, written);
+    toast('Export failed: ' + (failure?.message || failure));
     return false;
   } finally {
     app.exporting = false;

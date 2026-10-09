@@ -460,8 +460,10 @@ fn last_resort_name(prefix: &str, long: &str) -> String {
 /// apart:
 ///
 /// - a named instance's name, stated or made from its style, is used only
-///   if no named instance at ANOTHER place comes out with the same one;
-///   else the place is spelled out like any unnamed one;
+///   if it is not the default name, another named place's name, or in the
+///   namespace reserved for coordinate names; else the place is spelled out;
+/// - a generated coordinate name that equals the default's installed name
+///   gets a stable last-resort name hashed over its exact coordinates;
 /// - `_<value><tag>` is used only if the font's tags can be read back out
 ///   of it (`tags_tell_axes_apart`). A font whose tags `AB-C` and `A-BC`
 ///   both come out `ABC` gets the last resort instead, hashed over the tags
@@ -502,7 +504,24 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
         NameId::FAMILY_NAME,
     ]
     .into_iter()
-    .find_map(|id| text(id).map(plain).filter(|s| !s.is_empty()))?;
+    .find_map(|id| text(id).map(plain).filter(|s| !s.is_empty()))
+    // A family written without ASCII still has usable instance identities.
+    // A stated name does not depend on this prefix; unnamed places do.
+    .or_else(|| text(NameId::POSTSCRIPT_NAME).map(plain).filter(|s| !s.is_empty()))
+    .unwrap_or_else(|| "Font".to_string());
+    let default_name = text(NameId::POSTSCRIPT_NAME).filter(|s| is_postscript_name(s));
+    let bounded = |name: String| {
+        if name.len() > PS_NAME_MAX { last_resort_name(&prefix, &name) } else { name }
+    };
+    // Reserve the coordinate spelling and last-resort spelling for generated
+    // places. A font may state either string for another named place.
+    let reserved = |name: &str| {
+        name.strip_prefix(&format!("{prefix}_"))
+            .is_some_and(|tail| tail.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.'))
+            || name.strip_prefix(&format!("{}-", &prefix[..prefix.len().min(PS_NAME_MAX - LAST_RESORT_TAIL)]))
+                .and_then(|tail| tail.strip_suffix("..."))
+                .is_some_and(|hash| hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
 
     // What the font's own words make of a named instance: the PostScript
     // name it states, when that is one, else the prefix and its style.
@@ -520,20 +539,19 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
             })
     };
     let instances = font.named_instances();
+    let candidate = |inst: &skrifa::NamedInstance<'_>| -> Option<String> {
+        stated(inst).filter(|name| !reserved(name)).map(bounded)
+    };
     if let Some(name) = instances
         .iter()
         .find(|inst| place(inst) == at)
-        .and_then(|inst| stated(&inst))
+        .and_then(|inst| candidate(&inst))
     {
-        let shared = instances
+        let shared = default_name.as_ref() == Some(&name) || instances
             .iter()
-            .any(|other| place(&other) != at && stated(&other).as_ref() == Some(&name));
+            .any(|other| place(&other) != at && candidate(&other).as_ref() == Some(&name));
         if !shared {
-            return Some(if name.len() > PS_NAME_MAX {
-                last_resort_name(&prefix, &name)
-            } else {
-                name
-            });
+            return Some(name);
         }
     }
 
@@ -556,13 +574,22 @@ fn instance_postscript_name(font: &FontRef<'_>, location: &[(Tag, f32)]) -> Opti
             u32::from_be_bytes(axis.tag().to_be_bytes())
         ));
     }
-    Some(if !tellable {
+    let mut name = if !tellable {
         last_resort_name(&prefix, &exact)
-    } else if name.len() > PS_NAME_MAX {
-        last_resort_name(&prefix, &name)
     } else {
-        name
-    })
+        bounded(name)
+    };
+    // A default ID 6 (or a long named style after capping) can itself be the
+    // generated string. Keep the default's installed identity and move this
+    // non-default place to a stable name hashed over its exact coordinates.
+    let collision = |name: &String| default_name.as_ref() == Some(name)
+        || instances.iter().any(|inst| candidate(&inst).as_ref() == Some(name));
+    let mut salt = 0;
+    while collision(&name) {
+        name = last_resort_name(&prefix, &format!("{exact}#instance{salt}"));
+        salt += 1;
+    }
+    Some(name)
 }
 
 /// Whether `_<value><tag>` can be read back: every tag, cut down to its

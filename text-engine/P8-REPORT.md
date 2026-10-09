@@ -830,6 +830,32 @@ They cover the shared guard (labeled c12 retarget), its coverage/empty/metric
 entry points, cleared engine runs, shared ABI output/result clearing and JS
 status guards. None has been executed. The preserved original25 remain separate.
 
+### Fresh Codex review corrections [I: implementation; proofs pending]
+
+The independent review of `d7dd4ac254bdcf699dd1f4b07cdf6744c8d5d788`
+recorded seven reproducible gaps in
+`tp-data/reports/resume-20261009/p8c-final-codex-findings.md`.
+Those probes are **[M] for that earlier candidate** and are not fresh
+source-build evidence. The corrections below are implemented with
+regressions; their acceptance remains **[I]** until the focused/repeated
+proof logs are recorded.
+
+| review gap | correction and regression [I] |
+|---|---|
+| Ordinary nested PSD font failure forgets outer completed files | Every writer supplies its completed count for ordinary failures as well as `EngineSwitched`. A nested local “nothing was written” claim is removed once an outer file exists. The PSD test downloads page11, rejects page22 and requires an accurate one-file message. Strip and native failures use the same count wrapper. |
+| Native path/blob/dialog waits outlive the held engine | Checks follow native imports, path resolution, dialog, blob conversion and the actual completed write; the last pre-write check is immediately before `writeFileAtomic`. Tests pause each single-file wait and second-file streamed path/blob waits; a post-write change counts the completed file and suppresses Saved. These are simulated Tauri APIs, not an observed desktop run. |
+| Default/named/unnamed locations collide | Named names are compared after capping against the default and other named places. Coordinate and hash spellings are reserved for generated places; a generated name colliding with default uses an exact-location hash. Native and wasm tests construct default/stated/style/coordinate collisions in memory and require three names plus deterministic recovery. Hash collision freedom is not mathematically promised. |
+| Invalid ID6 falls back to invalid or overlong family names in PSD | Primary and borrowed engine fallback names are sanitized to allowed printable ASCII and capped to127 bytes with a hash of the full raw identity when altered. Actual PSD type-layer tests require valid, distinct, deterministic primary and borrowed names. The browser's previous constructor stays in its original path and has a compatibility assertion. |
+| Non-ASCII family hides valid stated names | Prefix construction always has a usable fallback from ID6 or `Font`, so stated names are checked regardless of ASCII family text. Native and wasm tests require `Test-Heavy` at700 and a separate valid650 name for family `漢字`. |
+| Package source replacement/pending/give-up misreports fonts | A new identity getter is read before/after a bounded family wait. Replacement waits repeat; same-source rejection or pending readiness becomes a visible inspection failure. Statuses are read synchronously inside the settled identity check, before another await can apply that check to a replacement. Pending families never count as drawable in synchronous statuses. Tests cover replacement, rejected old wait, give-up, pending and unending changes, plus the existing default same-tick assertion. |
+| Painter unknown chains bypass empty/no-paint returns | `paint_job_with` validates the shared chain before transform/size/run fast paths. Native and actual wasm tests cover no runs, zero size, singular transform, empty run and no fill; zero/live empty controls, stale-result refusal and valid raster recovery remain covered. |
+
+No Photoshop identity lookup, native OS dialog/write interaction or
+second-machine package observation is claimed by these regressions.
+The added mutation definitions will remain separate from both the preserved
+original25 and the new13 chain-policy definitions, with exact-revision logs
+required for each executed kill.
+
 ### Final verification [not yet run]
 
 The coordinator will fill this table from exact-revision logs after P7 is
