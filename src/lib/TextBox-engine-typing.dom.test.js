@@ -2133,23 +2133,28 @@ describe('browser ranges on a real picture broken inside a raw grapheme', () => 
       expect(m.box.text).toBe(SYLLABLE);
       nativeSel(m, 4, 5);
       await tick();
-      const before = px(m.q('.tcaret'));
-      expect(m.q('.tcaret').classList.contains('off')).toBe(true);
+      const initialCaret = m.q('.tcaret');
+      expect(initialCaret, 'the composing picture keeps its caret element').not.toBeNull();
+      const before = px(initialCaret);
+      expect(initialCaret.classList.contains('off')).toBe(true);
       expect(before.top).toBe(rows.at(-1).top);
       expect(m.sel()).toEqual([4, 5]);
       m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      expect(m.sel(), 'compositionend must preserve native anchor/focus before any notification').toEqual([4, 5]);
       const finish = timers.mock.calls.find(([fn]) => fn.name === 'finish')?.[0];
       expect(finish).toBeTypeOf('function');
       // Hold the real completion task. A selection notification in this gap
       // must still use the pending composed text, not the shorter box text.
-      nativeSel(m, 4, 5);
+      document.dispatchEvent(new Event('selectionchange'));
       await tick();
       expect(m.box.text).toBe(SYLLABLE);
       expect(m.editable().textContent).toBe(composed);
       expect(m.sel()).toEqual([4, 5]);
       expect(m.all('.tcomp')).toHaveLength(6);
-      expect(m.q('.tcaret').classList.contains('off')).toBe(true);
-      expect(px(m.q('.tcaret'))).toEqual(before);
+      const pendingCaret = m.q('.tcaret');
+      expect(pendingCaret, 'pending composed text keeps its caret element').not.toBeNull();
+      expect(pendingCaret.classList.contains('off')).toBe(true);
+      expect(px(pendingCaret)).toEqual(before);
       finish();
       await tick();
       expect(m.box.text).toBe(composed);
