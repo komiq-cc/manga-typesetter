@@ -5,9 +5,11 @@ import { tick } from 'svelte';
 // The two paints are the real ones, on the lane's stand-in canvas, wrapped so
 // a case can count them; and the roughening's phase, which a browser measures
 // once per session, is a promise the case holds.
+const real = vi.hoisted(() => ({}));
 vi.mock('./editor/box-picture.js', async (original) => {
-  const real = await original();
-  return { ...real, paintBoxPicture: vi.fn(real.paintBoxPicture), paintPictureTexture: vi.fn(real.paintPictureTexture) };
+  const mod = await original();
+  real.paintBoxPicture = mod.paintBoxPicture;
+  return { ...mod, paintBoxPicture: vi.fn(mod.paintBoxPicture), paintPictureTexture: vi.fn(mod.paintPictureTexture) };
 });
 vi.mock('./exporter.js', async (original) => {
   const real = await original();
@@ -577,6 +579,137 @@ describe('a box nobody can see', () => {
     m.box.w = 400;
     await tick();
     expect(css(m.reach()).width).toBeCloseTo(before.width + 160, 0);
+  });
+});
+
+describe('a paint that throws', () => {
+  // The painter can refuse a job (the engine throws for one it will not
+  // paint). The box must not keep a stale picture or an empty one: it is its
+  // DOM text until what it is painted from changes.
+  let said;
+  beforeEach(() => {
+    said = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    paintBoxPicture.mockImplementation(real.paintBoxPicture);
+    said.mockRestore();
+  });
+  const refuse = () => paintBoxPicture.mockImplementation(() => {
+    throw new Error('mt-text: paintJob: malformed paint job, or a surface larger than the engine allows');
+  });
+  const isDom = (m) => {
+    expect(m.root.querySelector('canvas')).toBe(null);
+    const lines = [...m.root.querySelectorAll('.txt.shaped.stack .tlayer.base .tline')].map((el) => el.textContent);
+    expect(lines.join(' ')).toBe(m.box.text.replace(/\n/g, ' '));
+  };
+
+  it('leaves the box as its DOM text, exactly as with the switch off, and says so once', async () => {
+    refuse();
+    const m = await mounted('straight');
+    isDom(m);
+    expect(said).toHaveBeenCalledTimes(1);
+    expect(String(said.mock.calls[0][0])).toContain('straight');
+    // The same elements the box has with the switch off.
+    const on = m.root.querySelector('.txt.shaped.stack').outerHTML;
+    engineSwitch.painting = false;
+    await tick();
+    expect(m.root.querySelector('.txt.shaped.stack').outerHTML).toBe(on);
+  });
+
+  it('is not tried again for the same picture: a move, a turn and a selection leave it alone', async () => {
+    refuse();
+    const m = await mounted('straight');
+    const tries = m.paints();
+    moveBoxTo(m.box, 300, 400, m.pg, moveGeom(m.box));
+    await tick();
+    m.box.style.rotation = 90;
+    await tick();
+    selectBox('straight');
+    await tick();
+    expect(m.paints()).toBe(tries);
+    isDom(m);
+    expect(said).toHaveBeenCalledTimes(1);
+  });
+
+  it('is tried again when what it is painted from changes, and is the picture again when that paints', async () => {
+    refuse();
+    const m = await mounted('straight');
+    isDom(m);
+    paintBoxPicture.mockImplementation(real.paintBoxPicture);
+    m.box.text = 'SOMETHING ELSE';
+    await tick();
+    const el = m.canvas();
+    expect(el).not.toBe(null);
+    expect(el.width * el.height).toBeGreaterThan(0);
+    expect(m.root.querySelector('.txt')).toBe(null);
+  });
+
+  it('a change that still throws leaves the text, the new text, and is not said again', async () => {
+    refuse();
+    const m = await mounted('straight');
+    const tries = m.paints();
+    m.box.text = 'SOMETHING ELSE';
+    await tick();
+    expect(m.paints()).toBe(tries + 1);
+    isDom(m);
+    m.box.w = 300;
+    await tick();
+    isDom(m);
+    expect(said).toHaveBeenCalledTimes(1);
+  });
+
+  it('a box that painted and then throws lets go of the picture it had', async () => {
+    const m = await mounted('straight');
+    const el = m.canvas();
+    expect(el.width).toBeGreaterThan(0);
+    refuse();
+    m.box.style.color = '#ff0000';
+    await tick();
+    expect([el.width, el.height]).toEqual([0, 0]);
+    isDom(m);
+  });
+
+  it('the other boxes of the same flush are painted, and the box that threw goes on working', async () => {
+    loadProjectPages([{ id: 1, w: 1600, h: 2300, lines: [], boxes: Object.values(KINDS).map((b) => structuredClone(b)) }]);
+    const pg = page();
+    const frame = document.createElement('div');
+    const views = ['straight', 'finish', 'masked'].map((id) => render(TextBox, { box: pg.boxes.find((b) => b.id === id), pageFrameEl: frame, pg }));
+    await tick();
+    const roots = views.map((v) => v.container.querySelector('.tbox'));
+    for (const r of roots) expect(r.querySelector('canvas').width).toBeGreaterThan(0);
+    // One change repaints all three in one flush; the first of them throws.
+    paintBoxPicture.mockClear();
+    paintBoxPicture.mockImplementationOnce(() => {
+      throw new Error('refused');
+    });
+    noteFontsChanged();
+    await tick();
+    expect(paintBoxPicture).toHaveBeenCalledTimes(3);
+    const pictured = roots.filter((r) => r.querySelector('canvas')?.width > 0);
+    expect(pictured).toHaveLength(2);
+    const fell = roots.find((r) => !r.querySelector('canvas'));
+    expect(fell.querySelector('.txt.shaped.stack')).not.toBe(null);
+    // Its other effects still run: it can be selected and typed into.
+    selectBox(fell.dataset.id);
+    await tick();
+    expect(fell.querySelectorAll('.handle')).toHaveLength(9);
+    beginEdit(fell.dataset.id);
+    await tick();
+    expect(fell.querySelector('.txt.editable')).not.toBe(null);
+  });
+
+  it('a late repaint that throws is caught too: the box falls back and nothing is left unhandled', async () => {
+    let release;
+    noise.gate = new Promise((resolve) => (release = resolve));
+    const m = await mounted('rough');
+    expect(m.paints()).toBe(1);
+    refuse();
+    release();
+    await vi.waitFor(() => expect(m.paints()).toBe(2));
+    await tick();
+    expect(m.root.querySelector('canvas')).toBe(null);
+    expect(m.root.querySelector('.txt.shaped.stack')).not.toBe(null);
+    expect(said).toHaveBeenCalledTimes(1);
   });
 });
 

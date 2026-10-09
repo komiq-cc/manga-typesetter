@@ -105,9 +105,20 @@
   // contenteditable below, exactly as it is with the switch off - so the
   // picture stands down for it here, in `!editing`, and nowhere else. The task
   // that draws the caret and the selection on the engine's glyphs removes
-  // those two words; everything downstream reads `engineShown`.
+  // those two words from `engineWanted`; everything downstream reads
+  // `engineShown`, which is that and "its paint did not throw".
   const enginePaints = $derived(engineSwitch.painting);
-  const engineShown = $derived(enginePaints && !editing);
+  const engineWanted = $derived(enginePaints && !editing);
+  // A PAINT THAT THREW. The picture is painted in an effect, and the painter
+  // can refuse: the engine throws for a job it will not paint, and nothing
+  // promises it never will. A box must not be left with the last picture it
+  // had, or with none, so the box whose paint threw is shown as its DOM text
+  // - exactly what it is with the switch off - until what it is painted from
+  // changes (`paintFailed` is the key that failed), and then it is tried
+  // again. The throw is caught where the paint is called, in the effect, so
+  // the other boxes of the same flush are painted as if nothing had happened.
+  let paintFailed = $state(null);
+  const engineShown = $derived(engineWanted && engineKey !== paintFailed);
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
@@ -502,8 +513,8 @@
   // - so turning a box repaints nothing, and it states the LINES, so a change
   // to how the text breaks repaints whatever caused it and a move, which
   // re-derives the same lines, does not.
-  const warpKey = $derived(
-    engineShown
+  const engineKey = $derived(
+    engineWanted
       ? pictureOn
         ? pictureKey({
             style: s,
@@ -517,6 +528,11 @@
             fonts: app.fontsVersion,
           })
         : PICTURE_OFF
+      : '',
+  );
+  const warpKey = $derived(
+    engineShown
+      ? engineKey
       : warped
         ? JSON.stringify({ ...s, ink: 0 }) +
           `|${inkKey}|${text}|${box.w}|${box.h}|${z}|${app.fontsVersion}`
@@ -532,6 +548,33 @@
       ? { ...paintBoxPicture(el, box, pg, pictureRes, tips), page: pageCorner(pageFrameEl) }
       : paintWarpedBox(el, box, pg, z, tips);
     if (engineShown) keepReach(warpGeom);
+  }
+
+  // The paint, for the effect: true when it painted. When it threw, the canvas
+  // holds nothing (a half-made picture is not kept), the engine's picture
+  // stands down for this key (`paintFailed`, above) and the error is said
+  // once for the box, not once a frame of a drag that keeps failing. A warped
+  // box painted the old way has no DOM text to fall back to - a mesh is not
+  // something CSS can state - and is left empty until its key changes.
+  let failSaid = false;
+  function tryPaint(el, tips, key) {
+    try {
+      paintWarp(el, tips);
+      failSaid = false;
+      return true;
+    } catch (err) {
+      el.width = 0;
+      el.height = 0;
+      warpGeom = null;
+      warpTips = null;
+      warpSeq++;
+      if (!failSaid) {
+        failSaid = true;
+        console.error(`the picture of box ${box.id} could not be painted${engineShown ? '; it is shown as its text' : ''}`, err);
+      }
+      if (engineShown) paintFailed = key;
+      return false;
+    }
   }
 
   // ---- the gizmo's live drag ----
@@ -631,7 +674,7 @@
       warpSeq++;
       return;
     }
-    paintWarp(el, warpTips);
+    if (!tryPaint(el, warpTips, key)) return;
     const ids = inkTipIds(s.ink);
     const wantNoise = s.roughen.on && !noiseSettled;
     if (!ids.size && !wantNoise) {
@@ -645,7 +688,7 @@
         if (wantNoise) noiseSettled = true;
         const before = warpTips;
         warpTips = map ?? null;
-        if (wantNoise || !sameTips(before, warpTips)) paintWarp(el, warpTips);
+        if (wantNoise || !sameTips(before, warpTips)) tryPaint(el, warpTips, key);
       },
       () => {},
     );
