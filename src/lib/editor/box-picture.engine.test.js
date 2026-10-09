@@ -5,7 +5,8 @@ import { PICTURE_MAX_PX, paintBoxPicture, paintPictureTexture, pictureTexture } 
 import { renderBoxTexture, warpTexture } from '../exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from '../text-engine/index.js';
 import { createRustGlyphPainter, SCRATCH_KEEP_PX, MAX_RASTER_SIDE } from '../text-engine/rust-painter.js';
-import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from '../measure.js';
+import { setTypesetEnabled, typesetEnabled, clearLayoutMemo, arcLayout, circleLayout, applyCase } from '../measure.js';
+import { boxCandidate, placeBlock } from '../contain.js';
 import { defaultStyle, normalizeStyle } from '../data.js';
 
 // ===========================================================================
@@ -79,6 +80,8 @@ const inked = (data) => {
   return n;
 };
 
+// The ring's own words: enough of them to go round.
+const RING = 'ROUND AND ROUND IT GOES ';
 const KINDS = {
   plain: {},
   finished: {
@@ -88,16 +91,45 @@ const KINDS = {
   },
   smeared: { motionBlur: { on: true, x: 2, y: 1, amount: 5 } },
   arc: { curve: 40 },
-  circle: { curve: 360 },
+  circle: { size: 20, circle: { on: true, angle: 0, inside: false, r: 0 } },
   masked: { clip: { on: true, mode: 'include', shapes: [{ kind: 'ellipse', cx: 150, cy: 45, rx: 120, ry: 34 }] } },
   warped: { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [300, 22], [-8, 96], [290, 84]] } },
 };
+
+// What a kind is called is the route it takes: `placeBlock` sends a box down
+// the ring only for `circle.on`, and a `curve` of any size is an arc. (The
+// kind named circle was an arc - `curve: 360` - so the ring was never painted
+// here.)
+describe('the kinds are the routes their names say', () => {
+  const routeOf = (over) => {
+    const box = boxOf(over, over.circle ? RING : undefined);
+    const place = placeBlock(boxCandidate(box, box.text));
+    if (!place.isCurve) return 'straight';
+    const s = box.style;
+    const same = (a, b) => a.length === b.length && a.every((g, i) => g.x === b[i].x && g.y === b[i].y && g.rot === b[i].rot);
+    const text = applyCase(box.text, s);
+    if (s.circle?.on) return same(place.layout, circleLayout(text, s, s.size)) ? 'circle' : 'unknown';
+    return same(place.layout, arcLayout(text, s, s.size)) ? 'arc' : 'unknown';
+  };
+  it('circle is a ring and arc is an arc, and they are not the same glyph positions', () => {
+    expect(routeOf(KINDS.circle)).toBe('circle');
+    expect(routeOf(KINDS.arc)).toBe('arc');
+    for (const k of ['plain', 'finished', 'smeared', 'masked', 'warped']) expect(routeOf(KINDS[k]), k).toBe('straight');
+    const s = style(KINDS.circle);
+    const ring = circleLayout(RING, s, s.size);
+    const arc = arcLayout(RING, s, s.size);
+    expect(ring.some((g, i) => Math.abs(g.x - arc[i].x) > 1 || Math.abs(g.y - arc[i].y) > 1)).toBe(true);
+    // A ring closes: its glyphs go all the way round.
+    const turn = ring.at(-1).rot - ring[0].rot;
+    expect(Math.abs(turn)).toBeGreaterThan(Math.PI);
+  });
+});
 
 describe('the picture is renderBoxTexture\'s, byte for byte', () => {
   for (const [kind, over] of Object.entries(KINDS)) {
     for (const scale of [1, 2, 2.74, 6]) {
       it(`${kind} at ${scale}`, () => {
-        const box = boxOf(over);
+        const box = boxOf(over, kind === 'circle' ? RING : undefined);
         const p = pageOf(box);
         const want = warpTexture(renderBoxTexture(box, p, null, scale, PICTURE_MAX_PX), box);
         const el = createCanvas(300, 150);
@@ -126,7 +158,7 @@ describe('the picture is renderBoxTexture\'s, byte for byte', () => {
 describe('what it holds', () => {
   it('nothing but the picture: every canvas made on the way is given back', () => {
     for (const over of Object.values(KINDS)) {
-      const box = boxOf(over);
+      const box = boxOf(over, over.circle ? RING : undefined);
       paintBoxPicture(createCanvas(1, 1), box, pageOf(box), 2, null);
     }
     // The painter's one scratch canvas is the painter's, and is bounded
