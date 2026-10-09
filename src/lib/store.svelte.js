@@ -1728,10 +1728,25 @@ function versionNow() {
  * as kept, when that save lands (`landed`) and not before: a write that
  * fails has stamped nothing.
  */
+const typesettingSnapshots = new WeakMap();
 export function stampTypesetting() {
   const version = versionNow();
   stamping = { version, doc: docText(), mode: app.chapterMode, byRust: rustMeasuring(), turn: documentTurn, owned: !!fontSource || !!disk?.owned };
-  return { ...app.typesetting, version };
+  const fields = { ...app.typesetting, version };
+  typesettingSnapshots.set(fields, stamping);
+  return fields;
+}
+
+// Both files of this particular snapshot landed, even if a newer save call
+// is queued. The writer passes the exact fields object returned above, so a
+// failed/obsolete callback cannot substitute another write's current stamp.
+// Ordinary browser saves keep their existing latest-call indicator policy;
+// only snapshots Rust owns (or acquired while they were held) use this seam.
+export function noteTypesettingSaved(fields) {
+  const took = typesettingSnapshots.get(fields);
+  typesettingSnapshots.delete(fields);
+  if (!took || took.turn !== documentTurn || (!took.owned && !fontSource && !disk?.owned)) return;
+  landed(took);
 }
 
 // The save that took that snapshot has landed (`markSaved`, from the saver).
@@ -1739,9 +1754,8 @@ export function stampTypesetting() {
 // known to hold what it took. Then, whoever said the disk is current - a
 // save, or the loader that has just read the file - whether it is so is
 // looked at (`settleDisk`), not taken on their word.
-function landed() {
-  const took = stamping;
-  stamping = null;
+function landed(took = stamping) {
+  if (stamping === took) stamping = null;
   if (took && took.turn === documentTurn) {
     if (app.typesetting.version !== took.version) app.typesetting = { ...app.typesetting, version: took.version };
     disk = { doc: took.doc, version: took.version, mode: took.mode, asOpened: false, owned: !!fontSource || !!disk?.owned || took.owned };

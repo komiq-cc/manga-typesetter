@@ -718,13 +718,13 @@ async function cleanupModel() {
   // make a failed sequence pass. Supersede pending opens before the next
   // sequence installs its literal fixture files.
   state.transition++;
-  resetHand();
-  await pass(0);
-  if (app.chapterRef && app.loaded) {
-    await until(flushBeforeLeaving('editor')).catch(() => {});
-  }
+  // Clear the outgoing identity before releasing held writers. A failed
+  // stale-ledger probe against old source must not enter its microtask loop
+  // while cleanup drains two competing final/Keep flushes.
   closeChapter();
   state.open = false;
+  resetHand();
+  await pass(0);
   for (const pending of [...state.pending]) await until(pending).catch(() => {});
   hand.fontHeld = false;
   await until(useTextEngine('browser'));
@@ -1100,6 +1100,106 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(hand.fonts.length).toBeGreaterThan(0);
       expect(JSON.parse(onDisk()).typesetting.version).toBe(1);
       checkFile('final current snapshot, future font still held');
+    } finally { await cleanupModel(); }
+  });
+
+  it('two simultaneous final flushes see each actual Rust snapshot land while the newer call remains held', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.editLine();
+      await EVENTS.fontLands();
+      await pass(0);
+      hand.hold = true;
+      let firstDone = false;
+      const first = flushBeforeLeaving('editor').then((answer) => { firstDone = true; return answer; });
+      const second = flushBeforeLeaving('quit');
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      expect(app.typesetting.version).toBe(1);
+      hand.writes.shift().ok();
+      await pass(0);
+      // The second call is held, so old source cannot enter an infinite loop
+      // before this assertion sees its suppressed first landed snapshot.
+      expect(hand.writes).toHaveLength(1);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(app.typesetting.version, 'a newer queued call cannot hide actual landed Rust bytes').toBe(2);
+      expect(app.saved, 'the latest queued call still owns the indicator').toBe(false);
+      expect(firstDone, 'both files already contain this final caller’s document').toBe(true);
+      hand.hold = false;
+      hand.writes.shift().ok();
+      expect(await until(first)).toBe(true);
+      expect(await until(second)).toBe(true);
+      expect(hand.began).toHaveLength(2);
+      checkFile('both simultaneous final calls, before cleanup');
+    } finally { await cleanupModel(); }
+  });
+
+  it('Keep and a final flush see the Keep snapshot land while the newer final call remains held', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.fontLands();
+      await pass(0);
+      hand.hold = true;
+      let keptDone = false;
+      const kept = keepFirstFit().then(() => { keptDone = true; });
+      state.touched = true;
+      const final = flushBeforeLeaving('editor');
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      expect(app.typesetting.version).toBe(1);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AA');
+      expect(app.typesetting.version, 'the completed Keep receipt survives the queued final call').toBe(2);
+      expect(keptDone, 'the chosen snapshot is in both files').toBe(true);
+      expect(app.saved, 'the queued final call has not landed').toBe(false);
+      hand.hold = false;
+      hand.writes.shift().ok();
+      await until(kept);
+      expect(await until(final)).toBe(true);
+      expect(hand.began).toHaveLength(2);
+      checkFile('Keep and final call, before cleanup');
+    } finally { await cleanupModel(); }
+  });
+
+  it('a failed translations file cannot advance a ready Rust receipt before both files land', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.fontLands();
+      await pass(0);
+      hand.holdTranslations = true;
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      expect(hand.writes[0].path).toBe(translationsPath);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AA');
+      expect(app.typesetting.version, 'only one file has landed').toBe(1);
+      hand.writes.shift().fail(new Error('translations disk full'));
+      await pass(0);
+      expect(app.saveFailed).toBe(true);
+      expect(app.saved).toBe(false);
+      expect(app.typesetting.version, 'a failed receipt is not the actual both-file ledger').toBe(1);
+      hand.holdTranslations = false;
+      expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      expect(app.typesetting.version).toBe(2);
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      checkFile('the successful retry has its own ready Rust receipt');
     } finally { await cleanupModel(); }
   });
 

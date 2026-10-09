@@ -32,6 +32,7 @@ import {
   cancelChapterPlace,
   useChapterTypesetting,
   stampTypesetting,
+  noteTypesettingSaved,
 } from './store.svelte.js';
 import { normalizeTypesetting, newTypesetting, legacyTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
@@ -2111,7 +2112,13 @@ async function writeOpenChapter(seq) {
   // happened, a newer snapshot exists that this write did not carry, and the
   // indicator has no business claiming everything is saved yet. The next save
   // in the chain will make that claim once it is truly the last one.
-  if (app.chapterRef === ref && seq === saveSeq) markSaved();
+  if (app.chapterRef === ref) {
+    // Actual landed bytes and permission to clear the indicator are separate.
+    // Suppressing both while final/Keep saves are queued behind one another
+    // makes their settlement loops continually enqueue more stale calls.
+    noteTypesettingSaved(record.typesetting);
+    if (seq === saveSeq) markSaved();
+  }
 }
 
 export function closeChapter() {

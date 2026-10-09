@@ -720,6 +720,7 @@ leave-save contract is retained.
 | leaving/quitting/switch off during Keep's wait | honor the choice by writing what is ready; Keep's waiting state belongs to that chapter and is cleared when it ends |
 | chapter.json lands but translations.json fails | the whole save has failed: indicator stays failed/unsaved, no new ledger snapshot or kept claim; retry writes both files |
 | an older snapshot lands after a durable change | it cannot mark the newer document or fits kept/saved; settlement arms the outstanding write |
+| a Rust-owned snapshot's two files land while a newer final/Keep save is queued | its own receipt advances the actual disk ledger; only the latest queued call can clear the indicator/timer |
 | load that mints ids or repairs pages | the existing repair/save path remains; the saved snapshot follows the same version rule |
 
 No new persisted field is added. Line-break notes and Keep's waiting state
@@ -1062,6 +1063,30 @@ A changed-line-count fixture adds100px horizontally while preserving the
 independent vertical prediction. These are source changes, with new proofs
 still pending.
 
+The coordinator's first focused run on `6b6dc77` stalled before any named
+result. It started at load5.60. The coordinator observed about99% CPU in
+its model worker and terminated only the owned processes after129.95s;
+exit143 and the full startup log are preserved. This is an interrupted
+draft run, not an assertion proof or acceptance. Its concurrent static
+review was cancelled before further edits, with exit143 confirmed. It did
+not produce a completed review and is not a review pass.
+
+Static diagnosis found final flushes could continually enqueue each other:
+library's latest-call guard suppressed not only the indicator but the actual
+landed snapshot, so each final loop still saw the old ledger. Keep versus
+final flush had the same risk. The new receipt seam separates these facts.
+Each completed Rust-owned/acquired snapshot carries its own private receipt
+through both physical writes. Its actual ledger is updated even when another
+save is queued. Only the latest call still clears the indicator and timer.
+Pure unowned browser saves keep the old policy. The receipt is in a WeakMap;
+it adds no persisted field and validates the outgoing document turn.
+Two new probes hold the second final/Keep write while checking the first
+actual version2 bytes and completion. An omitted notification must fail
+those assertions before the second write is released. Cleanup now clears
+the outgoing identity before draining, strictly after assertions, so an
+old-source failure cannot livelock during cleanup. New execution remains
+pending.
+
 The three original bad orders are retained as named real-store/real-saver
 model sequences. The old unpatched store's seeds20261102,20261268 and
 20261024, and84 failures in1500 sequences, are **historical measured evidence
@@ -1279,15 +1304,22 @@ mutations. Each control/mutant checks load below8 at its own start. Private
 Vite/dot caches avoid another worktree's transforms. JSON records archive
 hash, exact source changes, command/environment, failed test names/messages,
 and separate killed/survived/invalid/error/timeout classes. The original16
-catalog, ten first-review fixes and four second-review fixes are separately
-labeled and selectable with --group original, --group review or --group review2.
+catalog, ten first-review fixes, four second-review fixes and two receipt
+fixes are separately labeled and selectable with --group original, --group review,
+--group review2 or --group review3.
 The original runner SHA256 `a11ccaca8d44084efc2c0df0461d13f83f0542c68ba7734866639ce3d8c69ef0`
 and first-review runner `b13ea5797f7f513bf851f96aec51784e2f6f5ad1b0411657a1ba2ba620967330`
 are preserved byte for byte. The new mutations remove final-exit settlement,
 final-switch settlement, the incoming workflow baseline, or the unknown
-horizontal placement refusal. A positive control
+horizontal placement refusal. The second-review runner
+`844d5416889abd9a737562fe7392851c8d51c88f26c17a09404ce4e039068bdf`
+is also preserved. The separate convergence mutation removes actual landed
+notification while retaining the latest queued-call indicator guard. A second
+receipt mutation announces landing after chapter.json alone; the failed
+translation-file probe requires version1 in memory until both files land.
+A positive control
 must actually select and pass tests before its mutant runs. Source hashes
-are compared at the end. **All three mutation groups, final-source model repeat,
+are compared at the end. **All four mutation groups, final-source model repeat,
 full suites, engine/native tests, browser check, direct metric capture, both
 captures, repeated real dry run and final Codex review remain pending.**
 They will be scheduled below load8 and recorded here before acceptance. The
