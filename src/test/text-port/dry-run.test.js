@@ -136,14 +136,19 @@ describe('a block that moved and nothing else did', () => {
     expect(cause(rowOf(moved(100, 0), { fontFacts: { ...font, missing: true, borrowed: [{ family: 'Elsewhere' }] } })).moved.cause).toBe(null);
   });
 
-  it('different line counts have a placement prediction without calling their wrapping rule 4', () => {
+  it('different line counts predict vertical placement but unknown horizontal placement cannot hide a 100 px shift or claim rule 4', () => {
     const shorter = { ...directOf(), inks: directOf().inks.slice(0, 1) };
     expect(predictMiddle(directOf(), shorter).predictedDy).toBe(16.5);
     const changed = moved(16.5, 0);
     changed.lines = ['ONE'];
     changed.lineX = [50];
     changed.directMetrics = shorter;
-    expect(cause(rowOf(changed)).moved.rule).toBe('see lines');
+    // Line correspondence is unknown after wrapping changes; the independent
+    // vertical prediction alone cannot establish horizontal placement.
+    expect(cause(rowOf(changed)).moved.cause).toBe(null);
+    changed.lineX = changed.lineX.map((x) => x + 100);
+    expect(cause(rowOf(changed)).moved.cause).toBe(null);
+    expect(cause(rowOf(changed, { fontFacts: { ...font, missing: true } })).moved.cause).toBe(null);
     changed.blockY += 100;
     expect(cause(rowOf(changed)).moved.cause).toBe(null);
   });

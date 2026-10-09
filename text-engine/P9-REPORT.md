@@ -686,7 +686,9 @@ particular, its remembered stamp debt and its immediate dirty flag on Keep
 are superseded.
 
 With the switch **off**, a chapter that has never used Rust follows the
-existing browser save/load policy; saving a version2 writes version1. The
+existing browser save/load policy; a snapshot actually saved by the browser
+of a version2 document writes version1. Turning the switch off alone can
+leave an already saved version2 file in place. The
 old browser race described in section15 remains. A chapter Rust owned
 retains its actual landed and in-flight snapshots across off/on. Outstanding
 cross-switch work still settles after an older write lands, and that
@@ -708,6 +710,7 @@ leave-save contract is retained.
 | leaving/quitting/switch off after an unmarked durable change (a held handle, style/fit/text, picture association, translation, page order or mode) | the two document files as the user's document stands; no restore over the change |
 | an edit save while a font is still held or the engine still starts | chapter.json and translations.json from one snapshot; the file's current version remains (1 or2) |
 | the engine starts/a font lands after a save snapshot | settlement compares the actual current document/version to the landed snapshot; a newer document arms a follow-up save, even if the older write cancelled a debounce |
+| a font lands while the final leave/quit/chapter-switch snapshot is held | the outgoing Rust-owned document's actual newer bytes must land before that boundary finishes; no debounce rescue or wait for a still-absent future font |
 | an older Rust write lands after off/on, or a browser write already in flight lands after Rust is turned on | the original snapshot remains owned; the newer document cannot become an opened baseline; its natural follow-up debounce writes both files |
 | ready Rust save, with no box waiting on any page | the whole document at version2 |
 | Keep while a font waits | one deferred write; no ordinary debounce from the press; saved state can remain true while the visible notice says Keep is waiting |
@@ -1040,6 +1043,25 @@ chapter’s breaker without clearing the pending snapshot or document identity;
 a held-write mode-switch probe checks the independent chosen mode and both files.
 **These review fixes have not yet passed their new tests.**
 
+The static review of `10abda3b8357c6e2b623139580b110a6f46ae863`
+found four more gaps. Its findings and pin are preserved. The new source
+requests settlement at final leave, quit and real chapter switch. After
+each final saver finishes, it checks the outgoing identity and actual
+Rust-owned document/version against the landed snapshot. It writes an
+already-discovered difference immediately, rather than returning ahead
+of its800ms timer. It does not wait for an absent font to arrive. The
+library's existing exit timeout, refusal and failure escape are retained.
+
+Incoming workflow mode is now installed before the loader records first-fit
+state. Named untouched typeset-to-translate and translate-to-typeset real
+opens check both original file bytes, no autosave, and switch-off restoration.
+For changed wrapping, direct metrics can predict the vertical move, but
+horizontal line correspondence remains unknown. The report now leaves that
+placement unexplained instead of giving it a wrap or missing-font cause.
+A changed-line-count fixture adds100px horizontally while preserving the
+independent vertical prediction. These are source changes, with new proofs
+still pending.
+
 The three original bad orders are retained as named real-store/real-saver
 model sequences. The old unpatched store's seeds20261102,20261268 and
 20261024, and84 failures in1500 sequences, are **historical measured evidence
@@ -1203,13 +1225,48 @@ the retained empty-Keep eligibility passed its own seed repeat and the6000 run.
 The coordinator independently ran the later `dffafec` source:87 focused tests
 passed, but the6000-sequence generated invariant failed with223 seeds while24
 named probes passed. Of those223,175 incorrectly counted held fonts after the
-switch was off;48 ended with a new unmarked event missing the original action's
-settlement boundary. The off-phase waiting oracle is corrected and those
-unmarked actions now have an explicit boundary. All6000 seeds, event choices
+switch was off;48 ended with a new unmarked event whose settlement boundary
+or public applicability was not modeled correctly. The off-phase waiting
+oracle is corrected. All6000 seeds, event choices
 and the223 original failures/shrunk orders are retained; no raw held-snapshot
 probe was given a rescue flush. The private preserved log and extracted
 p9c-dffafec-223-failures.json are the prior failing record. The review's actual
 cross-switch save losses are separate source defects and receive direct tests.
+
+At `10abda3`, the coordinator's focused20-sequence run failed23 of152
+tests, with129 passed. Its gated repeat at load5.38 reproduced the same23
+failures. The first ungated run is preserved as a failed draft check, not
+acceptance. Nineteen failures included an invented translation expectation:
+the model edited `tr`, while the actual Queue and serializer use `en`.
+Some failures then arose in assertion-bearing cleanup and contaminated later
+tests. Two failures reached a plain-wrap DOM fallback the fake engines did
+not provide. One expected literal fixture omitted normal serialized
+`fit:null` and style keys. The remaining Keep-null failure may be a cleanup
+cascade; that explanation is not yet established by a repeat. No failure
+has been declared a flake or silently removed.
+
+The model now retains the `en` choice before calling the real Queue action.
+Its literal fixtures include schema defaults; their geometry is still
+literal, never generated by the current fit/save path. Fake engines provide
+deterministic plain wrapping; they make no browser CSS parity claim.
+Non-asserting cleanup runs only after a probe has made its assertions, so
+it cannot repair a lost-save result into a pass.
+
+The browser generated actions now use their actual public completion:
+`setLineText` for Queue text, `boxEdited` for Inspector changes, and the
+TextBox resize completion's `markUnsaved`. Open-editor raw picture/order
+events still run while Rust has actual cross-switch debt. Once both current
+physical files have landed, those open-editor events are inapplicable:
+the public library page/art rewrite APIs require `assertClosed`. The model
+does not claim generic raw browser mutation robustness. An `app.saved` flag
+alone cannot retire debt: current chapter and translation bytes, identity,
+and no held writer are required (or the allowed untouched opened bytes).
+The ten raw snapshot probes still call their mutations directly, with no
+relayout, completion mark or rescue flush. The new generated-stage counts
+separate Rust/startup, cross-switch debt, post-debt browser and closed
+events, and list each inapplicable public action. These counts include only
+the original generated orders, not named probes or shrink replays. Thus the
+retained6000 seeds do not imply the old harness's exact coverage semantics.
 
 The coordinator captured7243 direct WebKit metric records on `dffafec`, with
 complete=true and no errors, in private p9c-direct-root-dffafec.json. Final
@@ -1222,11 +1279,15 @@ mutations. Each control/mutant checks load below8 at its own start. Private
 Vite/dot caches avoid another worktree's transforms. JSON records archive
 hash, exact source changes, command/environment, failed test names/messages,
 and separate killed/survived/invalid/error/timeout classes. The original16
-catalog and ten review-fix mutations are separately labeled and selectable
-with --group original or --group review; the old pre-review runner bytes and
-hash are preserved. A positive control
+catalog, ten first-review fixes and four second-review fixes are separately
+labeled and selectable with --group original, --group review or --group review2.
+The original runner SHA256 `a11ccaca8d44084efc2c0df0461d13f83f0542c68ba7734866639ce3d8c69ef0`
+and first-review runner `b13ea5797f7f513bf851f96aec51784e2f6f5ad1b0411657a1ba2ba620967330`
+are preserved byte for byte. The new mutations remove final-exit settlement,
+final-switch settlement, the incoming workflow baseline, or the unknown
+horizontal placement refusal. A positive control
 must actually select and pass tests before its mutant runs. Source hashes
-are compared at the end. **Both mutation groups, final-source model repeat,
+are compared at the end. **All three mutation groups, final-source model repeat,
 full suites, engine/native tests, browser check, direct metric capture, both
 captures, repeated real dry run and final Codex review remain pending.**
 They will be scheduled below load8 and recorded here before acceptance. The

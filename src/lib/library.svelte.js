@@ -1760,7 +1760,7 @@ export async function openChapter(projectId, chapterId) {
   try {
     // Write anything still pending for the chapter being replaced - and cancel
     // its debounce either way - before app.pages stops being that chapter.
-    await flushSave();
+    await flushSave({ settle: true });
     if (!mine()) return;
 
     // The outgoing chapter is on disk, and from here until the new document is
@@ -1903,6 +1903,10 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // The load refits boxes immediately. Its bounds must come from the incoming
   // project's layout, not from whichever project was open before this one.
   app.projectLayout = normalizeLayout(p.layout);
+  // First-fit records the workflow mode with the incoming pages. Installing it
+  // afterwards would call an untouched translate/typeset open a user edit.
+  const mode = normalizeChapterMode(record.mode);
+  app.chapterMode = mode;
   // And its line breaker from the chapter's own record, for the same reason:
   // the load's refit measures under it (DET-3). A record from before the field
   // opens with what this machine laid it out with; the first save stamps it.
@@ -1926,8 +1930,6 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // after a translate one must give back the whole editor. The catalogue follows
   // the record it just read, so a chapter.json edited outside the app is
   // believed here as well as by the scan.
-  const mode = normalizeChapterMode(record.mode);
-  app.chapterMode = mode;
   c.mode = mode;
   // The layout belongs to the project and was set just before page loading so
   // its auto-height pass could use the correct document bounds.
@@ -2296,7 +2298,7 @@ export async function flushBeforeLeaving(where) {
     // Bounded - see `withinWait`. The save goes on running either way; what is
     // bounded is how long the user is left looking at a window that will not
     // close and will not say why.
-    if ((await withinWait(flushSave())) === STILL_WRITING) {
+    if ((await withinWait(flushSave({ settle: true }))) === STILL_WRITING) {
       toast(copy.slow);
       return false;
     }

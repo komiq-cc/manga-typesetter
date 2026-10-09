@@ -15,8 +15,9 @@
 //   (b) the file is the document in memory, and its version is 2 if and only
 //       if the Rust engine has fitted every box in it.
 //   And leaving, while things are in motion, ends in one of the two.
-// This at-rest invariant covers chapters that Rust has owned. The known
-// never-Rust browser autosave race remains deferred; real leave/open
+// This at-rest invariant covers Rust and its actual outstanding save debt.
+// Once both current browser files land, ordinary browser ownership resumes.
+// The known browser autosave race remains deferred; real leave/open
 // boundaries still check both files under either engine. Independently
 // retained user choices must survive automatic fits/restoration in memory
 // and in chapter.json AND translations.json, across distinct chapter paths.
@@ -33,7 +34,7 @@
 //
 // The engines are the stand-ins of first-fit.test.js: what is tested is an
 // order of events, and a measurement only has to differ between the two.
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 
 vi.mock('./fsx.js', () => {
   const tree = { dirs: new Set(), files: new Map() };
@@ -68,6 +69,7 @@ vi.mock('./fsx.js', () => {
     async writeTextFileAtomic(p, c) {
       if (fsx._before) await fsx._before(p, c);
       await fsx.writeTextFile(p, c);
+      fsx._after?.(p, c);
     },
     async writeFileAtomic(p, bytes) {
       await fsx.writeFile(p, bytes);
@@ -94,9 +96,10 @@ vi.mock('./fsx.js', () => {
 });
 
 const { fsx } = await import('./fsx.js');
-const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures } = await import('./library.svelte.js');
+const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
-const { app, autoFitBox, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
+const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
+const { defaultStyle } = await import('./data.js');
 const { buildTextJson } = await import('./text-json.js');
 const { initHistory } = await import('./editor/history.svelte.js');
 const { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } = await import('./engine-switch.svelte.js');
@@ -125,7 +128,23 @@ function fakeBrowser() {
     loading: () => false,
     onFontsChange: () => () => {},
     faceReady: () => true,
+    wrapPlain: (face, text, opts) => fakePlain((part) => part.length * face.size * BROWSER, text, opts.width),
   };
+}
+// The stand-ins do not own a DOM. Plain wrapping is deterministic measured
+// greedy wrapping here, not a claim about browser CSS parity.
+function fakePlain(width, text, limit) {
+  const lines = [];
+  for (const paragraph of text.split('\n')) {
+    let line = '';
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      const next = line ? `${line} ${word}` : word;
+      if (line && width(next) > limit) { lines.push(line); line = word; }
+      else line = next;
+    }
+    lines.push(line);
+  }
+  return lines;
 }
 
 // ---------- the made-up chapter ----------
@@ -133,16 +152,16 @@ function fakeBrowser() {
 // the machine's (Zapfino), whose file the model holds back: a box set in it
 // waits, and an edit to that box has its fit held.
 const SIZE = 20;
-const style = (font) => ({ font, size: SIZE, lineHeight: 1.1, valign: 'top', outlineWidth: 0 });
+const style = (font) => ({ ...defaultStyle(), font, size: SIZE, lineHeight: 1.1, valign: 'top', strokes: [], shadows: [] });
 const INSET = 100 - contentWidth(100, style('AnimeAce'));
-const box = (id, font, text, content, y) => ({ id, lineN: null, text, x: 100, y, w: content + INSET, h: 20, style: style(font) });
+const box = (id, font, text, content, y) => ({ id, lineN: null, text, x: 100, y, w: content + INSET, h: 20, style: style(font), fit: null });
 const BOXES = () => [
   box('same', 'AnimeAce', 'AA', 200, 100),
   box('relaid', 'AnimeAce', 'AAAA BBBB CCCC', 80, 200),
   box('grow', 'Narrow', 'AA BB', 60, 400),
   box('late', 'Zapfino', 'AAAA BBBB', 60, 600),
 ];
-const LINES = () => [{ n: 1, text: 'AA', tr: 'AA', tags: [] }];
+const LINES = () => [{ n: 1, jp: 'AA', en: 'AA', tags: [] }];
 const FILES = {
   'Helvetica Neue': [{ slots: { regular: 0, bold: 1, italic: 2, boldItalic: 3 }, bytes: TTC() }],
   Zapfino: [{ slots: { regular: 0 }, bytes: SFNT() }],
@@ -157,6 +176,7 @@ const hand = {
   writes: [],
   // Every chapter.json write that began, in order: its version and the clock.
   began: [],
+  landed: [],
   // Requests for the slow family's file, while `fontHeld`.
   fontHeld: true,
   fonts: [],
@@ -179,7 +199,9 @@ const createEngine = async () => {
   // away from the currently requested engine's held font requests.
   engineTurn++;
   if (hand.startHeld) await new Promise((resolve) => hand.starts.push(resolve));
-  return fakeRustEngine();
+  const engine = fakeRustEngine();
+  engine.wrapPlain = (face, text, opts) => fakePlain((part) => engine.advance(face, part), text, opts.width);
+  return engine;
 };
 
 // ---------- time, which is the model's too ----------
@@ -242,6 +264,7 @@ function resetHand() {
   hand.fontHeld = true;
   hand.startHeld = false;
   hand.began = [];
+  hand.landed = [];
   hand.broke = null;
 }
 
@@ -281,7 +304,7 @@ beforeAll(async () => {
       return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
     }
     if (!chapters.some((ch) => path === `${ch.dir}/chapter.json`)) return undefined;
-    hand.began.push({ path, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now() });
+    hand.began.push({ path, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now(), browser: engineSwitch.phase === 'off' });
     seen.writes++;
     const number = hand.began.at(-1).version;
     if (path === chapterPath && waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
@@ -293,6 +316,9 @@ beforeAll(async () => {
     if (!hand.hold) return undefined;
     return new Promise((ok, fail) => hand.writes.push({ path, ok, fail }));
   };
+  fsx._after = (path, text) => {
+    if (chapters.some((ch) => path === `${ch.dir}/chapter.json`)) hand.landed.push({ ...hand.began.findLast((w) => w.path === path), version: JSON.parse(text).typesetting?.version ?? null });
+  };
 
   // Literal fixture geometry, not a fixture produced by this implementation's
   // fit/save path: browser line boxes are 22px plus4px padding (26/48/70).
@@ -300,7 +326,7 @@ beforeAll(async () => {
   const raw = JSON.parse(onDisk());
   raw.mode = 'typeset';
   raw.pages[0] = { ...raw.pages[0], w: 800, h: 1200, lines: LINES(), detect: null, boxes: BOXES().map((b, i) => ({ ...b, h: [26, 70, 26, 48][i] })) };
-  raw.pages[1] = { ...raw.pages[0], id: 2, file: 'b.png', lines: [{ n: 2, text: 'BB', tr: 'BB', tags: [] }], boxes: [box('second', 'AnimeAce', 'SECOND', 200, 100)] };
+  raw.pages[1] = { ...raw.pages[0], id: 2, file: 'b.png', lines: [{ n: 2, jp: 'BB', en: 'BB', tags: [] }], boxes: [box('second', 'AnimeAce', 'SECOND', 200, 100)] };
   raw.pages[1].boxes[0].h = 26;
   raw.typesetting = { mode: 'smart', version: 1 };
   raw.pages = raw.pages.slice(0, 2);
@@ -316,6 +342,7 @@ beforeAll(async () => {
 afterAll(async () => {
   resetHand();
   fsx._before = null;
+  fsx._after = null;
   closeChapter();
   _resetEngineSwitch();
   _setEngineSwitchDeps(null);
@@ -333,14 +360,16 @@ beforeEach(() => {
   state.transition++;
   resetFiles();
 });
+afterEach(cleanupModel);
 
 // ---------- the events ----------
 // Each is something that happens to the app from outside it. One that cannot
 // happen in the state it finds (Keep with no chapter open) does nothing.
 class Broken extends Error {}
 // What the sequences did, over a whole run.
-const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0 };
-const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), transition: 0, pending: new Set() };
+const stageCounts = () => ({ eventsByStage: { closed: {}, rustOrStarting: {}, crossSwitchDebt: {}, browserAfterDebt: {} }, inapplicablePublicActions: {} });
+const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts() };
+const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set() };
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
 const copy = (v) => JSON.parse(JSON.stringify(v));
 const paths = (ch) => ({ chapter: `${ch.dir}/chapter.json`, text: `${ch.dir}/translations.json` });
@@ -351,6 +380,7 @@ function adopt(ch) {
 function resetFiles() {
   state.choices.clear();
   state.rustChapters.clear();
+  state.rustDebt.clear();
   for (const [i, ch] of chapters.entries()) {
     const raw = JSON.parse(i === 1 ? V2 : V1);
     raw.id = ch.id;
@@ -383,7 +413,7 @@ function choicesIn(id, record, text, when) {
     const got = {
       text: b?.text, height: b?.h, style: b?.style?.color, fit: b?.fit,
       file: pg?.file, cleaned: pg?.cleaned ?? pg?.cleanedFile ?? null,
-      translation: ln?.tr, order: record.pages.map((p) => p.id),
+      translation: ln?.en, order: record.pages.map((p) => p.id),
       mode: record.mode, typesetting: record.typesetting?.mode,
     }[want.kind];
     const okay = want.kind === 'height' ? got >= want.value : canon(got) === canon(want.value);
@@ -404,6 +434,17 @@ function choicesOnDisk(ch, when) {
   const path = paths(ch);
   choicesIn(ch.id, JSON.parse(fsx._tree.files.get(path.chapter)), JSON.parse(fsx._tree.files.get(path.text)), when);
 }
+// A prior Rust turn is not ownership forever. Retirement requires actual
+// current bytes in BOTH files (or the permitted untouched opened bytes), no
+// held writer, and no outstanding unsaved choice. A false saved flag alone
+// cannot retire debt over stale physical bytes.
+function retireBrowserDebt() {
+  if (!live() || engineSwitch.phase !== 'off' || !app.saved || hand.writes.some((w) => w.path.startsWith(`${c.dir}/`))) return;
+  const rec = JSON.parse(onDisk());
+  const current = canon(rec.pages) === canon(documentNow()) && rec.mode === app.chapterMode && rec.typesetting?.mode === app.typesetting.mode && textOnDisk() === buildTextJson(app.pages);
+  const untouched = !state.touched && onDisk() === state.opened && textOnDisk() === state.openedText;
+  if (current || untouched) state.rustDebt.delete(c.id);
+}
 
 function checkFile(when) {
   const bytes = onDisk();
@@ -421,11 +462,11 @@ function checkFile(when) {
   if (asOpened) return;
   if (!same) throw say('the file is neither the file that was opened nor the document in memory');
   // (b): what its number may be. At rest under the Rust engine every box is
-  // fitted, so it is 2. At rest with the switch off the model has left the
-  // chapter, and a save with the browser measuring writes 1.
+  // fitted, so it is 2. A snapshot actually written under the browser says1;
+  // merely switching off does not rewrite an already saved Rust file.
   if (inMotion) return;
   if (rustFitting() && version !== 2) throw say('the file is the document, every box is fitted by the Rust engine, and the file does not say 2');
-  if (engineSwitch.phase === 'off' && when === 'at rest' && version !== 1) throw say('the file was saved with the browser measuring and does not say 1');
+  if (engineSwitch.phase === 'off' && hand.landed.findLast((w) => w.path === chapterPath)?.browser && version !== 1) throw say('a landed browser snapshot does not say 1');
 }
 
 async function leave() {
@@ -454,7 +495,7 @@ async function open(bytes) {
   state.openedWrites = hand.began.length;
   state.touched = false;
   state.keep = null;
-  if (engineSwitch.mode === 'rust') state.rustChapters.add(c.id);
+  if (engineSwitch.mode === 'rust') { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
 }
 
 // Real library transitions can wait behind a held write. Request them without
@@ -477,7 +518,7 @@ async function requestOpen(index) {
     state.openedWrites = hand.began.length;
     state.touched = (state.choices.get(target.id)?.size ?? 0) > 0;
     state.keep = null;
-    if (engineSwitch.mode === 'rust') state.rustChapters.add(c.id);
+    if (engineSwitch.mode === 'rust') { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
   }).catch((error) => {
     if (error instanceof Broken) hand.broke ??= error.message;
     // A failed leave-save makes the actual open refuse; the old document stays.
@@ -535,6 +576,9 @@ const EVENTS = {
   },
   reversePages() {
     if (!live()) return;
+    // Public art/order rewrites require a closed chapter. The open-editor raw
+    // robustness stage is relevant only while Rust owns actual save debt.
+    if (engineSwitch.phase === 'off' && !state.rustDebt.has(c.id)) { seen.inapplicablePublicActions++; return; }
     app.pages.reverse();
     choose('order', app.pages.map((p) => p.id));
     state.touched = true;
@@ -547,20 +591,26 @@ const EVENTS = {
     choose('height', app.pages[0].boxes[0].h);
     state.touched = true;
     relayoutAll();
+    // TextBox's completed resize marks the chosen geometry (the held raw
+    // probes do not call this generated completion stage).
+    if (engineSwitch.phase === 'off') markUnsaved();
   },
-  unmarkedMode() {
+  async unmarkedMode() {
     if (!live()) return;
     app.chapterMode = app.chapterMode === 'translate' ? 'typeset' : 'translate';
     choose('mode', app.chapterMode);
     state.touched = true;
-    relayoutAll();
+    if (engineSwitch.phase === 'off') await setChapterMode(p.id, c.id, app.chapterMode);
+    else relayoutAll();
   },
   holdTranslations() { hand.holdTranslations = true; },
   editLine() {
     if (!live()) return;
-    app.pages[0].lines[0].tr += 'A';
-    choose('translation', app.pages[0].lines[0].tr);
-    markUnsaved();
+    const pg = app.pages[0];
+    const ln = pg.lines[0];
+    const intended = `${ln.en}A`;
+    choose('translation', intended, pg, pg.boxes[0], ln);
+    setLineText(pg, ln.n, intended);
     state.touched = true;
   },
   fontLands() {
@@ -599,7 +649,7 @@ const EVENTS = {
   // Rust must acquire whatever browser snapshot is still in flight.
   async switchOn() {
     if (engineSwitch.mode === 'rust') return;
-    if (live()) state.rustChapters.add(c.id);
+    if (live()) { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
     hand.startHeld = true;
     useTextEngine('rust').catch(() => {});
   },
@@ -615,21 +665,33 @@ const UNMARKED = {
   fit() { app.pages[0].boxes[0].fit = { kind: 'rect', x: 0, y: 0, w: 120, h: 80 }; choose('fit', app.pages[0].boxes[0].fit); },
   file() { app.pages[0].file = 'changed.png'; choose('file', 'changed.png'); },
   cleaned() { app.pages[0].cleanedFile = 'changed-cleaned.png'; choose('cleaned', 'changed-cleaned.png'); },
-  translation() { app.pages[0].lines[0].tr += ' UNMARKED'; choose('translation', app.pages[0].lines[0].tr); },
+  translation() { app.pages[0].lines[0].en += ' UNMARKED'; choose('translation', app.pages[0].lines[0].en); },
   order() { app.pages.reverse(); choose('order', app.pages.map((p) => p.id)); },
   mode() { app.chapterMode = app.chapterMode === 'typeset' ? 'translate' : 'typeset'; choose('mode', app.chapterMode); },
   typesetting() { app.typesetting.mode = app.typesetting.mode === 'smart' ? 'plain' : 'smart'; choose('typesetting', app.typesetting.mode); },
 };
 
 for (const [field, change] of Object.entries(UNMARKED)) {
-  EVENTS[`unmarked_${field}`] = () => {
+  EVENTS[`unmarked_${field}`] = async () => {
     if (!live() || !app.pages[0].boxes.length) return;
+    if (engineSwitch.phase === 'off' && !state.rustDebt.has(c.id) && ['file', 'cleaned', 'order'].includes(field)) { seen.inapplicablePublicActions++; return; }
     change();
     state.touched = true;
-    // A completed unmarked action has the same real settlement boundary as
-    // unmarkedHandle. The held-snapshot probes above call change() directly,
-    // with no relayout, to test a genuinely unannounced mutation at landing.
-    relayoutAll();
+    // Under Rust the old raw robustness action reaches its relayout boundary.
+    // Under the browser a completed action uses its actual public API/gesture
+    // completion. Raw probes below call change() directly with no completion.
+    if (engineSwitch.phase !== 'off') relayoutAll();
+    else if (['text', 'style', 'fit'].includes(field)) boxEdited(app.pages[0].boxes[0], app.pages[0]);
+    else if (field === 'height') { resizeBox(app.pages[0].id, app.pages[0].boxes[0].id, { h: app.pages[0].boxes[0].h }); markUnsaved(); }
+    else if (field === 'translation') setLineText(app.pages[0], app.pages[0].lines[0].n, app.pages[0].lines[0].en);
+    else if (field === 'mode') await setChapterMode(p.id, c.id, app.chapterMode);
+    else if (field === 'typesetting') {
+      const intended = app.typesetting.mode;
+      app.typesetting.mode = intended === 'smart' ? 'plain' : 'smart';
+      setChapterTypesetMode(intended);
+    }
+    // A raw art/order mutation during outstanding cross-switch debt stays
+    // raw. No completion mark or rescue is added to that wrong order.
   };
 }
 const TOUCHING = new Set(['edit', 'editLate', 'editLine', 'reversePages', 'unmarkedHandle', 'unmarkedMode', 'leave', 'open1', 'open2', 'openEmpty', 'switchOff', 'switchOn', 'writeFails', 'keep', ...Object.keys(UNMARKED).map((field) => `unmarked_${field}`)]);
@@ -651,29 +713,59 @@ async function rest() {
   }
 }
 
+async function cleanupModel() {
+  // Assertions have already run. Cleanup may drain/flush, but it cannot
+  // make a failed sequence pass. Supersede pending opens before the next
+  // sequence installs its literal fixture files.
+  state.transition++;
+  resetHand();
+  await pass(0);
+  if (app.chapterRef && app.loaded) {
+    await until(flushBeforeLeaving('editor')).catch(() => {});
+  }
+  closeChapter();
+  state.open = false;
+  for (const pending of [...state.pending]) await until(pending).catch(() => {});
+  hand.fontHeld = false;
+  await until(useTextEngine('browser'));
+  resetHand();
+  await pass(3000);
+  resetSaveFailures();
+  app.saveFailed = false;
+  state.choices.clear();
+}
+
 async function run(events) {
   resetHand();
   state.open = false;
   state.keep = null;
   resetFiles();
+  const stages = stageCounts();
   let at = '';
   try {
     for (const [i, name] of events.entries()) {
       at = `step ${i + 1} (${name})`;
+      const stage = !live() ? 'closed' : engineSwitch.mode === 'rust' ? 'rustOrStarting' : state.rustDebt.has(c.id) ? 'crossSwitchDebt' : 'browserAfterDebt';
+      stages.eventsByStage[stage][name] = (stages.eventsByStage[stage][name] ?? 0) + 1;
+      const ignoredBefore = seen.inapplicablePublicActions;
       if (state.keep && TOUCHING.has(name) && name !== 'keep') state.keep.alone = false;
       await EVENTS[name]();
+      const ignored = seen.inapplicablePublicActions - ignoredBefore;
+      if (ignored) stages.inapplicablePublicActions[name] = (stages.inapplicablePublicActions[name] ?? 0) + ignored;
       await pass(0);
+      retireBrowserDebt();
       choicesLive(`after ${name}`);
       if (hand.broke) throw new Broken(hand.broke);
     }
     at = 'coming to rest';
     await rest();
+    retireBrowserDebt();
     if (hand.broke) throw new Broken(hand.broke);
     if (live()) {
-      // No final rescue flush. The invariant belongs to chapters Rust has
-      // owned. The old pure-browser autosave race remains deferred; actual
+      // No final rescue flush. The invariant belongs to Rust or actual save
+      // debt it still owns. The old browser autosave race remains deferred; actual
       // leave/open boundaries still assert both files for every engine.
-      if (state.rustChapters.has(c.id) || engineSwitch.mode === 'rust') checkFile('at rest');
+      if (state.rustDebt.has(c.id) || engineSwitch.mode === 'rust') checkFile('at rest');
       else seen.browserDeferred++;
       choicesLive('at rest');
       // Keep is one write: pressed over a chapter with nothing of the user's
@@ -693,25 +785,8 @@ async function run(events) {
     if (!(e instanceof Broken)) throw new Error(`${at}: ${e?.stack ?? e}`);
     return `${e.message}`;
   } finally {
-    // Assertions have already run. Cleanup may drain/flush, but it cannot
-    // make a failed sequence pass. Supersede pending opens before the next
-    // sequence installs its literal fixture files.
-    state.transition++;
-    resetHand();
-    await pass(0);
-    if (app.chapterRef && app.loaded) {
-      await until(flushBeforeLeaving('editor')).catch(() => {});
-    }
-    closeChapter();
-    state.open = false;
-    for (const pending of [...state.pending]) await until(pending).catch(() => {});
-    hand.fontHeld = false;
-    await until(useTextEngine('browser'));
-    resetHand();
-    await pass(3000);
-    resetSaveFailures();
-    app.saveFailed = false;
-    state.choices.clear();
+    state.lastRunStages = stages;
+    await cleanupModel();
   }
 }
 
@@ -779,6 +854,13 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     for (const seed of seeds) {
       const events = sequence(seed, STEPS);
       const why = await run(events);
+      // Only the original generated orders count here. Named probes and
+      // shrink replays may increment the historical totals above, but cannot
+      // inflate this per-event breakdown of the 6000 generated sequences.
+      for (const [stage, counts] of Object.entries(state.lastRunStages.eventsByStage)) {
+        for (const [name, count] of Object.entries(counts)) seen.generatedStages.eventsByStage[stage][name] = (seen.generatedStages.eventsByStage[stage][name] ?? 0) + count;
+      }
+      for (const [name, count] of Object.entries(state.lastRunStages.inapplicablePublicActions)) seen.generatedStages.inapplicablePublicActions[name] = (seen.generatedStages.inapplicablePublicActions[name] ?? 0) + count;
       seen.sequences++;
       if (!why) continue;
       const least = await shrink(events);
@@ -818,10 +900,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       checkFile('after the follow-up debounce, with the slow font still held');
       expect(hand.fonts.length).toBeGreaterThan(0);
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -862,14 +941,11 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       const translations = JSON.parse(textOnDisk());
       expect(chapter.pages[0].boxes[3]).toMatchObject({ h: fittedHeight, text: wantedText });
       expect(translations.pages[0].extraBoxes[3]).toMatchObject({ h: fittedHeight, text: wantedText });
-      expect(chapter.pages[0].lines[0].tr).toBe(wantedTranslation);
+      expect(chapter.pages[0].lines[0].en).toBe(wantedTranslation);
       expect(translations.pages[0].lines[0].en).toBe(wantedTranslation);
       checkFile('switch debt settled by its natural debounce, before leaving');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -882,7 +958,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.editLine();
       await pass(DOC_SAVE_MS);
       expect(hand.writes[0].path).toBe(translationsPath);
-      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe('AAA');
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
       await EVENTS.editLine();
       const intended = 'AAAA';
       await EVENTS.switchOn();
@@ -893,14 +969,11 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await pass(0);
       expect(app.saved).toBe(false);
       await pass(DOC_SAVE_MS);
-      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe(intended);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe(intended);
       expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe(intended);
       checkFile('browser snapshot acquired by Rust, before leaving');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -936,20 +1009,17 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await until(state.lastOpen);
       await pass(0);
       expect(app.chapterRef.chapterId).toBe(chapters[1].id);
-      expect(JSON.parse(fsx._tree.files.get(first.chapter)).pages[0].lines[0].tr).toBe('AAAA');
+      expect(JSON.parse(fsx._tree.files.get(first.chapter)).pages[0].lines[0].en).toBe('AAAA');
       expect(JSON.parse(fsx._tree.files.get(first.text)).pages[0].lines[0].en).toBe('AAAA');
       choicesOnDisk(chapters[0], 'old files after the real second open');
       await EVENTS.editLine();
       await pass(DOC_SAVE_MS);
-      expect(JSON.parse(fsx._tree.files.get(second.chapter)).pages[0].lines[0].tr).toBe('AAA');
+      expect(JSON.parse(fsx._tree.files.get(second.chapter)).pages[0].lines[0].en).toBe('AAA');
       expect(JSON.parse(fsx._tree.files.get(second.text)).pages[0].lines[0].en).toBe('AAA');
       choicesOnDisk(chapters[1], 'second files after their own debounce');
       checkFile('second chapter independently saved');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -975,15 +1045,159 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(app.saved).toBe(false);
       await pass(DOC_SAVE_MS);
       expect(JSON.parse(onDisk()).typesetting.mode).toBe('plain');
-      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe('AAAA');
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
       expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
       checkFile('same-chapter Settings change settled before leaving');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
+  });
+
+  it.each(['editor', 'quit'])('the final %s snapshot waits for Rust debt discovered before it lands, without a debounce rescue', async (where) => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      hand.hold = true;
+      await EVENTS.editLate();
+      let done = false;
+      const leaving = flushBeforeLeaving(where).then((answer) => { done = true; return answer; });
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      expect(hand.began).toHaveLength(1);
+      await EVENTS.fontLands();
+      await pass(0);
+      expect(app.pages[0].boxes[3].h).toBe(70);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(done, 'exit cannot destroy the newer fitted edit').toBe(false);
+      expect(hand.writes).toHaveLength(1);
+      expect(JSON.parse(onDisk()).pages[0].boxes[3].h).toBe(48);
+      hand.hold = false;
+      hand.writes.shift().ok();
+      expect(await until(leaving)).toBe(true);
+      expect(JSON.parse(onDisk()).pages[0].boxes[3]).toMatchObject({ h: 70, text: 'AAAA BBBB CC' });
+      expect(JSON.parse(textOnDisk()).pages[0].extraBoxes[3]).toMatchObject({ h: 70, text: 'AAAA BBBB CC' });
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      checkFile('after final outgoing settlement, before closing');
+      expect(hand.began).toHaveLength(2);
+      closeChapter();
+      state.open = false;
+    } finally { await cleanupModel(); }
+  });
+
+  it('final exit saves what exists and does not wait for a font that is still absent', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      await EVENTS.editLine();
+      expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      expect(hand.fonts.length).toBeGreaterThan(0);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(1);
+      checkFile('final current snapshot, future font still held');
+    } finally { await cleanupModel(); }
+  });
+
+  it('a real chapter switch waits for debt discovered during its final outgoing snapshot, without a debounce rescue', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await open(V1);
+      const outgoing = paths(chapters[0]);
+      const incoming = paths(chapters[1]);
+      const incomingBefore = fsx._tree.files.get(incoming.chapter);
+      const incomingTextBefore = fsx._tree.files.get(incoming.text);
+      hand.hold = true;
+      await EVENTS.editLate();
+      await EVENTS.open2();
+      expect(hand.writes).toHaveLength(1);
+      expect(app.chapterRef.chapterId).toBe(chapters[0].id);
+      await EVENTS.fontLands();
+      await pass(0);
+      expect(app.pages[0].boxes[3].h).toBe(70);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(app.chapterRef.chapterId).toBe(chapters[0].id);
+      expect(hand.writes).toHaveLength(1);
+      expect(fsx._tree.files.get(incoming.chapter)).toBe(incomingBefore);
+      expect(fsx._tree.files.get(incoming.text)).toBe(incomingTextBefore);
+      expect(JSON.parse(fsx._tree.files.get(outgoing.chapter)).pages[0].boxes[3].h).toBe(48);
+      hand.hold = false;
+      hand.writes.shift().ok();
+      await until(state.lastOpen);
+      expect(app.chapterRef.chapterId).toBe(chapters[1].id);
+      expect(JSON.parse(fsx._tree.files.get(outgoing.chapter)).pages[0].boxes[3]).toMatchObject({ h: 70, text: 'AAAA BBBB CC' });
+      expect(JSON.parse(fsx._tree.files.get(outgoing.text)).pages[0].extraBoxes[3]).toMatchObject({ h: 70, text: 'AAAA BBBB CC' });
+      choicesOnDisk(chapters[0], 'both outgoing files before the incoming document is edited');
+      expect(hand.began.filter((w) => w.path === outgoing.chapter)).toHaveLength(2);
+    } finally { await cleanupModel(); }
+  });
+
+  it.each([['typeset', 'translate'], ['translate', 'typeset']])('an untouched %s to %s real open notes the incoming workflow mode and writes neither file', async (from, to) => {
+    resetHand();
+    state.open = false;
+    try {
+      for (const [index, mode] of [[0, from], [1, to]]) {
+        const rec = JSON.parse(V1);
+        rec.id = chapters[index].id;
+        rec.number = index + 1;
+        rec.mode = mode;
+        const path = paths(chapters[index]);
+        fsx._tree.files.set(path.chapter, JSON.stringify(rec));
+        fsx._tree.files.set(path.text, buildTextJson(rec.pages));
+      }
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await EVENTS.open1();
+      expect(app.chapterMode).toBe(from);
+      await EVENTS.open2();
+      expect(app.chapterMode).toBe(to);
+      expect(app.saved).toBe(true);
+      const opened = onDisk();
+      const openedText = textOnDisk();
+      await EVENTS.fontLands();
+      await pass(DOC_SAVE_MS);
+      expect(hand.began).toHaveLength(0);
+      expect(await until(flushBeforeLeaving('quit'))).toBe(true);
+      expect(onDisk()).toBe(opened);
+      expect(textOnDisk()).toBe(openedText);
+      await EVENTS.switchOff();
+      expect(app.chapterMode).toBe(to);
+      expect(app.pages.flatMap((pg) => pg.boxes.map((b) => b.h))).toEqual([26, 70, 26, 48, 26]);
+      expect(hand.began).toHaveLength(0);
+    } finally { await cleanupModel(); }
+  });
+
+  it('a settled Rust version2 remains version2 after switch-off until a browser snapshot is taken', async () => {
+    expect(await run(['switchOn', 'engineStarts', 'open2', 'editLine', 'debounce', 'switchOff'])).toBe(null);
+  });
+
+  it('a public browser Inspector color edit saves after both Rust-owned files are already current', async () => {
+    resetHand();
+    state.open = false;
+    try {
+      await EVENTS.switchOn();
+      await EVENTS.engineStarts();
+      await EVENTS.open2();
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      await EVENTS.switchOff();
+      retireBrowserDebt();
+      expect(state.rustDebt.has(c.id)).toBe(false);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      await EVENTS.unmarked_style();
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).pages[0].boxes[0].style.color).toBe('#123456');
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(1);
+      checkFile('completed public Inspector color edit under the browser');
+    } finally { await cleanupModel(); }
   });
 
   it('an empty chapter Keep does not wait for the previous chapter’s held font', async () => {
@@ -1006,10 +1220,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
       checkFile('empty chapter Keep, unrelated font still held');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -1031,16 +1242,13 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(app.saved).toBe(false);
       expect(app.saveFailed).toBe(true);
       expect(textOnDisk()).toBe(oldText);
-      expect(JSON.parse(onDisk()).pages[0].lines[0].tr).toBe(app.pages[0].lines[0].tr);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe(app.pages[0].lines[0].en);
       hand.holdTranslations = false;
       await until(flushSave());
       expect(app.saved).toBe(true);
       checkFile('after retry, with the slow font still held');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -1071,10 +1279,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
       checkFile('late font after timeout');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
@@ -1101,16 +1306,14 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(waiting()).toBe(true);
       checkFile('unchanged geometry Keep deadline, font never arrived');
     } finally {
-      await rest();
-      await leave();
-      await until(useTextEngine('browser'));
-      resetHand();
+      await cleanupModel();
     }
   });
 
   // Review findings and mutation-sensitive boundaries, kept by name so they
   // run even when the generator's seed count is zero.
   const FOUND = {
+    'the final leave snapshot awaits a fit that lands while it is held': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'leave', 'fontLands', 'writeLands'],
     'switching off cannot restore over an independently retained handle choice': ['switchOn', 'engineStarts', 'open1', 'unmarkedHandle', 'switchOff'],
     'a held Rust save remains owed after switching off': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'switchOff', 'writeLands'],
     'a held Rust save remains owed across off and on': ['switchOn', 'engineStarts', 'open1', 'holdWrites', 'editLate', 'debounce', 'fontLands', 'switchOff', 'switchOn', 'engineStarts', 'writeLands'],

@@ -2391,7 +2391,7 @@ export function markSaved() {
   // (`landed`, `settleDisk`).
   landed();
 }
-export function flushSave() {
+export function flushSave({ settle = false } = {}) {
   clearTimeout(saveT);
   // A chapter the Rust engine fitted for the first time, which the user has
   // neither edited nor kept: there is nothing of theirs to write, and what
@@ -2407,8 +2407,23 @@ export function flushSave() {
   // sit on its neutral dot promising a save that no longer exists. The error is
   // rethrown untouched - flushBeforeLeaving still decides whether the user may
   // go, and says why.
-  return savers.size() && app.chapterRef
-    ? runSavers().catch((e) => {
+  const ref = app.chapterRef;
+  const owned = !!fontSource || !!disk?.owned;
+  return savers.size() && ref
+    ? runSavers().then(async () => {
+        // Leaving/quit must finish debt discovered while its final snapshot
+        // was held. Only this outgoing Rust-owned document is covered. A font
+        // still absent is not waited for: compare the document/version that
+        // actually exists now, rather than Keep's remaining wait or future fit.
+        while (
+          settle && app.chapterRef === ref && app.loaded &&
+          (owned || fontSource || disk?.owned) && disk &&
+          (disk.doc !== docText() || disk.version !== versionNow() || disk.mode !== app.chapterMode)
+        ) {
+          clearTimeout(saveT);
+          await runSavers();
+        }
+      }).catch((e) => {
         throw saveFailed(e);
       })
     : Promise.resolve();

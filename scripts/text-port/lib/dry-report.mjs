@@ -111,7 +111,7 @@ export function explain(row, c, wk) {
 }
 
 export function placementMatches(row, c) {
-  if (row.valign !== 'middle' || !c.placement || c.blockDy == null) return false;
+  if (row.valign !== 'middle' || !c.placement || c.blockDy == null || c.blockDx == null) return false;
   if (c.blockDx != null && Math.abs(c.blockDx) > MOVED_PX) return false;
   return Math.abs(c.placement.predictedDy - c.blockDy) <= INK_TOL_PX;
 }
