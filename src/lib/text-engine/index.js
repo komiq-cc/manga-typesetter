@@ -49,11 +49,19 @@ export function setGlyphPainter(p) {
 // will be painted, and a canvas can be sized by it.
 //
 // This is the gate for what is right in the Rust engine and would change the
-// browser path's output if it were done there too: today one thing, the
-// footprint grown to hold ink past the advances (`layoutBox`, exporter.js).
-// The browser path has the same defect and keeps it, byte for byte, until it
-// is removed. AT CUT-OVER this function and its one call go, and what the
-// call guards becomes unconditional.
+// browser path's output if it were done there too:
+//
+//   - the footprint grown to hold ink past the advances (`layoutBox`,
+//     exporter.js). The browser path has the same defect and keeps it, byte
+//     for byte, until it is removed;
+//   - what a PSD type layer says of its font: the name in the file that was
+//     drawn, the engine's own faux flags, the fonts of borrowed letters, a
+//     missing font said in the layer name (psd.js);
+//   - what an export waits for: the engine's registry and not the browser's
+//     font set (`exportImages` in exporter.js, `buildPagePsd` in psd.js).
+//
+// AT CUT-OVER this function and its calls go, and what each call guards
+// becomes unconditional.
 export function engineDraws() {
   return engine != null && painter.engine === engine;
 }

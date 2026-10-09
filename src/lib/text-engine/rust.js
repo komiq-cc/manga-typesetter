@@ -84,6 +84,19 @@ export async function createRustTextEngine(source, options = {}) {
 
   const present = (fam) => FACE_SLOTS.filter((s) => fam[s]);
 
+  // The face one family of the fallback list lends to a request of this
+  // weight and slant, and what is synthesised of it: the one statement of
+  // that, for the chain that is measured and drawn from (`chainFor`) and for
+  // whoever has to name the face afterwards (`lenders`).
+  function lend({ family, first }, bold, italic) {
+    const fam = families.get(family);
+    const slots = present(fam);
+    const { slot, fauxBold, fauxItalic } = first
+      ? { slot: slots[0], fauxBold: bold && !BOLD_SLOTS.has(slots[0]), fauxItalic: italic && !ITALIC_SLOTS.has(slots[0]) }
+      : matchSlot(slots, bold, italic);
+    return { family, slot, font: fam[slot], fauxBold, fauxItalic };
+  }
+
   // The chain is the same for every family asked in one weight and slant.
   // A fallback family answers with the face CSS would pick from it, so a
   // bold line borrows a bold letter where the fallback has one - unless it
@@ -99,13 +112,9 @@ export async function createRustTextEngine(source, options = {}) {
     let chain = 0;
     if (lenders.length) {
       chain = low.chainNew();
-      for (const { family, first } of lenders) {
-        const fam = families.get(family);
-        const slots = present(fam);
-        const { slot, fauxBold, fauxItalic } = first
-          ? { slot: slots[0], fauxBold: bold && !BOLD_SLOTS.has(slots[0]), fauxItalic: italic && !ITALIC_SLOTS.has(slots[0]) }
-          : matchSlot(slots, bold, italic);
-        low.chainPush(chain, fam[slot], { bold: fauxBold, italic: fauxItalic });
+      for (const lender of lenders) {
+        const { font, fauxBold, fauxItalic } = lend(lender, bold, italic);
+        low.chainPush(chain, font, { bold: fauxBold, italic: fauxItalic });
       }
     }
     chains.set(at, chain);
@@ -373,6 +382,16 @@ export async function createRustTextEngine(source, options = {}) {
     /** The families of the list by name, in its order. */
     fallbacks() {
       return fallbacks.map((f) => f.family);
+    },
+    /**
+     * The face each family of the list lends to a request of this weight and
+     * slant, in the list's order, as `{ family, slot, font, fauxBold,
+     * fauxItalic }` - `font` is the engine's id of it. Null for a family that
+     * is not registered, which lends nothing. Entry `n - 1` is what `missing`
+     * with depth `n` adds to depth `n - 1`.
+     */
+    lenders(bold, italic) {
+      return fallbacks.map((f) => (families.has(f.family) ? lend(f, !!bold, !!italic) : null));
     },
 
     /**

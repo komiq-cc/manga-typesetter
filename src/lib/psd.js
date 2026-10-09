@@ -13,9 +13,11 @@ import { app, PAGE_W, PAGE_H } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
 import { renderBoxLayer, pageSpace, settleNoise } from './exporter.js';
 import { settleBoxTips } from './brush-tips.js';
-import { fontCssFor, fontNameFor, reviewOf } from './store.svelte.js';
+import { fontCssFor, fontNameFor, reviewOf, fontsSettling, fontMissing } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
-import { applyCase, canMeasure, textInset, contentWidth, blockYFor } from './measure.js';
+import { applyCase, canMeasure, textInset, contentWidth, blockYFor, faceFor } from './measure.js';
+import { textEngine, engineDraws } from './text-engine/index.js';
+import { drawnFace, drawnRuns } from './text-engine/drawn-face.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { normalizeFit, normalizeAuto } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
@@ -271,7 +273,35 @@ function postScriptName(family) {
 // `resolveFace` answers per axis (see fonts.js), so the two flags below can
 // disagree with each other - a bold-italic box on a family with a real bold and
 // no italics is exactly that case, and it is the case this app makes most.
+//
+// WITH THE RUST ENGINE DRAWING (`engineDraws`) none of the above is asked. The
+// engine holds the bytes of every face it draws, whichever list the family
+// came from, so the name is read out of the font that was drawn and the two
+// flags are what the engine did to it (`drawnFace`): a system font is
+// `Arial-BoldMT` because its file says so, not `Arial-Bold` because a family
+// name and a suffix make that, and a flag is on exactly when the engine
+// emboldened or slanted the face it resolved. A font that states no
+// PostScript name keeps the constructed one, from the face that was drawn.
+const SLOT_SUFFIX = { regular: '', bold: '-Bold', italic: '-Italic', boldItalic: '-BoldItalic' };
+
+// The engine's own account of the face `s` is drawn in, or null when it is
+// not the one drawing - the browser path, which is everything below it.
+function engineFontRequest(s) {
+  if (!engineDraws()) return null;
+  const engine = textEngine();
+  if (typeof engine.resolveFace !== 'function') return null;
+  const drawn = drawnFace(engine, faceFor(s, s.size));
+  if (!drawn) return null;
+  return {
+    name: drawn.postScriptName || postScriptName(drawn.family) + SLOT_SUFFIX[drawn.slot],
+    fauxBold: drawn.fauxBold,
+    fauxItalic: drawn.fauxItalic,
+  };
+}
+
 export function fontRequestFor(s) {
+  const fromEngine = engineFontRequest(s);
+  if (fromEngine) return fromEngine;
   const family = fontNameFor(s.font);
   const face = resolveFace(family, s);
   const parsed = face.known
@@ -281,9 +311,7 @@ export function fontRequestFor(s) {
     return { name: parsed, fauxBold: face.fauxBold, fauxItalic: face.fauxItalic };
   }
   const base = postScriptName(family);
-  const suffix = face.known
-    ? { regular: '', bold: '-Bold', italic: '-Italic', boldItalic: '-BoldItalic' }[face.slot]
-    : '';
+  const suffix = face.known ? SLOT_SUFFIX[face.slot] : '';
   return { name: base + suffix, fauxBold: face.fauxBold, fauxItalic: face.fauxItalic };
 }
 
@@ -413,6 +441,59 @@ export const RASTER_MARK = ' [raster, not editable in Photoshop]';
 // and the importer takes it back off before the name becomes the box's text.
 export const REVIEW_MARK = ' [needs review]';
 
+// Written onto the layer name of a box set in a font this machine has no
+// usable face for, with the Rust engine drawing. Such a box is drawn in the
+// last-resort face (text-engine/last-resort.js), and its type layer names
+// THAT face, because it is the one whose pixels are in the file and the one
+// the lines were broken with. Left at that, the person opening the PSD would
+// read the stand-in as the letterer's choice: the name says it is not, and
+// which font the box is waiting for. Before the raster marker on a raster
+// layer, like the review marker, and taken back off by the importer.
+//
+// Only with the Rust engine drawing. The browser path draws Comic Neue from
+// the network for such a box and says nothing, as it always has.
+const FONT_MISSING_OPEN = ' [font missing: ';
+export const fontMissingMark = (name) => `${FONT_MISSING_OPEN}${String(name).replace(/[\[\]]/g, '')}]`;
+const FONT_MISSING_TAIL = / \[font missing: [^\]]*\]$/;
+
+// Written onto the name of a type layer some of whose letters are not drawn in
+// the font the box is set in: the face lacks them (kana in a Latin lettering
+// font, a heart, a star) and the engine drew them from another family
+// (RULES.md rules 10 and 11). See `borrowedRuns` for what the layer then says.
+export const BORROWED_MARK = ' [letters from another font]';
+
+// The stretches of a type layer's text that are drawn from another family
+// than the box's, as ag-psd `styleRuns`; null when every letter is the face's
+// own, which is nearly every box, and whenever the Rust engine is not drawing.
+//
+// THE CHOICE, between a raster-only layer and a live one: LIVE, with the truth
+// in it. `isRasterOnly` is for what Photoshop's type engine cannot state, and
+// this it can: a type layer carries a font per stretch of text. So each
+// borrowed stretch names the PostScript name of the face that drew it and
+// whether the engine emboldened or slanted that face, and Photoshop - which
+// would otherwise set the whole layer in the box's font and show its own
+// missing-glyph boxes - re-renders every letter in the font the app drew it
+// in. The text stays editable, which a raster layer would have cost for every
+// box with one heart in it; the name is marked so the mixed fonts read as
+// meant. The cached pixels are the engine's either way.
+function borrowedRuns(s, content) {
+  if (!engineDraws()) return null;
+  const engine = textEngine();
+  if (typeof engine.lenders !== 'function') return null;
+  const runs = drawnRuns(engine, faceFor(s, s.size), content);
+  if (!runs || runs.every((r) => r.own)) return null;
+  return runs.map((r) => ({
+    length: r.end - r.start,
+    style: r.own
+      ? {}
+      : {
+          font: { name: r.postScriptName || postScriptName(r.family) + SLOT_SUFFIX[r.slot] },
+          fauxBold: r.fauxBold,
+          fauxItalic: r.fauxItalic,
+        },
+  }));
+}
+
 // Build one layer for a box. The common case is a live, editable Photoshop
 // type layer backed by the box's exact pixels (`rendered`, from
 // renderBoxLayer) as its cached rasterization, so it displays pixel-identical
@@ -432,7 +513,9 @@ export const REVIEW_MARK = ' [needs review]';
 export function textLayerFor(p, box, rendered) {
   const s = box.style;
   const raw = boxTextFor(p, box);
-  const flag = reviewOf(box, p) ? REVIEW_MARK : '';
+  // The review flag, then - with the Rust engine drawing - that the box's font
+  // is not on this machine and what it shows is the stand-in.
+  const flag = (reviewOf(box, p) ? REVIEW_MARK : '') + (engineDraws() && fontMissing(s.font) ? fontMissingMark(s.font) : '');
 
   if (isRasterOnly(s)) {
     // If the box paints no pixels (e.g. empty or whitespace-only text),
@@ -562,6 +645,7 @@ export function textLayerFor(p, box, rendered) {
   const fontSize = s.size;
   const tracking = s.size > 0 ? Math.round(((s.letterSpacing || 0) / s.size) * 1000) : 0;
   const face = fontRequestFor(s);
+  const borrowed = borrowedRuns(s, content);
 
   // Photoshop type layers require real layer effects for stroke and drop shadow.
   // Photoshop always re-renders a live type layer from its internal engine data
@@ -648,7 +732,7 @@ export function textLayerFor(p, box, rendered) {
   const hasEffects = Boolean(effects.stroke || effects.dropShadow || effects.gradientOverlay);
 
   return {
-    name: `${name}${flag}`,
+    name: `${name}${flag}${borrowed ? BORROWED_MARK : ''}`,
     ...bounds,
     imageData: rendered ? rendered.imageData : undefined,
     opacity: s.opacity ?? 1,
@@ -687,6 +771,8 @@ export function textLayerFor(p, box, rendered) {
         // (`bands` is outermost-first - see strokeBands.)
         strokeColor: hexToRgb(s.strokes?.[0]?.color ?? s.color),
       },
+      // The letters another family lent, each stretch in the font that drew it.
+      ...(borrowed ? { styleRuns: borrowed } : null),
       paragraphStyle: { justification: JUSTIFY[s.align] || 'center' },
       // A flush line in a balloon starts at its row's edge, not the frame's
       // (`lineIndents`). Every line is its own paragraph here - the breaks go in
@@ -834,8 +920,20 @@ export function writePagePsd(doc) {
 // falling back to these pixels instead of re-rendering the (still editable)
 // type layer, and then only above 100% zoom. With the font installed nothing is
 // lost, because Photoshop redraws the type vector-sharp at any zoom.
+//
+// WHAT IT WAITS FOR. With the Rust engine switched on, the same gate every
+// export goes through (`fontsSettling`: every face this page's boxes are set
+// in, and every family a letter of theirs is borrowed from, in the engine or
+// known not to be coming) - asked here as well as in `exportImages`, because
+// the self-test below calls this directly and a page that was never on screen
+// names fonts nobody has sent for. It rejects when the wait gives up, and
+// then nothing is built: a type layer written from a stand-in is a file of
+// wrong breaks that says it went well. `document.fonts.ready` is the browser
+// path's wait and stays that: awaited when the browser is what draws.
 export async function buildPagePsd(p) {
-  await document.fonts.ready;
+  const settling = fontsSettling([p]);
+  if (settling) await settling;
+  if (!engineDraws()) await document.fonts.ready;
   const { w: W, h: H } = await pageSpace(p);
   // A roughened box's pixels are displaced against a phase measured from the
   // running browser, and measuring it is a rasterisation - so it is settled
@@ -1025,7 +1123,7 @@ export async function reconstructForeign(psd) {
       else if (!n.text && typeof n.name === 'string' && n.name.endsWith(RASTER_MARK)) {
         const left = n.left ?? 0;
         const top = n.top ?? 0;
-        const named = n.name.slice(0, -RASTER_MARK.length);
+        const named = n.name.slice(0, -RASTER_MARK.length).replace(FONT_MISSING_TAIL, '');
         boxes.push({
           lineN: null,
           // The review marker is the app's note about the box, not its words.
