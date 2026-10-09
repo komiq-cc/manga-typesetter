@@ -63,7 +63,7 @@
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin } from './exporter.js';
   import { boxCandidate, placeBlock, blockRect } from './contain.js';
   import { engineSwitch } from './engine-switch.svelte.js';
-  import { PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
+  import { PICTURE_OFF, pictureScale, dragScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
   import { displayScale } from './editor/display-scale.svelte.js';
   import { watchNear } from './editor/near-view.js';
   import { maskTool } from './mask-tool.svelte.js';
@@ -123,7 +123,18 @@
   // Device px per page px the picture is painted at: one texture pixel per
   // device pixel at this zoom on this display (less for a box over the pixel
   // budget - `PICTURE_MAX_PX`).
-  const pictureRes = $derived(enginePaints ? pictureScale(z, displayScale(), s.rotation) : 0);
+  //
+  // While a handle is resizing the box (`resizing`, set by the drag in
+  // `startTransform`) a box over the drag's budget is painted lower: every
+  // frame of the drag is a repaint, and a frame has no time for megapixels.
+  // The scale is in the picture's key, so letting go is one repaint at the
+  // scale the box has at rest, and for a box within the budget it is nothing.
+  let resizing = $state(false);
+  const pictureRes = $derived.by(() => {
+    if (!enginePaints) return 0;
+    const full = pictureScale(z, displayScale(), s.rotation);
+    return resizing ? dragScale(full, box.w, box.h) : full;
+  });
   // Whether the box is near the viewport: null until the observer has said.
   //
   // What is watched is not the box's rectangle but what its picture covers
@@ -1212,6 +1223,9 @@
         // auto-height does not fit either.
         const floor = edgeDragFloor(box, shaped ? shaped.length : null, pg);
         const geom = resizeBoxMath(dx, dy, dir, o, s.rotation, floor);
+        // From the first move, not from the press: a handle pressed and let
+        // go changes nothing and must repaint nothing.
+        resizing = true;
         resizeBox(
           pageId,
           box.id,
@@ -1226,6 +1240,7 @@
       if (ev.pointerId !== pid) return;
       live.delete(ac);
       ac.abort();
+      resizing = false;
       // Both gestures on this handle CHANGE THE STYLE - the rotation handle
       // writes `rotation`, a corner writes `size` - and the next box placed is
       // meant to follow the box the user just shaped. Nothing else on this path

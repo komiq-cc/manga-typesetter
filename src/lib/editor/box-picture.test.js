@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PICTURE_MAX_PX, PICTURE_OFF, TURNED_OVERSAMPLE, pageCorner, pictureCss, pictureKey, pictureScale } from './box-picture.js';
+import { PICTURE_DRAG_PX, PICTURE_MAX_PX, PICTURE_OFF, TURNED_OVERSAMPLE, dragScale, pageCorner, pictureCss, pictureKey, pictureScale } from './box-picture.js';
 import { textureScale } from '../exporter.js';
 import { defaultStyle, normalizeStyle } from '../data.js';
 
@@ -51,6 +51,30 @@ describe('the pixel budget of one box', () => {
   });
   it('with no budget given, the export never loses resolution', () => {
     expect(textureScale(4000, 6000, 2)).toBe(2);
+  });
+});
+
+describe('the scale while a handle is resizing the box', () => {
+  it('the budget of a frame of the drag is a megapixel', () => {
+    expect(PICTURE_DRAG_PX).toBe(1024 * 1024);
+  });
+  it('is the scale asked for when the box is within it: an ordinary balloon is as sharp as at rest', () => {
+    // 220 x 110 page px at 100% on a 2x display is a tenth of a megapixel.
+    expect(dragScale(2, 220, 110)).toBe(2);
+    expect(dragScale(1, 1000, 1000)).toBe(1);
+    expect(dragScale(4, 256, 256)).toBe(4);
+  });
+  it('is lowered for a box over it, to the budget and not past it', () => {
+    for (const [w, h, scale] of [[1100, 800, 6], [600, 400, 6], [1600, 2300, 1], [4000, 200, 3]]) {
+      const ss = dragScale(scale, w, h);
+      expect(ss).toBeLessThan(scale);
+      expect(w * ss * h * ss).toBeCloseTo(PICTURE_DRAG_PX, 3);
+    }
+  });
+  it('never raises a scale, and makes nothing of a box with no area', () => {
+    expect(dragScale(0.5, 100, 100)).toBe(0.5);
+    expect(dragScale(3, 0, 100)).toBe(3);
+    expect(dragScale(3, 100, NaN)).toBe(3);
   });
 });
 

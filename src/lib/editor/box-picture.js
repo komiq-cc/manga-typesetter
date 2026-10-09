@@ -62,6 +62,32 @@ export function pictureScale(zoom, dpr, rotation = 0) {
   return zoom * (dpr > 0 ? dpr : 1) * (rotation % 90 ? TURNED_OVERSAMPLE : 1);
 }
 
+// The most pixels a box's picture is asked for while a handle is resizing the
+// box: one megapixel.
+//
+// A resize changes what the picture is drawn from on every frame of the drag,
+// so every frame repaints it, and the paint's time follows its pixels.
+// Measured in Chromium on a loaded machine, a frame of the drag to the end of
+// its effects: 2 ms for a tenth of a megapixel, 6 to 15 ms for one, 25 ms for
+// 2.4, 72 to 87 ms for the 8.4 a box at the budget above holds. A megapixel
+// is what fits a frame. An ordinary balloon is under it at 100% on any
+// display and at 300% on a 1x one, and is as sharp in the hand as at rest;
+// a page-wide sound effect is soft while it is dragged and is painted in
+// full once, when the handle is let go.
+export const PICTURE_DRAG_PX = 1024 * 1024;
+
+/**
+ * The scale a box `w` x `h` page px is painted at while it is being resized:
+ * `scale`, or less for a box whose own area at `scale` is over the drag's
+ * budget. The box's area and not its footprint's - the footprint is the
+ * paint's to work out, and the few px of padding round a box that large are
+ * nothing against it.
+ */
+export function dragScale(scale, w, h) {
+  const px = w * h * scale * scale;
+  return px > PICTURE_DRAG_PX ? scale * Math.sqrt(PICTURE_DRAG_PX / px) : scale;
+}
+
 // The finished bitmap onto the editor's canvas, pixel for pixel, and the
 // footprint back. 'copy' rather than a clear and a draw: the canvas then holds
 // exactly the bytes the painter made, which is what lets a test say the editor

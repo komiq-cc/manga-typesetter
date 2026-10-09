@@ -24,7 +24,7 @@ vi.mock('./text-paint.js', async (original) => {
 import TextBox from './TextBox.svelte';
 import { app, loadProjectPages, page, selectBox, beginEdit, endEdit, setZoom, setZoomLive, moveBoxTo, moveGeom, noteFontsChanged } from './store.svelte.js';
 import { engineSwitch } from './engine-switch.svelte.js';
-import { paintBoxPicture, PICTURE_MAX_PX, TURNED_OVERSAMPLE } from './editor/box-picture.js';
+import { paintBoxPicture, PICTURE_DRAG_PX, PICTURE_MAX_PX, TURNED_OVERSAMPLE } from './editor/box-picture.js';
 import { paintWarpedBox, renderBoxTexture } from './exporter.js';
 import { _setDisplayScale } from './editor/display-scale.svelte.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
@@ -299,6 +299,102 @@ describe('the scale the picture is painted at', () => {
     await tick();
     expect(m.paints()).toBe(2);
     expect(m.canvas().width).toBe(w1 * 2);
+  });
+});
+
+describe('while a handle is resizing the box', () => {
+  // A resize repaints the picture every frame of the drag, and a frame of a
+  // page-sized box at the display's scale is many megapixels. So the drag
+  // paints it within a smaller budget, and the full picture comes back once,
+  // when the handle is let go.
+  const ev = (type, x) => new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: 300 });
+  const scaleOf = (call) => call[3];
+  async function grabbed(id, opts) {
+    const m = await mounted(id, opts);
+    selectBox(id);
+    await tick();
+    m.root.querySelector('.handle.side.e').dispatchEvent(ev('pointerdown', 500));
+    await tick();
+    return m;
+  }
+
+  it('a box over the drag\'s budget is painted within it on every move, and shown at its size', async () => {
+    // 1600 x 2300 page px at 100%: 3.7 megapixels at rest.
+    const m = await grabbed('huge');
+    const rest = { paints: m.paints(), px: m.canvas().width * m.canvas().height };
+    expect(rest.px).toBeGreaterThan(PICTURE_DRAG_PX * 3);
+    for (const [i, x] of [510, 520, 530].entries()) {
+      document.dispatchEvent(ev('pointermove', x));
+      await tick();
+      expect(m.paints(), `move ${i + 1}`).toBe(rest.paints + i + 1);
+      const el = m.canvas();
+      expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBeLessThan(1);
+      // The box's own area is what is budgeted; the footprint's few px of
+      // padding round it are the slack.
+      expect(el.width * el.height).toBeLessThan(PICTURE_DRAG_PX * 1.05);
+      expect(el.width * el.height).toBeGreaterThan(PICTURE_DRAG_PX * 0.9);
+      // Shown at the footprint's size, to within the one texel a canvas of
+      // whole pixels rounds up by - about two page px at this scale.
+      const f = footprint(m.box, m.pg);
+      const texel = 1 / scaleOf(paintBoxPicture.mock.calls.at(-1));
+      expect(css(el).width - f.cw).toBeGreaterThanOrEqual(0);
+      expect(css(el).width - f.cw).toBeLessThan(texel);
+      expect(css(el).height - f.ch).toBeGreaterThanOrEqual(0);
+      expect(css(el).height - f.ch).toBeLessThan(texel);
+    }
+    expect(m.box.w).toBe(1630);
+  });
+
+  it('and is painted once more when the handle is let go, at the scale it has at rest', async () => {
+    const m = await grabbed('huge');
+    document.dispatchEvent(ev('pointermove', 520));
+    await tick();
+    const dragging = m.paints();
+    document.dispatchEvent(ev('pointerup', 520));
+    await tick();
+    expect(m.paints()).toBe(dragging + 1);
+    expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBe(1);
+    const f = footprint(m.box, m.pg);
+    expect(m.canvas().width).toBe(f.cw);
+    expect(m.canvas().height).toBe(f.ch);
+    // And nothing after that: the next change is painted in full.
+    await tick();
+    expect(m.paints()).toBe(dragging + 1);
+  });
+
+  it('a press on a handle that never moves repaints nothing', async () => {
+    const m = await grabbed('huge');
+    const before = m.paints();
+    document.dispatchEvent(ev('pointerup', 500));
+    await tick();
+    expect(m.paints()).toBe(before);
+  });
+
+  it('a box within the budget is painted at its full scale all through, and letting go repaints nothing', async () => {
+    _setDisplayScale(2);
+    const m = await grabbed('straight');
+    document.dispatchEvent(ev('pointermove', 520));
+    await tick();
+    expect(scaleOf(paintBoxPicture.mock.calls.at(-1))).toBe(2);
+    expect(m.canvas().width).toBe(footprint(m.box, m.pg).cw * 2);
+    const dragging = m.paints();
+    document.dispatchEvent(ev('pointerup', 520));
+    await tick();
+    expect(m.paints()).toBe(dragging);
+  });
+
+  it('the rotate handle turns the box and repaints nothing, as a turn does', async () => {
+    // 'finish' is turned already: another angle is the same picture.
+    const m = await mounted('finish');
+    selectBox('finish');
+    await tick();
+    const before = m.paints();
+    m.root.querySelector('.handle.rot').dispatchEvent(ev('pointerdown', 500));
+    document.dispatchEvent(ev('pointermove', 560));
+    await tick();
+    document.dispatchEvent(ev('pointerup', 560));
+    await tick();
+    expect(m.paints()).toBe(before);
   });
 });
 
