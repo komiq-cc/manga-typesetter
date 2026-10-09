@@ -2021,7 +2021,9 @@ describe('a box narrower than one grapheme, typed into as its picture', () => {
     const near = Math.min(...rows.map((r) => r.lead?.x ?? r.xs[0]));
     expect(far - near).toBe(10);
     expect(far).toBeGreaterThan(m.box.w);
-    const pad = px(m.q('.tpad'));
+    const padEl = m.q('.tpad');
+    expect(padEl, 'overflowing pictured rows have a pointer pad').not.toBeNull();
+    const pad = px(padEl);
     expect(pad.left).toBe(Math.min(0, near));
     expect(pad.left + pad.width).toBe(far);
     expect(Number.isFinite(pad.width) && Number.isFinite(pad.height)).toBe(true);
@@ -2114,6 +2116,49 @@ describe('browser ranges on a real picture broken inside a raw grapheme', () => 
     await tick();
     expect(m.box.text).toBe(`X${SYLLABLE}`);
     expect(m.sel()).toEqual([1, 1]);
+  });
+
+  it('pending composed text keeps its hidden caret row after compositionend until completion', async () => {
+    const m = await realJamo();
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const composed = SYLLABLE.repeat(2);
+      m.editable().dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      m.editable().textContent = composed;
+      m.editable().dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      await tick();
+      const rows = typeModel(m.box, composed).rows;
+      expect(rows).toHaveLength(6);
+      expect(m.box.text).toBe(SYLLABLE);
+      nativeSel(m, 4, 5);
+      await tick();
+      const before = px(m.q('.tcaret'));
+      expect(m.q('.tcaret').classList.contains('off')).toBe(true);
+      expect(before.top).toBe(rows.at(-1).top);
+      expect(m.sel()).toEqual([4, 5]);
+      m.editable().dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+      const finish = timers.mock.calls.find(([fn]) => fn.name === 'finish')?.[0];
+      expect(finish).toBeTypeOf('function');
+      // Hold the real completion task. A selection notification in this gap
+      // must still use the pending composed text, not the shorter box text.
+      nativeSel(m, 4, 5);
+      await tick();
+      expect(m.box.text).toBe(SYLLABLE);
+      expect(m.editable().textContent).toBe(composed);
+      expect(m.sel()).toEqual([4, 5]);
+      expect(m.all('.tcomp')).toHaveLength(6);
+      expect(m.q('.tcaret').classList.contains('off')).toBe(true);
+      expect(px(m.q('.tcaret'))).toEqual(before);
+      finish();
+      await tick();
+      expect(m.box.text).toBe(composed);
+      expect(m.all('.tcomp')).toHaveLength(0);
+    } finally {
+      cleanup();
+      timers.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('a composing partial native selection keeps its existing picture and browser ownership', async () => {

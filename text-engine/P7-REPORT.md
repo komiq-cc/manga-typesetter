@@ -1520,6 +1520,80 @@ coordinator can copy it into a private archive and require actual named
 assertion failures. The real-engine oracle is a numerical control and is
 not presented as a failing old-source defect reproduction.
 
+### 13.2.3 Pending composition coverage only
+
+The final delta review, `p7c-last-delta-codex-findings.md`, found no production
+defect. It independently measured236 real-wasm selection checks,32 edits,
+33 composition/pending/default/curve controls and20 native-caret alignment
+checks. Actual browser generation of controlled raw ranges and desktop IME
+placement remain inferred. The review's clear-then-add drag mutation failed
+the new multiple-drag assertion, while unmutated candidate behavior passed.
+
+One P3 coverage gap remained: deleting only `composeText == null` from the
+pictured span guard still passed the nine newly added cases. In a composition
+that expands one jamo syllable to two, raw selection `[4,5]` belongs to the
+pending double-syllable text after `compositionend`, while the stored box
+still has three units. The reviewer measured the guard-removal mutation
+moving the hidden caret to an earlier row and making it visible during the
+held completion interval. Production source at `0a001247` behaves correctly.
+
+The added mounted regression composes the double text with real wasm, holds
+the actual completion callback, repeats the native selection notification,
+and checks that the pending selection direction, hidden caret row/geometry,
+six composed marks and original stored box text persist. Running completion
+then commits the double text and clears composition marks. This is test and
+report work only: production source remains exactly `0a001247`. At preparation
+time the test and new mutation have not run; the coordinator owns those proofs.
+
+The coordinator measured47/47 named assertion kills in the existing catalog
+at `0a001247`. Those scripts, definitions and result files remain byte-for-byte
+frozen; hashes are recorded separately. The new one-guard mutation has its own
+`p7c-pending-compose-mutation/` directory, exact source strings, pinned archive
+runner and named pending test. It has no claimed kill until the coordinator
+runs it. Existing47 evidence is never rewritten into a48-result claim.
+
+### 13.2.4 Historical replay status and test-quality follow-up
+
+The coordinator's exact historical107 replay at `0a001247` measured
+77 named assertion kills,22 obsolete textual targets,4 test-errors and
+4 surviving substitutions. These statuses are retained verbatim. A parse,
+compile, runtime or test-body TypeError is not an assertion kill. There is
+no107-pass claim, and separately measured current-catalog kills are not
+substituted for any historical nonkill. Exact provenance and explanations
+are in `p7c-historical-followups/SURVIVOR-AUDIT.md`.
+
+Historical C1/M6/M7 included behavioral assertion failures together with
+body TypeErrors, so their broad statuses remain test-error. The coordinator
+prepared a separate clean selected-test runner for the same exact source
+substitutions; its future results are focused follow-up proofs only.
+Historical T3 produced a missing `.tpad` and a TypeError at the old test's
+style dereference. The test-only change now explicitly requires that
+necessary overflow pointer pad before measuring it. The exact old T3
+substitution can therefore fail a named behavioral assertion; that fresh
+run remains the coordinator's task and does not relabel the original result.
+
+The four historical survivors have a static domain explanation, not an
+invented kill. M18/M19 remove inequalities from lead/trail selection predicates;
+valid `stopRows` outputs and existing row/range guards make them redundant
+for the covered domain. They are not cleanup substitutions. Reconstructed
+RustR1/R2 remove initial finite-input checks, while downstream finite pen/
+advance checks still refuse the covered malformed numeric requests. This
+explains the measured covered error-status survival, not universal malformed
+input equivalence; combined-fault precedence/side effects are not proved.
+
+By comparison, current47 `F4-close`/`F5-close` target redundant menu/curve
+lifecycle cleanup routes together, and current RustR1/R2 remove downstream
+pen/advance guards. The coordinator measured all four killed by their named
+assertions, as part of47/47 current results. Those are different definitions
+with separate evidence and retain their identities. The source-only
+finite-advance/nonfinite-pen test proves the pen check independently.
+
+This commit changes only mounted tests and this report. All production
+files remain byte-identical to `0a001247`, the measured47 scripts/catalog/
+results remain frozen, and the new pending-text mutation stays in its
+separate directory. No test, build, browser, capture or mutation executed in
+this worker's final test/report pass.
+
 ### 13.3 The ABI coverage gap
 
 The natural overflow test alone still passes when only the pen guard is
@@ -1617,6 +1691,14 @@ this candidate's mounted/engine tests onto old `69e6704`: five named
 assertion failures proved all four defects, with no import/collection errors.
 Those are coordinator measurements, and they precede section13.2.2's final
 delta. They are not final-source acceptance or mutation evidence.
+
+**Coordinator at `0a001247`:** full Vitest3657 cases passed plus7 skips,
+and the8 earlier plus6 final independent bounded probes passed. The final
+focused review found no production defect, only the pending-text coverage
+gap recorded above. Current47 named mutations were independently killed.
+These coordinator facts predate the final pending/T3 test-only assertions;
+the coordinator will own their baseline/kill, exact T3 fresh repeat, final
+full JavaScript, Chromium1x/2x, WebKit and integration verification.
 
 Remaining gates: finish all relevant proofs on the accepted final source,
 view the new pictures, obtain a fresh read-only Codex review, fix any real
