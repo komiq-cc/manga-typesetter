@@ -317,6 +317,15 @@ describe('a variable font made in the test', () => {
     expect(() => addInstance(low, font, { wght: 700, bad: 4 })).toThrow(/not an axis tag/);
     expect(() => addInstance(low, font, { wght: 700, wdth: NaN })).toThrow(/not a number/);
     expect(nextId()).toBe(free);
+    // Not made and taken back: never made. The engine is not called at all.
+    let calls = 0;
+    const watched = { exports: { mt_font_add_instance: (...args) => (calls++, low.exports.mt_font_add_instance(...args)) }, removeFont: (id) => low.removeFont(id) };
+    expect(() => addInstance(watched, font, { wght: 700, bad: 4 })).toThrow(/not an axis tag/);
+    expect(() => addInstance(watched, font, { wght: 700, wdth: NaN })).toThrow(/not a number/);
+    expect(calls).toBe(0);
+    const both = addInstance(watched, font, { wght: 700, wdth: 150 });
+    expect(calls).toBe(2);
+    low.removeFont(both);
     low.removeFont(font);
   });
 
