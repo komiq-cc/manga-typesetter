@@ -803,28 +803,6 @@ const middle = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // The stop of a row nearest an x, the later of two as near (flat-caret.js).
 const nearest = (row, x) => row.xs.reduce((best, v, j) => (Math.abs(v - x) <= Math.abs(row.xs[best] - x) ? j : best), 0);
-// Every letter of a model, as the two places a press on it can go: the middle
-// of its left half (the caret goes before it) and of its right (after it).
-function halves(model) {
-  const out = [];
-  if (model.kind === 'curve') {
-    model.glyphs.forEach((g, i) => {
-      if (far(g.left, g.right) < 1.5) return;
-      out.push({ p: g.left, o: i, row: 0, k: i }, { p: g.right, o: i + 1, row: 0, k: i + 1 });
-    });
-    return out;
-  }
-  model.rows.forEach((row, i) => {
-    for (let k = 0; k + 1 < row.offs.length; k++) {
-      const a = model.at[i][k];
-      const b = model.at[i][k + 1];
-      if (far(a, b) < 1.5) continue;
-      out.push({ p: lerp(a, b, 0.25), o: row.offs[k], row: i, k }, { p: lerp(a, b, 0.75), o: row.offs[k + 1], row: i, k: k + 1 });
-    }
-  });
-  return out;
-}
-
 if (ONLY.has('type')) {
   await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   await viewport(WINDOW.w, WINDOW.h);
@@ -885,7 +863,7 @@ if (ONLY.has('type')) {
     await bring(id);
     const m = await ec('typeRows', id);
     if (m?.kind !== 'flat') continue;
-    samples[id] = { halves: halves(m), rows: m.rows.map((row, i) => (row.line >= 0 && row.offs.length > 2 ? { row: i, p: lerp(m.at[i][1], m.at[i][2], 0.5) } : null)).filter(Boolean) };
+    samples[id] = { halves: await ec('typeHalves', id), rows: m.rows.map((row, i) => (row.line >= 0 && row.offs.length > 2 ? { row: i, p: lerp(m.at[i][1], m.at[i][2], 0.5) } : null)).filter(Boolean) };
   }
   await ec('engine', 'browser');
   await ec('zoom', 1);
@@ -958,7 +936,7 @@ if (ONLY.has('type')) {
       // 2. A press on each half of every letter.
       st = await begin(id);
       const model = await ec('typeRows', id);
-      const pts = halves(model);
+      const pts = await ec('typeHalves', id);
       const flat = model.kind === 'flat';
       let wrong = 0;
       let caretOff = 0;
@@ -1052,7 +1030,7 @@ if (ONLY.has('type')) {
         const lastK = rows[longest].offs.length - 1;
         // The end of its body: the last stop that is not a hanging space is
         // where the text ends, which a press on the last letter's right half gives.
-        const endHalf = halves(model).filter((h) => h.row === longest).at(-1);
+        const endHalf = pts.filter((h) => h.row === longest).at(-1);
         await pressAt(endHalf.p);
         st = await typeState();
         const startO = st.sel[1];
@@ -1296,6 +1274,241 @@ if (ONLY.has('type')) {
       }
     }
   }
+  // -- the odd ones, at 100% --
+  if (!args.ids || args.ids.split(',').includes('edges')) {
+    const edge = await ec('spec', 'typeEdge');
+    await ec('openCustom', edge);
+    await ec('zoom', 1);
+    const E = (T.edges = {});
+    const textOf = (id) => edge.pages[0].boxes.find((b) => b.id === id).text ?? 'WAIT FOR ME\nOVER THERE!';
+    const edgeShots = [];
+    const picture = async (id, what) => {
+      await ec('freezeCaret', true);
+      await ec('wait', 2);
+      edgeShots.push([id, what, await shot((await cellFor(id)).cell)]);
+      await ec('freezeCaret', false);
+    };
+    const guard = async (id, run) => {
+      const errorsBefore = cdp.errors.length;
+      try {
+        await bring(id);
+        await run((E[id] = {}));
+      } catch (err) {
+        check(false, id, 'the step threw', String(err?.stack ?? err).slice(0, 400));
+        log(`type edges ${id}: threw ${String(err?.message ?? err)}`);
+        await ec('freezeCaret', false);
+      }
+      await ec('refuse', null);
+      if ((await ec('state')).editing) await end();
+      // The refusal is said on the console, once, by the app: that one is wanted.
+      const said = cdp.errors.splice(errorsBefore);
+      const wanted = id === 'refused' ? said.filter((e) => String(e).includes('could not be painted')) : [];
+      if (id === 'refused') check(wanted.length === 1, id, 'the refusal is said on the console once', said.map((e) => String(e).slice(0, 80)));
+      check(said.length === wanted.length, id, 'no page error', said.filter((e) => !wanted.includes(e)));
+      log(`type edges ${id.padEnd(10)} ${JSON.stringify(E[id]).slice(0, 420)}`);
+    };
+    const caretFromNative = (st) => (st.native && st.caret ? +far(middle(st.native), middle(st.caret)).toFixed(2) : null);
+
+    // Nothing in the box: a caret as tall as a line where the first letter
+    // will be, and the first letter typed is drawn.
+    await guard('empty', async (R) => {
+      const { box } = await cellFor('empty');
+      let st = await begin('empty');
+      R.start = { editing: st.editing === 'empty', overlay: st.overlay, unseen: st.unseen, focused: st.focused, sel: st.sel, caret: st.caret, nativeFromDrawn: caretFromNative(st) };
+      const lineH = 30 * 1.1;
+      check(st.editing === 'empty' && st.overlay === 'flat' && st.unseen && st.focused, 'empty', 'an empty box is typed into as a picture', R.start);
+      check(!!st.caret && !st.caret.off && st.caret.h > lineH * 0.8 && Math.abs(middle(st.caret).x - middle(box.rect).x) < 1 && Math.abs(middle(st.caret).y - middle(box.rect).y) < 1, 'empty', 'its caret is a line tall, at the middle of a centred box', { caret: st.caret, box: box.rect });
+      check(R.start.nativeFromDrawn != null && R.start.nativeFromDrawn <= 4, 'empty', 'the browser\'s own caret is within 4 CSS px of the drawn one', R.start.nativeFromDrawn);
+      await picture('empty', 'empty, caret');
+      await key('a', { text: 'a' });
+      st = await typeState(3);
+      const one = await ec('typeSame', 'empty');
+      R.typed = { text: st.text, sel: st.sel, bytes: one.bytes, painted: one.painted };
+      check(st.text === 'a' && same(st.sel, [1, 1]) && one.painted && one.bytes === 0, 'empty', 'the first letter typed is the box\'s text and its picture', R.typed);
+      const y1 = middle(st.caret).y;
+      await key('Enter', { text: '\r', commands: ['insertNewline'] });
+      st = await typeState(3);
+      R.returned = { text: st.text, sel: st.sel, caretDown: +(middle(st.caret).y - y1).toFixed(2), nativeFromDrawn: caretFromNative(st) };
+      check(st.text === 'a\n' && same(st.sel, [2, 2]) && R.returned.caretDown > lineH * 0.4, 'empty', 'a Return opens a line with nothing on it and the caret stands on it', R.returned);
+      check(R.returned.nativeFromDrawn != null && R.returned.nativeFromDrawn <= 4, 'empty', 'on the empty last line too the browser\'s caret is within 4 CSS px', R.returned.nativeFromDrawn);
+      await key('Backspace', { commands: ['deleteBackward'] });
+      await key('Backspace', { commands: ['deleteBackward'] });
+      st = await typeState(3);
+      R.emptied = { text: st.text, sel: st.sel, caret: !!st.caret, unseen: st.unseen };
+      check(st.text === '' && same(st.sel, [0, 0]) && !!st.caret && st.unseen, 'empty', 'deleted back to nothing, the caret is still drawn', R.emptied);
+      check(await end(), 'empty', 'Escape ends the edit');
+    });
+
+    // Nothing but spaces.
+    await guard('spaces', async (R) => {
+      let st = await begin('spaces');
+      const model = await ec('typeRows', 'spaces');
+      R.start = { overlay: st.overlay, unseen: st.unseen, sel: st.sel, rows: model?.rows?.map((r) => r.offs), xs: model?.rows?.map((r) => r.xs.map((v) => +v.toFixed(2))) };
+      check(st.overlay === 'flat' && st.unseen && same(st.sel, [0, 3]), 'spaces', 'a box of spaces is typed into as a picture, all of it selected', R.start);
+      await key('ArrowRight', { commands: ['moveRight'] });
+      st = await typeState(2);
+      const xEnd = st.caret?.x;
+      await key('ArrowLeft', { commands: ['moveLeft'] });
+      st = await typeState(2);
+      R.step = { sel: st.sel, movedBy: xEnd != null && st.caret ? +(xEnd - st.caret.x).toFixed(2) : null, nativeFromDrawn: caretFromNative(st) };
+      check(same(st.sel, [2, 2]) && R.step.movedBy > 2, 'spaces', 'the caret steps over a space by a space\'s width', R.step);
+      check(R.step.nativeFromDrawn != null && R.step.nativeFromDrawn <= 4, 'spaces', 'the browser\'s own caret is within 4 CSS px of the drawn one', R.step.nativeFromDrawn);
+      await key('x', { text: 'x' });
+      st = await typeState(3);
+      const one = await ec('typeSame', 'spaces');
+      R.typed = { text: st.text, sel: st.sel, bytes: one.bytes };
+      check(st.text === '  x ' && same(st.sel, [3, 3]) && one.bytes === 0, 'spaces', 'a letter typed among the spaces is drawn where the caret was', R.typed);
+      await picture('spaces', 'spaces and an x');
+      await pause();
+      await key('z', { mods: MOD.meta });
+      check((await typeState(2)).text === '   ', 'spaces', 'Cmd+Z takes it out');
+      check(await end(), 'spaces', 'Escape ends the edit');
+    });
+
+    // The system's correction of a word: one input naming what it replaces.
+    await guard('corrected', async (R) => {
+      const text0 = textOf('corrected');
+      await begin('corrected');
+      const pts = await ec('typeHalves', 'corrected');
+      await pressAt(pts.find((h) => h.o === 9).p);
+      await ec('wait', 2);
+      const sent = await ec('replace', 0, 3, 'the');
+      let st = await typeState(3);
+      const one = await ec('typeSame', 'corrected');
+      R.replaced = { prevented: sent.prevented, text: st.text, sel: st.sel, bytes: one.bytes };
+      check(sent.prevented && st.text === 'the' + text0.slice(3) && one.bytes === 0, 'corrected', 'a correction replaces its word, through the same input the box always took, and is drawn', R.replaced);
+      check(same(st.sel, [3, 3]), 'corrected', 'the caret is after the corrected word', st.sel);
+      await pause();
+      await ec('replace', 4, 9, 'quiet');
+      st = await typeState(3);
+      R.second = st.text;
+      check(st.text === 'the quiet' + text0.slice(9), 'corrected', 'a second correction, of a word further on', st.text);
+      await pause();
+      await key('z', { mods: MOD.meta });
+      await pause();
+      await key('z', { mods: MOD.meta });
+      st = await typeState(2);
+      R.undone = st.text;
+      check(st.text === text0, 'corrected', 'Cmd+Z twice takes both corrections out', st.text);
+      check(await end(), 'corrected', 'Escape ends the edit');
+    });
+
+    // A picture that cannot be painted while it is typed into: the text
+    // stays, in the same editable, with the caret where it was.
+    await guard('refused', async (R) => {
+      const text0 = textOf('refused');
+      await begin('refused');
+      const pts = await ec('typeHalves', 'refused');
+      const at = pts.find((h) => h.o === 4);
+      await pressAt(at.p);
+      let st = await typeState(2);
+      check(st.unseen && same(st.sel, [4, 4]), 'refused', 'typed into as a picture before the refusal', { unseen: st.unseen, sel: st.sel });
+      await ec('refuse', 'Q');
+      await key('Q', { text: 'Q', mods: MOD.shift });
+      st = await typeState(4);
+      const withQ = text0.slice(0, 4) + 'Q' + text0.slice(4);
+      R.refused = { text: st.text, held: st.held, sel: st.sel, unseen: st.unseen, focused: st.focused, overlay: st.overlay, canvas: st.canvas?.w ?? null, logged: (await ec('logged')).length };
+      check(st.text === withQ && st.held === withQ, 'refused', 'the letter whose picture is refused is in the box\'s text all the same', R.refused);
+      check(!st.unseen && st.overlay == null && st.focused && same(st.sel, [5, 5]), 'refused', 'the box is DOM text now, focus and caret kept', R.refused);
+      await picture('refused', 'refused: DOM text');
+      await key('u', { text: 'u' });
+      st = await typeState(3);
+      R.typedAsText = { text: st.text, sel: st.sel };
+      check(st.text === text0.slice(0, 4) + 'Qu' + text0.slice(4) && same(st.sel, [6, 6]), 'refused', 'typing goes on, into the text', R.typedAsText);
+      await key('Backspace', { commands: ['deleteBackward'] });
+      await key('Backspace', { commands: ['deleteBackward'] });
+      st = await typeState(4);
+      const back = await ec('typeSame', 'refused');
+      R.back = { text: st.text, sel: st.sel, unseen: st.unseen, overlay: st.overlay, focused: st.focused, bytes: back.bytes };
+      check(st.text === text0 && st.unseen && st.overlay === 'flat' && st.focused && same(st.sel, [4, 4]) && back.bytes === 0, 'refused', 'the refused letter deleted, the box is its picture again, caret kept', R.back);
+      await ec('refuse', null);
+      await ec('logged');
+      check(await end(), 'refused', 'Escape ends the edit');
+    });
+
+    // Something over or around the text: a clip mask, brush ink, a smear.
+    for (const id of ['masked', 'inked', 'smear']) {
+      await guard(id, async (R) => {
+        const text0 = textOf(id);
+        await ec('bare', true);
+        const { cell } = await cellFor(id);
+        await mouse('mouseMoved', middle(cell), { buttons: 0 });
+        await ec('wait', 2);
+        const rest = await shot(cell);
+        let st = await begin(id);
+        const editingShot = await shot(cell);
+        let d = 0;
+        for (let k = 0; k < rest.data.length; k++) if (rest.data[k] !== editingShot.data[k]) d++;
+        edgeShots.push([id, `${id}, at rest`, rest], [id, `${id}, edit begun (marks hidden)`, editingShot]);
+        const one = await ec('typeSame', id);
+        R.start = { overlay: st.overlay, unseen: st.unseen, canvas: st.canvas?.painter ?? null, bytes: one.bytes ?? null, screenBytesUnlike: d };
+        await ec('bare', false);
+        check(st.overlay === 'flat' && st.unseen && st.canvas?.painter === 'engine', id, 'typed into as its picture', R.start);
+        check(one.painted && one.bytes === 0, id, 'the picture while typing is renderBoxTexture', one);
+        check(d === 0, id, 'the screen does not change when the edit starts', d);
+        const pts = await ec('typeHalves', id);
+        let wrong = 0;
+        for (const h of pts) {
+          await pressAt(h.p);
+          const s = await typeState();
+          if (!same(s.sel, [h.o, h.o])) wrong++;
+        }
+        R.presses = { n: pts.length, wrong };
+        check(wrong === 0, id, 'a press on every half of every letter puts the caret there', R.presses);
+        await pressAt(pts.find((h) => h.o === 4).p);
+        await key('k', { text: 'k' });
+        st = await typeState(3);
+        const two = await ec('typeSame', id);
+        R.typed = { text: st.text === text0.slice(0, 4) + 'k' + text0.slice(4), bytes: two.bytes };
+        check(R.typed.text && two.bytes === 0, id, 'a letter typed is drawn', R.typed);
+        await picture(id, `${id}, typing`);
+        await pause();
+        await key('z', { mods: MOD.meta });
+        check((await typeState(2)).text === text0, id, 'Cmd+Z takes it out');
+        check(await end(), id, 'Escape ends the edit');
+      });
+    }
+
+    // A warped box is one canvas with no text element under it, and was never
+    // typed into where it stands (TextBox.svelte, `onDblClick`): still so.
+    await guard('warped', async (R) => {
+      const st = await begin('warped');
+      const box = (await cellFor('warped')).box;
+      R.byDoubleClick = { editing: st.editing ?? null, editable: st.editable, canvas: box.canvas?.w > 0 };
+      check(st.editing == null && !st.editable && box.canvas?.w > 0, 'warped', 'a double-click on a warped box starts no edit, and its picture stays', R.byDoubleClick);
+      await picture('warped', 'warped, double-clicked: no edit');
+    });
+
+    {
+      const w = 12 + edgeShots.reduce((sum, q) => sum + q[2].w + 12, 0);
+      const h = 12 + 26 + Math.max(...edgeShots.map((q) => q[2].h)) + 12;
+      const c = createCanvas(w, h);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#d8d8d8';
+      ctx.fillRect(0, 0, w, h);
+      ctx.font = '14px sans-serif';
+      let x = 12;
+      for (const q of edgeShots) {
+        ctx.fillStyle = '#000';
+        ctx.fillText(q[1], x, 28);
+        ctx.drawImage(q[2].canvas, x, 38);
+        x += q[2].w + 12;
+      }
+      if (edgeShots.length) save(`type-${DSF}x-edges.png`, c);
+    }
+
+    // The questions the system's WebKit is asked (scripts/editor-check-webkit.swift),
+    // answered here by Chromium: the presses are events made in the page.
+    const self = (T.self = await ec('typeSelf'));
+    for (const [id, row] of Object.entries(self)) {
+      check(row.whileTyping.canvas === 'engine' && row.whileTyping.unseen && row.picture.bytes === 0 && !row.canvasMoved, id, 'self-check: typed into as its picture, which does not move', row);
+      check(row.presses > 0 && row.wrongOffset === 0, id, 'self-check: every press made in the page lands on its offset', row);
+      check(row.nativeCaret.noRectangle === 0 && row.nativeCaret.worstCssPxFromDrawn <= 4, id, 'self-check: the browser\'s caret is within 4 CSS px of the drawn one at every stop', row.nativeCaret);
+      check(row.typed.text && row.typed.picture === 0 && row.textBack, id, 'self-check: a letter typed and deleted', row);
+    }
+    log(`type self-check (Chromium): ${Object.entries(self).map(([id, r]) => `${id} ${r.presses - r.wrongOffset}/${r.presses}, native ${r.nativeCaret.worstCssPxFromDrawn} px`).join('; ')}`);
+  }
+
   // The pictures: one row a box - the caret, a selection, an IME composing.
   for (let i = 0; i < ids.length; i += 5) {
     const part = ids.slice(i, i + 5);

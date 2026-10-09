@@ -25,7 +25,7 @@ import { pictureScale, pictureTexture } from '../../lib/editor/box-picture.js';
 import { defaultStyle, normalizeStyle } from '../../lib/data.js';
 import { boxText } from '../../lib/store.svelte.js';
 import { typeModel } from '../../lib/type-rows.js';
-import { rawOffset } from '../../lib/edit-lines.js';
+import { rawOffset, domPoint } from '../../lib/edit-lines.js';
 
 const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 // Effects flushed, the observer's first answers in, and what they caused painted.
@@ -717,11 +717,16 @@ window.__ec = {
       await this.endEdit();
     }
     out.blobs = this.blobs().filter((b) => b.live).map((b) => b.size);
+    try {
+      out.typing = await this.typeSelf();
+    } catch (err) {
+      out.typing = { error: String(err?.stack ?? err) };
+    }
     out.errors = consoleErrors.slice();
     return out;
   },
   spec(name) {
-    return { limits: LIMITS_SPEC, mask: MASK_SPEC, type: TYPE_SPEC, typeCost: TYPE_COST_SPEC }[name];
+    return { limits: LIMITS_SPEC, mask: MASK_SPEC, type: TYPE_SPEC, typeEdge: TYPE_EDGE_SPEC, typeCost: TYPE_COST_SPEC }[name];
   },
 
   // ---- typing into the picture (P7) ----
@@ -741,9 +746,24 @@ window.__ec = {
       const r = document.createRange();
       r.setStart(sel.focusNode, sel.focusOffset);
       r.collapse(true);
-      const at = sel.focusNode.nodeType === 1 ? sel.focusNode.childNodes[sel.focusOffset] : null;
-      const q = r.getClientRects()[0] ?? (at?.nodeName === 'BR' ? at.getBoundingClientRect() : null);
-      native = q ? { x: q.x, y: q.y, w: q.width, h: q.height, from: r.getClientRects()[0] ? 'range' : 'br' } : null;
+      // Where the browser's caret is. A place with no rectangle of its own
+      // (measured, Chromium 155): in front of a Return that starts its text
+      // node, where the Return's rectangle - as wide as nothing - is; and on
+      // a line with nothing on it, where its `<br>`'s is.
+      let q = r.getClientRects()[0];
+      let from = 'range';
+      const n = sel.focusNode;
+      if (!q && n.nodeType === 3 && n.data[sel.focusOffset] === '\n') {
+        r.setEnd(n, sel.focusOffset + 1);
+        q = r.getClientRects()[0];
+        from = 'return';
+      } else if (!q && n.nodeType === 1) {
+        const at = n.childNodes[sel.focusOffset] ?? n;
+        const br = at.nodeName === 'BR' ? at : !at.textContent ? at.querySelector('br') : null;
+        q = br?.getBoundingClientRect();
+        from = 'br';
+      }
+      native = q ? { x: q.x, y: q.y, w: q.width, h: q.height, from } : null;
     }
     const cnv = el.querySelector('canvas.warpl');
     const mark = el.querySelector('.tcaret, .ccaret');
@@ -801,6 +821,89 @@ window.__ec = {
     const half = (g, side) => client(b.w / 2 + g.x + (side * g.w * Math.cos(g.rot)) / 4, b.h / 2 + g.y + (side * g.w * Math.sin(g.rot)) / 4);
     return { kind: 'curve', zoom: z, drawn: m.drawn, mapped: !!m.map, glyphs: m.glyphs.map((g) => ({ ch: g.ch, left: half(g, -1), right: half(g, 1) })) };
   },
+  // Every letter of a box as the two places a press on it can go: the middle
+  // of its left half (the caret goes before it, raw offset `o`) and of its
+  // right (after it). `row` and `k` say which stop of the model that is.
+  typeHalves(id) {
+    const m = this.typeRows(id);
+    const out = [];
+    if (!m) return out;
+    const far = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    if (m.kind === 'curve') {
+      m.glyphs.forEach((g, i) => {
+        if (far(g.left, g.right) < 1.5) return;
+        out.push({ p: g.left, o: i, row: 0, k: i }, { p: g.right, o: i + 1, row: 0, k: i + 1 });
+      });
+      return out;
+    }
+    m.rows.forEach((row, i) => {
+      for (let k = 0; k + 1 < row.offs.length; k++) {
+        const a = m.at[i][k];
+        const b = m.at[i][k + 1];
+        if (far(a, b) < 1.5) continue;
+        out.push({ p: lerp(a, b, 0.25), o: row.offs[k], row: i, k }, { p: lerp(a, b, 0.75), o: row.offs[k + 1], row: i, k: k + 1 });
+      }
+    });
+    return out;
+  },
+  // The typing check's questions that need no screenshot, no outside pointer
+  // and no IME: what any browser can answer of itself (`selfCheck`, for the
+  // system's WebKit). The presses are events made here, not the system's.
+  // What matters most in it is `nativeCaret`: how far the browser's own caret
+  // - where the system would hang an IME's window - is from the drawn one.
+  async typeSelf() {
+    await this.engine('rust');
+    await this.openCustom(TYPE_SPEC);
+    await this.zoom(1);
+    const out = {};
+    const mid = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+    for (const b of TYPE_SPEC.pages[0].boxes) {
+      const id = b.id;
+      await this.reveal(id);
+      const rest = rectOf(boxEl(id).querySelector('canvas.warpl'));
+      await this.edit(id);
+      const first = this.typeState();
+      const row = { whileTyping: { canvas: first.canvas?.painter ?? null, overlay: first.overlay, unseen: first.unseen, focused: first.focused }, picture: this.typeSame(id), canvasMoved: JSON.stringify(first.canvas?.rect) !== JSON.stringify(rest) };
+      const overlay = boxEl(id).querySelector('.type-edit, .curve-edit');
+      const pts = this.typeHalves(id);
+      let wrong = 0;
+      let worst = 0;
+      const none = [];
+      const from = new Set();
+      for (const h of pts) {
+        const init = { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true, clientX: h.p.x, clientY: h.p.y };
+        overlay?.dispatchEvent(new PointerEvent('pointerdown', init));
+        overlay?.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }));
+        await settle(1);
+        const s = this.typeState();
+        if (s.sel?.[0] !== h.o || s.sel?.[1] !== h.o) wrong++;
+        if (s.native && s.caret) {
+          from.add(s.native.from);
+          const a = mid(s.native);
+          const c = mid(s.caret);
+          worst = Math.max(worst, Math.hypot(a.x - c.x, a.y - c.y));
+        } else none.push(h.o);
+      }
+      Object.assign(row, { presses: pts.length, wrongOffset: wrong, nativeCaret: { worstCssPxFromDrawn: +worst.toFixed(2), noRectangle: none.length, noRectangleAt: [...new Set(none)], from: [...from] } });
+      // A key the page takes (Up), and one edit through `beforeinput`.
+      const ed = boxEl(id).querySelector('.txt.editable');
+      const before = this.typeState();
+      const down = new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true });
+      ed.dispatchEvent(down);
+      ed.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'q', bubbles: true, cancelable: true }));
+      await settle(2);
+      const after = this.typeState();
+      row.keyTaken = down.defaultPrevented;
+      row.typed = { text: after.text.length === before.text.length + 1, picture: this.typeSame(id).bytes };
+      ed.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+      await settle(2);
+      row.textBack = this.typeState().text === before.text;
+      await this.endEdit();
+      out[id] = row;
+    }
+    return out;
+  },
   // The picture of one box against `renderBoxTexture` asked for the same
   // scale - painted from what the editable holds, which while an IME composes
   // is not yet the box's text.
@@ -832,6 +935,22 @@ window.__ec = {
     ed.dispatchEvent(ev);
     return { prevented: ev.defaultPrevented, data: data.getData('text/plain') };
   },
+  // A word put in the place of another the way the system's autocorrect and
+  // its spelling menu do it: one `beforeinput` naming the range it replaces
+  // and carrying the new word, which is not `data`.
+  replace(a, b, word) {
+    const ed = document.querySelector('.tbox .txt.editable');
+    const [sc, so] = domPoint(ed, a);
+    const [ec, eo] = domPoint(ed, b);
+    const data = new DataTransfer();
+    data.setData('text/plain', word);
+    const ev = new InputEvent('beforeinput', {
+      inputType: 'insertReplacementText', data: null, dataTransfer: data, bubbles: true, cancelable: true,
+      targetRanges: [new StaticRange({ startContainer: sc, startOffset: so, endContainer: ec, endOffset: eo })],
+    });
+    ed.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented };
+  },
   // The last request for the system's menu: what it was aimed at.
   menuSeen() {
     const m = menu;
@@ -851,7 +970,7 @@ window.__ec = {
     st.id = 'ec-bare';
     st.textContent = [
       '.tbox, .tbox:hover { outline-color: transparent !important; }',
-      '.tbox .handle, .tbox .rotate-stem, .tbox .review-badge, .tbox .lock-chip-wrap, .tbox .tsel, .tbox .tcaret, .tbox .tcomp, .tbox .csel, .tbox .ccaret { visibility: hidden !important; }',
+      '.tbox .handle, .tbox .rotate-stem, .tbox .mask-gizmo, .tbox .review-badge, .tbox .lock-chip-wrap, .tbox .tsel, .tbox .tcaret, .tbox .tcomp, .tbox .csel, .tbox .ccaret { visibility: hidden !important; }',
       '.tbox .txt.editable { caret-color: transparent !important; }',
       '.tbox .txt.editable::selection, .tbox .txt.editable *::selection { background: transparent !important; }',
     ].join('\n');
@@ -1003,6 +1122,19 @@ const TYPE_SPEC = { pages: [{ w: 1560, h: 760, boxes: [
   { id: 'rot30', x: 80, y: 560, w: 240, h: 120, over: { rotation: 30 } },
   { id: 'flipped', x: 440, y: 560, w: 240, h: 120, over: { flipH: true, strokes: [{ color: '#d02020', width: 3, opacity: 1 }] } },
   { id: 'arc', x: 800, y: 580, w: 260, h: 120, over: { curve: 45 }, text: 'ALONG AN ARC WE GO' },
+] }] };
+// The typing check's odd ones: nothing to draw, nothing but spaces, a word
+// the system corrects, a picture refused while it is typed into, and the
+// boxes with something over or under their text.
+const TYPE_EDGE_SPEC = { pages: [{ w: 1560, h: 520, boxes: [
+  { id: 'empty', x: 40, y: 60, w: 240, h: 120, text: '' },
+  { id: 'spaces', x: 340, y: 60, w: 240, h: 120, text: '   ', over: { align: 'left', valign: 'top' } },
+  { id: 'corrected', x: 640, y: 60, w: 240, h: 120, text: 'teh quick fox\nran home', over: { size: 26 } },
+  { id: 'refused', x: 940, y: 60, w: 240, h: 120 },
+  { id: 'masked', x: 40, y: 300, w: 240, h: 120, over: { clip: ellipse(120, 60, 90, 40) } },
+  { id: 'inked', x: 340, y: 300, w: 240, h: 120, over: { ink: { on: true, strokes: [{ size: 9, color: '#0a50c8', opacity: 1, pts: [[10, 96, 0.6], [60, 104, 1], [120, 92, 1], [180, 106, 0.8], [214, 96, 0.4]] }] } } },
+  { id: 'smear', x: 640, y: 300, w: 240, h: 120, over: { motionBlur: { on: true, x: 2, y: 0, amount: 6 } } },
+  { id: 'warped', x: 940, y: 300, w: 240, h: 120, over: { warp: { on: true, cols: 1, rows: 1, pts: [[0, 0], [252, 14], [-8, 128], [240, 120]] } } },
 ] }] };
 // The three sizes of box the cost of a keystroke is taken on.
 const TYPE_COST_SPEC = { pages: [{ w: 1400, h: 1700, boxes: [
