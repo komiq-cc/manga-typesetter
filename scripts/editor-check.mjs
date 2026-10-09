@@ -4,7 +4,7 @@
 //
 //   npm run dev -- --port 5201 --strictPort          (in another shell)
 //   node scripts/editor-check.mjs --data <tp-data> [--url http://localhost:5201]
-//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag]
+//        [--out <tp-data>/reports/p6] [--only bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,typecost]
 //        [--chapter tsukimichi__121] [--chrome <path>] [--port 9377]
 //
 // No dependency is added for this: the protocol is spoken over node's own
@@ -26,7 +26,7 @@ const args = Object.fromEntries(
 const URL_BASE = (args.url ?? 'http://localhost:5201').replace(/\/$/, '');
 const DATA = args.data ? resolve(args.data) : null;
 const OUT = resolve(args.out ?? (DATA ? join(DATA, 'reports', 'p6') : 'editor-check-out'));
-const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag').split(','));
+const ONLY = new Set((args.only ?? 'bytes,export,look,edit,cost,real,near,hits,mask,limits,ink,drag,type,typecost').split(','));
 const CHROME = args.chrome ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = Number(args.port ?? 9377);
 const CHAPTER = args.chapter ?? 'tsukimichi__121';
@@ -758,6 +758,610 @@ if (ONLY.has('drag')) {
         out[`${id}@${zoom * 100}%`] = r;
         const mp = (s) => (s ? `${((s[0] * s[1]) / 1e6).toFixed(2)} MP` : 'no canvas');
         log(`drag / switch ${mode === 'rust' ? 'ON ' : 'OFF'} ${id.padEnd(9)} at ${zoom * 100}%: a frame ${r.error ?? ms(r.frame)} ms, letting go ${r.letGo?.toFixed(1)} ms; canvas before ${mp(r.before)}, at the last frame ${mp(r.during)}, after ${mp(r.after)}; grew ${r.grewPagePx} page px`);
+      }
+    }
+  }
+}
+
+
+// ---- typing into the picture (P7) ----
+// Real input from here on: keys, the mouse and an IME's composition go in
+// through the DevTools protocol, as the system would send them. On macOS the
+// editing a key stands for is the system's to say (a key binding), so a key
+// the page leaves to the browser carries the command the system would attach.
+const MOD = { alt: 1, ctrl: 2, meta: 4, shift: 8 };
+const VK = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Home: 36, End: 35, Backspace: 8, Delete: 46, Escape: 27, Enter: 13 };
+async function key(name, { mods = 0, text = null, commands = null } = {}) {
+  const vk = VK[name] ?? name.toUpperCase().charCodeAt(0);
+  const base = { key: name, code: VK[name] ? name : `Key${name.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: mods };
+  await cdp.send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...base, ...(text ? { text, unmodifiedText: text } : {}), ...(commands ? { commands } : {}) });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+}
+async function mouse(type, p, { button = 'left', buttons = 1, clickCount = 1, mods = 0 } = {}) {
+  await cdp.send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button, buttons, clickCount, modifiers: mods });
+}
+// `count` presses at one place: 2 is a double-click, 3 a triple.
+async function pressAt(p, { count = 1, mods = 0, button = 'left' } = {}) {
+  for (let c = 1; c <= count; c++) {
+    await mouse('mousePressed', p, { button, buttons: button === 'left' ? 1 : 2, clickCount: c, mods });
+    await mouse('mouseReleased', p, { button, buttons: 0, clickCount: c, mods });
+  }
+}
+async function dragTo(a, b) {
+  await mouse('mousePressed', a);
+  await mouse('mouseMoved', { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  await mouse('mouseMoved', b);
+  await mouse('mouseReleased', b, { buttons: 0 });
+}
+const typeState = async (frames = 1) => {
+  await ec('wait', frames);
+  return ec('typeState');
+};
+const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+const far = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const middle = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// The stop of a row nearest an x, the later of two as near (flat-caret.js).
+const nearest = (row, x) => row.xs.reduce((best, v, j) => (Math.abs(v - x) <= Math.abs(row.xs[best] - x) ? j : best), 0);
+// Every letter of a model, as the two places a press on it can go: the middle
+// of its left half (the caret goes before it) and of its right (after it).
+function halves(model) {
+  const out = [];
+  if (model.kind === 'curve') {
+    model.glyphs.forEach((g, i) => {
+      if (far(g.left, g.right) < 1.5) return;
+      out.push({ p: g.left, o: i, row: 0, k: i }, { p: g.right, o: i + 1, row: 0, k: i + 1 });
+    });
+    return out;
+  }
+  model.rows.forEach((row, i) => {
+    for (let k = 0; k + 1 < row.offs.length; k++) {
+      const a = model.at[i][k];
+      const b = model.at[i][k + 1];
+      if (far(a, b) < 1.5) continue;
+      out.push({ p: lerp(a, b, 0.25), o: row.offs[k], row: i, k }, { p: lerp(a, b, 0.75), o: row.offs[k + 1], row: i, k: k + 1 });
+    }
+  });
+  return out;
+}
+
+if (ONLY.has('type')) {
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await viewport(WINDOW.w, WINDOW.h);
+  const spec = await ec('spec', 'type');
+  const ids = spec.pages[0].boxes.map((b) => b.id).filter((id) => !args.ids || args.ids.split(',').includes(id));
+  const T = (report.type = { boxes: {}, zooms: {}, browserSelects: {}, fails: [], checks: 0 });
+  const check = (ok, id, what, detail) => {
+    T.checks++;
+    if (!ok) T.fails.push({ id, what, detail });
+    return ok;
+  };
+  const cellFor = async (id, margin = 40) => {
+    const b = (await ec('boxesState')).boxes.find((x) => x.id === id);
+    return { box: b, cell: { x: b.rect.x - margin, y: b.rect.y - margin, w: b.rect.w + margin * 2, h: b.rect.h + margin * 2 } };
+  };
+  // A box brought to the middle of the window and left to settle there: the
+  // app scrolls to a box it selects, and a box that was far off paints when
+  // the observer says it is near.
+  const bring = async (id) => {
+    await ec('select', id);
+    await ec('wait', 8);
+    await ec('reveal', id);
+    await ec('reveal', id);
+    for (let i = 0; i < 20; i++) {
+      const c = (await cellFor(id)).box.canvas;
+      if (c?.w > 0) break;
+      await ec('wait', 3);
+    }
+  };
+  // An edit begun as a user begins one: a double-click on the box.
+  const begin = async (id) => {
+    const { box } = await cellFor(id);
+    await pressAt(middle(box.rect), { count: 2 });
+    return typeState(2);
+  };
+  // A stretch of time long enough that the next edit is a step of its own in
+  // the field's undo (field-undo.svelte.js gathers typing into runs).
+  const pause = () => sleep(700);
+  const end = async () => {
+    await key('Escape');
+    await ec('wait', 2);
+    const editing = (await ec('state')).editing;
+    if (editing) await ec('endEdit');
+    return !editing;
+  };
+
+  // -- what the browser selects today, with the switch off: measured, to match --
+  await ec('engine', 'rust');
+  await ec('openCustom', spec);
+  await ec('zoom', 1);
+  // Asked at the two halves of every letter (the places the engine's rows
+  // say they are): where one press puts the browser's caret, what two select,
+  // and - once a row - what three select. A place where the browser's own
+  // layout puts the caret at another offset than the engine's rows do is no
+  // comparison of the RULE, and is counted apart.
+  const samples = {};
+  for (const id of ids) {
+    await bring(id);
+    const m = await ec('typeRows', id);
+    if (m?.kind !== 'flat') continue;
+    samples[id] = { halves: halves(m), rows: m.rows.map((row, i) => (row.line >= 0 && row.offs.length > 2 ? { row: i, p: lerp(m.at[i][1], m.at[i][2], 0.5) } : null)).filter(Boolean) };
+  }
+  await ec('engine', 'browser');
+  await ec('zoom', 1);
+  for (const id of Object.keys(samples)) {
+    await bring(id);
+    await begin(id);
+    const out = { halves: [], rows: [] };
+    for (const h of samples[id].halves) {
+      await pressAt(h.p);
+      const caret = (await typeState()).sel?.[1];
+      await pressAt(h.p, { count: 2 });
+      out.halves.push({ caret, word: (await typeState()).sel });
+    }
+    for (const q of samples[id].rows) {
+      await pressAt(q.p, { count: 3 });
+      out.rows.push((await typeState()).sel);
+    }
+    await end();
+    T.browserSelects[id] = out;
+  }
+
+  // -- with the switch on --
+  await ec('engine', 'rust');
+  await ec('openCustom', spec);
+  const sheets = [];
+  for (const zoom of [1, 0.6, 3]) {
+    await ec('zoom', zoom);
+    const full = zoom === 1;
+    const Z = full ? T.boxes : (T.zooms[`${zoom * 100}%`] = {});
+    for (const id of ids) {
+      const R = (Z[id] = {});
+      const errorsBefore = cdp.errors.length;
+      try {
+      await (async () => {
+      await bring(id);
+      const text0 = spec.pages[0].boxes.find((b) => b.id === id).text ?? 'WAIT FOR ME\nOVER THERE!';
+      // 1. The edit starting and ending: nothing but the marks changes.
+      await ec('bare', true);
+      const { cell, box: at0 } = await cellFor(id);
+      // The pointer where the double-click will be, so that what it hovers is
+      // in every picture alike.
+      await mouse('mouseMoved', middle(at0.rect), { buttons: 0 });
+      await ec('wait', 2);
+      const rest = await shot(cell);
+      const restCanvas = (await cellFor(id)).box.canvas;
+      let st = await begin(id);
+      const typing = await shot(cell);
+      const sameBytes = await ec('typeSame', id);
+      R.whileTyping = { canvas: st.canvas?.painter ?? null, overlay: st.overlay, unseen: st.unseen, ghost: st.ghost, focused: st.focused };
+      check(st.editing === id && st.canvas?.painter === 'engine' && (st.unseen || st.ghost) && !!st.overlay, id, 'typed into as its picture', R.whileTyping);
+      check(sameBytes.painted && sameBytes.bytes === 0, id, 'picture is renderBoxTexture, byte for byte', sameBytes);
+      check(same(st.canvas?.rect, restCanvas?.rect) && st.canvas?.w === restCanvas?.w, id, 'the canvas did not move or change size when the edit began', { rest: restCanvas, typing: st.canvas });
+      let unlike = 0;
+      for (let k = 0; k < rest.data.length; k++) if (rest.data[k] !== typing.data[k]) unlike++;
+      R.editStart = { screenBytesUnlike: unlike, inkBox: offsets(inkBox(rest, true), inkBox(typing, true)) };
+      check(unlike === 0, id, 'screen unchanged when the edit began (marks hidden)', R.editStart);
+      // The first focus selects everything, and shows it.
+      R.firstFocus = { sel: st.sel, held: st.held, marks: st.sels.length, caretShown: st.caret ? !st.caret.off : null };
+      check(same(st.sel, [0, text0.length]) && st.sels.length > 0, id, 'first focus selects all and shows it', R.firstFocus);
+      check(await end(), id, 'Escape ends the edit');
+      await ec('select', id);
+      await ec('wait', 3);
+      const again = await shot(cell);
+      unlike = 0;
+      for (let k = 0; k < rest.data.length; k++) if (rest.data[k] !== again.data[k]) unlike++;
+      R.editEnd = { screenBytesUnlike: unlike };
+      check(unlike === 0, id, 'screen unchanged once the edit ended', R.editEnd);
+      await ec('bare', false);
+
+      // 2. A press on each half of every letter.
+      st = await begin(id);
+      const model = await ec('typeRows', id);
+      const pts = halves(model);
+      const flat = model.kind === 'flat';
+      let wrong = 0;
+      let caretOff = 0;
+      let worstCaret = 0;
+      const firstWrong = [];
+      for (const h of pts) {
+        await pressAt(h.p);
+        st = await typeState();
+        if (!same(st.sel, [h.o, h.o])) {
+          wrong++;
+          if (firstWrong.length < 4) firstWrong.push({ want: h.o, got: st.sel, row: h.row });
+        }
+        // The caret is drawn at the stop the press went to, on its row.
+        if (flat && st.caret) {
+          const d = far(middle(st.caret), model.at[h.row][h.k]);
+          worstCaret = Math.max(worstCaret, d);
+          if (d > 0.75 || st.caret.off) caretOff++;
+        }
+      }
+      R.presses = { letterHalves: pts.length, wrongOffset: wrong, firstWrong, caretNotAtItsStop: caretOff, worstCaretCssPx: +worstCaret.toFixed(3) };
+      check(pts.length > 0 && wrong === 0, id, 'a press on each half of every letter goes to its offset', R.presses);
+      check(caretOff === 0, id, 'the caret is drawn at the stop pressed, on its row', R.presses);
+      if (!full) {
+        check(await end(), id, 'Escape ends the edit');
+        check(cdp.errors.length === errorsBefore, id, 'no page error', cdp.errors.slice(errorsBefore));
+        log(`type ${String(zoom * 100).padStart(3)}% ${id.padEnd(16)} bytes ${sameBytes.bytes}, start ${R.editStart.screenBytesUnlike}, end ${R.editEnd.screenBytesUnlike}; presses ${pts.length - wrong}/${pts.length}, caret worst ${R.presses.worstCaretCssPx} px`);
+        return;
+      }
+
+      const len = st.held.length;
+      if (flat) {
+        const rows = model.rows;
+        const at = model.at;
+        const drawn = rows.map((r, i) => (r.line >= 0 ? i : -1)).filter((i) => i >= 0);
+        // 3. Double-click and triple-click, against what the browser selected.
+        const was = T.browserSelects[id] ?? { halves: [], rows: [] };
+        const mine = samples[id] ?? { halves: [], rows: [] };
+        let words = 0;
+        let wordsUnlike = 0;
+        let elsewhere = 0;
+        const unlike = [];
+        for (const [n, h] of mine.halves.entries()) {
+          // Only where the browser's own layout put its caret at the same offset.
+          if (was.halves[n]?.caret !== h.o) {
+            elsewhere++;
+            continue;
+          }
+          await pressAt(h.p, { count: 2 });
+          const word = (await typeState()).sel;
+          words++;
+          if (!same(word, was.halves[n].word)) {
+            wordsUnlike++;
+            if (unlike.length < 6) unlike.push({ at: h.o, got: word, browser: was.halves[n].word });
+          }
+        }
+        let linesUnlike = 0;
+        const lines = [];
+        for (const [n, q] of mine.rows.entries()) {
+          await pressAt(q.p, { count: 3 });
+          const line = (await typeState()).sel;
+          lines.push({ row: q.row, got: line, browser: was.rows[n] });
+          if (!same(line, was.rows[n])) linesUnlike++;
+        }
+        R.clicks = { doubleClicksCompared: words, unlikeTheBrowser: wordsUnlike, unlike, browserCaretElsewhere: elsewhere, tripleClicks: lines.length, tripleUnlikeTheBrowser: linesUnlike, lines };
+        check(words > 0 && wordsUnlike === 0, id, 'double-click selects what the browser selects', R.clicks);
+        check(lines.length > 0 && linesUnlike === 0, id, 'triple-click selects what the browser selects', lines);
+        // 4. A drag across rows, Shift+click, and the rectangles drawn for it.
+        const a = { row: drawn[0], k: 1 };
+        const b = { row: drawn[drawn.length - 1], k: Math.min(3, rows[drawn[drawn.length - 1]].offs.length - 1) };
+        await dragTo(at[a.row][a.k], at[b.row][b.k]);
+        st = await typeState();
+        const wantSel = [rows[a.row].offs[a.k], rows[b.row].offs[b.k]];
+        R.drag = { sel: st.sel, want: wantSel, rectangles: st.sels.length, rowsSpanned: b.row - a.row + 1 };
+        check(same(st.sel, wantSel) && st.sels.length === b.row - a.row + 1 && st.caret?.off === true, id, 'a drag selects from stop to stop, a rectangle a row', R.drag);
+        await pressAt(at[a.row][Math.min(4, rows[a.row].offs.length - 1)], { mods: MOD.shift });
+        st = await typeState();
+        check(same(st.sel, [wantSel[0], rows[a.row].offs[Math.min(4, rows[a.row].offs.length - 1)]]), id, 'Shift+click extends from the anchor', st.sel);
+
+        // 5. The keys that go by lines, across rows of unequal length.
+        const K = (R.keys = []);
+        const step = async (name, opts, want, what) => {
+          await key(name, opts);
+          const s = await typeState();
+          const ok = same(s.sel, want.sel) && (want.row == null || (!!s.caret && far(middle(s.caret), at[want.row][want.k]) < 1));
+          K.push({ key: what, sel: s.sel, want: want.sel, ok });
+          check(ok, id, `key ${what}`, { got: s.sel, want, caret: s.caret && middle(s.caret) });
+          return s;
+        };
+        // From the end of the longest drawn row.
+        const longest = drawn.reduce((m, i) => (rows[i].xs.at(-1) - rows[i].xs[0] > rows[m].xs.at(-1) - rows[m].xs[0] ? i : m), drawn[0]);
+        const lastK = rows[longest].offs.length - 1;
+        // The end of its body: the last stop that is not a hanging space is
+        // where the text ends, which a press on the last letter's right half gives.
+        const endHalf = halves(model).filter((h) => h.row === longest).at(-1);
+        await pressAt(endHalf.p);
+        st = await typeState();
+        const startO = st.sel[1];
+        const goal = rows[longest].xs[rows[longest].offs.indexOf(startO)];
+        const walk = async (dir, shift) => {
+          let cur = longest;
+          const anchor = startO;
+          const name = dir > 0 ? 'ArrowDown' : 'ArrowUp';
+          for (let n = 0; n < rows.length + 1; n++) {
+            const next = cur + dir;
+            let want;
+            if (next < 0) want = { sel: [shift ? anchor : 0, 0] };
+            else if (next >= rows.length) want = { sel: [shift ? anchor : len, len] };
+            else {
+              const k = nearest(rows[next], goal);
+              want = { sel: [shift ? anchor : rows[next].offs[k], rows[next].offs[k]], row: next, k };
+            }
+            await step(name, { mods: shift ? MOD.shift : 0, commands: [shift ? (dir > 0 ? 'moveDownAndModifySelection' : 'moveUpAndModifySelection') : dir > 0 ? 'moveDown' : 'moveUp'] }, want, `${shift ? 'Shift+' : ''}${name}`);
+            if (next < 0 || next >= rows.length) break;
+            cur = next;
+          }
+        };
+        await walk(1, false);
+        await pressAt(endHalf.p);
+        await walk(-1, false);
+        await pressAt(endHalf.p);
+        await walk(1, true);
+        // Home and End on every drawn row; End on a wrapped row stays on it.
+        for (const i of drawn) {
+          const row = rows[i];
+          if (row.offs.length < 3) continue;
+          await pressAt(lerp(at[i][1], at[i][2], 0.25));
+          await step('Home', { commands: ['moveToBeginningOfLine'] }, { sel: [row.offs[0], row.offs[0]], row: i, k: 0 }, 'Home');
+          await step('End', { commands: ['moveToEndOfLine'] }, { sel: [row.offs.at(-1), row.offs.at(-1)], row: i, k: row.offs.length - 1 }, `End${row.soft ? ' (wrapped row)' : ''}`);
+          await step('ArrowLeft', { mods: MOD.meta, commands: ['moveToBeginningOfLine'] }, { sel: [row.offs[0], row.offs[0]], row: i, k: 0 }, 'Cmd+Left');
+          await step('ArrowRight', { mods: MOD.meta | MOD.shift, commands: ['moveToEndOfLineAndModifySelection'] }, { sel: [row.offs[0], row.offs.at(-1)] }, 'Cmd+Shift+Right');
+        }
+        await step('ArrowUp', { mods: MOD.meta, commands: ['moveToBeginningOfDocument'] }, { sel: [0, 0] }, 'Cmd+Up');
+        const lastRow = rows.length - 1;
+        await step('ArrowDown', { mods: MOD.meta, commands: ['moveToEndOfDocument'] }, { sel: [len, len], row: lastRow, k: rows[lastRow].offs.indexOf(len) }, 'Cmd+Down');
+        // Left and Right step through every offset there is, one a press.
+        await key('ArrowUp', { mods: MOD.meta });
+        let stuck = 0;
+        let prev = 0;
+        let steps = 0;
+        for (let n = 0; n < len + 2; n++) {
+          await key('ArrowRight', { commands: ['moveRight'] });
+          const s = await typeState(0);
+          if (s.sel[1] === prev && prev < len) stuck++;
+          if (s.sel[1] === len) {
+            steps = n + 1;
+            break;
+          }
+          prev = s.sel[1];
+        }
+        R.rightSteps = { presses: steps, characters: len, pressesThatDidNotMove: stuck };
+        check(stuck === 0 && steps > 0 && steps <= len, id, 'Right moves at every press, start to end', R.rightSteps);
+
+        // 6. Typing, deleting, pasting, cutting, undoing.
+        const E = (R.edits = {});
+        const row = rows[drawn[0]];
+        const k0 = Math.min(3, row.offs.length - 2);
+        const o = row.offs[k0];
+        await pressAt(lerp(at[drawn[0]][k0], at[drawn[0]][k0 + 1], 0.25));
+        await pause();
+        await key('q', { text: 'q' });
+        st = await typeState(2);
+        E.typed = st.text === text0.slice(0, o) + 'q' + text0.slice(o) && same(st.sel, [o + 1, o + 1]);
+        const afterType = await ec('typeSame', id);
+        check(E.typed, id, 'a letter typed goes in at the caret', { text: st.text, sel: st.sel });
+        check(afterType.bytes === 0 && afterType.painted, id, 'the picture after a letter is renderBoxTexture', afterType);
+        await key('Backspace', { commands: ['deleteBackward'] });
+        st = await typeState(2);
+        E.backspace = st.text === text0 && same(st.sel, [o, o]);
+        check(E.backspace, id, 'Backspace takes it away', { text: st.text, sel: st.sel });
+        await pause();
+        // By word: the browser says how far (its own target range), as with the switch off.
+        await key('Backspace', { mods: MOD.alt, commands: ['deleteWordBackward'] });
+        st = await typeState(2);
+        E.wordDelete = { removed: text0.length - st.text.length, text: st.text };
+        check(st.text.length < text0.length && st.text.endsWith(text0.slice(o)) && text0.startsWith(st.text.slice(0, st.sel[1])), id, 'Alt+Backspace takes a word', E.wordDelete);
+        await key('z', { mods: MOD.meta });
+        st = await typeState(2);
+        E.undoWord = st.text === text0;
+        check(E.undoWord, id, 'Cmd+Z brings the word back', st.text);
+        // To the line's start: OUR line. From a row that is not the first, where there is one.
+        const dr = drawn.length > 1 ? drawn[1] : drawn[0];
+        const dk = Math.min(4, rows[dr].offs.length - 1);
+        await pressAt(lerp(at[dr][dk - 1], at[dr][dk], 0.75));
+        st = await typeState();
+        const from = rows[dr].offs[0];
+        const to = st.sel[1];
+        await pause();
+        await key('Backspace', { mods: MOD.meta, commands: ['deleteToBeginningOfLine'] });
+        st = await typeState(2);
+        E.lineDelete = { row: dr, want: text0.slice(0, from) + text0.slice(to), got: st.text };
+        check(st.text === E.lineDelete.want && to > from, id, 'Cmd+Backspace deletes to the start of the picture\'s line', E.lineDelete);
+        await key('z', { mods: MOD.meta });
+        st = await typeState(2);
+        check(st.text === text0, id, 'Cmd+Z brings the line back', st.text);
+        await key('z', { mods: MOD.meta | MOD.shift });
+        st = await typeState(2);
+        E.redo = st.text === E.lineDelete.want;
+        check(E.redo, id, 'Cmd+Shift+Z takes it away again', st.text);
+        await key('z', { mods: MOD.meta });
+        await ec('wait', 2);
+        // Paste and cut carry their own clipboard (the system's is the user's).
+        await pressAt(lerp(at[drawn[0]][k0], at[drawn[0]][k0 + 1], 0.25));
+        await pause();
+        const pasted = await ec('clip', 'paste', 'XY\nZ');
+        st = await typeState(2);
+        E.paste = st.text === text0.slice(0, o) + 'XY\nZ' + text0.slice(o) && pasted.prevented;
+        check(E.paste, id, 'a paste goes in at the caret', { text: st.text });
+        const pasteSame = await ec('typeSame', id);
+        check(pasteSame.bytes === 0, id, 'the picture after a paste is renderBoxTexture', pasteSame);
+        await key('z', { mods: MOD.meta });
+        st = await typeState(2);
+        check(st.text === text0, id, 'Cmd+Z takes the paste out', st.text);
+        await pressAt(lerp(at[drawn[0]][k0], at[drawn[0]][k0 + 1], 0.25));
+        await key('ArrowRight', { mods: MOD.shift, commands: ['moveRightAndModifySelection'] });
+        await key('ArrowRight', { mods: MOD.shift, commands: ['moveRightAndModifySelection'] });
+        st = await typeState();
+        const cutSpan = [Math.min(...st.sel), Math.max(...st.sel)];
+        const cut = await ec('clip', 'cut');
+        st = await typeState(2);
+        E.cut = { clipboard: cut.data, want: text0.slice(...cutSpan), text: st.text };
+        check(cut.data === text0.slice(...cutSpan) && cut.data.length > 0 && st.text === text0.slice(0, cutSpan[0]) + text0.slice(cutSpan[1]), id, 'a cut takes the selection, as raw text', E.cut);
+        await key('z', { mods: MOD.meta });
+        st = await typeState(2);
+        check(st.text === text0, id, 'Cmd+Z puts the cut back', st.text);
+        // A word step is the browser's (Alt+Right): the marks follow its selection.
+        await key('ArrowUp', { mods: MOD.meta });
+        await key('ArrowRight', { mods: MOD.alt, commands: ['moveWordRight'] });
+        st = await typeState();
+        E.wordStep = st.sel;
+        check(st.sel[1] > 0 && st.sel[0] === st.sel[1] && st.caret && !st.caret.off, id, 'Alt+Right (the browser\'s word step) moves the drawn caret', st.sel);
+
+        // The right button: the system's menu is asked of the editable.
+        await ec('menuSeen');
+        const mp = lerp(at[drawn[0]][1], at[drawn[0]][2], 0.5);
+        await pressAt(mp, { button: 'right' });
+        st = await typeState(2);
+        const menu = await ec('menuSeen');
+        R.menu = { ...menu, sel: st.sel };
+        check(st.sel[0] !== st.sel[1], id, 'the right button selects the word under it', st.sel);
+        check(menu?.inEditable === true, id, 'the menu is asked of the editable', menu);
+        await key('ArrowUp', { mods: MOD.meta });
+      } else {
+        // The curve: Up and Down are the text's ends, a letter goes in and out.
+        await pressAt(pts[5].p);
+        await key('ArrowUp', { commands: ['moveUp'] });
+        st = await typeState();
+        check(same(st.sel, [0, 0]), id, 'key Up on a curve: the start', st.sel);
+        await key('ArrowDown', { commands: ['moveDown'] });
+        st = await typeState();
+        check(same(st.sel, [len, len]), id, 'key Down on a curve: the end', st.sel);
+        await pressAt(pts[6].p);
+        const o = pts[6].o;
+        await pause();
+        await key('q', { text: 'q' });
+        st = await typeState(2);
+        const afterType = await ec('typeSame', id);
+        check(st.text === text0.slice(0, o) + 'q' + text0.slice(o) && afterType.bytes === 0, id, 'a letter typed on the curve is in the picture', { text: st.text, afterType });
+        await key('Backspace', { commands: ['deleteBackward'] });
+        st = await typeState(2);
+        check(st.text === text0, id, 'Backspace takes it away', st.text);
+        await dragTo(pts[2].p, pts[11].p);
+        st = await typeState();
+        R.drag = { sel: st.sel, want: [pts[2].o, pts[11].o], marks: st.sels.length };
+        check(same(st.sel, R.drag.want) && st.sels.length === Math.abs(pts[11].o - pts[2].o), id, 'a drag on the curve selects glyph to glyph', R.drag);
+      }
+
+      // 7. An IME: composed text is in the picture, underlined; the box's text
+      //    is its own until the composition ends; and the browser's caret, which
+      //    the system hangs the IME's window on, is under the drawn one.
+      const C = (R.ime = {});
+      const cp = pts[Math.min(7, pts.length - 1)];
+      await pressAt(cp.p);
+      st = await typeState();
+      const co = st.sel[1];
+      const before = st.native && st.caret ? +far(middle(st.native), middle(st.caret)).toFixed(2) : null;
+      await pause();
+      await cdp.send('Input.imeSetComposition', { text: 'かな', selectionStart: 2, selectionEnd: 2 });
+      st = await typeState(3);
+      const comp1 = await ec('typeSame', id);
+      C.composing = { boxText: st.text === text0, held: st.held === text0.slice(0, co) + 'かな' + text0.slice(co), underlines: st.comps.length, picture: comp1.bytes, fromStandIn: comp1.composing };
+      C.nativeCaretFromDrawn = [before, st.native && st.caret ? +far(middle(st.native), middle(st.caret)).toFixed(2) : null];
+      check(C.composing.boxText && C.composing.held && st.comps.length > 0, id, 'composed text is held and underlined, and is not yet the box\'s', C.composing);
+      check(comp1.painted && comp1.bytes === 0 && comp1.composing, id, 'the picture while composing is renderBoxTexture of the composed text', comp1);
+      await cdp.send('Input.imeSetComposition', { text: 'かなも', selectionStart: 1, selectionEnd: 1 });
+      st = await typeState(3);
+      C.nativeCaretFromDrawn.push(st.native && st.caret ? +far(middle(st.native), middle(st.caret)).toFixed(2) : null);
+      C.caretInsideComposition = same(st.sel, [co + 1, co + 1]);
+      check(C.caretInsideComposition, id, 'the caret inside the composition is where the IME put it', st.sel);
+      check(C.nativeCaretFromDrawn.every((d) => d != null && d <= 4), id, 'the browser\'s own caret is within 4 CSS px of the drawn one', C.nativeCaretFromDrawn);
+      if (full) {
+        await ec('freezeCaret', true);
+        await ec('wait', 1);
+        sheets.push([id, 'ime', await shot((await cellFor(id)).cell)]);
+      }
+      await cdp.send('Input.insertText', { text: '仮名' });
+      st = await typeState(3);
+      await pause();
+      const committed = await ec('typeSame', id);
+      C.committed = st.text === text0.slice(0, co) + '仮名' + text0.slice(co) && st.comps.length === 0 && committed.bytes === 0 && !committed.composing;
+      check(C.committed, id, 'the composition ended is the box\'s text and its picture', { text: st.text, committed });
+      await key('z', { mods: MOD.meta });
+      st = await typeState(2);
+      C.undone = st.text === text0;
+      check(C.undone, id, 'Cmd+Z takes the composed text out', st.text);
+
+      // 8. To look at: the caret, and a selection.
+      await ec('freezeCaret', true);
+      const look = pts[Math.min(9, pts.length - 1)];
+      await pressAt(look.p);
+      await ec('wait', 2);
+      sheets.push([id, 'caret', await shot((await cellFor(id)).cell)]);
+      if (flat) {
+        const rows = model.rows.map((r, i) => (r.line >= 0 ? i : -1)).filter((i) => i >= 0);
+        const lastRowI = rows[rows.length - 1];
+        await dragTo(model.at[rows[0]][2], model.at[lastRowI][Math.max(1, model.rows[lastRowI].offs.length - 3)]);
+      } else await dragTo(pts[4].p, pts[21].p);
+      await ec('wait', 2);
+      sheets.push([id, 'selection', await shot((await cellFor(id)).cell)]);
+      await ec('freezeCaret', false);
+
+      check(await end(), id, 'Escape ends the edit');
+      const after = await ec('typeState');
+      check(after.text === text0 || after.text == null, id, 'the text is what it was', after.text);
+      check(cdp.errors.length === errorsBefore, id, 'no page error', cdp.errors.slice(errorsBefore));
+      const bad = T.fails.filter((f) => f.id === id).length;
+      log(`type 100% ${id.padEnd(16)} bytes ${sameBytes.bytes}, start ${R.editStart.screenBytesUnlike}, end ${R.editEnd.screenBytesUnlike}; presses ${pts.length - wrong}/${pts.length}, caret worst ${R.presses.worstCaretCssPx} px; ime caret ${JSON.stringify(R.ime.nativeCaretFromDrawn)} px; failed ${bad}`);
+      })();
+      } catch (err) {
+        // One box's trouble is that box's: said, and the next one is gone through.
+        check(false, id, 'the step threw', String(err?.stack ?? err).slice(0, 400));
+        log(`type ${zoom * 100}% ${id}: threw ${String(err?.message ?? err)}`);
+        await ec('bare', false);
+        await ec('freezeCaret', false);
+        if ((await ec('state')).editing) await ec('endEdit');
+      }
+    }
+  }
+  // The pictures: one row a box - the caret, a selection, an IME composing.
+  for (let i = 0; i < ids.length; i += 5) {
+    const part = ids.slice(i, i + 5);
+    const w = 12 + Math.max(...part.map((id) => sheets.filter((q) => q[0] === id).reduce((s, q) => s + q[2].w + 12, 0)));
+    const h = 12 + part.reduce((s, id) => s + 26 + Math.max(...sheets.filter((q) => q[0] === id).map((q) => q[2].h)) + 12, 0);
+    const c = createCanvas(w, h);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#d8d8d8';
+    ctx.fillRect(0, 0, w, h);
+    ctx.font = '16px sans-serif';
+    let y = 12;
+    for (const id of part) {
+      const mine = sheets.filter((q) => q[0] === id);
+      ctx.fillStyle = '#000';
+      ctx.fillText(`${id}: ${mine.map((q) => q[1]).join(' | ')}   (switch ON, zoom 100%, ${DSF}x)`, 12, y + 16);
+      y += 26;
+      let x = 12;
+      for (const q of mine) {
+        ctx.drawImage(q[2].canvas, x, y);
+        x += q[2].w + 12;
+      }
+      y += Math.max(...mine.map((q) => q[2].h)) + 12;
+    }
+    save(`type-${DSF}x-${String(i / 5 + 1).padStart(2, '0')}.png`, c);
+  }
+  T.verdict = { checks: T.checks, failed: T.fails.length };
+  log(`type verdict (${DSF}x): ${T.checks - T.fails.length} of ${T.checks} checks passed, ${T.fails.length} failed`);
+  for (const f of T.fails.slice(0, 60)) log('  FAILED', f.id, '-', f.what, JSON.stringify(f.detail)?.slice(0, 300));
+}
+
+if (ONLY.has('typecost')) {
+  // What a keystroke costs: to the end of its effects (for a pictured box, the
+  // paint) and to the next frame, on three sizes of box, at 100% and 300%,
+  // with the switch on and off.
+  await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await viewport(WINDOW.w, WINDOW.h);
+  const spec = await ec('spec', 'typeCost');
+  report.typeCost = {};
+  const ms = (st) => `${st.median.toFixed(1)} (${st.min.toFixed(1)}-${st.max.toFixed(1)})`;
+  for (const mode of ['browser', 'rust']) {
+    await ec('engine', mode);
+    await ec('openCustom', spec);
+    const out = (report.typeCost[mode === 'rust' ? 'on' : 'off'] = {});
+    for (const zoom of [1, 3]) {
+      await ec('zoom', zoom);
+      for (const id of ['balloon', 'effect', 'page-wide']) {
+        await ec('reveal', id);
+        await ec('edit', id);
+        const r = await ec('timeType', 20);
+        // And from real keys: heard by the page to the first frame after.
+        await ec('keyTimes', true);
+        for (let i = 0; i < 12; i++) {
+          await key('a', { text: 'a' });
+          await sleep(60);
+        }
+        for (let i = 0; i < 12; i++) {
+          await key('Backspace', { commands: ['deleteBackward'] });
+          await sleep(60);
+        }
+        const keys = (await ec('keyTimes', false)).filter((k) => k.task != null && k.frame != null);
+        const med = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] ?? null;
+        r.realKeys = { n: keys.length, taskMedian: med(keys.map((k) => k.task)), taskMax: Math.max(...keys.map((k) => k.task)), frameMedian: med(keys.map((k) => k.frame)), frameMax: Math.max(...keys.map((k) => k.frame)) };
+        await ec('endEdit');
+        await ec('select', null);
+        out[`${id}@${zoom * 100}%`] = r;
+        log(`typecost / switch ${mode === 'rust' ? 'ON ' : 'OFF'} ${id.padEnd(9)} at ${zoom * 100}%: a keystroke ${r.error ?? ms(r.sync)} ms to the end of its effects, ${r.error ? '' : ms(r.toNextFrame)} to the next frame; canvas ${r.canvas ? `${((r.canvas[0] * r.canvas[1]) / 1e6).toFixed(2)} MP` : 'none'}; real keys (n ${r.realKeys.n}): task ${r.realKeys.taskMedian?.toFixed(1)} median, ${r.realKeys.taskMax.toFixed(1)} max; to the frame ${r.realKeys.frameMedian?.toFixed(1)} median`);
       }
     }
   }
