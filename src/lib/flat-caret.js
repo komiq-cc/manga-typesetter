@@ -25,6 +25,7 @@
 //
 // and the rules a row is built by are `buildRows`' comment.
 import { stepChar } from './edit-lines.js';
+import { wordAt } from './curve-caret.js';
 
 const first = (r) => r.offs[0];
 const last = (r) => r.offs[r.offs.length - 1];
@@ -248,20 +249,53 @@ export function offsetAt(rows, x, y) {
   return { o: r.offs[k], up: r.soft && k === r.offs.length - 1, row: i };
 }
 
-// The offset of the character under a point - the stop at or before it, not
-// the nearest: the right half of a word's last letter is still that letter.
-// A double-click selects the word around it.
-export function glyphAt(rows, x, y) {
-  if (!rows.length) return 0;
-  const r = rows[rowAt(rows, y)];
-  const n = r.offs.length;
-  if (n < 2) return r.offs[0];
-  for (let j = n - 2; j >= 0; j--) if (x >= r.xs[j]) return r.offs[j];
-  return r.offs[0];
+// ----- two presses, and three -----
+//
+// What a double-click and a triple-click select is what the browser selects
+// in the editable these rows stand in for (measured in Chromium, at both
+// halves of every letter of the check's boxes; scripts/editor-check.mjs,
+// `type`):
+//
+//   two     the caret goes where one press puts it, and the selection is the
+//           word, the run of spaces, the mark or the Return that STARTS at or
+//           holds that offset - so the right half of a word's last letter
+//           selects the space after it. At the end of the text, the last such
+//           run. Where a row wrapped and the press is past its end, nothing:
+//           the caret alone, on that row.
+//   three   the row the press is level with, whole: with the space it wrapped
+//           at, and with its Return when it ends at one.
+//
+// Both as `{ a, f, up }`.
+
+// The run of `text` that holds the character at offset `o`, as [start, end]:
+// the browser's own idea of a word (Intl.Segmenter, which is the rule its
+// double-click goes by).
+let words;
+export function wordAround(text, o) {
+  const v = String(text ?? '');
+  if (!v) return [0, 0];
+  const at = Math.min(Math.max(0, o), v.length - 1);
+  if (words === undefined) words = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'word' }) : null;
+  if (!words) return wordAt(v, at);
+  const seg = words.segment(v).containing(at);
+  return [seg.index, seg.index + seg.segment.length];
 }
 
-// The raw span of the row a caret is on, `[from, to]`: what a triple-click
-// selects and what the soft-line deletes are cut from.
+export function wordPress(rows, text, x, y) {
+  const hit = offsetAt(rows, x, y);
+  if (hit.up) return { a: hit.o, f: hit.o, up: true };
+  const [a, b] = wordAround(text, hit.o);
+  return { a, f: b, up: false };
+}
+
+export function linePress(rows, text, x, y) {
+  const r = rows[offsetAt(rows, x, y).row];
+  if (!r) return { a: 0, f: 0, up: false };
+  return { a: first(r), f: r.hard ? Math.min(last(r) + 1, String(text ?? '').length) : last(r), up: r.soft };
+}
+
+// The raw span of the row a caret is on, `[from, to]`: what the soft-line
+// deletes are cut from.
 export function rowSpan(rows, o, up = false) {
   const i = rowOf(rows, o, up);
   return i < 0 ? [0, 0] : [first(rows[i]), last(rows[i])];

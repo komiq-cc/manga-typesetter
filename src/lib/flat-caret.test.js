@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { editLines } from './edit-lines.js';
-import { buildRows, rowOf, caretAt, selectionRects, offsetAt, glyphAt, rowSpan, moveCaret, lineDeleteSpan, caseMap, mapRows, rawAtDrawn } from './flat-caret.js';
+import { buildRows, rowOf, caretAt, selectionRects, offsetAt, wordAround, wordPress, linePress, rowSpan, moveCaret, lineDeleteSpan, caseMap, mapRows, rawAtDrawn } from './flat-caret.js';
 
 // ===========================================================================
 // The caret on straight text that is a picture: arithmetic on rows
@@ -198,14 +198,6 @@ describe('a point on the rows', () => {
     expect(offsetAt(rows, 500, 1000)).toMatchObject({ o: 14, row: 2 });
   });
 
-  it('the glyph under a point is the stop at or before it, not the nearest', () => {
-    expect(glyphAt(rows, 48, 110)).toBe(4);
-    expect(glyphAt(rows, 41, 110)).toBe(4);
-    expect(glyphAt(rows, 39, 110)).toBe(3);
-    // Past the last letter it is still the last one of the row; before the first, the first.
-    expect(glyphAt(rows, 500, 150)).toBe(13);
-    expect(glyphAt(rows, -5, 150)).toBe(12);
-  });
 
   it('the span of the row a caret is on', () => {
     expect(rowSpan(rows, 3)).toEqual([0, 6]);
@@ -406,5 +398,59 @@ describe('casing that changes the length', () => {
   it('with no map the rows are themselves', () => {
     const rows = rowsFor('AB', ['AB']);
     expect(mapRows(rows, null)).toBe(rows);
+  });
+});
+
+describe('two presses select a word and three a row, as the browser does in the editable', () => {
+  // "HELLO WORLD!" wrapped after HELLO, a Return, then "AB".
+  const text = 'HELLO WORLD!\nAB';
+  const rows = rowsFor(text, ['HELLO', 'WORLD!', 'AB']);
+
+  it('the run of the text that holds an offset: a word, the spaces, a mark, a Return', () => {
+    expect(wordAround(text, 0)).toEqual([0, 5]);
+    expect(wordAround(text, 4)).toEqual([0, 5]);
+    expect(wordAround(text, 5)).toEqual([5, 6]);
+    expect(wordAround(text, 6)).toEqual([6, 11]);
+    expect(wordAround(text, 11)).toEqual([11, 12]);
+    expect(wordAround(text, 12)).toEqual([12, 13]);
+    // At the end of the text, the last run.
+    expect(wordAround(text, 15)).toEqual([13, 15]);
+    expect(wordAround('', 0)).toEqual([0, 0]);
+    // An apostrophe is in its word and a hyphen is not, as the browser has it.
+    expect(wordAround("don't over-do", 2)).toEqual([0, 5]);
+    expect(wordAround("don't over-do", 7)).toEqual([6, 10]);
+    expect(wordAround('two  spaces', 3)).toEqual([3, 5]);
+  });
+
+  it('two presses: the run that starts at or holds the offset one press goes to', () => {
+    // The left half of the second L: the caret before it, in HELLO.
+    expect(wordPress(rows, text, 32, 110)).toEqual({ a: 0, f: 5, up: false });
+    // The right half of the O: the caret after the word, which is where the space starts.
+    expect(wordPress(rows, text, 48, 110)).toEqual({ a: 5, f: 6, up: false });
+    // The left half of the W on the row below: the same offset, the word it starts.
+    expect(wordPress(rows, text, 2, 130)).toEqual({ a: 6, f: 11, up: false });
+    // The mark, and past the end of that row, the Return.
+    expect(wordPress(rows, text, 52, 130)).toEqual({ a: 11, f: 12, up: false });
+    expect(wordPress(rows, text, 300, 130)).toEqual({ a: 12, f: 13, up: false });
+    // At the end of the text: the last word.
+    expect(wordPress(rows, text, 300, 150)).toEqual({ a: 13, f: 15, up: false });
+  });
+
+  it('two presses past the end of a row that wrapped select nothing: the caret, on that row', () => {
+    expect(wordPress(rows, text, 300, 110)).toEqual({ a: 6, f: 6, up: true });
+  });
+
+  it('three presses: the row, with the space it wrapped at, or with its Return', () => {
+    expect(linePress(rows, text, 20, 110)).toEqual({ a: 0, f: 6, up: true });
+    expect(linePress(rows, text, 20, 130)).toEqual({ a: 6, f: 13, up: false });
+    // The last row ends at the text's end and has no Return to take.
+    expect(linePress(rows, text, 0, 150)).toEqual({ a: 13, f: 15, up: false });
+    expect(linePress([], text, 0, 0)).toEqual({ a: 0, f: 0, up: false });
+  });
+
+  it('three presses on an empty line select its Return', () => {
+    const t = 'A\n\nB';
+    const r = rowsFor(t, ['A', '', 'B']);
+    expect(linePress(r, t, 0, 130)).toEqual({ a: 2, f: 3, up: false });
   });
 });

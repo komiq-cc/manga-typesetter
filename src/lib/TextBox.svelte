@@ -80,7 +80,7 @@
   import { editLines, drawEditLines, rawOffset, domPoint, rawEdit } from './edit-lines.js';
   import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
   import { typeModel } from './type-rows.js';
-  import { caretAt as rowCaret, selectionRects, offsetAt, glyphAt, rowSpan, moveCaret, lineDeleteSpan, rawAtDrawn } from './flat-caret.js';
+  import { caretAt as rowCaret, selectionRects, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn } from './flat-caret.js';
 
   // pg defaults to current page; longstrip passes explicit page.
   // `shown` and `lazy` are read only while the Rust engine draws (see "the
@@ -2192,22 +2192,15 @@
     el.addEventListener('pointercancel', up);
   }
   // Default prevented, so the editable keeps the focus. The press count is
-  // the mouse event's: two selects the word under the pointer - the letter
-  // under it, not the caret beside it - and three the line of the picture it
-  // is on, whole, as a triple-click in the editable selects its line.
+  // the mouse event's: two select a word and three a line of the picture, by
+  // the rule the browser goes by in the editable (flat-caret.js `wordPress`,
+  // `linePress`, which say what was measured).
   function onTypeMouseDown(e) {
     e.preventDefault();
     if (e.button !== 0 || e.detail < 2 || !editEl || composing || !typeFlat) return;
     typeDragEnd?.();
-    const [x, y] = maskLocal(e);
-    if (e.detail === 2) {
-      const [a, b] = wordAt(editEl.textContent, glyphAt(typed.rows, x, y));
-      setTypeSel(a, b);
-    } else {
-      const hit = offsetAt(typed.rows, x, y);
-      const [a, b] = rowSpan(typed.rows, hit.o, hit.up);
-      setTypeSel(a, b, typed.rows[hit.row]?.soft === true);
-    }
+    const to = (e.detail === 2 ? wordPress : linePress)(typed.rows, editEl.textContent, ...maskLocal(e));
+    setTypeSel(to.a, to.f, to.up);
   }
   // The right button. The system's menu for text is offered only on an
   // editable, and the overlay is not one; so the word under the pointer is
@@ -2221,8 +2214,8 @@
     const lo = edSel ? Math.min(edSel.a, edSel.f) : 0;
     const hi = edSel ? Math.max(edSel.a, edSel.f) : 0;
     if (lo === hi || o < lo || o > hi) {
-      const [a, b] = wordAt(editEl.textContent, glyphAt(typed.rows, x, y));
-      setTypeSel(a, b);
+      const to = wordPress(typed.rows, editEl.textContent, x, y);
+      setTypeSel(to.a, to.f, to.up);
     }
     el.classList.add('ctx');
     const back = () => {
@@ -2526,6 +2519,14 @@
              editable below, which holds the text and is not seen. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="curve-edit" onpointerdown={onCurvePointerDown} onmousedown={(e) => e.preventDefault()} ondblclick={onCurveDblClick}>
+          {#if typeCurve}
+            <!-- A curve leaves the frame, and its picture takes no pointer: a
+                 target a glyph, where the glyph is, as the picture at rest
+                 has (`hitsOn`). -->
+            {#each typeGlyphs as g, i (i)}
+              <span class="tpad" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+            {/each}
+          {/if}
           {#if curveMarks}
             {#each curveMarks.sel as r, i (i)}
               <span class="csel" style="width:{r.w}px;height:{effSize}px;transform:translate(calc(-50% + {r.x}px), calc(-50% + {r.y}px)) rotate({r.rot}rad)"></span>
@@ -2545,7 +2546,7 @@
       <div
         class="txt editable"
         class:ghost={curveEdit || (typing && curved)}
-        class:unseen={typing && !curved}
+        class:unseen={typing}
         contenteditable="true"
         style="{typing ? textStyle : editStyle}{editShift}"
         use:editField

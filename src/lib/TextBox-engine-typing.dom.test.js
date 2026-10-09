@@ -307,12 +307,17 @@ describe('the pointer on the picture', () => {
     expect(m.all('.tsel').map(px)).toEqual([{ left: rows[0].xs[2], top: rows[0].top, width: 40, height: 24 }]);
   });
 
-  it('the second press of a double-click selects the word under the pointer, and ends the drag', async () => {
+  it('the second press of a double-click selects the word the caret went to, and ends the drag', async () => {
     const m = await typing('plain');
     const rows = rowsOf(m.box);
-    // The right half of the R of FOR: the caret beside it is after the word,
-    // the letter under it is in it.
-    const x = rows[0].xs[7] + 8;
+    // The right half of the R of FOR: the caret is after the word, and what
+    // starts there is the space (flat-caret.js `wordPress`: the browser's rule).
+    press(m, rows[0].xs[7] + 8, rows[0].top + 5);
+    m.q('.type-edit').dispatchEvent(new MouseEvent('mousedown', at(m, rows[0].xs[7] + 8, rows[0].top + 5, { detail: 2 })));
+    expect(m.sel()).toEqual([8, 9]);
+    release(m);
+    // Its left half: the word.
+    const x = rows[0].xs[7] + 2;
     press(m, x, rows[0].top + 5);
     m.q('.type-edit').dispatchEvent(new MouseEvent('mousedown', at(m, x, rows[0].top + 5, { detail: 2 })));
     expect(m.sel()).toEqual([5, 8]);
@@ -335,6 +340,12 @@ describe('the pointer on the picture', () => {
     expect(sel).toHaveLength(1);
     expect(sel[0].top).toBe(rows[1].top);
     expect(px(m.q('.tcaret')).top).toBe(rows[1].top);
+    cleanup();
+    // A row that ends at a Return is selected with it.
+    const p = await typing('plain');
+    const r = rowsOf(p.box);
+    p.q('.type-edit').dispatchEvent(new MouseEvent('mousedown', at(p, r[0].xs[3], r[0].top + 5, { detail: 3 })));
+    expect(p.sel()).toEqual([0, 12]);
   });
 
   it('the right button selects the word under it and steps aside for the system\'s menu, then comes back', async () => {
@@ -575,7 +586,7 @@ describe('text on a curve, and text whose casing changes its length', () => {
     expect(m.q('.curve-edit')).not.toBe(null);
     expect(m.q('.type-edit')).toBe(null);
     expect(m.editable().classList.contains('ghost')).toBe(true);
-    expect(m.editable().classList.contains('unseen')).toBe(false);
+    expect(m.editable().classList.contains('unseen')).toBe(true);
     // Everything selected: a mark a glyph, each the glyph's advance wide in
     // zoomed px (the model's glyphs are in page px).
     const glyphs = typeModel(m.box, boxText(m.box)).glyphs;
@@ -585,6 +596,10 @@ describe('text on a curve, and text whose casing changes its length', () => {
     expect(parseFloat(marks[0].style.width)).toBeGreaterThan(glyphs[0].w * 2 * 0.9);
     expect(parseFloat(marks[0].style.width)).toBeLessThan(glyphs[0].w * 2 * 1.2);
     expect(m.q('.ccaret').classList.contains('off')).toBe(true);
+    // And a target a glyph for the pointer: an arc leaves its frame.
+    const pads = m.all('.curve-edit .tpad');
+    expect(pads).toHaveLength(glyphs.length);
+    expect(parseFloat(pads[0].style.width)).toBeCloseTo(glyphs[0].w * 2, 6);
   });
 
   it('uppercase that makes a letter two: the caret after it stands after both', async () => {
