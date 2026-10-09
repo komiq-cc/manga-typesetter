@@ -1005,6 +1005,23 @@ window.__ec = {
   inputsSeen() {
     return inputs.splice(0);
   },
+  // The picture of the box typed into at the first frame after each of those
+  // edits, read in the page: how long after the edit, and the canvas then.
+  // (Read from outside, a loaded machine can be past the pause before it
+  // has looked.)
+  picturesSeen() {
+    return pictures.splice(0);
+  },
+  // The edit ended at the first frame after the next edit, in the page, so
+  // that it ends inside the pause whatever the machine is doing: `endSeen`
+  // says how long after the edit that was, and the canvas before and at once
+  // after.
+  endAtNextEdit() {
+    ending = { armed: true };
+  },
+  endSeen() {
+    return ending;
+  },
   // The last request for the system's menu: what it was aimed at.
   menuSeen() {
     const m = menu;
@@ -1201,7 +1218,24 @@ window.addEventListener('beforeinput', (e) => {
     from: r ? where(r.startContainer, r.startOffset) : null,
     to: r ? where(r.endContainer, r.endOffset) : null,
   });
+  const t0 = performance.now();
+  const type = e.inputType;
+  requestAnimationFrame(() => {
+    const cnv = app.editingId != null ? boxEl(app.editingId)?.querySelector('canvas.warpl') : null;
+    pictures.push({ type, ms: performance.now() - t0, w: cnv?.width ?? 0, h: cnv?.height ?? 0 });
+    if (!ending?.armed) return;
+    ending = { armed: false, ms: performance.now() - t0, before: { w: cnv?.width ?? 0, h: cnv?.height ?? 0 } };
+    document.querySelector('.tbox .txt.editable')?.blur();
+    flushSync();
+    if (app.editingId) endEdit(null);
+    flushSync();
+    ending.after = { w: cnv?.width ?? 0, h: cnv?.height ?? 0 };
+    ending.editing = app.editingId ?? null;
+    ending.sameCanvas = !!cnv?.isConnected;
+  });
 }, true);
+const pictures = [];
+let ending = null;
 const keyStamps = [];
 function onKeyStamp(e) {
   const row = { key: e.key, heard: performance.now(), sinceEvent: performance.now() - e.timeStamp };

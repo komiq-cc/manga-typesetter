@@ -1944,11 +1944,15 @@ if (ONLY.has('type2')) {
     st = await typeState(2);
     const big0 = st.canvas;
     const caret0 = st.caret;
+    // What the picture is while keys are coming is read IN the page, at the
+    // first frame after the key: this script, on a loaded machine, can take
+    // longer than the pause to look.
+    const inPause = (seen) => seen.find((x) => x.ms < 140) ?? null;
+    await ec('picturesSeen');
     await key('q', { text: 'q' });
     await ec('wait', 1);
     st = await ec('typeState');
-    const soft = st.canvas;
-    const softSame = await ec('typeSame', 'big');
+    const soft = inPause(await ec('picturesSeen'));
     const caret1 = st.caret;
     await sleep(400);
     st = await typeState(2);
@@ -1957,7 +1961,7 @@ if (ONLY.has('type2')) {
     const caret2 = st.caret;
     B.big = { atRestMP: mp(big0), afterKeyMP: mp(soft), afterPauseMP: mp(sharp), afterPause: sharpSame, caret: [caret0, caret1, caret2].map((c) => c && [+c.x.toFixed(2), +c.y.toFixed(2), +c.h.toFixed(2)]) };
     check(mp(big0) > 1.1, 'big', 'the large box is over the budget at rest', B.big);
-    check(mp(soft) <= 1.08 && !same(softSame.editor, softSame.exporter), 'big', 'while keys are coming it is painted within a megapixel', { soft: mp(soft), softSame });
+    check(soft && mp(soft) <= 1.08 && mp(soft) < mp(big0), 'big', 'while keys are coming it is painted within a megapixel', { soft, atRest: mp(big0) });
     check(mp(sharp) === mp(big0) && sharpSame.painted && sharpSame.bytes === 0, 'big', 'after the pause it is renderBoxTexture, byte for byte', sharpSame);
     check(caret1 && caret2 && Math.abs(caret1.x - caret2.x) < 0.01 && Math.abs(caret1.y - caret2.y) < 0.01 && Math.abs(caret1.h - caret2.h) < 0.01, 'big', 'the caret does not move when the picture is painted in full', B.big.caret);
     // A composition in the large box: soft while it is composed, in full
@@ -1965,10 +1969,10 @@ if (ONLY.has('type2')) {
     const text1 = st.text;
     const co = st.sel[1];
     await sleep(700);
+    await ec('picturesSeen');
     await cdp.send('Input.imeSetComposition', { text: 'かな', selectionStart: 2, selectionEnd: 2 });
     await ec('wait', 1);
-    st = await ec('typeState');
-    const compSoft = st.canvas;
+    const compSoft = inPause(await ec('picturesSeen'));
     await sleep(400);
     st = await typeState(2);
     const compSame = await ec('typeSame', 'big');
@@ -1981,19 +1985,19 @@ if (ONLY.has('type2')) {
     comp.committed = st.text === text1.slice(0, co) + '仮名' + text1.slice(co) && st.comps.length === 0;
     comp.committedPicture = done;
     B.composition = comp;
-    check(comp.softMP <= 1.08 && comp.held && comp.boxText && comp.underlines > 0, 'big', 'a composition is painted within the budget while it is composed, and is not yet the box\'s text', comp);
+    check(compSoft && comp.softMP <= 1.08 && comp.held && comp.boxText && comp.underlines > 0, 'big', 'a composition is painted within the budget while it is composed, and is not yet the box\'s text', comp);
     check(comp.sharpMP === mp(big0) && compSame.painted && compSame.bytes === 0 && compSame.composing, 'big', 'and in full after the pause, from the composed text', compSame);
     check(comp.committed && done.painted && done.bytes === 0 && !done.composing, 'big', 'the composition ended is the box\'s text and its picture', { committed: comp.committed, done });
     // The edit ending inside the pause: in full at once.
+    await ec('endAtNextEdit');
     await key('w', { text: 'w' });
-    await ec('wait', 1);
-    st = await ec('typeState');
-    const beforeEnd = st.canvas;
-    await ec('endEdit');
+    await ec('wait', 2);
+    const endSeen = await ec('endSeen');
     const ended = await ec('typeSame', 'big');
-    B.ending = { beforeMP: mp(beforeEnd), after: ended };
-    check(mp(beforeEnd) <= 1.08 && ended.painted && ended.bytes === 0 && same(ended.editor, ended.exporter), 'big', 'the edit ending inside the pause paints it in full at once', B.ending);
-    log(`type2 budget: balloon ${B.small.atRestMP} MP at rest, ${B.small.afterKeyMP} after a key (bytes unlike the exporter ${now.bytes}); large box ${B.big.atRestMP} MP at rest, ${B.big.afterKeyMP} after a key, ${B.big.afterPauseMP} after the pause (bytes unlike ${sharpSame.bytes}); composing ${comp.softMP} then ${comp.sharpMP} MP (bytes unlike ${compSame.bytes}); ended inside the pause: bytes unlike ${ended.bytes}`);
+    B.ending = { ...endSeen, beforeMP: mp(endSeen.before), afterMP: mp(endSeen.after), after: ended };
+    check(endSeen.ms < 140 && endSeen.editing == null && endSeen.sameCanvas && B.ending.beforeMP <= 1.08 && B.ending.afterMP === mp(big0), 'big', 'the edit ending inside the pause paints it in full at once', B.ending);
+    check(ended.painted && ended.bytes === 0 && same(ended.editor, ended.exporter), 'big', 'and what it painted is renderBoxTexture, byte for byte', ended);
+    log(`type2 budget: balloon ${B.small.atRestMP} MP at rest, ${B.small.afterKeyMP} after a key (bytes unlike the exporter ${now.bytes}); large box ${B.big.atRestMP} MP at rest, ${B.big.afterKeyMP} at the frame after a key (${soft ? soft.ms.toFixed(0) : '?'} ms after it), ${B.big.afterPauseMP} after the pause (bytes unlike ${sharpSame.bytes}); composing ${comp.softMP} then ${comp.sharpMP} MP (bytes unlike ${compSame.bytes}); ended ${endSeen.ms.toFixed(0)} ms after a key: ${B.ending.beforeMP} MP then ${B.ending.afterMP} at once, bytes unlike ${ended.bytes}`);
   }
   await ec('zoom', 1);
   check(cdp.errors.length === errorsBefore, 'type2', 'no page error', cdp.errors.slice(errorsBefore));
