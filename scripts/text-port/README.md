@@ -207,6 +207,10 @@ in device pixels, right and bottom exclusive, or `null` for an empty texture.
 | `scripts/text-port/lib/cmap.mjs` | which code points a font file has a glyph for; the harness's own reader, so the answer comes from no engine under test |
 | `scripts/text-port/compare.mjs` | compares two runs, writes `report.json` and `report.html`, exits non-zero when a gate fails |
 | `scripts/text-port/gates.json` | the thresholds |
+| `scripts/text-port/dry-run.mjs` + `src/lib/text-port-dryrun.realfont.test.js` | the dry run over the chapter copies: every box as the file has it against the same box after the app's own open under the Rust engine |
+| `scripts/text-port/lib/dry-compare.mjs`, `lib/dry-report.mjs` | what changed for one box; the report, its causes and its pictures |
+| `scripts/text-port/lib/installed-fonts.mjs` | the app's native font answers re-made in node: the installed families, a system face's bytes, which family has a letter |
+| `p9-check.html` + `src/test/p9-check/host.js`, `scripts/text-port/p9-check.mjs` | the first-open notice in a real browser: a dev-only page with the editor's canvas and the text queue, and its driver |
 
 ## Capturing
 
@@ -261,6 +265,58 @@ blur, a pattern tile, a clip mask, the PSD layer path) is counted and may
 differ; every other picture is the engine's own pixels, and one that differs
 makes the exit code 1. Measured on tree `e829744`: 3,558 of 3,558 equal in
 Chromium and in Safari against node; 32 of the 174 with a host step.
+
+## Old chapters under the Rust engine
+
+```
+node scripts/text-port/dry-run.mjs --data <dir> --out <dir> [--legacy-mode smart|plain] [--load-fixtures yes]
+```
+
+Opens every chapter copy the way the app opens one, with the switch on, and
+writes what the open changed, box by box: `report.html` (one file, pictures
+inside), `report.md`, `totals.json`, `boxes.jsonl` (holds chapter text),
+`sheets/` (the pictures sixteen boxes to a sheet). "Before" is the file and
+Safari's capture `runs/ref-wk/base`; "after" is the store's own load, the real
+switch, the wasm and the user's fonts, in node. It also reads the counts the
+app's notice would show, and what leaving, Keep and a save back under the
+browser write. Reads copies only and writes only under `--out`; two runs give
+the same bytes. `--load-fixtures yes` also hands the engine the repository's
+fixture fonts as loaded fonts (they carry the names of two former built-ins,
+Bangers and Comic Neue): what is left of the report once those are loaded.
+Exit code 2 when the report cannot be signed as it stands: a box changed its
+x, width or size, a height shrank, or a top edge moved without its height
+growing (gate G6, checked with the project as pages and as a long strip), or
+a chapter was not opened. 1 when the run failed.
+
+What the tool will not guess:
+
+- `--legacy-mode` has no default. A chapter saved before it carried its own
+  mode is opened by the app with what this machine's typesetting switch said
+  when the build that added the field first ran; no copy carries that, and
+  the two modes break lines differently. The run stops at the first such
+  chapter without the flag. For the 13 copies it is `smart`.
+- The project's layout is not in the copies, and it decides how far a box may
+  grow. Every chapter is opened as pages and as a long strip; the report is
+  the open as pages and lists the boxes that differ as a long strip.
+- A page whose art was replaced at another size (`needsRespace`), or with no
+  size, is repaired from its picture when the app opens it: x, width and
+  size are rescaled. The copies have no pictures, so such a chapter is not
+  opened; it is named at the top of the report.
+- A stored box is matched to the box the open made of it by its place in the
+  file, never by an id the load may repair. A stored box with no partner, or
+  a box with text and no layout, fails the run.
+- A cause is given only where the run's numbers bear it out. A block that
+  moved is put down to the ink boxes (rule 4) only when the shift the two
+  engines' ink boxes predict is the shift seen; otherwise it is unexplained.
+
+```
+node scripts/text-port/p9-check.mjs --data <dir> [--out <dir>] [--chapter <stem>]
+```
+
+The same moment in a browser: the notice in the text queue, with pictures. It
+starts its own Vite on port 5205 and a headless Chromium (DevTools port 9383)
+and stops both. The page has no filesystem; that a real file is untouched by
+an open is `src/lib/first-fit.engine.test.js`.
 
 ## Comparing
 
@@ -323,3 +379,29 @@ node scripts/text-port/p8-audit.mjs --data <tp-data>   # -> <tp-data>/reports/p8
 It starts its own Vite (port 5204) and Chromium (DevTools port 9382) and
 stops both. The head of the file says what a plain browser makes it stand in
 for (the library on disk, system fonts) and that typing is not acted out.
+
+
+### P9c direct WebKit measurements
+
+Before the P9 dry run, record the existing Safari layout's exact lines with
+raw canvas font-box and per-line ink metrics. This reads only local copies
+under tp-data. It installs/downloads no fonts and starts no server/collector.
+The private output includes source/font SHA256s and must use a new path:
+
+```
+node scripts/text-port/dry-metrics.mjs --data <tp-data> --out <tp-data>/reports/p9-direct-metrics.json
+node scripts/text-port/dry-run.mjs --data <tp-data> --out <out> --legacy-mode smart
+```
+
+The capture compiles dry-metrics-webkit.swift in a private temporary folder,
+loads copy font bytes into a nonpersistent local WKWebView, measures the
+font and exact lines, then deletes its private HTML/executable. The dry run
+validates hashes and copies the raw artifact into raw/direct-webkit.json.
+For an independently repeated capture use a fresh JSON path and pass it as
+`--webkit-metrics <json>`. Missing/stale reference metrics are refused. The
+prediction reads those direct measurements, never blockY or positioned ink;
+font-box shifts name rule3 and glyph-ink shifts name rule4.
+
+A raw lane also needs its completed passing verdict. --report-only cannot
+publish a failed or incomplete layout/paint lane. Reports/p9/check is kept
+when the dry run replaces its own output.

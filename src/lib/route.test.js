@@ -83,3 +83,46 @@ describe('leave-editor hook', () => {
     expect(hook).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe('overlapping navigation ownership', () => {
+  it('an older fulfilled leave cannot overwrite the newer route', async () => {
+    await goEditor('p1', 'c1');
+    const releases = [];
+    setLeaveEditorHook(() => new Promise((resolve) => releases.push(resolve)));
+    const old = goLibrary();
+    const newer = goProject('p2');
+    releases[1]();
+    expect(await newer).toBe(true);
+    releases[0]();
+    expect(await old).toBe(false);
+    expect(route).toMatchObject({ name: 'project', projectId: 'p2' });
+  });
+
+  it('a no-op request keeps the current editor and supersedes an older leave', async () => {
+    await goEditor('p1', 'c1');
+    let release;
+    setLeaveEditorHook(() => new Promise((resolve) => { release = resolve; }));
+    const old = goLibrary();
+    expect(await goEditor('p1', 'c1')).toBe(true);
+    release();
+    expect(await old).toBe(false);
+    expect(route).toMatchObject({ name: 'editor', chapterId: 'c1' });
+  });
+});
+
+
+it.each(['same editor', 'refused newer leave'])('a superseded Back retains history after %s', async (newerKind) => {
+  await goProject('p1'); await goEditor('p1', 'c1');
+  let release;
+  let calls = 0;
+  setLeaveEditorHook(() => ++calls === 1 ? new Promise((resolve) => { release = resolve; }) : Promise.reject(new Error('stay')));
+  const old = goBack();
+  if (newerKind === 'same editor') expect(await goEditor('p1', 'c1')).toBe(true);
+  else expect(await goLibrary()).toBe(false);
+  release(); expect(await old).toBe(false);
+  expect(route.name).toBe('editor');
+  setLeaveEditorHook(async () => {});
+  expect(await goBack(), 'the Back destination was never consumed by superseded work').toBe(true);
+  expect(route).toMatchObject({ name: 'project', projectId: 'p1' });
+});

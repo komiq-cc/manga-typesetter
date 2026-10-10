@@ -20,6 +20,9 @@ import {
   markUnsaved,
   setSaver,
   flushSave,
+  chapterSaveCycle,
+  chapterSaveCurrent,
+  chapterSaveApproval,
   clearPending,
   settleEdits,
   setTool,
@@ -31,6 +34,8 @@ import {
   toast,
   cancelChapterPlace,
   useChapterTypesetting,
+  stampTypesetting,
+  noteTypesettingSaved,
 } from './store.svelte.js';
 import { normalizeTypesetting, newTypesetting, legacyTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
@@ -1759,8 +1764,14 @@ export async function openChapter(projectId, chapterId) {
   try {
     // Write anything still pending for the chapter being replaced - and cancel
     // its debounce either way - before app.pages stops being that chapter.
-    await flushSave();
+    await flushSave({ settle: true });
     if (!mine()) return;
+    // A startup/font continuation may run after the store's final loop.
+    // Recheck at the actual handoff, before the old ref can be discarded.
+    while (!chapterSaveCurrent()) {
+      await flushSave({ settle: true });
+      if (!mine()) return;
+    }
 
     // The outgoing chapter is on disk, and from here until the new document is
     // fully loaded there is no open chapter at all.
@@ -1902,6 +1913,10 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // The load refits boxes immediately. Its bounds must come from the incoming
   // project's layout, not from whichever project was open before this one.
   app.projectLayout = normalizeLayout(p.layout);
+  // First-fit records the workflow mode with the incoming pages. Installing it
+  // afterwards would call an untouched translate/typeset open a user edit.
+  const mode = normalizeChapterMode(record.mode);
+  app.chapterMode = mode;
   // And its line breaker from the chapter's own record, for the same reason:
   // the load's refit measures under it (DET-3). A record from before the field
   // opens with what this machine laid it out with; the first save stamps it.
@@ -1925,8 +1940,6 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // after a translate one must give back the whole editor. The catalogue follows
   // the record it just read, so a chapter.json edited outside the app is
   // believed here as well as by the scan.
-  const mode = normalizeChapterMode(record.mode);
-  app.chapterMode = mode;
   c.mode = mode;
   // The layout belongs to the project and was set just before page loading so
   // its auto-height pass could use the correct document bounds.
@@ -1996,7 +2009,9 @@ let saveSeq = 0;
 
 export function saveOpenChapter() {
   const seq = ++saveSeq;
-  const done = saving.then(() => writeOpenChapter(seq));
+  const requestedRef = app.chapterRef;
+  const requestedTurn = chapterSaveCycle();
+  const done = saving.then(() => writeOpenChapter(seq, requestedRef, requestedTurn));
   // The queue must outlive a save that fails, or one bad write would strand
   // every later one - but the rejection still reaches this caller, because a
   // rejected autosave is the user's only signal that their work is off-disk.
@@ -2004,7 +2019,10 @@ export function saveOpenChapter() {
   return done;
 }
 
-async function writeOpenChapter(seq) {
+async function writeOpenChapter(seq, requestedRef, requestedTurn) {
+  // The request belongs to the identity that queued it, including a fresh
+  // reopen of the same chapter. Check before reading or stamping any document.
+  if (app.chapterRef !== requestedRef || chapterSaveCycle() !== requestedTurn) return;
   // Captured once. Every await below is a window in which the user can close
   // this chapter or open another, and `app.pages` stops being what `ref`
   // describes the moment they do - so the identity of the ref is re-checked
@@ -2029,9 +2047,9 @@ async function writeOpenChapter(seq) {
   const c = chapterById(ref.projectId, ref.chapterId);
   if (!c) return;
   const path = await fsx.join(c.dir, 'chapter.json');
-  if (app.chapterRef !== ref) return;
+  if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
   const record = await readJson(path);
-  if (app.chapterRef !== ref) return;
+  if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
 
   record.updatedAt = now();
   // The open chapter's mode is app state while it is open - that is how a switch
@@ -2039,7 +2057,8 @@ async function writeOpenChapter(seq) {
   // record follows it here rather than the other way round.
   record.mode = app.chapterMode;
   // The same for its typesetting (DET-3): Settings writes it while it is open.
-  record.typesetting = { ...app.typesetting };
+  // Stamped with the engine that fitted the boxes written below.
+  record.typesetting = stampTypesetting();
   // Blob URLs are runtime-only. `file` and `cleanedFile` are the durable
   // references and both are read off the page itself, so a document whose pages
   // were replaced or reordered in the editor can never hand one page's images
@@ -2083,11 +2102,11 @@ async function writeOpenChapter(seq) {
   // Any write that lands ends the failure streak, whoever asked for it - the
   // debounced autosave included. The escape below is for a disk that keeps
   // failing, not for one that failed once an hour ago.
-  saveFailures = 0;
+  if (app.chapterRef === ref && chapterSaveCycle() === requestedTurn) resetSaveFailures();
   // …and lowers the save indicator's failed state for the same reason. This is
   // the only place it comes down: the chrome promises the user that the warning
   // stands until bytes actually reach the disk, and this is where they have.
-  app.saveFailed = false;
+  if (app.chapterRef === ref && chapterSaveCycle() === requestedTurn) app.saveFailed = false;
   // The in-memory catalogue follows the disk, never leads it.
   // Re-resolve the live catalogue entry by id after disk awaits rather than
   // holding onto `c`: a concurrent scanLibrary can replace library.projects
@@ -2107,7 +2126,13 @@ async function writeOpenChapter(seq) {
   // happened, a newer snapshot exists that this write did not carry, and the
   // indicator has no business claiming everything is saved yet. The next save
   // in the chain will make that claim once it is truly the last one.
-  if (app.chapterRef === ref && seq === saveSeq) markSaved();
+  if (app.chapterRef === ref && chapterSaveCycle() === requestedTurn) {
+    // Actual landed bytes and permission to clear the indicator are separate.
+    // Suppressing both while final/Keep saves are queued behind one another
+    // makes their settlement loops continually enqueue more stale calls.
+    noteTypesettingSaved(record.typesetting);
+    if (seq === saveSeq) markSaved({ written: true });
+  }
 }
 
 export function closeChapter() {
@@ -2165,7 +2190,7 @@ export function closeChapter() {
   unbindTags();
   // The failure streak belongs to the chapter that was open. Nothing is pending
   // any more, so the next chapter starts its own two-step from scratch.
-  saveFailures = 0;
+  resetSaveFailures();
   // So does the save indicator's failed state: the pill presents it inside
   // `{project} · {chapter}`, as a fact about the open chapter. Carrying chapter
   // A's failure onto chapter B would blame the wrong document. With this, the
@@ -2188,7 +2213,8 @@ export function closeChapter() {
 // consecutive attempt says exactly what is about to be lost and lets the user
 // through. Two deliberate requests, same shape as the two-step deletes on the
 // home screens.
-let saveFailures = 0;
+let saveRefusal = null;
+let saveFailureEpoch = 0;
 
 const LEAVING = {
   editor: {
@@ -2209,7 +2235,8 @@ const LEAVING = {
 
 // Test-only: clear the streak without going through a chapter close.
 export function resetSaveFailures() {
-  saveFailures = 0;
+  saveRefusal = null;
+  saveFailureEpoch++;
 }
 
 // Wait for a promise, but not forever. Every failure inside the history's write
@@ -2255,12 +2282,12 @@ async function atMost(ms, p) {
 // rather than doing nothing at all.
 const SAVE_WAIT_MS = 10000;
 const STILL_WRITING = Symbol('still writing');
-function withinWait(p) {
+function withinWait(p, ms = SAVE_WAIT_MS) {
   let t;
   return Promise.race([
     p.finally(() => clearTimeout(t)),
     new Promise((r) => {
-      t = setTimeout(() => r(STILL_WRITING), SAVE_WAIT_MS);
+      t = setTimeout(() => r(STILL_WRITING), ms);
     }),
   ]);
 }
@@ -2269,7 +2296,17 @@ function withinWait(p) {
 // `where` picks the wording - 'editor' for closing the chapter, 'quit' for
 // closing the window. Resolves true when it is safe to go, false when the caller
 // must stay put.
-export async function flushBeforeLeaving(where) {
+const leaveApprovals = new WeakMap();
+export function leaveApprovalCurrent(promise) {
+  return leaveApprovals.get(promise)?.current?.() === true;
+}
+export function flushBeforeLeaving(where) {
+  const approval = { current: null };
+  const done = saveBeforeLeaving(where, () => { approval.current = chapterSaveApproval(); });
+  leaveApprovals.set(done, approval);
+  return done;
+}
+async function saveBeforeLeaving(where, approve) {
   const copy = LEAVING[where] ?? LEAVING.editor;
   // First of all, and synchronously: an edit still inside its settle window has
   // been applied to the document and will be written by the save below, while
@@ -2290,44 +2327,68 @@ export async function flushBeforeLeaving(where) {
   // so no future change to that can turn a failed history write into a window
   // that will not close.
   const history = flushHistory().catch(() => {});
+  const ref = app.chapterRef;
+  const turn = chapterSaveCycle();
+  const current = () => app.chapterRef === ref && chapterSaveCycle() === turn;
+  const refusalAtRequest = saveRefusal;
+  const epochAtRequest = saveFailureEpoch;
+  const deadline = Date.now() + SAVE_WAIT_MS;
+  let waitedHistory = false;
+  const finishHistory = async () => {
+    if (where !== 'quit' || waitedHistory) return;
+    waitedHistory = true;
+    await atMost(HISTORY_WAIT_MS, history);
+  };
   try {
-    // Bounded - see `withinWait`. The save goes on running either way; what is
-    // bounded is how long the user is left looking at a window that will not
-    // close and will not say why.
-    if ((await withinWait(flushSave())) === STILL_WRITING) {
-      toast(copy.slow);
-      return false;
-    }
-    saveFailures = 0;
+    do {
+      // Every retry shares the original deadline. A held writer is never
+      // interpreted as a refusal or a deliberate request to discard work.
+      if ((await withinWait(flushSave({ settle: true }), Math.max(0, deadline - Date.now()))) === STILL_WRITING) {
+        await finishHistory();
+        toast(current() ? copy.slow : 'Still writing the previous chapter. Try again when it finishes.');
+        return false;
+      }
+      if (where === 'quit') await finishHistory();
+      if (!current()) return false;
+      // This is the final continuation, including quit's history wait. The
+      // engine may have become ready after flushSave's earlier loop decision.
+    } while (!chapterSaveCurrent());
+    resetSaveFailures();
+    approve();
     return true;
   } catch (e) {
-    saveFailures += 1;
-    if (saveFailures < 2) {
+    await finishHistory();
+    if (!current()) {
+      toast(`Could not save the previous chapter: ${e?.message ?? e}`);
+      return false;
+    }
+    // Only an attempt begun AFTER a known refusal can spend the escape.
+    // Concurrent callers cannot count one another as deliberate confirmation.
+    const deliberate = refusalAtRequest && refusalAtRequest === saveRefusal &&
+      refusalAtRequest.ref === ref && refusalAtRequest.turn === turn && epochAtRequest === saveFailureEpoch;
+    if (!deliberate) {
+      saveRefusal = { ref, turn };
       toast(copy.refuse(e?.message ?? e));
       return false;
     }
-    // The escape is spent. A later attempt starts the two-step over rather than
-    // inheriting a streak from a problem that may since have been fixed.
-    saveFailures = 0;
+    resetSaveFailures();
     toast(copy.force);
+    approve();
     return true;
-  } finally {
-    // Only the quit path waits, and only for a bounded moment. Quitting
-    // destroys the window as soon as this resolves, so the records have to have
-    // landed by then; leaving the editor destroys nothing, and `closeChapter`
-    // flushes again a moment later anyway. Neither can change the answer - a
-    // `finally` does not overwrite a return.
-    if (where === 'quit') await atMost(HISTORY_WAIT_MS, history);
   }
 }
 
 // Wire the store's autosave and the route's leave-editor flush to this module.
 setSaver(saveOpenChapter);
-setLeaveEditorHook(async () => {
+setLeaveEditorHook(async (navigationCurrent = () => true) => {
+  const ref = app.chapterRef;
+  const turn = chapterSaveCycle();
   // Rethrowing keeps the route on the editor, so the work is still on screen and
   // the next edit will retry the save; leaving would close the chapter and drop
   // it. flushBeforeLeaving has already said why, and on a second consecutive
   // failure it returns true instead, which is the way out.
-  if (!(await flushBeforeLeaving('editor'))) throw new Error('The chapter could not be saved');
+  const request = flushBeforeLeaving('editor');
+  if (!(await request)) throw new Error('The chapter could not be saved');
+  if (!leaveApprovalCurrent(request) || !navigationCurrent() || app.chapterRef !== ref || chapterSaveCycle() !== turn) throw new Error('The navigation was superseded');
   closeChapter();
 });
