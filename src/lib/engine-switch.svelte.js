@@ -198,7 +198,10 @@ async function start() {
   engineSwitch.error = '';
   before = textEngine();
   const was = before;
-  setFontSource({ ready: () => false, settle: fontsSettled, before: () => was });
+  setFontSource({ ready: () => false, settle: fontsSettled,
+    // Final saves wait for this startup or its cancellation, never for future
+    // per-box font arrivals after the engine is installed.
+    starting: () => Promise.race([starting, left.promise]), before: () => was });
   // fonts.js reports from now; what it says before the engine has the library
   // is kept and said again after, in order, so nothing falls between the two.
   const early = [];

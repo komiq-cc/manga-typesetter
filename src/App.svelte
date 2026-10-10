@@ -16,7 +16,7 @@
   import NewChapterDialog from './lib/home/NewChapterDialog.svelte';
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -31,7 +31,7 @@
   // Side-effect import: reading the stored preferences also applies them, and
   // the typesetting switch has to be applied before the first line is measured.
   import './lib/prefs.svelte.js';
-  import { library, initRoot, openChapter, flushBeforeLeaving } from './lib/library.svelte.js';
+  import { library, initRoot, openChapter, flushBeforeLeaving, leaveApprovalCurrent } from './lib/library.svelte.js';
   import { route, goBack } from './lib/route.svelte.js';
   import { watchFontLoads, installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
 
@@ -140,8 +140,14 @@
         flushSidebar();
         flushPanels();
         if (!app.chapterRef) return Promise.resolve(true);
-        if (!inFlight) inFlight = flushBeforeLeaving('quit').finally(() => (inFlight = null));
-        return inFlight;
+        const ref = app.chapterRef, turn = chapterSaveCycle();
+        if (!inFlight || inFlight.ref !== ref || inFlight.turn !== turn) {
+          const original = flushBeforeLeaving('quit');
+          const own = { ref, turn, original };
+          inFlight = own;
+          original.finally(() => { if (inFlight === own) inFlight = null; }).catch(() => {});
+        }
+        return inFlight.original;
       };
 
       // Route 1: window close button. The only route that exists on every
@@ -154,7 +160,7 @@
           return;
         }
         e.preventDefault();
-        if (await safeToQuit()) await w.destroy();
+        await destroyWhenSaved(safeToQuit, w);
       });
 
       // Route 2: Cmd+Q and the Quit menu item. macOS only because the MENU is
@@ -170,6 +176,16 @@
       console.error('Could not arm the quit flush', e);
       toast(`Quitting may not save the last edits: ${e?.message ?? e}`);
     }
+  }
+
+  async function destroyWhenSaved(safeToQuit, w) {
+    const ref = app.chapterRef, turn = chapterSaveCycle();
+    const original = safeToQuit();
+    if (!(await original)) return;
+    // Approval belongs to this exact public Promise/document, including the
+    // deliberate discard path. A new load or edit cannot inherit it.
+    if (app.chapterRef !== ref || chapterSaveCycle() !== turn || (ref && !leaveApprovalCurrent(original))) return;
+    await w.destroy();
   }
 
   // Strip predefined Undo/Redo from the macOS application menu so DOM keydowns
@@ -205,7 +221,7 @@
           text,
           accelerator: 'CmdOrCtrl+Q',
           action: async () => {
-            if (await safeToQuit()) await w.destroy();
+            await destroyWhenSaved(safeToQuit, w);
           },
         });
         await sub.removeAt(i);
@@ -222,10 +238,13 @@
     if (route.name !== 'editor') return;
     const { projectId, chapterId } = route;
     if (untrack(() => app.chapterRef?.projectId === projectId && app.chapterRef?.chapterId === chapterId)) return;
+    let active = true;
     openChapter(projectId, chapterId).catch((e) => {
+      if (!active || route.name !== 'editor' || route.projectId !== projectId || route.chapterId !== chapterId) return;
       toast(`Could not open that chapter: ${e?.message ?? e}`);
       goBack();
     });
+    return () => { active = false; };
   });
 
   function openNewChapter(projectId = null) {

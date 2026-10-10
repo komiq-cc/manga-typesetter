@@ -1309,6 +1309,8 @@ async function run(events) {
   }
 }
 
+const STARTUP_CLOSE_ORDERS = [[20262691, ["switchOn", "open1", "unmarked_fit", "editLate", "writeFails", "unmarkedMode", "writeLands", "fontLands", "holdTranslations", "leave", "reversePages", "holdWrites", "fontLands", "edit", "unmarked_file", "engineStarts", "holdWrites", "keep", "debounce", "unmarkedHandle", "editLate", "writeLands", "debounce", "writeLands", "edit", "switchOff", "switchOff", "reversePages", "unmarkedHandle", "writeLands", "switchOn", "holdWrites"]], [20263661, ["switchOn", "open2", "holdWrites", "unmarkedHandle", "reversePages", "writeLands", "unmarked_fit", "unmarkedHandle", "unmarkedMode", "editLine", "holdWrites", "writeLands", "holdTranslations", "editLate", "unmarkedMode", "writeLands", "fontLands", "debounce", "debounce", "unmarked_style", "holdWrites", "editLine", "keep", "writeFails", "debounce", "debounce", "leave", "switchOff", "keep", "writeFails", "switchOn", "switchOn", "debounce"]], [20264358, ["switchOn", "open1", "writeLands", "editLate", "debounce", "reversePages", "writeLands", "fontLands", "fontLands", "fontLands", "fontLands", "open2", "open2", "switchOff", "wait", "holdTranslations", "debounce", "editLine", "editLine", "editLine", "fontLands", "debounce", "switchOff", "keep", "leave", "writeLands", "switchOn", "keep", "editLate", "writeLands", "holdWrites", "debounce"]], [20265531, ["switchOn", "engineStarts", "open1", "holdWrites", "reversePages", "unmarkedMode", "writeLands", "edit", "holdWrites", "editLine", "wait", "editLine", "leave", "keep", "engineStarts", "editLine", "writeLands", "editLine", "holdWrites", "switchOff", "editLate", "writeLands", "holdWrites", "switchOff", "editLate", "keep", "holdWrites", "fontLands", "editLate", "switchOn", "unmarkedMode", "reversePages", "reversePages", "writeLands"]]];
+
 // ---------- the generator ----------
 function rng(seed) {
   let a = seed >>> 0;
@@ -2240,6 +2242,209 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally {
       await cleanupModel();
     }
+  });
+
+  // These literal original schedules exercise the public reply, with no
+  // production diagnostic overlay. Close synchronously in the FIRST original
+  // reply observer, before assertions or cleanup can repair an early success.
+  it.each(STARTUP_CLOSE_ORDERS)('public leave at startup seed %s saves version2 before the first TRUE reply closes the chapter', async (_seed, order) => {
+    resetHand(); state.open = false; state.keep = null; resetFiles();
+    let cut = null;
+    const previous = saverObserver.reply;
+    saverObserver.reply = (request, answer, error) => {
+      if (!cut && answer === true && !error) {
+        cut = copy({ chapterId: app.chapterRef?.chapterId, live: documentNow(), mode: app.chapterMode,
+          choices: [...state.choices].map(([id, map]) => [id, [...map]]),
+          physical: chapters.map((ch) => ({ id: ch.id, chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) })),
+          version: app.typesetting.version, engine: textEngine()?.id, phase: engineSwitch.phase });
+        closeChapter();
+        state.open = false;
+      }
+      return previous?.(request, answer, error);
+    };
+    try {
+      for (const name of order) {
+        state.event = name;
+        await EVENTS[name]();
+        await pass(0);
+        if (cut) break;
+      }
+      if (!cut) await rest();
+      expect(cut, 'the original public TRUE reply must be observed before cleanup').not.toBeNull();
+      const actual = cut.physical.find((file) => file.id === cut.chapterId);
+      expect(JSON.parse(actual.chapter).typesetting.version, 'first TRUE reply must already carry ready Rust version2').toBe(2);
+      expect(canon(JSON.parse(actual.chapter).pages)).toBe(canon(cut.live));
+      for (const file of cut.physical) choicesIn(file.id, JSON.parse(file.chapter), JSON.parse(file.text),
+        'first TRUE reply retains every independent choice before synchronous close', new Set(), true,
+        new Map(cut.choices.find(([id]) => id === file.id)?.[1] ?? []));
+      expect(app.chapterRef).toBeNull();
+    } finally { saverObserver.reply = previous; await cleanupModel(); }
+  });
+
+  it.each(['engine starts', 'switch cancelled'])('an edited final waits for actual startup until %s without waiting future fonts', async (completion) => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1); await EVENTS.editLine();
+      hand.startHeld = true; hand.fontHeld = false;
+      const starting = useTextEngine('rust');
+      await pass(0);
+      expect(hand.starts).toHaveLength(1);
+      let reply = null;
+      const final = flushBeforeLeaving('editor').then((answer) => { reply = answer; return answer; });
+      await pass(0);
+      expect(reply, 'a touched startup cannot claim its temporary version1 is settled').toBeNull();
+      if (completion === 'engine starts') await EVENTS.engineStarts();
+      else await EVENTS.switchOff();
+      expect(await until(final)).toBe(true);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(completion === 'engine starts' ? 2 : 1);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      if (completion === 'engine starts') await until(starting);
+    } finally { await cleanupModel(); }
+  });
+
+  it('a held touched startup consumes only the existing public deadline and never a discard refusal', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1); await EVENTS.editLine(); hand.startHeld = true;
+      useTextEngine('rust').catch(() => {}); await pass(0);
+      let reply = null;
+      const final = flushBeforeLeaving('editor').then((answer) => { reply = answer; return answer; });
+      await pass(9999); expect(reply).toBeNull();
+      await pass(1); expect(await until(final)).toBe(false);
+      expect(app.chapterRef).not.toBeNull();
+      expect(app.toast.msg).toMatch(/Still writing/);
+      await EVENTS.switchOff(); await pass(0);
+      expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      choicesOnDisk(c, 'cancelled startup after timeout retains choices');
+    } finally { await cleanupModel(); }
+  });
+
+  it('an untouched first fit can leave with startup still held and writes neither file', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1); const chapter = onDisk(), text = textOnDisk(), began = hand.began.length;
+      hand.startHeld = true; useTextEngine('rust').catch(() => {}); await pass(0);
+      expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      expect(onDisk()).toBe(chapter); expect(textOnDisk()).toBe(text); expect(hand.began.length).toBe(began);
+      expect(hand.starts).toHaveLength(1);
+    } finally { await cleanupModel(); }
+  });
+
+  it.each(['saved', 'deliberate discard'])('the exact public %s approval is invalidated by a later live choice', async (outcome) => {
+    resetHand(); state.open = false;
+    const beforeWrite = fsx._before;
+    try {
+      await open(V1); await EVENTS.editLine();
+      if (outcome === 'deliberate discard') {
+        const failure = new Error('disk full');
+        fsx._before = (path, bytes, write) => path === chapterPath ? Promise.reject(failure) : beforeWrite(path, bytes, write);
+        expect(await until(flushBeforeLeaving('quit'))).toBe(false);
+      }
+      const request = flushBeforeLeaving('quit');
+      expect(await until(request)).toBe(true);
+      const { leaveApprovalCurrent } = await import('./library.svelte.js');
+      expect(leaveApprovalCurrent(request)).toBe(true);
+      UNMARKED.text();
+      expect(leaveApprovalCurrent(request), 'even a raw later choice requires a new approval').toBe(false);
+    } finally { fsx._before = beforeWrite; await cleanupModel(); }
+  });
+
+  it('a public saved approval cannot authorize edited startup begun after its reply', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1); await EVENTS.editLine();
+      const request = flushBeforeLeaving('quit');
+      expect(await until(request)).toBe(true);
+      const { leaveApprovalCurrent } = await import('./library.svelte.js');
+      expect(leaveApprovalCurrent(request)).toBe(true);
+      const ref = app.chapterRef, version = app.version;
+      hand.startHeld = true; useTextEngine('rust').catch(() => {}); await pass(0);
+      expect(app.chapterRef).toBe(ref); expect(app.version).toBe(version);
+      expect(leaveApprovalCurrent(request), 'the last consumer must refuse a new pending startup even before version changes').toBe(false);
+      expect(hand.starts).toHaveLength(1);
+    } finally { await cleanupModel(); }
+  });
+
+  it('an outgoing BOTH receipt cannot lower a new same-ref load cycle failure', async () => {
+    resetHand(); state.open = false;
+    let unsubscribe = null;
+    try {
+      await open(V1); await EVENTS.editLine();
+      hand.holdTranslations = true;
+      const old = saveOpenChapter(); await pass(0);
+      expect(hand.writes[0].path).toBe(translationsPath);
+      const ref = app.chapterRef;
+      const incoming = JSON.parse(V1); incoming.pages[0].lines[0].en = 'INCOMING';
+      useChapterTypesetting(incoming.typesetting); loadProjectPages(incoming.pages); markSaved();
+      expect(app.chapterRef).toBe(ref);
+      const failure = new Error('current-cycle failure');
+      unsubscribe = store.setSaver(() => Promise.reject(failure));
+      expect(await until(flushBeforeLeaving('editor'))).toBe(false);
+      expect(app.saveFailed).toBe(true);
+      hand.hold = true; hand.holdTranslations = false;
+      hand.writes.shift().ok(); await until(old); await pass(0);
+      expect(app.saveFailed, 'old actual BOTH bytes do not clear a newer cycle failure').toBe(true);
+      expect(app.pages[0].lines[0].en).toBe('INCOMING');
+      expect(await until(flushBeforeLeaving('editor')), 'old BOTH bytes cannot spend the new cycle refusal').toBe(true);
+    } finally { unsubscribe?.(); await cleanupModel(); }
+  });
+
+  it.each(['editor', 'quit', 'same-ID open'])('browser %s waits for late independent choices in BOTH files', async (where) => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      await EVENTS.editLine();
+      hand.hold = true;
+      const request = where === 'same-ID open' ? openChapter(p.id, c.id) : flushBeforeLeaving(where);
+      let replied = false; request.then(() => { replied = true; }, () => {});
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      await EVENTS.editLine();
+      await EVENTS.editLate();
+      const pg = app.pages[0], box = pg.boxes[3];
+      resizeBox(pg.id, box.id, { x: box.x, y: box.y, w: box.w, h: 91 });
+      choose('height', 91, pg, box); markUnsaved();
+      expect(box.h, 'public resize establishes the independent late height').toBe(91);
+      box.style.color = '#123456'; choose('style', '#123456', pg, box);
+      setChapterTypesetMode('plain'); choose('typesetting', 'plain');
+      app.chapterMode = 'translate'; choose('mode', 'translate');
+      app.pages.reverse(); choose('order', app.pages.map((page) => page.id)); markUnsaved();
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(replied, 'old BOTH bytes cannot authorize the public handoff').toBe(false);
+      expect(hand.writes.length).toBeGreaterThan(0);
+      hand.hold = false;
+      for (const writer of hand.writes.splice(0)) writer.ok();
+      await until(request);
+      const chapter = JSON.parse(onDisk()), translations = JSON.parse(textOnDisk());
+      const chosenPage = chapter.pages.find((page) => page.id === 1);
+      const chosenText = translations.pages.find((page) => page.page === 1);
+      expect(chosenPage.lines[0].en).toBe('AAAA');
+      expect(chosenText.lines[0].en).toBe('AAAA');
+      expect(chosenPage.boxes[3]).toMatchObject({ text: 'AAAA BBBB CC', h: 91, style: { color: '#123456' } });
+      expect(chosenText.extraBoxes[3]).toMatchObject({ text: 'AAAA BBBB CC', h: 91 });
+      expect(chapter.mode).toBe('translate'); expect(chapter.typesetting.mode).toBe('plain');
+      expect(chapter.pages.map((page) => page.id)).toEqual([2, 1]);
+      choicesOnDisk(c, 'successful browser final retains every choice');
+      expect(app.pages.find((page) => page.id === 1).lines[0].en).toBe('AAAA');
+    } finally { await cleanupModel(); }
+  });
+
+  it('an old browser BOTH receipt cannot cancel a later edit debounce', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      hand.hold = true;
+      await EVENTS.editLine(); await pass(DOC_SAVE_MS);
+      await EVENTS.editLine();
+      hand.hold = false; hand.writes.shift().ok(); await pass(0);
+      expect(app.saved, 'old bytes must leave the newer intent unsaved').toBe(false);
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
+      choicesOnDisk(c, 'natural browser debounce without rescue');
+    } finally { await cleanupModel(); }
   });
 
   it.each(['editor', 'quit'])('the final %s snapshot waits for Rust debt discovered before it lands, without a debounce rescue', async (where) => {

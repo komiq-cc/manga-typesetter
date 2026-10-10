@@ -1861,3 +1861,74 @@ original continuation, six-control runs, mutation sensitivity, remaining13
 original orders, full6000 model and final whole-P9 review remain pending. No
 transient browser category from the separately reviewed private prototypes is
 applied, and no completion is claimed.
+
+### Intermediate repair of browser persistence and public handoff (2026-10-10)
+
+The user's expanded scope requires fixing genuine browser and related save bugs.
+Earlier browser-loss/cancellation/transient verdicts in this report are retained
+as historical diagnostics, not accepted final behavior. Their model acceptance
+paths and the completed-browser disk-check omission still require a coordinated
+model update after the root's exact injected-error association replays. This
+intermediate candidate does not claim full P9 acceptance or a passing6000 run.
+
+Actual original startup seeds20262691/20263661/20264358/20265531 returned TRUE
+with Rust on, saved false and BOTH physical files at version1 although the actual
+version had become2 before the first public reply. Root retained the original
+orders/stages/prefix/tails in p9c-root-506-startup-original*-001 and its
+p9c-root-original4-actual-audit-001.json. Four source-free regressions copy the
+first original TRUE cut and synchronously close before assertions or later
+repair; all fail archived506 at physical version1 and pass this repair at2.
+The same literal orders are used; when still pending at their end the named
+support uses only the existing fourteen drain rounds. Generated schedules have
+not changed.
+
+Final saving now converges for browser as well as Rust. Every actual BOTH-file
+receipt advances the exact snapshot ledger, independently of latest-save
+indicator permission. A writer marks saved only when its actual receipt matches
+the current document/version/mode, so older bytes cannot clear a newer edit's
+800ms timer or substitute current live pages as disk evidence. Edited pending
+Rust startup is awaited or cancelled before final approval; absent future box
+fonts and untouched first-fit trials retain their existing behavior. The public
+leave continuation revalidates after its last await, including the bounded quit
+history wait, and retries share the original ten-second document deadline.
+Open revalidates before discarding the outgoing reference. Actual writes and
+queued calls check both exact reference object and public load cycle, including
+a same-ref new load; old success cannot clear a newer cycle's failure warning.
+
+A deliberate discard requires a refusal already known when that request began,
+the same reference/cycle and unchanged refusal epoch. Concurrent requests begun
+before either refusal cannot consume confirmation. Genuine BOTH success and
+close clear that basis. Public TRUE replies carry an approval for their exact
+reference/cycle/document/version/mode and font-source identity, including the
+explicit discard outcome; this is not a durable claim for discard. Route close
+and window/menu destroy check that original Promise approval at their final
+consumer. A new chapter gets its own quit request. Superseded navigation cannot
+close or replace a newer editor, Back consumes only its committed history entry,
+and a stale App open failure cannot navigate away from the current chapter.
+
+p9c-worker-save-fixes-focused-005/results.json records43PASS across model,
+library, route and App DOM controls. The actual held-browser regressions cover
+translation, text, height, color, typesetting mode, chapter mode and page order
+in BOTH files, plus raw later edits, startup cancellation/timeout/untouched
+supports, concurrent confirmation and incoming cycle protection. The approval
+controls use the real library approval API; App DOM tests mock its decision and
+independently exercise the actual destruction/navigation continuations.
+p9c-worker-save-fixes-old506-003 records19 clean functional AssertionErrors using
+identical current tests on immutable archived506 source, including all four
+startup cuts, browser handoffs/timer, concurrent confirmation, incoming BOTH
+cycle, route/Back and App overlaps. Missing new APIs are not counted as old
+failures. Both jobs retain source snapshots, raw reporter/logs and exact owned
+cleanup evidence with no timeout, runtime suite, cleanup or source drift.
+The full library/route/App check in
+p9c-worker-save-fixes-library-route-001 records195PASS with the same clean
+source/owned-process guards. Earlier failed fixture attempts remain preserved;
+old506-002 stopped before a child because the local Python tar API lacked its
+requested keyword.
+
+This is a reviewed intermediate repair. Root independent replays, strict model
+policy/error updates, Fit-now/auto-fit review persistence and longstrip
+round-trip follow-ups, full6000 accounting, final captures and whole-P9 review
+remain pending. The original outgoing-failure P2 source fix in the preceding
+section is now behaviorally verified: root506 selected15PASS and literal
+original continuation2PASS plus2same-current supports, with all old2c failures
+retained; its earlier UNEXECUTED label describes the historical submission.

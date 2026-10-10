@@ -2244,6 +2244,33 @@ describe('a save whose chapter moved under it', () => {
   });
 });
 
+describe('navigation only closes its own outgoing chapter', () => {
+  it('a superseded leave cannot close the editor kept by a newer no-op navigation', async () => {
+    const { p, c } = await seedOpenChapter();
+    resetRoute(); await goEditor(p.id, c.id);
+    const ref = app.chapterRef;
+    app.pages[0].lines = [{ n: 1, jp: 'あ', en: 'chosen current text' }];
+    const write = fsx.writeTextFile;
+    let release;
+    fsx.writeTextFile = async (path, bytes) => {
+      if (path.includes('chapter.json')) await new Promise((resolve) => { release = resolve; });
+      return write(path, bytes);
+    };
+    let leaving;
+    try {
+      leaving = goLibrary();
+      for (let i = 0; i < 100 && !release; i++) await Promise.resolve();
+      expect(release, 'actual outgoing chapter write is held').toBeTypeOf('function');
+      expect(await goEditor(p.id, c.id)).toBe(true);
+      release();
+      expect(await leaving).toBe(false);
+      expect(app.chapterRef, 'the old library hook must not close the retained editor').toBe(ref);
+      expect(app.pages[0].lines[0].en).toBe('chosen current text');
+      expect(route.name).toBe('editor');
+    } finally { fsx.writeTextFile = write; release?.(); await leaving; resetRoute(); closeChapter(); }
+  });
+});
+
 describe('a failed save is visible', () => {
   it('toasts when the debounced autosave cannot write', async () => {
     await seedOpenChapter();
@@ -2304,6 +2331,18 @@ describe('a failed save is visible', () => {
         fsx.writeTextFile = orig;
       }
     }
+
+    it('two concurrent leave failures cannot spend a deliberate discard confirmation', async () => {
+      await seedOpenChapter();
+      app.pages[0].lines = [{ n: 1, jp: 'あ', en: 'retained choice' }];
+      const answers = await withBrokenDisk(() => Promise.all([
+        flushBeforeLeaving('editor'), flushBeforeLeaving('quit'),
+      ]));
+      expect(answers, 'both requests began before any known refusal').toEqual([false, false]);
+      expect(app.chapterRef).not.toBeNull();
+      expect(app.pages[0].lines[0].en).toBe('retained choice');
+      expect(await withBrokenDisk(() => flushBeforeLeaving('editor'))).toBe(true);
+    });
 
     it('lets the user out of the editor on a second consecutive failure', async () => {
       const { p, c } = await seedOpenChapter();

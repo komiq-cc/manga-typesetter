@@ -1745,12 +1745,12 @@ export function stampTypesetting() {
 // Both files of this particular snapshot landed, even if a newer save call
 // is queued. The writer passes the exact fields object returned above, so a
 // failed/obsolete callback cannot substitute another write's current stamp.
-// Ordinary browser saves keep their existing latest-call indicator policy;
-// only snapshots Rust owns (or acquired while they were held) use this seam.
+// Every actual BOTH-file receipt advances the disk ledger, including browser
+// writes. Queued final callers must see progress independently of the indicator.
 export function noteTypesettingSaved(fields) {
   const took = typesettingSnapshots.get(fields);
   typesettingSnapshots.delete(fields);
-  if (!took || took.turn !== documentTurn || (!took.owned && !fontSource && !disk?.owned)) return;
+  if (!took || took.turn !== documentTurn) return;
   landed(took);
 }
 
@@ -1806,7 +1806,8 @@ const keepWaits = () => !keepOver && anyBoxWaiting();
 function settleDisk() {
   if (!fileBehind()) {
     // Once the work crossing Rust's switch-off has landed, ordinary browser
-    // autosaves resume their existing policy. Pure never-Rust races are deferred.
+    // autosaves resume their ordinary policy. Actual browser receipts still
+    // participate in explicit final convergence and exact saved marking.
     if (!fontSource && disk && !finalOwnsDocument()) disk.owned = false;
     return;
   }
@@ -2395,7 +2396,10 @@ export function markUnsaved() {
     });
   }, DOC_SAVE_MS);
 }
-export function markSaved() {
+export function markSaved({ written = false } = {}) {
+  // A writer has already supplied its exact BOTH-file snapshot. Never cancel
+  // a newer edit's timer or manufacture a receipt from current live pages.
+  if (written && !chapterSaveCurrent()) return;
   // The debounce goes with the flag, and it has to: `markSaved` means "the disk
   // is current", and a timer left armed against work that has already landed
   // writes the whole document a second time 800ms later. On the way out of a
@@ -2412,8 +2416,24 @@ export function markSaved() {
   // say: a document that changed after the save's snapshot was taken - an
   // edit, a font landing, the engine starting - is unsaved again at once
   // (`landed`, `settleDisk`).
-  landed();
+  if (!written) landed();
 }
+
+// Navigation captures the cycle as well as the ref: a reload can reuse a ref.
+export const chapterSaveCycle = () => documentTurn;
+// A final caller may approve an explicit discard as well as a durable save.
+// Capture exactly the approved document; a later edit/load needs its own reply.
+export function chapterSaveApproval() {
+  const ref = app.chapterRef, turn = documentTurn, source = fontSource;
+  const doc = docText(), version = versionNow(), mode = app.chapterMode;
+  return () => app.chapterRef === ref && documentTurn === turn && fontSource === source && docText() === doc &&
+    versionNow() === version && app.chapterMode === mode;
+}
+export function chapterSaveCurrent() {
+  if (!savers.size() || !app.chapterRef || !app.loaded || firstFitUntouched()) return true;
+  return !fontSource?.starting && !!disk && disk.doc === docText() && disk.version === versionNow() && disk.mode === app.chapterMode;
+}
+
 export function flushSave({ settle = false } = {}) {
   clearTimeout(saveT);
   // A chapter the Rust engine fitted for the first time, which the user has
@@ -2437,15 +2457,22 @@ export function flushSave({ settle = false } = {}) {
   if (ticket) finalSettlements.add(ticket);
   return savers.size() && ref
     ? runSavers().then(async () => {
-        // Leaving/quit must finish debt discovered while its final snapshot
-        // was held. Only this outgoing Rust-owned document is covered. A font
+        if (settle && app.chapterRef === ref && documentTurn === turn) {
+          const startup = fontSource?.starting?.();
+          if (startup) await startup;
+        }
+        // Every engine must finish changes discovered while its final snapshot
+        // was held. The exact outgoing ref and load cycle are covered. A font
         // still absent is not waited for: compare the document/version that
         // actually exists now, rather than Keep's remaining wait or future fit.
         while (
           settle && app.chapterRef === ref && documentTurn === turn && app.loaded &&
-          (owned || ticket?.owned || fontSource || disk?.owned) && disk &&
-          (disk.doc !== docText() || disk.version !== versionNow() || disk.mode !== app.chapterMode)
+          disk &&
+          !chapterSaveCurrent()
         ) {
+          const startup = fontSource?.starting?.();
+          if (startup) await startup;
+          if (app.chapterRef !== ref || documentTurn !== turn || chapterSaveCurrent()) break;
           clearTimeout(saveT);
           await runSavers();
         }
