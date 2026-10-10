@@ -1529,11 +1529,12 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally { await cleanupModel(); }
   });
 
-  it('overlapping Rust final settlements retain receipt ownership after a matching browser handoff and later edit', async () => {
+  it('overlapping public final callers retain actual receipt ownership while two callers still await a later choice', async () => {
     resetHand();
     state.open = false;
     const finals = [];
-    let settled = 0;
+    const settled = new Set();
+    const answers = [];
     try {
       await EVENTS.switchOn();
       await EVENTS.engineStarts();
@@ -1541,22 +1542,38 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.editLine();
       hand.hold = true;
       for (let i = 0; i < 3; i++) {
-        const final = flushSave({ settle: true });
-        final.then(() => settled++, () => {});
+        const final = flushBeforeLeaving(i === 1 ? 'quit' : 'editor');
+        final.then((answer) => { answers[i] = answer; settled.add(i); }, () => {});
         finals.push(final);
       }
       await pass(0);
       expect(hand.writes).toHaveLength(1);
       await EVENTS.switchOff();
-      // A and B match the browser handoff. The other finals still own this
-      // outgoing debt when those receipts match both current files.
+      // Only A lands before the later public edit. B is held and C remains
+      // queued, so neither competing outgoing caller has finished its debt.
       hand.writes.shift().ok();
       await pass(0);
       expect(hand.writes).toHaveLength(1);
-      hand.writes.shift().ok();
-      await pass(0);
-      expect(hand.writes).toHaveLength(1);
+      expect(settled.has(0)).toBe(true);
+      expect(settled.has(1)).toBe(false);
+      expect(settled.has(2)).toBe(false);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
       await EVENTS.editLine();
+      expect(app.pages[0].lines[0].en).toBe('AAAA');
+      // B's old snapshot lands, and then C's actual current pair. Hold B's
+      // follow-up throughout the early assertion. An old stale ledger cannot
+      // let C finish even though both physical files contain C's later choice.
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      hand.writes.shift().ok();
+      await pass(0);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(hand.writes.length).toBeGreaterThan(0);
+      expect(settled.has(2), 'C must finish from its actual both-file receipt while B still waits').toBe(true);
+      expect(settled.has(1), 'B still waits for its already queued follow-up').toBe(false);
       // Keep every subsequent writer held. Old source must fail on an extra
       // held writer/pending final before unheld cleanup could enter its loop.
       // Queue coalescing is not the contract. Bound release attempts, keep
@@ -1567,7 +1584,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
         await pass(0);
       }
       expect(hand.writes, 'current both-file receipts must stop the final queues').toHaveLength(0);
-      expect(settled, 'all three outgoing finals must settle').toBe(3);
+      expect(settled.size, 'all three outgoing finals must settle').toBe(3);
+      expect(answers).toEqual([true, true, true]);
       expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
       expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
       choicesOnDisk(c, 'independent later choice after all outgoing finals');

@@ -1474,3 +1474,20 @@ and both physical independent choices current. Hold remains true throughout;
 identity cleanup happens after assertions. Queue coalescing/count is not the
 contract. This bounded fixture correction is unrun. All final-source model, mutation,
 real dry-run, browser, capture and final review proofs remain pending.
+
+The coordinator subsequently measured the original bounded final fixture
+on current cc253fd, on its retirement-guard mutation, and on old e377 with
+only that current test overlaid. All three passed. The guard mutation is a
+measured survivor; the fixture did not prove the ticket repair. Its late edit
+came after two of three final callers had finished, allowing the sole remaining
+caller's ordinary latest-save callback to converge even on the old source.
+The original catalog and those raw results remain unchanged.
+
+A separate stronger regression now uses three public flushBeforeLeaving
+callers. Only A lands before the independent later Queue choice, while B is
+held and C is queued. After C's actual current chapter and translations files
+land, C must finish while B's already queued follow-up remains held. Subsequent
+held writers are released at most eight times; all three callers must finish
+with both files current before identity cleanup. This stronger regression is
+unrun. Its early assertion must fail old source and the guard mutation cleanly;
+neither a timeout nor a write-count difference will count as a kill.
