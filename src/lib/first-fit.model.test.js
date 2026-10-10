@@ -1391,8 +1391,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await pass(DOC_SAVE_MS);
       const history = [...state.timers.values()].filter((timer) => timer.pending && timer.source === 'history');
       expect(history).toHaveLength(1);
-      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, relevant: false, ref: app.chapterRef });
-      expect(relevantTimers()).toEqual([]);
+      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, source: 'history', ref: app.chapterRef });
       expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
       expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
       expect(app.saved).toBe(true);
@@ -1401,7 +1400,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(state.baselineReceipts).toHaveLength(1);
       expect(state.touched).toBe(false);
       expect([...state.choices.get(c.id)]).toEqual(choices);
-      expect(history[0].pending).toBe(true);
+      expect(history[0]).toMatchObject({ pending: true, relevant: false });
+      expect(relevantTimers()).toEqual([]);
     } finally { await cleanupModel(); }
   });
 
@@ -1994,13 +1994,13 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.switchOff();
       const history = [...state.timers.values()].filter((timer) => timer.pending && timer.source === 'history');
       expect(history).toHaveLength(1);
-      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, relevant: false, ref: app.chapterRef });
-      expect(relevantTimers()).toEqual([]);
-      expect(settlementReceipt()).not.toBe(null);
+      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, source: 'history', ref: app.chapterRef });
       retireBrowserDebt();
       expect(state.rustDebt.has(c.id)).toBe(false);
       expect(state.retirements.get(c.id)?.ref).toBe(app.chapterRef);
-      expect(history[0].pending).toBe(true);
+      expect(history[0]).toMatchObject({ pending: true, relevant: false });
+      expect(relevantTimers()).toEqual([]);
+      expect(settlementReceipt()).not.toBe(null);
       expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
       await EVENTS.unmarked_style();
       await pass(DOC_SAVE_MS);
