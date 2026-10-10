@@ -7,9 +7,9 @@ All are listed in section 13.
 The briefs are `tp-data/briefs/p9-old-chapters.md` (sections 2 to 6 carry its
 item numbers) and `tp-data/briefs/p9b-old-chapters-fixes.md` (section 14,
 "Second round"). Sections0–10 and12–14 retain historical measured proofs;
-section11 gives the current write contracts, and section15 separates current
-P9c repair evidence from its preserved failed drafts. Historical wording is
-not current acceptance policy.
+section11 gives the current write contracts, section15 preserves the repair
+history, and section16 gives the final coordinator measurements and limits.
+Historical wording is not current acceptance policy.
 
 Every figure is marked **measured** or **inferred**. Measured on the 13
 chapter copies means: the app's own store, switch and font sync in node, the
@@ -24,7 +24,7 @@ report for signing are under `tp-data/reports/p9`.
 
 ## 0. Result
 
-Current P9c persistence and model results are in section15. The table below
+Current P9c acceptance results are in section16. The table below
 is historical second-round evidence; it does not certify the current tree.
 
 Second round, final tree `3f368143` (every row measured):
@@ -683,9 +683,8 @@ Second round:
 
 ## 11. Exactly what is written to the user's files, and when
 
-These are the current persistence contracts. Section15 separates current
-measured proofs from preserved historical runs; integrated captures and final
-whole-P9 review remain the coordinator's acceptance work.
+These are the current persistence contracts. Section16 records coordinator
+proofs; section15 preserves the earlier runs and corrections.
 
 Both browser and Rust final saves converge on the actual outgoing document,
 version and mode before ordinary leave/quit/open succeeds. Every actual
@@ -2126,3 +2125,89 @@ inputs/source, unlisted files and all9 canonical check files passed their
 guards; owned processes were empty after6.288s. This attempt does not count
 as either required passing worker dry run. Two fresh canonical runs and the
 root's independent comparison follow on the corrected clean tree.
+
+## 16. Final coordinator proof record (2026-10-10)
+
+This section supersedes earlier pending-acceptance statements. The candidate
+is clean `537276a400c28125a38dbd71f40bb7b07a2ccb02`, tree
+`9d58041749ddb0728602c2db88d77fd91c7f8b61`. It contains the Keep production
+fix at `756e8e9`, the force-certificate model correction at `1bd5bfc`, and
+the direct-style dry-fixture correction at `537276a`. The latter two change
+no production code. This report update changes only documentation.
+
+All paths below are relative to the private evidence root
+`/Users/caved/dev/manga-typesetter-wt/tp-data/reports/resume-20261009`.
+Figures are **measured** unless explicitly called a limit or inference.
+
+| root proof | measured result and source |
+|---|---|
+| Keep old/fixed | `p9c-root-keep-old5e-756e8e9-002`:20 pass,2 clean functional assertion failures on immutable `5e25827` with the identical new engine tests. `p9c-root-keep-focused-756e8e9-001`:313 pass. The original notice one-save assertion is unchanged. The real-file regression checks both files and the four-second deadline; the edit-timer control preserves the already armed800ms save. |
+| original ZERO controls | `p9c-root-keep-zero-756e8e9-001`:ZERO_WAIT and ZERO_FAILED controls pass; both mutants fail their functional one-save assertion. This resolves the two previously failed controls, not all32 original definitions. |
+| force certificate old/fixed | `p9c-root-force-old756e-1bd5bfc-001`:2 pass,5 clean assertion failures on the old classifier with identical controls. `p9c-root-force-focused-1bd5bfc-001`:318 pass. Error-identity controls prove model bookkeeping, not production data loss. |
+| full6000 | Root `p9c-root-force-final6000-1bd5bfc-001` and worker `p9c-worker-force-final6000-1bd5bfc-001`:6000 completed,0 unfinished,0 unresolved;197113 generated and executed events,0 tail. Actual witness bytes match, SHA256 `700b44c8ad2c2c2686bd776bfca5905f6cc7a0022b005b5b14c41afaaec108c6`. Production and model bytes are unchanged at `537276a`. |
+| ten checks | `p9c-root-keep-ten-756e8e9-001`:all10 ordered checks pass, including default/no-default Rust tests, fmt, three clippy variants, full Vitest4036 pass/8 skipped, Tauri301 pass/1 ignored and app build. This was measured at `756e8e9`; the later five model controls and dry-fixture correction are covered by focused/model/dry proofs. The full ten checks will run on the merged tree. |
+| fresh WASM/WebKit | Default engine build at `5e25827` and rebuilt ten-check engine at `756e8e9` yield1614483 bytes, SHA256 `f71d8563ed9d7663f867a9ffcf7edda119ab2e68efec5a2ffe82a5b48b0e4294`. Fresh system-WebKit metrics at `5e25827`:7243 records,0 errors, SHA256 `ab8fb09ec11494f74d932afe21cda8a04f4853ddea751673c67b86fc8c97089c`. Engine and metric-input source is unchanged; these exact artifacts feed all final dry runs. |
+| both reference captures | `p9c-root-force-caps-1bd5bfc-001`:default versus `ref-sk/base` and Rust versus `new/r4` differ only in manifests. Each has64718 metrics,17538 layouts,3732 pictures and0 errors. Successful capture folders were deleted as HANDOFF requires. |
+| actual browser CLI | `p9c-browser-error-cli-proofs-v3-descendants/runs/`:old-injected-final-1bd5bfc-001 reproduces false exit0/all-passed with one injected page error. Fixed-control-final-1bd5bfc-001 has21 named passes/0 page errors/exit0. Fixed-injected-final-1bd5bfc-001 has21 named passes/1 page error/exit1 and no all-passed claim. Root inspected the actual notice/review/Keep/held-handle pictures. |
+| retained repro and mutation audit | `p9c-root-retained-artifact-audit-756e8e9.json` independently verifies all nine review repro reporters and all36 semantic job reporters/log hashes. The historical nine-definition catalog has7 functional kills and2 honest survivors;3 kills concern model history/receipts. Original32 at `5e25827` has22 kills,7 survivors,2 failed controls,1 obsolete target and aggregate passed=false. The two controls are resolved above. Distinct returned-deferred-copy sensitivity remains unproved. No32-kill or9-kill claim is made. |
+
+Deliberate sequential force controls remain separately **unfinished** with
+their original unexecuted tail and retained choices/debt. They are not
+completed saves or part of the6000 completed count. Ordinary successful
+browser-loss exemptions remain removed. Original failed schedules, invalid
+attempts and the original dirty starting patch are retained privately.
+
+### Repeated real-copy dry run and picture inspection
+
+Under `p9c-root-dry-proofs-v3-owned/runs/`, both worker canonical passes
+(`worker-feature-canonical1-537276a`, `worker-feature-canonical2-537276a`)
+and root `root-scratch-final-537276a` have complete/passed raw lane verdicts,
+13 chapters,0 layout errors and0 paint errors. The first passing worker
+output differs from the retained failed partial output; its comparison-only
+wrapper exit1 is not a lane failure or equality proof. The second worker
+and root compare all918 files equal, manifest SHA256
+`4ca73d0dbbab0778a3a7fb21995eb730328a3b3a5707a7cbd9dc0bc4fbb0be5d`.
+All nine canonical `check/` files and unlisted files are preserved. Each
+run has intact source/input guards and empty owned processes, without
+timeout, execution or cleanup errors. No blanket XPC-service claim is made.
+
+Current totals:2487 boxes,2302 lettered,2292 compared,pending0. Changes to
+x/width/size, shrunk height, top-only movement and longstrip G6 breaches
+are all0. Heights grew361 (352 already behind the browser app,9 missing
+fonts);75 newly flagged (59 already behind),4 unflagged;7 changed line
+arrays,442 changed boxes,35 missing-font boxes and30 borrowed styles.
+Strip differences8 and arithmetic noise253 are reported separately.
+The placement classifications retain19 rule4 ink predictions,0 rule3
+line-height predictions and0 combined predictions. **Unexplained remains2.**
+
+Root inspected all30 contact sheets, the two individual unknown pairs and
+the actual browser check pictures. The missing Bangers file gives Helvetica
+Neue fallback with different line counts in both unknown pairs:
+
+| box id | observed vertical shift | independent predicted shift |
+|---|---|---|
+| `c.tsukimichi__122.p26.bb354` | -23.76031249999994 | -23.760312499999998 |
+| `c.tsukimichi__122.p28.bb383` | -37.73031250000031 | -37.7303125 |
+
+These measurements reject a suspected unrelated vertical-placement defect:
+the independent metric predictions match within floating-point error.
+They do not prove horizontal correspondence after the line counts change.
+`blockDx` remains null and the report correctly refuses a rule3/rule4 cause.
+Both rows stay unexplained; no placement guard, assertion or category is
+weakened. This is a dry-report proof limit, not a completed-save waiver.
+
+### Acceptance and remaining desktop work
+
+Independent Codex source/model reviews cover the full integration0272-to-P9
+diff and both review corrections. The final report/evidence review precedes
+the integration merge; its result and the exact merge/post-merge proofs are
+recorded in private `CHECKPOINT.md`. The coordinator then runs all ten checks,
+both reference captures and the final canonical dry run on `text-port`.
+That regenerated `tp-data/reports/p9/report.html` is the report to sign.
+
+The automated integration work does not supply the user's G6 signature or
+the15 real-desktop checks in section12. Real Tauri quit/menu/OS-IME, pen,
+dictation, Photoshop and second-machine package checks from earlier reports
+remain deferred. System-WebKit and synthetic Chromium checks cannot certify
+them. No push, main merge or P10 is part of P9 completion. P10 requires the
+user's separate approval.
