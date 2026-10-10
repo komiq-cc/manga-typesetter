@@ -2037,3 +2037,36 @@ held bytes; cleanup's later TX/BOTH receipt cannot mutate their retained proof.
 These worker results are a concrete candidate, not merge authorization. Root
 independent pinned reruns, final mutation/capture/dry-run proofs and whole-P9
 review remain outstanding.
+
+### Failed Keep retry keeps its own deadline (2026-10-10)
+
+The independent pause audit found one live defect at `5e25827`. After a
+failed Keep, `saved` is false and no ordinary save timer exists. A second
+Keep while a font is held made `settleDisk` arm an 800ms save, then its
+four-second deadline wrote the same snapshot again. A waiting Keep now
+creates no ordinary timer. Any timer already armed by an edit retains its
+original deadline. The Keep deadline and later fitted-font debt still write.
+
+Measured worker evidence under `tp-data/reports/resume-20261009`:
+
+- `p9c-worker-keep-fixed-001`:22 passed,0 failed in the complete
+  `first-fit.engine.test.js` and `EngineNotice.dom.test.js` files. The notice
+  file and its exact one-save assertion at301 are unchanged.
+- `p9c-worker-keep-old5e-001`:20 passed,2 clean functional AssertionErrors
+  using preserved immutable `5e25827` production and the same new engine
+  test overlay. The unchanged notice assertion sees two saves. The new
+  real-file retry assertion sees both physical files written at800ms.
+- The real-WASM/node:fs regression fails the first translations write after
+  chapter.json lands, retries with the font held, and proves no write at800ms
+  or before the four-second deadline. Exactly one chapter/translations pair
+  lands at that deadline at version1. No redundant pair follows. A later font
+  fit persists one new pair with its actual height and version2.
+- The separate real-file control arms a user-edit timer before retry. Both
+  files retain the edit at its original800ms deadline; the font's later fit
+  and version2 follow without losing that text.
+
+Both runs began below load8 and retained raw reporters/logs, exact source
+hashes and commands. Neither timed out or changed execution source; the
+existing owned-process helper verified an empty process group with no
+cleanup or execution error. These focused results do not replace final
+root proofs, canonical dry runs or independent whole-P9 review.

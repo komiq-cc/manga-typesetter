@@ -66,7 +66,8 @@ vi.mock('./fsx.js', async () => {
 });
 
 const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures } = await import('./library.svelte.js');
-const { app, loadProjectPages, firstFit, firstFitChanges, keepFirstFit, markUnsaved, DOC_SAVE_MS } = await import('./store.svelte.js');
+const { app, loadProjectPages, firstFit, firstFitChanges, keepFirstFit, markUnsaved, DOC_SAVE_MS, KEEP_WAIT_MS } = await import('./store.svelte.js');
+const { fsx } = await import('./fsx.js');
 const { initHistory } = await import('./editor/history.svelte.js');
 const { switchHistoryPage } = await import('./editor/history-file.svelte.js');
 const { setPageSwitchHook } = await import('./store.svelte.js');
@@ -224,6 +225,8 @@ afterEach(async () => {
   setTextEngine(original.engine);
   setTypesetEnabled(original.typeset);
   clearLayoutMemo();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -329,6 +332,110 @@ describe('a version 1 chapter opened with the Rust engine on', () => {
 // The second round (text-engine/P9-REPORT.md): the cases an outside review
 // found, on the real file.
 describe('what must reach the file all the same', () => {
+  // Use the library's actual two-file saver and the real engine. Fail the
+  // first translations write after chapter.json lands, then retry while the
+  // system face is still held. Count successful physical atomic writes.
+  async function failedWaitingKeep() {
+    await useTextEngine('rust');
+    let land;
+    slow = new Promise((resolve) => (land = resolve));
+    await openChapter(p.id, c.id);
+    expect(boxes()[1].h).toBe(20);
+    const writes = [];
+    const write = fsx.writeTextFileAtomic.bind(fsx);
+    let fail = true;
+    const spy = vi.spyOn(fsx, 'writeTextFileAtomic').mockImplementation(async (path, bytes) => {
+      if (path === join(c.dir, 'translations.json') && fail) {
+        fail = false;
+        throw new Error('disk full');
+      }
+      await write(path, bytes);
+      if (path === chapterFile() || path === join(c.dir, 'translations.json')) writes.push({ path, record: JSON.parse(bytes) });
+    });
+    vi.useFakeTimers();
+    try {
+      const refused = expect(keepFirstFit()).rejects.toThrow('disk full');
+      await vi.advanceTimersByTimeAsync(KEEP_WAIT_MS);
+      await refused;
+      expect(firstFit.keeping).toBe(false);
+      expect(app.saveFailed).toBe(true);
+      expect(app.saved).toBe(false);
+      writes.length = 0;
+    } catch (error) {
+      land();
+      spy.mockRestore();
+      throw error;
+    } finally {
+      vi.useRealTimers();
+    }
+    return { land, writes, spy };
+  }
+
+  it('a failed Keep retry waits for its deadline, writes both files once, then saves a late font fit', async () => {
+    const { land, writes, spy } = await failedWaitingKeep();
+    try {
+      const kept = keepFirstFit();
+      await wait(DOC_SAVE_MS + 200);
+      expect(writes, 'retry must not create an ordinary 800ms write').toEqual([]);
+      expect(firstFit.keeping).toBe(true);
+      await wait(KEEP_WAIT_MS - DOC_SAVE_MS - 400);
+      expect(writes, 'retry remains waiting before its four-second deadline').toEqual([]);
+      await kept;
+      expect(writes.map((w) => w.path)).toEqual([chapterFile(), join(c.dir, 'translations.json')]);
+      expect(writes[0].record.typesetting).toEqual({ mode: 'smart', version: 1 });
+      expect(writes[0].record.pages[0].boxes[1].h).toBe(20);
+      expect(writes[1].record.pages[0].extraBoxes[1]).toMatchObject({ text: TEXT, h: 20 });
+      expect(firstFit).toMatchObject({ keeping: false, kept: true, dismissed: true });
+      expect(app.saveFailed).toBe(false);
+      expect(app.saved).toBe(true);
+      await wait(DOC_SAVE_MS + 200);
+      expect(writes).toHaveLength(2);
+
+      land();
+      await _engineSwitchSync().settled();
+      expect(boxes()[1].h).toBeGreaterThan(20);
+      await wait(DOC_SAVE_MS + 200);
+      expect(writes.map((w) => w.path)).toEqual([chapterFile(), join(c.dir, 'translations.json'), chapterFile(), join(c.dir, 'translations.json')]);
+      expect(writes[2].record.typesetting.version).toBe(2);
+      expect(writes[2].record.pages[0].boxes[1].h).toBe(boxes()[1].h);
+      expect(writes[3].record.pages[0].extraBoxes[1]).toMatchObject({ text: TEXT, h: boxes()[1].h });
+      expect(JSON.parse(await readFile(join(c.dir, 'translations.json'), 'utf8'))).toEqual(writes[3].record);
+    } finally {
+      land();
+      await _engineSwitchSync().settled();
+      spy.mockRestore();
+    }
+  }, 15000);
+
+  it('a failed Keep retry preserves an already armed user-edit save deadline', async () => {
+    const { land, writes, spy } = await failedWaitingKeep();
+    try {
+      boxes()[0].text = 'EDITED WHILE KEEP WAITS';
+      markUnsaved();
+      await wait(DOC_SAVE_MS - 200);
+      expect(writes).toEqual([]);
+      const kept = keepFirstFit();
+      // At the original 800ms deadline, rather than 800ms after the retry.
+      await wait(400);
+      expect(writes.map((w) => w.path)).toEqual([chapterFile(), join(c.dir, 'translations.json')]);
+      expect(writes[0].record.pages[0].boxes[0].text).toBe('EDITED WHILE KEEP WAITS');
+      expect(writes[1].record.pages[0].extraBoxes[0].text).toBe('EDITED WHILE KEEP WAITS');
+      expect(firstFit.keeping).toBe(true);
+      land();
+      await _engineSwitchSync().settled();
+      await kept;
+      expect(writes.map((w) => w.path)).toEqual([chapterFile(), join(c.dir, 'translations.json'), chapterFile(), join(c.dir, 'translations.json')]);
+      expect(writes[2].record.typesetting.version).toBe(2);
+      expect(writes[2].record.pages[0].boxes[0].text).toBe('EDITED WHILE KEEP WAITS');
+      expect(writes[2].record.pages[0].boxes[1].h).toBe(boxes()[1].h);
+      expect(writes[3].record.pages[0].extraBoxes[0].text).toBe('EDITED WHILE KEEP WAITS');
+    } finally {
+      land();
+      await _engineSwitchSync().settled();
+      spy.mockRestore();
+    }
+  }, 15000);
+
   it('a handle still held down when the app is quit: the box is written as the hand has it', async () => {
     await useTextEngine('rust');
     await openChapter(p.id, c.id);

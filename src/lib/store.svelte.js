@@ -1836,7 +1836,10 @@ function settleDisk() {
       answer.writing = false;
       settleDisk();
     }, () => {});
-  } else if (app.saved || !saveT) markUnsaved();
+  // A waiting Keep owns its deadline. Retrying a failed write has saved=false
+  // and no debounce; do not invent an 800ms write before that deadline. An
+  // already armed user-edit timer stays armed at its original deadline.
+  } else if (!firstFit.keeping && (app.saved || !saveT)) markUnsaved();
 }
 
 // ---------- a font arriving changes every measurement ----------
