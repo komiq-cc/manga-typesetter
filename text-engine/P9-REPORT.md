@@ -1711,9 +1711,9 @@ added. The full6000-order model, remaining combined proof lanes and final
 review remain pending; no completion is claimed from diagnostic prefixes.
 
 
-### Actual public-open and saver observations (draft, unexecuted)
+### Actual public-open and saver observations (2a94d measured, acceptance pending)
 
-This model-only draft replaces first-pending filesystem attribution at BOTH
+The committed model-only observation change replaces first-pending filesystem attribution at BOTH
 start and landing with the exact still-pending saver invocation's test-only
 AsyncLocalStorage context. Public open and saver wrappers pass the same
 arguments and return the original promise unchanged. Active matching public
@@ -1754,9 +1754,44 @@ multiple-invocation refusal with first observations preserved, and original
 promise identity. The registered callback's unchanged return is verified
 statically; its named observation checks original-promise completion, while
 open/direct-save controls compare the public returned identity. Existing four stale queued-ref controls
-also check the outgoing BOTH receipt after actual ref adoption. The draft has
-only syntax/whitespace checks; these new observations and controls have NOT
-been executed or committed. Root and independent static review are pending.
-Production, generator seeds/events/weights/stages, fourteen drains, cleanup,
-raw robustness probes, historical choices and chapter-ID debt remain unchanged.
-Remaining originals, including1184, are not claimed resolved before execution.
+also check the outgoing BOTH receipt after actual ref adoption. Root measured
+exact2a94d focused100:252PASS/3FAIL, with original20261094 UNKNOWN and the two
+unrelated/expired markSaved controls failing caller-source metadata only after
+their functional refusal/lost-intent assertions passed. Runtime, timeout and
+cleanup errors were zero, source unchanged: p9c-root-2a94d-focused100-001.
+The exact31-original continuation returned5 completed,11 exact cancellation,
+1 stale-final,1 forced-exit and13 UNKNOWN,1007 generated/732 executed/275 tail:
+p9c-root-2a94d-31-originals-001/results.json. Quiet1184/2245/2419 now reach the
+existing exact cancellation; no new category was added. These bounded results
+are not full6000 acceptance.
+
+The root-owned assertion-message-only diagnostic printed each already captured
+clearer stack on an exact2a94d archive. Both immediate callers were Proxy.markSaved
+at store.svelte.js:2403:3. It returned the expected two clean metadata assertion
+failures, no runtime/timeout/cleanup/source errors and verified empty owned
+processes: p9c-root-2a94d-clearer-message-001/root-clearer-message.json. Archive,
+all610 tracked scratch hashes and sealed inputs were verified after execution.
+The original strict immediate-source matcher remains unchanged. The new fixture
+draft destructures the same original exported markSaved and calls it directly.
+
+Root also found that shallow proof fields could acquire nested snapshot.text,
+physical receipts or timer history during finally cleanup. Existing classifier
+outcomes were decided before cleanup; polluted nested fields cannot establish
+what had actually started/landed at that boundary. The authorized observation
+correction copies the entire ref/promise-stripped proof BEFORE cleanup and
+copies a deferred return at its catch boundary. A boundary observation order
+makes later clear/receipt additions distinguishable. Actual settlement receipts
+now carry a stable ref token and monotonic observation order at creation, with
+no eligibility change or debt deletion.
+
+Two named original94/2168 cutoff controls require held chapter translations to
+remain unobserved/no physical receipt, or held translations to retain exactly
+one actual chapter receipt, after cleanup really completes both physical writes.
+Existing same-ID deferred-prefix checks verify returned observations are separate
+values from the live cleanup objects. Pure-browser receipt metadata remains
+explicitly separate from Rust retirement. This correction draft has only syntax
+and whitespace checks; no behavioral jobs or commit have run. Independent static
+review and root execution remain pending. Production, categories, generator
+seeds/events/weights/stages, fourteen drains, cleanup, raw robustness probes,
+historical choices and chapter-ID debt remain unchanged. Remaining13 originals
+and full6000 combined proof are pending.

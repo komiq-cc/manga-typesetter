@@ -158,7 +158,7 @@ vi.mock('./store.svelte.js', async (original) => {
 const { fsx } = await import('./fsx.js');
 const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
-const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
+const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, markSaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
 const { defaultStyle } = await import('./data.js');
 const { buildTextJson } = await import('./text-json.js');
 const { initHistory } = await import('./editor/history.svelte.js');
@@ -631,7 +631,7 @@ function settlementReceipt() {
   if (!currentDocument && !untouchedOpened) return null;
   try { for (const chapter of chapters) choicesOnDisk(chapter, 'settlement receipt retains every historical choice'); }
   catch (error) { if (error instanceof Broken) return null; throw error; }
-  return { kind: currentDocument ? 'current-document' : 'untouched-opened', chapterId: c.id, ref: app.chapterRef,
+  return { kind: currentDocument ? 'current-document' : 'untouched-opened', chapterId: c.id, ref: app.chapterRef, refToken: refToken(app.chapterRef), order: ++state.nextObservation,
     chapter: onDisk(), text: textOnDisk(), writes: hand.began.length, at: Date.now(), event: state.event };
 }
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
@@ -1281,13 +1281,13 @@ async function run(events) {
     for (const ch of chapters) if (ch.id !== app.chapterRef?.chapterId) choicesOnDisk(ch, 'inactive chapter at rest');
     return null;
   } catch (e) {
-    if (e instanceof DeferredBrowser) return { deferred: e.witness };
+    if (e instanceof DeferredBrowser) return { deferred: copy(e.witness) };
     if (!(e instanceof Broken)) throw new Error(`${at}: ${e?.stack ?? e}`);
     return `${e.message}`;
   } finally {
     state.lastRunStages = stages;
     const timerRecord = (timer) => timer && Object.fromEntries(Object.entries(timer).filter(([key]) => key !== 'id' && key !== 'ref'));
-    state.lastRunProof = { fullOrder: [...events], executedPrefix: events.slice(0, executed), unexecutedTail: events.slice(executed),
+    state.lastRunProof = copy({ boundaryOrder: state.nextObservation, fullOrder: [...events], executedPrefix: events.slice(0, executed), unexecutedTail: events.slice(executed),
       stages: copy(stages), windows: state.finalWindows.map((w) => ({ kind: w.kind, chapterId: w.chapter.id, refToken: w.refToken, generation: w.generation, targetId: w.targetId, fulfilled: w.fulfilled, saverSerials: w.saverSerials, attributionAmbiguous: w.attributionAmbiguous, browserAtRequest: w.browserAtRequest,
         currentIdentity: w.ref === app.chapterRef, debtAtRequest: w.debtAtRequest, acquiredRust: w.acquiredRust, pending: w.pending, cleanAtRequest: w.cleanAtRequest,
         publicRequest: w.publicRequest && (({ ref, incomingRef, originalPromise, window, ...request }) => request)(w.publicRequest), saverSerial: w.saver?.serial, replyAt: w.replyAt, retirement: w.retirement && (({ ref, ...receipt }) => receipt)(w.retirement), answer: w.answer, toast: w.toast, rejected: w.rejected, snapshot: w.snapshot,
@@ -1304,7 +1304,7 @@ async function run(events) {
         pendingTransitions: state.pending.size, heldWriters: hand.writes.map(({ path, bytes, saverSerial, refToken }) => ({ path, bytes, saverSerial, refToken })),
         choices: [...state.choices].map(([id, choices]) => [id, [...choices]]), rustDebt: [...state.rustDebt],
         failedWriters: state.failedWriters.map(({ ref, ...writer }) => writer),
-        physical: chapters.map((ch) => ({ chapterId: ch.id, chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) })) } };
+        physical: chapters.map((ch) => ({ chapterId: ch.id, chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) })) } });
     await cleanupModel();
   }
 }
@@ -1611,6 +1611,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(state.retirements.has(c.id)).toBe(false);
       expect(state.rustDebt.has(c.id)).toBe(false);
       expect(state.choices.size).toBe(0);
+      expect(receipt.refToken).toBe(refToken(app.chapterRef));
+      expect(receipt.order).toBeGreaterThan(0);
     } finally { await cleanupModel(); }
   });
 
@@ -1796,7 +1798,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(onDisk()).toBe(window.snapshot.chapter);
       expect(textOnDisk()).toBe(window.snapshot.text);
       await EVENTS.editLine();
-      saverObserver.invocationScope.run(clearKind === 'expired invocation' ? finished : undefined, () => store.markSaved());
+      saverObserver.invocationScope.run(clearKind === 'expired invocation' ? finished : undefined, () => markSaved());
       hand.writes.shift().ok(); await until(state.lastOpen); await pass(0);
       expect(state.deferred, 'only the still-active exact final saver may prove this cancellation').toBe(null);
       expect(hand.broke).toContain('user translation choice');
@@ -1814,6 +1816,36 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     expect(loadClears.length).toBeGreaterThan(0);
     expect(loadClears.some((clear) => clear.saverContextPending)).toBe(false);
     expect(state.lastRunProof.facts.choices.length).toBeGreaterThan(0);
+  });
+
+  it.each([[20261094, 'chapter'], [20262168, 'translations']])('original%s proof retains its actual held %s boundary before cleanup', async (seed, heldFile) => {
+    const result = await run(sequence(seed, 30));
+    expect(typeof result, 'pending browser work remains UNKNOWN, with no new category').toBe('string');
+    const proof = state.lastRunProof;
+    const held = proof.facts.heldWriters.find((writer) => writer.path.endsWith(`/${heldFile}.json`));
+    expect(held, 'the original boundary must have an actual held physical writer').toBeDefined();
+    const save = proof.savers.find((save) => save.serial === held.saverSerial);
+    // Cleanup really completes this started outgoing writer. The retained proof
+    // must still describe its earlier public boundary, not the cleanup receipt.
+    if (heldFile === 'chapter') {
+      expect(save.snapshot.text, 'held chapter had not started its translations at the boundary').toBe(null);
+      expect(save.physicalReceipts ?? [], 'held chapter had no physical landing at the boundary').toEqual([]);
+    } else {
+      expect(save.physicalReceipts, 'only the newer chapter had physically landed at the boundary').toHaveLength(1);
+      expect(save.physicalReceipts[0]).toMatchObject({ path: save.snapshot.chapterPath, bytes: save.snapshot.chapter });
+      expect(save.snapshot.text).toBe(held.bytes);
+    }
+    expect(save.bothFileReceipt, 'cleanup cannot supply a boundary BOTH receipt').toBeUndefined();
+    const completed = state.savers.find((actual) => actual.serial === save.serial);
+    expect(completed.snapshot.text, 'cleanup actually observed this writer’s translations later').not.toBe(null);
+    expect(completed.physicalReceipts).toHaveLength(2);
+    expect(proof.timers.flatMap((timer) => timer.clears ?? []).every((clear) => clear.cancelOrder <= proof.boundaryOrder)).toBe(true);
+    expect(save).not.toBe(completed);
+    expect(save.snapshot).not.toBe(completed.snapshot);
+    expect(proof.witnesses).toEqual([]);
+    const receipt = proof.browserSettlements.find(([id]) => id === save.chapterId)?.[1];
+    expect(receipt.refToken, 'outgoing settlement stays tied to that actual old ref after adoption').toBe(save.refToken);
+    expect(receipt.order).toBeLessThan(save.serial);
   });
 
   it('a still-pending old public context cannot bind a fresh ref’s actual saver or waive its later loss', async () => {
@@ -1945,6 +1977,10 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     const result = await run(events);
     expect(result?.deferred?.category).toBe('exact-browser-cancellation');
     expect(state.lastRunProof.unexecutedTail).toEqual(['switchOn', 'engineStarts']);
+    const actual = state.savers.find((save) => save.serial === result.deferred.snapshot.saverSerial);
+    expect(result.deferred.snapshot).not.toBe(actual.snapshot);
+    expect(result.deferred.timer).not.toBe(actual.window.timer);
+    expect(result.deferred.snapshot).toEqual(state.lastRunProof.witnesses[0].snapshot);
     expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
   });
 
