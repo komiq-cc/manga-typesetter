@@ -491,7 +491,7 @@ const stageCounts = () => ({ eventsByStage: { closed: {}, rustOrStarting: {}, cr
 const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, staleBrowserFinalWitnessOrders: 0, forcedExitWitnessOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
 const classifiedWitnesses = [];
 const classifiedUnknowns = [];
-const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [], savers: [], timers: new Map(), nextObservation: 0, retirements: new Map(), baselineReceipts: [], failedWriters: [], publicRequests: [] };
+const state = { open: false, opened: null, openedText: null, openedRef: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [], savers: [], timers: new Map(), nextObservation: 0, retirements: new Map(), browserSettlements: new Map(), baselineReceipts: [], failedWriters: [], publicRequests: [] };
 saverObserver.boundary = (where) => {
   const window = state.finalWindows.findLast((window) => window.pending && window.kind === 'leave' && !window.publicRequest && window.ref === app.chapterRef) ?? finalWindow('leave');
   const request = { serial: ++state.nextObservation, where, ref: app.chapterRef,
@@ -535,13 +535,23 @@ function settlementReceipt() {
   if (!live() || state.pending.size || state.publicRequests.some((request) => request.pending) || state.savers.some((save) => save.pending) || pendingOwnedFinals().length ||
       relevantTimers().length || hand.writes.length || firstFitChanges()?.keeping || !app.saved || app.saveFailed) return null;
   const rec = JSON.parse(onDisk());
-  if (rec.id !== c.id || app.chapterRef.projectId !== p.id || canon(rec.pages) !== canon(documentNow()) ||
+  const current = documentNow();
+  // Browser opening can reflow an untouched document without owning a write.
+  // Its literal opened receipt remains valid only for that exact ref/cycle,
+  // with no later physical write and no lost identity or historical intent.
+  const identity = (pages) => pages.map(({ id, file, cleaned }) => ({ id, file, cleaned }));
+  if (rec.id !== c.id || app.chapterRef.projectId !== p.id || canon(identity(rec.pages)) !== canon(identity(current)) ||
       rec.mode !== app.chapterMode || rec.typesetting?.mode !== app.typesetting.mode ||
-      rec.typesetting?.version !== app.typesetting.version || textOnDisk() !== buildTextJson(app.pages)) return null;
-  try { choicesOnDisk(c, 'settlement receipt retains every historical choice'); }
+      rec.typesetting?.version !== app.typesetting.version) return null;
+  const currentDocument = canon(rec.pages) === canon(current) && textOnDisk() === buildTextJson(app.pages);
+  const untouchedOpened = engineSwitch.phase === 'off' && textEngine()?.id === 'browser' && !state.touched &&
+    state.openedRef === app.chapterRef && onDisk() === state.opened && textOnDisk() === state.openedText &&
+    hand.began.length === state.openedWrites;
+  if (!currentDocument && !untouchedOpened) return null;
+  try { for (const chapter of chapters) choicesOnDisk(chapter, 'settlement receipt retains every historical choice'); }
   catch (error) { if (error instanceof Broken) return null; throw error; }
-  return { chapterId: c.id, ref: app.chapterRef, chapter: onDisk(), text: textOnDisk(),
-    writes: hand.began.length, at: Date.now(), event: state.event };
+  return { kind: currentDocument ? 'current-document' : 'untouched-opened', chapterId: c.id, ref: app.chapterRef,
+    chapter: onDisk(), text: textOnDisk(), writes: hand.began.length, at: Date.now(), event: state.event };
 }
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -554,6 +564,8 @@ function resetFiles() {
   state.choices.clear();
   state.savers = [];
   state.retirements.clear();
+  state.browserSettlements.clear();
+  state.openedRef = null;
   state.baselineReceipts = [];
   state.failedWriters = [];
   state.publicRequests = [];
@@ -779,10 +791,13 @@ function deferObservedBoundary(window, ch) {
 // held writer, and no outstanding unsaved choice. A false saved flag alone
 // cannot retire debt over stale physical bytes.
 function retireBrowserDebt() {
-  if (engineSwitch.phase !== 'off') return;
+  if (engineSwitch.phase !== 'off' || textEngine()?.id !== 'browser') return;
   const receipt = settlementReceipt();
   if (!receipt) return;
-  if (state.rustDebt.has(c.id)) state.retirements.set(c.id, receipt);
+  const retiredRustDebt = state.rustDebt.has(c.id);
+  // A quiet browser receipt is not necessarily prior Rust debt retirement.
+  state.browserSettlements.set(c.id, { ...receipt, retiredRustDebt });
+  if (retiredRustDebt) state.retirements.set(c.id, receipt);
   state.rustDebt.delete(c.id);
 }
 
@@ -832,6 +847,7 @@ async function open(bytes) {
   await until(openChapter(p.id, c.id));
   state.open = true;
   state.opened = bytes;
+  state.openedRef = app.chapterRef;
   state.openedText = textOnDisk();
   state.openedWrites = hand.began.length;
   state.touched = false;
@@ -857,6 +873,7 @@ async function requestOpen(index) {
     adopt(target);
     state.open = true;
     state.opened = onDisk();
+    state.openedRef = app.chapterRef;
     state.openedText = textOnDisk();
     state.openedWrites = hand.began.length;
     // Historical user choices remain mandatory, but opening their already
@@ -1008,7 +1025,7 @@ const EVENTS = {
       const baseline = engineSwitch.phase === 'off' && textEngine()?.id === 'browser' ? settlementReceipt() : null;
       if (baseline) {
         state.baselineReceipts.push(baseline);
-        state.opened = baseline.chapter; state.openedText = baseline.text;
+        state.opened = baseline.chapter; state.openedText = baseline.text; state.openedRef = baseline.ref;
         state.openedWrites = baseline.writes; state.touched = false; state.keep = null;
       }
       for (const window of state.finalWindows) if (window.ref === app.chapterRef) window.acquiredRust = true;
@@ -1179,10 +1196,11 @@ async function run(events) {
       savers: state.savers.map(({ ref, window, ...save }) => ({ ...save, currentIdentity: ref === app.chapterRef })),
       timers: [...state.timers.values()].map(timerRecord),
       baselineReceipts: state.baselineReceipts.map(({ ref, ...receipt }) => receipt),
+      browserSettlements: [...state.browserSettlements].map(([id, { ref, ...receipt }]) => [id, { ...receipt, currentIdentity: ref === app.chapterRef }]),
       facts: { chapterId: app.chapterRef?.chapterId, projectId: app.chapterRef?.projectId, modelChapterId: c?.id,
         liveDocument: copy(documentNow()), liveTranslations: buildTextJson(app.pages), typesetting: copy(app.typesetting),
         mode: app.chapterMode, engine: { mode: engineSwitch.mode, phase: engineSwitch.phase, id: textEngine()?.id },
-        firstFit: firstFitChanges(), gates: { fonts: hand.fonts.length, starts: hand.starts.length, writers: hand.writes.length }, touched: state.touched, saved: app.saved, saveFailed: app.saveFailed,
+        openedRefCurrent: state.openedRef === app.chapterRef, firstFit: firstFitChanges(), gates: { fonts: hand.fonts.length, starts: hand.starts.length, writers: hand.writes.length }, touched: state.touched, saved: app.saved, saveFailed: app.saveFailed,
         pendingTransitions: state.pending.size, heldWriters: hand.writes.map(({ path, bytes }) => ({ path, bytes })),
         choices: [...state.choices].map(([id, choices]) => [id, [...choices]]), rustDebt: [...state.rustDebt],
         failedWriters: state.failedWriters.map(({ ref, ...writer }) => writer),
@@ -1248,6 +1266,24 @@ const SEQUENCES = Number(process.env.MODEL_SEQUENCES ?? 400);
 const STEPS = Number(process.env.MODEL_STEPS ?? 30);
 const ONE = process.env.MODEL_SEED ? Number(process.env.MODEL_SEED) : null;
 const FIRST = 20261009;
+
+// The measured original1358 prefix reaches a fresh browser ref with saved
+// 48px geometry and a 70px live reflow. All prior user choices have landed.
+// Leave the final receipt for the named control to accept or refuse.
+async function openedBrowserReflow() {
+  resetHand(); state.open = false;
+  const prefix = sequence(20261358, 30).slice(0, 20);
+  for (const [index, name] of prefix.entries()) {
+    state.event = name;
+    await EVENTS[name](); await pass(0);
+    if (index < prefix.length - 1) retireBrowserDebt();
+    choicesLive(`browser reflow setup after ${name}`);
+  }
+  expect(state.touched).toBe(false);
+  expect(JSON.parse(onDisk()).pages[0].boxes[3].h).toBe(48);
+  expect(app.pages[0].boxes[3].h).toBe(70);
+  expect(state.rustDebt.has(c.id)).toBe(true);
+}
 
 describe('saves, fonts, the engine starting and Keep, in any order', () => {
   it(`leave the file as opened, or as the document with the right number (${ONE == null ? `${SEQUENCES} sequences of ${STEPS} events` : `seed ${ONE}`})`, async () => {
@@ -1381,6 +1417,97 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     expect(state.lastRunProof.baselineReceipts).toHaveLength(1);
     expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
     expect(state.lastRunProof.facts.touched).toBe(false);
+  });
+
+  it('an untouched browser reflow retires old debt from its exact opened receipt and starts a Rust baseline without losing history', async () => {
+    try {
+      await openedBrowserReflow();
+      const choices = copy([...state.choices].map(([id, values]) => [id, [...values]]));
+      const opened = onDisk(); const openedText = textOnDisk(); const writes = hand.began.length;
+      expect(state.openedRef).toBe(app.chapterRef);
+      for (const chapter of chapters) choicesOnDisk(chapter, 'all historical choices before reflow retirement');
+      retireBrowserDebt();
+      expect(state.rustDebt.has(c.id)).toBe(false);
+      expect(state.retirements.get(c.id)).toMatchObject({ kind: 'untouched-opened', ref: app.chapterRef, chapter: opened, text: openedText, writes });
+      expect(state.browserSettlements.get(c.id)?.retiredRustDebt).toBe(true);
+      await EVENTS.switchOn();
+      expect(state.baselineReceipts).toHaveLength(1);
+      expect(state.baselineReceipts[0]).toMatchObject({ kind: 'untouched-opened', ref: state.openedRef, chapter: opened, text: openedText, writes });
+      expect(state.touched).toBe(false);
+      expect(copy([...state.choices].map(([id, values]) => [id, [...values]]))).toEqual(choices);
+      expect(onDisk()).toBe(opened); expect(textOnDisk()).toBe(openedText); expect(hand.began).toHaveLength(writes);
+    } finally { await cleanupModel(); }
+  });
+
+  it.each(['chapter bytes', 'translation bytes', 'opened ref', 'extra actual write', 'touched', 'current choice loss', 'inactive choice loss', 'document timer', 'unknown timer', 'live filename', 'physical identity', 'mode', 'version'])(
+    'an untouched opened browser receipt refuses %s', async (risk) => {
+      let timer;
+      try {
+        await openedBrowserReflow();
+        if (risk === 'chapter bytes') fsx._tree.files.set(chapterPath, onDisk() + ' ');
+        else if (risk === 'translation bytes') fsx._tree.files.set(translationsPath, textOnDisk() + ' ');
+        else if (risk === 'opened ref') state.openedRef = { ...app.chapterRef };
+        else if (risk === 'extra actual write') {
+          const opened = onDisk(); const openedText = textOnDisk(); const before = hand.began.length;
+          await until(saveOpenChapter());
+          expect(hand.began.length).toBeGreaterThan(before);
+          // An external replacement with the older bytes cannot erase the
+          // observation that another actual BOTH-file write occurred.
+          fsx._tree.files.set(chapterPath, opened); fsx._tree.files.set(translationsPath, openedText);
+        } else if (risk === 'touched') state.touched = true;
+        else if (risk === 'current choice loss') UNMARKED.text();
+        else if (risk === 'inactive choice loss') {
+          const other = chapters[2]; const path = paths(other); const rec = JSON.parse(fsx._tree.files.get(path.chapter));
+          rec.pages.reverse(); fsx._tree.files.set(path.chapter, JSON.stringify(rec));
+        } else if (risk === 'document timer') { markUnsaved(); app.saved = true; }
+        else if (risk === 'unknown timer') timer = setTimeout(() => {}, DOC_SAVE_MS);
+        else if (risk === 'live filename') app.pages[0].file = 'wrong-live.png';
+        else if (risk === 'physical identity') {
+          const rec = JSON.parse(onDisk()); rec.id = chapters[1].id; fsx._tree.files.set(chapterPath, JSON.stringify(rec));
+        } else if (risk === 'mode') app.chapterMode = 'translate';
+        else app.typesetting.version = 2;
+        expect(settlementReceipt()).toBe(null);
+        retireBrowserDebt();
+        expect(state.rustDebt.has(c.id)).toBe(true);
+        expect(state.browserSettlements.get(c.id)).toBeUndefined();
+        await EVENTS.switchOn();
+        expect(state.baselineReceipts).toEqual([]);
+      } finally { if (timer) clearTimeout(timer); await cleanupModel(); }
+    });
+
+  it('a held old-ref Rust-owned public final cannot qualify a fresh browser opened receipt', async () => {
+    resetHand(); state.open = false;
+    let pending;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); await open(V1); await EVENTS.editLine();
+      const outgoingRef = app.chapterRef;
+      hand.hold = true;
+      pending = flushBeforeLeaving('editor'); pending.catch(() => {}); await pass(0);
+      expect(pendingOwnedFinals(outgoingRef)).toHaveLength(1);
+      expect(hand.writes).toHaveLength(1);
+      closeChapter(); state.open = false;
+      await EVENTS.switchOff(); adopt(chapters[1]); await open(V2);
+      expect(app.chapterRef).not.toBe(outgoingRef);
+      expect(state.openedRef).toBe(app.chapterRef);
+      expect(onDisk()).toBe(state.opened); expect(textOnDisk()).toBe(state.openedText);
+      expect(pendingOwnedFinals(outgoingRef)).toHaveLength(1);
+      expect(settlementReceipt()).toBe(null);
+      retireBrowserDebt();
+      expect(state.browserSettlements.get(c.id)).toBeUndefined();
+    } finally { await cleanupModel(); if (pending) await until(pending).catch(() => {}); }
+  });
+
+  it('a positive pure-browser receipt records settlement without claiming prior Rust debt retirement', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      retireBrowserDebt();
+      const receipt = state.browserSettlements.get(c.id);
+      expect(receipt).toMatchObject({ kind: 'current-document', ref: app.chapterRef, chapter: onDisk(), text: textOnDisk(), retiredRustDebt: false });
+      expect(state.retirements.has(c.id)).toBe(false);
+      expect(state.rustDebt.has(c.id)).toBe(false);
+      expect(state.choices.size).toBe(0);
+    } finally { await cleanupModel(); }
   });
 
   it('a real pending history timer permits a saved browser baseline while retaining the line choice', async () => {

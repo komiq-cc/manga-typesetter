@@ -1594,7 +1594,7 @@ mutant, each failed all4 stale-ref controls by the same clean early physical
 write-attempt assertion before cleanup. No runtime, timeout, cleanup error or
 source drift occurred. Evidence: p9c-root-queue-identity-b1b664-001/results.json.
 
-### Narrow history timer ownership correction (execution pending)
+### Narrow history timer ownership correction (root focused proof)
 
 Root ran a separately sealed, observational copy of exact b1b6643 for the
 Inspector and original seeds20261011,20261037,20261601,20262087,20261094,20262168.
@@ -1622,11 +1622,75 @@ also requires the real history timer to remain pending through debt retirement.
 Other controls exercise real document/Keep timers and actual unknown800/4000ms
 timers; unknown timers are the sole blocker over otherwise settled bytes.
 
-These timer corrections and controls have syntax/whitespace checks only and
-await root execution. Original20261011's later actual autosave cancellation has
-no final-window request and remains UNKNOWN; original20261094 has earlier and
-later saver work still outstanding at its failure; original20262168 has an
-actual partial newer chapter/older translations receipt at an outgoing load
-boundary. None is admitted by an old BOTH-file cancellation witness. The full
-6000-order model, remaining combined proof lanes and final review still await
-root execution; no completion is claimed from these diagnostic observations.
+Root's exact fd11d908 focused100 run returned226PASS/1FAIL across four files:
+94 completed generated originals,5 exact cancellation prefixes and1 UNKNOWN
+original20261094. All new history/Inspector/document/Keep/unknown/missing-origin
+controls passed. No runtime, timeout, cleanup error or source drift occurred.
+Original20261011/20261026 no longer produced UNKNOWN here; no new autosave
+category was added. Evidence: p9c-root-fd11-focused100-001. Root's exact31-original
+replay returned5 completed,7 cancellation prefixes,1 stale-final prefix,
+1 forced-exit prefix and17 UNKNOWN originals, all preserved separately:
+p9c-root-fd11-31-originals-001/results.json. No acceptance is claimed.
+
+Root's separate history exclusion sensitivity proof passed: both fixed named
+positives and all5 negative controls passed; removing ONLY the history exclusion
+produced two clean early functional AssertionErrors for baseline receipt and
+debt retirement. All5 mutant negative controls passed. No runtime, timeout,
+cleanup error or source drift occurred; restoration and seals verified.
+Evidence: p9c-root-history-timer-fd11-001/results.json. This proves the scoped
+history exclusion, not full model completion.
+
+### Untouched opened browser settlement candidate (execution pending)
+
+Root ran seven separately sealed exact-fd11 ORIGINAL diagnostic orders:
+20261358,20261467,20261873,20261184,20261737,20261094,20262168. Each reproduced
+its UNKNOWN by a clean assertion without runtime, timeout, cleanup error or
+feature drift. The private p9c-fd11-original-causal-analysis.md identifies
+original-only pre-cleanup row locations and compares uninstrumented failures;
+no original result is inferred from its minimized order.
+
+Original20261358 row107 establishes a narrow receipt-model gap: fresh browser
+ref5 is untouched and saved, BOTH physical files exactly equal that ref's
+opened/openedText bytes, actual write count2 equals opened count2, and all
+pending public/saver/owned-final/writer/Keep/relevant-timer guards are clear.
+Physical identity/mode/version and ALL historical intent pass, including prior
+chapter1 text in BOTH files and Empty chapter order in BOTH files. The only
+current page difference is browser reflow of the late box from saved48px to
+live70px. Requiring current geometry equality prevents a proven old chapter-ID
+debt settlement. Later cancellation on fresh browser refs is a separate
+physical event, and raw action applicability can change after correct receipt
+settlement; its old terminal choices cannot be projected onto a new candidate.
+
+The model now binds openedRef at actual open/adoption and baseline capture.
+It retains the current-document equality branch and additionally permits the
+literal BOTH untouched opened bytes only under browser/off, exact opened ref,
+no touch and unchanged observed write count. Existing pending/public/saver/
+owned-final/timer/writer/Keep/saved/failure guards remain mandatory. Physical
+chapter/project identity, page order/durable filenames, mode/version and ALL
+historical choices across every chapter remain mandatory for either receipt.
+There is no debt deletion merely on reopen or ref change, no historical choice
+reset and no physical-file or pending-work waiver.
+
+A separate browserSettlements map records every actual positive browser
+receipt, with explicit retiredRustDebt=true/false. Pure browser settlement is
+not prior Rust debt deletion; the existing Rust retirement map still records
+only actual debt retirement. The new map is observational and feeds no
+classifier. Existing categories, generator events/weights/orders/stages,
+fourteen drains, raw robustness probes and production source are unchanged.
+
+New named controls exercise the real original1358 reflow prefix, functional
+old-debt retirement and a fresh Rust baseline with ALL history retained. Thirteen
+refusal controls cover either opened file's bytes, exact ref, extra actual
+write, touched cycle, current/inactive choice loss, real document/unknown timer,
+live durable filename, physical identity, mode and version. A public held
+old-ref Rust-owned final cannot qualify a fresh browser receipt; a positive
+pure-browser receipt explicitly claims no prior Rust retirement. Independent
+static review approved the narrow draft; syntax and whitespace checks pass.
+These new receipt changes and controls have NOT been executed and await root.
+
+Remaining pure-browser leave/open traces still have pending actual newer saves
+or missing causal attribution. Original20262168's newer chapter/older held
+translations cannot satisfy old BOTH cancellation; original20261184's quiet
+same-ID loss needs its actual open/saver/timer binding. No new category was
+added. The full6000-order model, remaining combined proof lanes and final
+review remain pending; no completion is claimed from diagnostic prefixes.
