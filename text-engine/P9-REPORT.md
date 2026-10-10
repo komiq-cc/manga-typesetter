@@ -1640,7 +1640,7 @@ cleanup error or source drift occurred; restoration and seals verified.
 Evidence: p9c-root-history-timer-fd11-001/results.json. This proves the scoped
 history exclusion, not full model completion.
 
-### Untouched opened browser settlement candidate (execution pending)
+### Untouched opened browser settlement proof (aeb50f)
 
 Root ran seven separately sealed exact-fd11 ORIGINAL diagnostic orders:
 20261358,20261467,20261873,20261184,20261737,20261094,20262168. Each reproduced
@@ -1686,7 +1686,22 @@ live durable filename, physical identity, mode and version. A public held
 old-ref Rust-owned final cannot qualify a fresh browser receipt; a positive
 pure-browser receipt explicitly claims no prior Rust retirement. Independent
 static review approved the narrow draft; syntax and whitespace checks pass.
-These new receipt changes and controls have NOT been executed and await root.
+Root's exact aeb50f focused100 proof completed in18.047s with242PASS/1FAIL
+across four files; all16 new receipt controls passed and the sole generated
+UNKNOWN was original20261094. Runtime/timeouts/cleanup errors were zero and
+source was unchanged: p9c-root-aeb50-focused100-001. The exact31-original replay
+returned5 completed,8 exact cancellation prefixes,1 stale-final prefix,
+1 forced-exit prefix and16 UNKNOWN, with1007 generated events,732 executed and
+275 unexecuted tail events. Original and minimized proofs remain separate:
+p9c-root-aeb50-31-originals-001/results.json. Original1358 now settles its proven
+untouched opened receipt and later reaches the existing exact cancellation;
+this does not waive same-ID opens or delete the other chapter's retained debt.
+
+The root-owned fixed reproduction continuation passed all9 cases on exact
+aeb50f: p9c-review2-repros/runs/fixed-owned-v2-aeb50-001/results.json. The separate
+opened-receipt sensitivity proof passed, including its scoped removal and
+negative controls: p9c-root-opened-receipt-aeb50f-001/results.json. No full6000
+acceptance is claimed from these bounded proofs.
 
 Remaining pure-browser leave/open traces still have pending actual newer saves
 or missing causal attribution. Original20262168's newer chapter/older held
@@ -1694,3 +1709,54 @@ translations cannot satisfy old BOTH cancellation; original20261184's quiet
 same-ID loss needs its actual open/saver/timer binding. No new category was
 added. The full6000-order model, remaining combined proof lanes and final
 review remain pending; no completion is claimed from diagnostic prefixes.
+
+
+### Actual public-open and saver observations (draft, unexecuted)
+
+This model-only draft replaces first-pending filesystem attribution at BOTH
+start and landing with the exact still-pending saver invocation's test-only
+AsyncLocalStorage context. Public open and saver wrappers pass the same
+arguments and return the original promise unchanged. Active matching public
+ref/window/generation can bind its saver; missing, expired, mismatched and
+superseded contexts remain observations without an authoritative operation
+binding. Multiple invocations retain the first snapshot/timer/held evidence and
+all invocation serials, while explicit ambiguity refuses known classification.
+Stable test-only ref tokens serialize identities without live object cycles.
+A chapter snapshot must start on the captured actual ref. Its already-started
+translations may finish after incoming adoption, on that exact invocation's
+old paths and bytes. Independent raw write tokens preserve actual browser/
+version-at-start facts even if saver attribution is unknown; the browser
+version invariant must still reject an unattributed current-byte version2
+write. No next-writer or next-snapshot guess remains.
+
+Actual public-open fulfillment is distinct from a boolean leave answer. Model
+adoption requires observed fulfillment, a changed actual ref, loaded matching
+project/target and matching generation. A fulfilled superseded same-ID no-op
+must preserve the touched cycle, opened baseline and historical intent.
+Independent choices are copied at the actual chapter snapshot boundary before
+its hold; existing cancellation/stale-final witnesses must preserve that earlier
+map in BOTH files, including the previous value of a later superseded key.
+This tightens scope; it does not create a new transient category.
+
+Each actual timer clear records one real clearer stack, immediate caller/source,
+monotonic order, inherited public/invocation context and actual physical bytes.
+Repeated clears remain in observation history. Existing cancellation additionally
+requires the immediate markSaved caller and its still-active exact saver
+serial/ref/snapshot before the deadline. An unrelated, expired or incoming LOAD
+clear cannot supply that outgoing saver proof. Unknown caller sources remain
+unknown, and no clear call or clock change is introduced.
+
+Named controls cover a causal open behind an older held autosave, a missing
+earlier same-key intent, missing/expired/mismatched contexts, unrelated/expired
+markSaved clears, the original94 incoming LOAD boundary, a fulfilled same-ID
+no-op with exact unrelated historical intent/debt/physical obligations,
+multiple-invocation refusal with first observations preserved, and original
+promise identity. The registered callback's unchanged return is verified
+statically; its named observation checks original-promise completion, while
+open/direct-save controls compare the public returned identity. Existing four stale queued-ref controls
+also check the outgoing BOTH receipt after actual ref adoption. The draft has
+only syntax/whitespace checks; these new observations and controls have NOT
+been executed or committed. Root and independent static review are pending.
+Production, generator seeds/events/weights/stages, fourteen drains, cleanup,
+raw robustness probes, historical choices and chapter-ID debt remain unchanged.
+Remaining originals, including1184, are not claimed resolved before execution.
