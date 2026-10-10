@@ -2000,7 +2000,8 @@ let saveSeq = 0;
 
 export function saveOpenChapter() {
   const seq = ++saveSeq;
-  const done = saving.then(() => writeOpenChapter(seq));
+  const requestedRef = app.chapterRef;
+  const done = saving.then(() => writeOpenChapter(seq, requestedRef));
   // The queue must outlive a save that fails, or one bad write would strand
   // every later one - but the rejection still reaches this caller, because a
   // rejected autosave is the user's only signal that their work is off-disk.
@@ -2008,7 +2009,10 @@ export function saveOpenChapter() {
   return done;
 }
 
-async function writeOpenChapter(seq) {
+async function writeOpenChapter(seq, requestedRef) {
+  // The request belongs to the identity that queued it, including a fresh
+  // reopen of the same chapter. Check before reading or stamping any document.
+  if (app.chapterRef !== requestedRef) return;
   // Captured once. Every await below is a window in which the user can close
   // this chapter or open another, and `app.pages` stops being what `ref`
   // describes the moment they do - so the identity of the ref is re-checked

@@ -1488,6 +1488,96 @@ callers. Only A lands before the independent later Queue choice, while B is
 held and C is queued. After C's actual current chapter and translations files
 land, C must finish while B's already queued follow-up remains held. Subsequent
 held writers are released at most eight times; all three callers must finish
-with both files current before identity cleanup. This stronger regression is
-unrun. Its early assertion must fail old source and the guard mutation cleanly;
-neither a timeout nor a write-count difference will count as a kill.
+with both files current before identity cleanup. Root measured this stronger
+regression at4d1069: fixed1PASS and four support controls PASS; old e377 with
+only the current model test overlaid and the retirement-guard removal each
+failed cleanly at the same early assertion, “C must finish from its actual
+both-file receipt while B still waits.” No runtime error, timeout, cleanup
+error or source drift occurred. Raw evidence is preserved separately in
+p9c-root-public-final-4d1069-001/results.json; the original survivor remains.
+
+
+### Current P9c request identity and model evidence candidate
+
+Root replayed five previously unknown ORIGINAL orders on frozen cc253fd:
+20261029,20261037,20261867,20261290,20262371. All failed by clean assertions,
+with no timeout/runtime/cleanup error or source drift. Separate copied,
+observational diagnostics retained original and shrink records independently.
+The originals are never inferred from their minimized orders.
+
+Original20262371 established a real queued-save destination defect: the
+incoming untouched chapter1 was adopted with its actual version1/opened files
+and no incoming choices after all34 events; only during rest did two queued
+outgoing requests write that incoming chapter atversion2, without a user Keep.
+The library queued only a sequence number, then read app.chapterRef when the
+queued writer finally ran. It now captures the object ref at request time and
+returns before any read or stamp if execution sees a different ref. This also
+rejects stale browser cross-ref requests and same-ID fresh-ref requests; valid
+same-ref browser queues and their acquisition by Rust remain valid. This is a
+universal request identity guard, not a Rust-only guard. It leaves the ordinary
+same-ref browser cancellation/indicator policy intact. Public held-write
+controls cover browser/Rust, distinct incoming chapters, same-ID fresh refs,
+valid same-ref saves and browser queues acquired by Rust. The original34-event
+order is retained as a separate regression.
+
+Original20261029 positively observed both old physical files and cancellation
+of the actual800ms late-choice timer atdelta0, with no Rust acquisition. The
+model now checks every outgoing open window, including same-ID reopen, before
+adoption. If no exact witness qualifies, all historical outgoing choices are
+still mandatory. Original20261037 instead had both actual files matching the
+current saved browser document at rest; the old model baseline still called
+that previous browser edit a current Rust touch. A pre-acquisition baseline is
+now allowed only under the actual browser/off engine with independently equal
+current chapter/translation bytes, correct identity/version/durable filenames,
+all historical choices present, no unsaved/failure state and no pending public
+operation, saver, owned final, physical writer, relevant timer or Keep. The
+receipt is recorded before Rust starts; historical choices are never cleared.
+
+The model observes real public saver invocations and the ORIGINAL returned
+promises using pass-through registration/public API wrappers. Public leave
+calls run in test-only AsyncLocalStorage solely to attribute their actual
+refusal/force toast emissions and saver calls to the request. Calls, arguments,
+returned promise identities, event weights, fake clock advances, drain rounds,
+generated orders and cleanup policy remain unchanged. Internal open hooks
+without that public leave context cannot acquire a forced-exit/stale-final
+classification. Actual snapshot/translation attribution follows the serial
+pending saver invocation and its captured ref, including old-ref translations
+that finish after adoption. A final snapshot qualifies only for a sole clean
+public final request without an earlier queued saver. Ambiguous attribution
+remains UNKNOWN. Monotonic observation orders distinguish tied fake timestamps.
+
+Two distinct measured leave cases have narrow candidate classifiers, not a
+browser file-check waiver. Original20261867 retired prior Rust debt only after
+both exact files were current and all public/save work had settled; its later
+ordinary browser final returned old both-file bytes after a late-choice timer
+FIRED and a newer actual browser chapter writer was held. Its stale-final
+witness requires that actual public leave answer/current ref, the prior actual
+retirement, exact old both-file receipt, fired uncancelled timer, independent
+late choice in the actual newer queued chapter fields, and no Rust debt,
+acquisition or owned pending final. Newer translations remain explicitly
+unobserved, not synthesized from the chapter snapshot. Negative controls cover
+Rust acquisition, outstanding owned finals, wrong prior ref, one-file-only
+retirement and an earlier ambiguous saver. Original20261290 had two injected
+failed writes and overlapping public leaves; its forced-exit candidate requires
+two actual failed-writer/saver identities attributed to the public refusal and
+forced reply, a fresh request-associated exact force toast, unchanged ref and
+no intervening actual both-file success or successful public final reply.
+Intent and Rust debt remain retained; forced exit never counts as durable
+success, retirement or completed invariant order.
+
+After the existing fourteen drain rounds, completion now requires positive
+absence of pending public operations/savers/finals, physical writers, relevant
+save/Keep timers, font/start gates and a pending Keep. No new drain or rescue
+flush is introduced. Explicit private MODEL_WITNESS_OUT now preserves each
+UNKNOWN original reason, full order/prefix/tail, stages, canonical live and
+physical documents, independent choices/debt and pending observations BEFORE
+cleanup; shrink reason/order/proof is saved separately. Completed invariant
+orders, exact cancellation prefixes, stale-final prefixes, forced-exit prefixes
+and UNKNOWN orders have separate counts. Shrinks preserve the classification.
+All6000 seeds/events/weights and the ten raw robustness probes are retained.
+
+This candidate has passed syntax and whitespace checks only. Its new named
+controls, current31 original UNKNOWN-seed replay, full6000-order model, queued
+identity old-source/guard-removal proof, combined mutation/tool/dry/browser/
+capture lanes and final review remain pending root execution. No acceptance
+is claimed from the earlier20-order run or from diagnostic prefixes.

@@ -100,8 +100,50 @@ vi.mock('./fsx.js', () => {
   return { fsx };
 });
 
+// Observe the public saver registration and the promise it actually returns.
+// Return that same promise: no extra save, wait, replacement, or queue policy.
+const saverObserver = vi.hoisted(() => ({ begin: null, finish: null, boundary: null, reply: null, toast: null, scope: null }));
+vi.mock('./library.svelte.js', async (original) => {
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  saverObserver.scope = new AsyncLocalStorage();
+  const module = await original();
+  return { ...module, saveOpenChapter(...args) {
+    const receipt = saverObserver.begin?.();
+    try {
+      const done = module.saveOpenChapter(...args);
+      Promise.resolve(done).then(() => saverObserver.finish?.(receipt, null),
+        (error) => saverObserver.finish?.(receipt, error));
+      return done;
+    } catch (error) { saverObserver.finish?.(receipt, error); throw error; }
+  }, flushBeforeLeaving(...args) {
+    const request = saverObserver.boundary?.(args[0]);
+    const done = saverObserver.scope.run(request, () => module.flushBeforeLeaving(...args));
+    Promise.resolve(done).then((answer) => saverObserver.reply?.(request, answer, null),
+      (error) => saverObserver.reply?.(request, null, error));
+    return done;
+  } };
+});
+vi.mock('./store.svelte.js', async (original) => {
+  const module = await original();
+  return { ...module, toast(...args) {
+    const result = module.toast(...args);
+    saverObserver.toast?.(saverObserver.scope?.getStore(), args[0]);
+    return result;
+  }, setSaver(fn) {
+    return module.setSaver((...args) => {
+      const receipt = saverObserver.begin?.();
+      try {
+        const done = fn(...args);
+        Promise.resolve(done).then(() => saverObserver.finish?.(receipt, null),
+          (error) => saverObserver.finish?.(receipt, error));
+        return done;
+      } catch (error) { saverObserver.finish?.(receipt, error); throw error; }
+    });
+  } };
+});
+
 const { fsx } = await import('./fsx.js');
-const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode } = await import('./library.svelte.js');
+const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
 const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
 const { defaultStyle } = await import('./data.js');
@@ -285,19 +327,29 @@ beforeAll(async () => {
   const schedule = globalThis.setTimeout.bind(globalThis);
   const cancel = globalThis.clearTimeout.bind(globalThis);
   vi.stubGlobal('setTimeout', (callback, ms, ...args) => {
-    const id = schedule(callback, ms, ...args);
+    const observed = { serial: ++state.nextObservation, ms, at: Date.now(), ref: app.chapterRef,
+      relevant: ms === DOC_SAVE_MS || ms === KEEP_WAIT_MS, pending: true, event: state.event };
+    const id = schedule((...values) => {
+      observed.pending = false;
+      observed.firedAt = Date.now();
+      for (const window of state.finalWindows) if (window.timer?.id === id) window.timer.firedAt = Date.now();
+      return callback(...values);
+    }, ms, ...args);
+    state.timers.set(id, observed);
     if (ms !== DOC_SAVE_MS) return id;
     for (const window of state.finalWindows) {
       if (window.ref !== app.chapterRef || !window.laterChoices.size || !hand.writes.includes(window.heldWriter)) continue;
       const stack = new Error('observed final-window timer').stack;
       if (!/\bmarkUnsaved\b/.test(stack ?? '')) continue;
-      window.timer = { id, ms, at: Date.now(), event: state.event,
+      window.timer = { id, serial: observed.serial, ms, at: Date.now(), event: state.event,
         unsavedWhenArmed: !app.saved, setterStack: stack,
         cancelledByMarkSaved: false, bothFilesAtCancellation: false };
     }
     return id;
   });
   vi.stubGlobal('clearTimeout', (id) => {
+    const observed = state.timers.get(id);
+    if (observed) { observed.pending = false; observed.cancelledAt = Date.now(); }
     for (const window of state.finalWindows) {
       if (!window.timer || window.timer.id !== id || window.ref !== app.chapterRef) continue;
       const stack = new Error('observed final-window cancellation').stack;
@@ -336,13 +388,13 @@ beforeAll(async () => {
       finalSnapshot(path, text);
       if (!hand.holdTranslations) return undefined;
       return new Promise((ok, fail) => {
-        const writer = { path, ok, fail };
+        const writer = { path, bytes: text, ref: null, ok, fail };
         finalSnapshot(path, text, writer);
         hand.writes.push(writer);
       });
     }
     if (!chapters.some((ch) => path === `${ch.dir}/chapter.json`)) return undefined;
-    hand.began.push({ path, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now(), browser: engineSwitch.phase === 'off' });
+    hand.began.push({ path, bytes: text, ref: null, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now(), browser: engineSwitch.phase === 'off' });
     finalSnapshot(path, text);
     seen.writes++;
     const number = hand.began.at(-1).version;
@@ -354,13 +406,20 @@ beforeAll(async () => {
     }
     if (!hand.hold) return undefined;
     return new Promise((ok, fail) => {
-      const writer = { path, ok, fail };
+      const writer = { path, bytes: text, ref: null, ok, fail };
       finalSnapshot(path, text, writer);
       hand.writes.push(writer);
     });
   };
   fsx._after = (path, text) => {
     if (chapters.some((ch) => path === `${ch.dir}/chapter.json`)) hand.landed.push({ ...hand.began.findLast((w) => w.path === path), version: JSON.parse(text).typesetting?.version ?? null });
+    const save = state.savers.find((save) => save.pending);
+    const ch = chapters.find((chapter) => chapter.id === save?.chapterId);
+    if (ch && path === paths(ch).text && save.snapshot?.text === text &&
+        fsx._tree.files.get(paths(ch).chapter) === save.snapshot.chapter &&
+        fsx._tree.files.get(paths(ch).text) === save.snapshot.text) {
+      save.bothFileReceipt = { order: ++state.nextObservation, at: Date.now(), chapter: save.snapshot.chapter, text };
+    }
   };
 
   // Literal fixture geometry, not a fixture produced by this implementation's
@@ -414,9 +473,61 @@ class DeferredBrowser extends Error {
 }
 // What the sequences did, over a whole run.
 const stageCounts = () => ({ eventsByStage: { closed: {}, rustOrStarting: {}, crossSwitchDebt: {}, browserAfterDebt: {} }, inapplicablePublicActions: {} });
-const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
+const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, staleBrowserFinalWitnessOrders: 0, forcedExitWitnessOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
 const classifiedWitnesses = [];
-const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [] };
+const classifiedUnknowns = [];
+const state = { open: false, opened: null, openedText: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [], savers: [], timers: new Map(), nextObservation: 0, retirements: new Map(), baselineReceipts: [], failedWriters: [], publicRequests: [] };
+saverObserver.boundary = (where) => {
+  const window = state.finalWindows.findLast((window) => window.pending && window.kind === 'leave' && !window.publicRequest && window.ref === app.chapterRef) ?? finalWindow('leave');
+  const request = { serial: ++state.nextObservation, where, ref: app.chapterRef,
+    at: Date.now(), pending: true, emissions: [] };
+  if (window) { window.publicRequest = request; request.window = window; }
+  state.publicRequests.push(request);
+  return request;
+};
+saverObserver.reply = (request, answer, error) => {
+  if (!request) return;
+  request.pending = false; request.answer = answer; request.replyAt = Date.now(); request.replyOrder = ++state.nextObservation;
+  if (request.window) { request.window.pending = false; request.window.answer = answer; }
+  request.rejected = error ? String(error.message ?? error) : null;
+};
+saverObserver.toast = (request, message) => {
+  if (request) request.emissions.push({ message, seq: app.toast.seq, at: Date.now(), order: ++state.nextObservation, currentIdentity: app.chapterRef === request.ref });
+};
+saverObserver.begin = () => {
+  const receipt = { serial: ++state.nextObservation, ref: app.chapterRef,
+    publicRequestSerial: saverObserver.scope?.getStore()?.serial, chapterId: app.chapterRef?.chapterId, event: state.event, at: Date.now(), pending: true,
+    browser: engineSwitch.phase === 'off' && textEngine()?.id === 'browser', snapshot: null };
+  const pending = state.finalWindows.filter((window) => window.pending && window.ref === receipt.ref && !window.saver);
+  // A sole clean request can be attributed. Overlap is recorded as ambiguity.
+  if (pending.length === 1 && pending[0].cleanAtRequest && !relevantTimers(receipt.ref).length && !state.savers.some((save) => save.pending)) {
+    receipt.window = pending[0];
+    pending[0].saver = receipt;
+  }
+  state.savers.push(receipt);
+  return receipt;
+};
+saverObserver.finish = (receipt, error) => {
+  if (!receipt) return;
+  receipt.pending = false;
+  receipt.finishedAt = Date.now(); receipt.finishOrder = ++state.nextObservation;
+  receipt.failed = error ? String(error.message ?? error) : null;
+};
+const relevantTimers = (ref = app.chapterRef) => [...state.timers.values()].filter((timer) => timer.pending && timer.relevant && timer.ref === ref);
+const pendingSavers = (ref = app.chapterRef) => state.savers.filter((save) => save.pending && save.ref === ref);
+const pendingOwnedFinals = (ref = app.chapterRef) => state.finalWindows.filter((window) => window.pending && window.ref === ref && (window.debtAtRequest || !window.browserAtRequest || window.acquiredRust));
+function settlementReceipt() {
+  if (!live() || state.pending.size || state.publicRequests.some((request) => request.pending) || state.savers.some((save) => save.pending) || pendingOwnedFinals().length ||
+      relevantTimers().length || hand.writes.length || firstFitChanges()?.keeping || !app.saved || app.saveFailed) return null;
+  const rec = JSON.parse(onDisk());
+  if (rec.id !== c.id || app.chapterRef.projectId !== p.id || canon(rec.pages) !== canon(documentNow()) ||
+      rec.mode !== app.chapterMode || rec.typesetting?.mode !== app.typesetting.mode ||
+      rec.typesetting?.version !== app.typesetting.version || textOnDisk() !== buildTextJson(app.pages)) return null;
+  try { choicesOnDisk(c, 'settlement receipt retains every historical choice'); }
+  catch (error) { if (error instanceof Broken) return null; throw error; }
+  return { chapterId: c.id, ref: app.chapterRef, chapter: onDisk(), text: textOnDisk(),
+    writes: hand.began.length, at: Date.now(), event: state.event };
+}
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
 const copy = (v) => JSON.parse(JSON.stringify(v));
 const paths = (ch) => ({ chapter: `${ch.dir}/chapter.json`, text: `${ch.dir}/translations.json` });
@@ -426,6 +537,11 @@ function adopt(ch) {
 }
 function resetFiles() {
   state.choices.clear();
+  state.savers = [];
+  state.retirements.clear();
+  state.baselineReceipts = [];
+  state.failedWriters = [];
+  state.publicRequests = [];
   state.rustChapters.clear();
   state.rustDebt.clear();
   for (const [i, ch] of chapters.entries()) {
@@ -455,13 +571,13 @@ function choose(kind, value, pg = app.pages[0], b = pg?.boxes[0], ln = pg?.lines
     }
   }
 }
-function choicesIn(id, record, text, when, allowed = new Set()) {
+function choicesIn(id, record, text, when, allowed = new Set(), checkDerived = true) {
   for (const [key, want] of state.choices.get(id)?.entries() ?? []) {
     if (allowed.has(key)) continue;
     const pg = record.pages.find((p) => p.id === want.page);
     const b = pg?.boxes.find((b) => b.id === want.box);
     const ln = pg?.lines.find((l) => l.n === want.line);
-    const tp = text.pages.find((p) => p.page === want.page);
+    const tp = text?.pages.find((p) => p.page === want.page);
     const extraIndex = pg?.boxes.filter((b) => b.lineN == null).findIndex((b) => b.id === want.box);
     const extra = extraIndex >= 0 ? tp?.extraBoxes[extraIndex] : null;
     const got = {
@@ -474,10 +590,10 @@ function choicesIn(id, record, text, when, allowed = new Set()) {
     const second = want.kind === 'translation' ? tp?.lines.find((l) => l.n === want.line)?.en
       : want.kind === 'text' ? extra?.text
       : want.kind === 'height' ? extra?.h
-      : want.kind === 'order' ? text.pages.map((p) => p.page) : undefined;
+      : want.kind === 'order' ? text?.pages.map((p) => p.page) : undefined;
     const secondOkay = second === undefined && !['translation', 'text', 'height', 'order'].includes(want.kind)
       ? true : want.kind === 'height' ? second >= want.value : canon(second) === canon(want.value);
-    if (!okay || !secondOkay) throw new Broken(`${when}: user ${want.kind} choice ${canon(want.value)} was lost (chapter ${id}; chapter.json ${canon(got)}; translations.json ${canon(second)})`);
+    if (!okay || (checkDerived && !secondOkay)) throw new Broken(`${when}: user ${want.kind} choice ${canon(want.value)} was lost (chapter ${id}; chapter.json ${canon(got)}; translations.json ${canon(second)})`);
   }
 }
 function choicesLive(when) {
@@ -495,7 +611,9 @@ function choicesOnDisk(ch, when) {
 function finalWindow(kind) {
   if (!live()) return null;
   const window = {
-    kind, chapter: c, ref: app.chapterRef, at: Date.now(), event: state.event,
+    kind, chapter: c, ref: app.chapterRef, at: Date.now(), event: state.event, pending: true,
+    cleanAtRequest: !state.pending.size && !state.publicRequests.some((request) => request.pending) && !state.finalWindows.some((window) => window.pending) && !pendingSavers().length && !hand.writes.length && !firstFitChanges()?.keeping,
+    retirement: state.retirements.get(c.id), saver: null, answer: null,
     browserAtRequest: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
     debtAtRequest: state.rustDebt.has(c.id), acquiredRust: false,
     snapshot: null, heldWriter: null, laterChoices: new Map(), timer: null, counted: false,
@@ -504,21 +622,29 @@ function finalWindow(kind) {
   return window;
 }
 
-// Capture the actual final writer's two serialized snapshot strings. A gate
-// belongs to that snapshot only, rather than any older write already held
-// when another final transition was requested.
+// The serial saver promise, observed at its public registration, binds a
+// physical snapshot to its invocation. A final request is eligible only when
+// the invocation has an unambiguous sole clean public caller.
 function finalSnapshot(path, text, writer = null) {
-  for (const window of state.finalWindows) {
-    if (window.ref !== app.chapterRef) continue;
-    const p = paths(window.chapter);
-    if (path === p.chapter && !window.snapshot) {
-      window.snapshot = { chapter: text, text: null, writeIndex: hand.began.length - 1,
-        startedBrowser: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
-        debtAtSnapshot: state.rustDebt.has(window.chapter.id), at: Date.now() };
-    }
-    if (!window.snapshot || window.snapshot.writeIndex !== hand.began.length - 1) continue;
-    if (path === p.text && window.snapshot.text == null) window.snapshot.text = text;
-    if (writer && (path === p.chapter || path === p.text)) window.heldWriter = writer;
+  const save = state.savers.find((save) => save.pending);
+  if (!save) return;
+  if (writer) { writer.saverSerial = save.serial; writer.ref = save.ref; }
+  const ch = chapters.find((chapter) => chapter.id === save.chapterId);
+  if (!ch) return;
+  const p = paths(ch);
+  if (path === p.chapter && !save.snapshot) {
+    Object.assign(hand.began.at(-1), { ref: save.ref, saverSerial: save.serial });
+    save.snapshot = {
+    chapter: text, text: null, writeIndex: hand.began.length - 1,
+    saverSerial: save.serial, startedBrowser: save.browser,
+    debtAtSnapshot: state.rustDebt.has(ch.id), at: Date.now(),
+    };
+  }
+  if (!save.snapshot || save.snapshot.writeIndex !== hand.began.length - 1) return;
+  if (path === p.text && save.snapshot.text == null) save.snapshot.text = text;
+  if (save.window) {
+    save.window.snapshot = save.snapshot;
+    if (writer && (path === p.chapter || path === p.text)) save.window.heldWriter = writer;
   }
 }
 
@@ -543,7 +669,7 @@ function observedBrowserCancellation(window, ch) {
   catch (error) {
     if (!(error instanceof Broken)) throw error;
     choicesIn(ch.id, rec, tx, 'all earlier/unrelated choices remain mandatory', allowed);
-    return { chapterId: ch.id, kind: window.kind, requestEvent: window.event,
+    return { category: 'exact-browser-cancellation', chapterId: ch.id, kind: window.kind, requestEvent: window.event,
       reason: error.message, startedBrowser: true, acquiredRust: false,
       snapshot: window.snapshot, physical: { chapter, text },
       laterChoices: [...window.laterChoices.entries()], timer: window.timer };
@@ -551,9 +677,83 @@ function observedBrowserCancellation(window, ch) {
   return null;
 }
 
-function deferExactBrowserCancellation(window, ch) {
-  const witness = observedBrowserCancellation(window, ch);
+function observedBrowserStaleFinal(window, ch) {
+  if (!window || window.kind !== 'leave' || window.ref !== app.chapterRef || window.publicRequest?.answer !== true || window.chapter.id !== ch.id || !window.browserAtRequest || window.debtAtRequest || window.acquiredRust ||
+      !window.retirement || window.retirement.ref !== window.ref || !window.saver || !window.cleanAtRequest ||
+      window.answer !== true || window.saver.pending || window.saver.failed || !window.snapshot?.startedBrowser ||
+      window.snapshot.debtAtSnapshot || !window.laterChoices.size || window.timer?.cancelledByMarkSaved ||
+      window.timer?.firedAt == null || window.timer.firedAt - window.timer.at < DOC_SAVE_MS ||
+      app.saved || app.saveFailed || pendingOwnedFinals(window.ref).length || state.rustDebt.has(ch.id) || engineSwitch.mode === 'rust') return null;
+  const p = paths(ch);
+  const chapter = fsx._tree.files.get(p.chapter), text = fsx._tree.files.get(p.text);
+  if (chapter !== window.snapshot.chapter || text !== window.snapshot.text) return null;
+  const newer = state.savers.filter((save) => save.pending && save.ref === window.ref && save.serial > window.saver.serial);
+  if (newer.length !== 1 || !newer[0].browser || !newer[0].snapshot ||
+      !hand.writes.some((writer) => writer.ref === window.ref && writer.path === p.chapter && writer.bytes === newer[0].snapshot.chapter)) return null;
+  const allowed = new Set();
+  for (const [key, late] of window.laterChoices) {
+    if (canon(state.choices.get(ch.id)?.get(key)) !== canon(late.choice)) return null;
+    allowed.add(key);
+  }
+  const next = JSON.parse(newer[0].snapshot.chapter);
+  // Actual queued chapter bytes contain the independent choices. Its derived
+  // file has not started yet; this witness never claims that it has landed.
+  try { choicesIn(ch.id, next, null, 'newer actual queued chapter contains every retained choice', new Set(), false); }
+  catch (error) { if (error instanceof Broken) return null; throw error; }
+  try { choicesIn(ch.id, JSON.parse(chapter), JSON.parse(text), 'known stale browser final must lose a retained later choice'); }
+  catch (error) {
+    if (!(error instanceof Broken)) throw error;
+    choicesIn(ch.id, JSON.parse(chapter), JSON.parse(text), 'earlier/unrelated choices remain mandatory', allowed);
+    const { ref, ...retirement } = window.retirement;
+    return { category: 'exact-browser-stale-final', chapterId: ch.id, kind: window.kind,
+      reason: error.message, requestEvent: window.event, answer: window.answer, retirement,
+      snapshot: window.snapshot, physical: { chapter, text }, laterChoices: [...window.laterChoices],
+      timer: window.timer, newerSaverSerial: newer[0].serial, newerActualChapter: newer[0].snapshot.chapter,
+      newerDerivedFileNotYetObserved: true, acquiredRust: false };
+  }
+  return null;
+}
+
+function observedForcedExit(window, ch) {
+  const request = window?.publicRequest;
+  const force = request?.emissions.find((emission) => emission.currentIdentity &&
+    emission.message === 'Left the editor. The last edits to this chapter were never written to disk.');
+  if (!window || window.kind !== 'leave' || window.chapter.id !== ch.id || window.answer !== true ||
+      window.ref !== app.chapterRef || request?.answer !== true || request.where !== 'editor' || !force ||
+      force.order < request.serial || force.order > request.replyOrder) return null;
+  const prior = state.finalWindows.findLast((old) => old !== window && old.ref === window.ref && old.publicRequest?.answer === false &&
+    old.publicRequest.replyOrder < request.replyOrder && old.publicRequest.emissions.some((emission) => emission.currentIdentity &&
+      emission.message.startsWith('Could not save: staying in the editor.')));
+  if (!prior) return null;
+  const failures = state.savers.filter((save) => save.ref === window.ref && save.failed === 'disk full' &&
+    [prior.publicRequest.serial, request.serial].includes(save.publicRequestSerial));
+  if (failures.length !== 2 || failures[0].publicRequestSerial !== prior.publicRequest.serial ||
+      failures[1].publicRequestSerial !== request.serial || failures[0].finishOrder >= failures[1].finishOrder || !failures.every((save) => state.failedWriters.some((writer) =>
+        writer.ref === window.ref && writer.saverSerial === save.serial)) || state.savers.some((save) => save.ref === window.ref &&
+        save.bothFileReceipt?.order > failures[0].finishOrder && save.bothFileReceipt.order < failures[1].finishOrder) ||
+      state.publicRequests.some((reply) => reply.ref === window.ref && reply.answer === true &&
+        reply.replyOrder > failures[0].finishOrder && reply.replyOrder < force.order)) return null;
+  choicesLive('forced exit preserves all intent in memory');
+  try { choicesOnDisk(ch, 'force is not a durable successful exit'); }
+  catch (error) {
+    if (!(error instanceof Broken)) throw error;
+    return { category: 'explicit-forced-exit', chapterId: ch.id, kind: window.kind, reason: error.message,
+      requestEvent: window.event, publicRequestSerial: request.serial, answer: true, forceEmission: force,
+      priorRefusal: { publicRequestSerial: prior.publicRequest.serial, answer: false, emissions: prior.publicRequest.emissions, at: prior.publicRequest.replyAt },
+      failedSavers: failures.map(({ serial, publicRequestSerial, event, at, finishedAt, finishOrder, failed, snapshot }) => ({ serial, publicRequestSerial, event, at, finishedAt, finishOrder, failed, snapshot })),
+      injectedWriters: state.failedWriters.filter((writer) => failures.some((save) => save.serial === writer.saverSerial)).map(({ ref, ...writer }) => writer),
+      retainedChoices: [...state.choices.get(ch.id)], rustDebtRetained: state.rustDebt.has(ch.id),
+      physical: { chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) } };
+  }
+  return null;
+}
+
+function deferObservedBoundary(window, ch) {
+  const witness = observedForcedExit(window, ch) ?? observedBrowserCancellation(window, ch) ?? observedBrowserStaleFinal(window, ch);
   if (!witness) return false;
+  // A current boundary cannot hide a loss on another historical chapter.
+  try { for (const other of chapters) if (other.id !== ch.id) choicesOnDisk(other, 'unrelated chapter before a classified prefix'); }
+  catch (error) { if (error instanceof Broken) return false; throw error; }
   if (!window.counted) { window.counted = true; state.witnesses.push(witness); }
   // A fully proven counterexample ends this order. Historical intent is not
   // quarantined, and no later Rust stage inherits a broad browser exemption.
@@ -564,15 +764,15 @@ function deferExactBrowserCancellation(window, ch) {
 // held writer, and no outstanding unsaved choice. A false saved flag alone
 // cannot retire debt over stale physical bytes.
 function retireBrowserDebt() {
-  if (!live() || engineSwitch.phase !== 'off' || !app.saved || hand.writes.some((w) => w.path.startsWith(`${c.dir}/`))) return;
-  const rec = JSON.parse(onDisk());
-  const current = canon(rec.pages) === canon(documentNow()) && rec.mode === app.chapterMode && rec.typesetting?.mode === app.typesetting.mode && textOnDisk() === buildTextJson(app.pages);
-  const untouched = !state.touched && onDisk() === state.opened && textOnDisk() === state.openedText;
-  if (current || untouched) state.rustDebt.delete(c.id);
+  if (engineSwitch.phase !== 'off') return;
+  const receipt = settlementReceipt();
+  if (!receipt) return;
+  if (state.rustDebt.has(c.id)) state.retirements.set(c.id, receipt);
+  state.rustDebt.delete(c.id);
 }
 
 function checkFile(when, window = null) {
-  if (deferExactBrowserCancellation(window, c)) return;
+  if (deferObservedBoundary(window, c)) return;
   const bytes = onDisk();
   const rec = JSON.parse(bytes);
   const chapterAsOpened = bytes === state.opened;
@@ -636,8 +836,9 @@ async function requestOpen(index) {
   state.pending.add(request);
   state.lastOpen = request;
   request.then(() => {
+    if (window) { window.pending = false; window.answer = true; window.replyAt = Date.now(); window.toast = app.toast.msg; }
     if (generation !== state.transition || app.chapterRef?.chapterId !== target.id) return;
-    if (outgoing && outgoing.id !== target.id && !deferExactBrowserCancellation(window, outgoing)) choicesOnDisk(outgoing, 'after opening another chapter');
+    if (outgoing && !deferObservedBoundary(window, outgoing)) choicesOnDisk(outgoing, 'after opening a chapter');
     adopt(target);
     state.open = true;
     state.opened = onDisk();
@@ -649,6 +850,7 @@ async function requestOpen(index) {
     state.keep = null;
     if (engineSwitch.mode === 'rust') { state.rustChapters.add(c.id); state.rustDebt.add(c.id); }
   }).catch((error) => {
+    if (window) { window.pending = false; window.rejected = String(error.message ?? error); }
     if (error instanceof DeferredBrowser) state.deferred = error.witness;
     else if (error instanceof Broken) hand.broke ??= error.message;
     // A failed leave-save makes the actual open refuse; the old document stays.
@@ -665,6 +867,7 @@ async function requestLeave() {
   const request = flushBeforeLeaving('editor');
   state.pending.add(request);
   request.then((went) => {
+    window.pending = false; window.answer = went; window.replyAt = Date.now(); window.toast = app.toast.msg;
     if (!went || app.chapterRef !== ref) return;
     checkFile('after leaving', window);
     seen.left++;
@@ -672,6 +875,7 @@ async function requestLeave() {
     state.open = false;
     state.keep = null;
   }).catch((error) => {
+    window.pending = false;
     if (error instanceof DeferredBrowser) state.deferred = error.witness;
     else hand.broke ??= `leaving: ${error.message}`;
   }).finally(() => state.pending.delete(request));
@@ -762,7 +966,7 @@ const EVENTS = {
   },
   writeFails() {
     const w = hand.writes.shift();
-    if (w) seen.failed++;
+    if (w) { seen.failed++; state.failedWriters.push({ order: ++state.nextObservation, ref: w.ref, saverSerial: w.saverSerial, path: w.path, bytes: w.bytes, at: Date.now() }); }
     w?.fail(new Error('disk full'));
   },
   keep() {
@@ -773,7 +977,9 @@ const EVENTS = {
     if (!state.keep) state.keep = { alone: !state.touched && app.saved, began: hand.began.length, at: Date.now(), waited: waiting() };
     state.touched = true;
     seen.keeps++;
-    keepFirstFit().catch(() => {});
+    const request = keepFirstFit();
+    state.pending.add(request);
+    request.catch(() => {}).finally(() => state.pending.delete(request));
   },
   async switchOff() {
     await until(useTextEngine('browser'));
@@ -784,6 +990,12 @@ const EVENTS = {
   async switchOn() {
     if (engineSwitch.mode === 'rust') return;
     if (live()) {
+      const baseline = engineSwitch.phase === 'off' && textEngine()?.id === 'browser' ? settlementReceipt() : null;
+      if (baseline) {
+        state.baselineReceipts.push(baseline);
+        state.opened = baseline.chapter; state.openedText = baseline.text;
+        state.openedWrites = baseline.writes; state.touched = false; state.keep = null;
+      }
       for (const window of state.finalWindows) if (window.ref === app.chapterRef) window.acquiredRust = true;
       state.rustChapters.add(c.id); state.rustDebt.add(c.id);
     }
@@ -872,6 +1084,7 @@ async function cleanupModel() {
   state.choices.clear();
   state.finalWindows = [];
   state.witnesses = [];
+  state.timers.clear();
 }
 
 async function run(events) {
@@ -908,6 +1121,11 @@ async function run(events) {
     await rest();
     if (hand.broke) throw new Broken(hand.broke);
     if (state.deferred) throw new DeferredBrowser(state.deferred);
+    if (state.pending.size || state.publicRequests.some((request) => request.pending) || hand.writes.length || hand.fonts.length || hand.starts.length ||
+        state.savers.some((save) => save.pending) || [...state.timers.values()].some((timer) => timer.pending && timer.relevant) ||
+        firstFitChanges()?.keeping || engineSwitch.phase === 'starting' || waiting()) {
+      throw new Broken('coming to rest: residual public transition, saver, writer, timer, font, engine start, or Keep');
+    }
     retireBrowserDebt();
     if (hand.broke) throw new Broken(hand.broke);
     if (live()) {
@@ -936,10 +1154,24 @@ async function run(events) {
     return `${e.message}`;
   } finally {
     state.lastRunStages = stages;
+    const timerRecord = (timer) => timer && Object.fromEntries(Object.entries(timer).filter(([key]) => key !== 'id' && key !== 'ref'));
     state.lastRunProof = { fullOrder: [...events], executedPrefix: events.slice(0, executed), unexecutedTail: events.slice(executed),
-      windows: state.finalWindows.map((w) => ({ kind: w.kind, chapterId: w.chapter.id, browserAtRequest: w.browserAtRequest,
-        debtAtRequest: w.debtAtRequest, acquiredRust: w.acquiredRust, snapshot: w.snapshot,
-        laterChoices: [...w.laterChoices], timer: w.timer })), witnesses: [...state.witnesses] };
+      stages: copy(stages), windows: state.finalWindows.map((w) => ({ kind: w.kind, chapterId: w.chapter.id, browserAtRequest: w.browserAtRequest,
+        currentIdentity: w.ref === app.chapterRef, debtAtRequest: w.debtAtRequest, acquiredRust: w.acquiredRust, pending: w.pending, cleanAtRequest: w.cleanAtRequest,
+        publicRequest: w.publicRequest && (({ ref, window, ...request }) => request)(w.publicRequest), saverSerial: w.saver?.serial, replyAt: w.replyAt, retirement: w.retirement && (({ ref, ...receipt }) => receipt)(w.retirement), answer: w.answer, toast: w.toast, rejected: w.rejected, snapshot: w.snapshot,
+        laterChoices: [...w.laterChoices], timer: timerRecord(w.timer) })), witnesses: copy(state.witnesses),
+      publicRequests: state.publicRequests.map(({ ref, window, ...request }) => ({ ...request, currentIdentity: ref === app.chapterRef })),
+      savers: state.savers.map(({ ref, window, ...save }) => ({ ...save, currentIdentity: ref === app.chapterRef })),
+      timers: [...state.timers.values()].map(timerRecord),
+      baselineReceipts: state.baselineReceipts.map(({ ref, ...receipt }) => receipt),
+      facts: { chapterId: app.chapterRef?.chapterId, projectId: app.chapterRef?.projectId, modelChapterId: c?.id,
+        liveDocument: copy(documentNow()), liveTranslations: buildTextJson(app.pages), typesetting: copy(app.typesetting),
+        mode: app.chapterMode, engine: { mode: engineSwitch.mode, phase: engineSwitch.phase, id: textEngine()?.id },
+        firstFit: firstFitChanges(), gates: { fonts: hand.fonts.length, starts: hand.starts.length, writers: hand.writes.length }, touched: state.touched, saved: app.saved, saveFailed: app.saveFailed,
+        pendingTransitions: state.pending.size, heldWriters: hand.writes.map(({ path, bytes }) => ({ path, bytes })),
+        choices: [...state.choices].map(([id, choices]) => [id, [...choices]]), rustDebt: [...state.rustDebt],
+        failedWriters: state.failedWriters.map(({ ref, ...writer }) => writer),
+        physical: chapters.map((ch) => ({ chapterId: ch.id, chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) })) } };
     await cleanupModel();
   }
 }
@@ -988,7 +1220,7 @@ async function shrink(events, kind = 'unknown') {
     for (let i = now.length - 1; i >= 0; i--) {
       const fewer = [...now.slice(0, i), ...now.slice(i + 1)];
       const result = await run(fewer);
-      if (kind === 'witness' ? !!result?.deferred : typeof result === 'string') {
+      if (kind !== 'unknown' ? result?.deferred?.category === kind : typeof result === 'string') {
         now = fewer;
         again = true;
       }
@@ -1009,7 +1241,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     for (const seed of seeds) {
       const events = sequence(seed, STEPS);
       const why = await run(events);
-      const proof = state.lastRunProof;
+      const proof = copy(state.lastRunProof);
       // Only the original generated orders count here. Named probes and
       // shrink replays may increment the historical totals above, but cannot
       // inflate this per-event breakdown of the 6000 generated sequences.
@@ -1023,21 +1255,26 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       seen.unexecutedTailEvents += proof.unexecutedTail.length;
       if (!why) { seen.completedInvariantOrders++; continue; }
       if (why.deferred) {
-        seen.exactBrowserWitnessOrders++;
-        const least = await shrink(events, 'witness');
+        const category = why.deferred.category;
+        if (category === 'exact-browser-cancellation') seen.exactBrowserWitnessOrders++;
+        else if (category === 'exact-browser-stale-final') seen.staleBrowserFinalWitnessOrders++;
+        else if (category === 'explicit-forced-exit') seen.forcedExitWitnessOrders++;
+        else throw new Error(`unknown classification ${category}`);
+        const least = await shrink(events, category);
         classifiedWitnesses.push({ seed, original: proof, shrunkOrder: least.events,
           shrunkProof: state.lastRunProof, witness: least.why.deferred });
         continue;
       }
       seen.unknownFailedOrders++;
       const least = await shrink(events);
+      classifiedUnknowns.push({ seed, originalWhy: why, original: proof, shrunkWhy: least.why, shrunkOrder: least.events, shrunkProof: copy(state.lastRunProof) });
       broken.push(`seed ${seed}: ${least.why}\n    the fewest events that do it: ${least.events.join(', ')}`);
       if (broken.length >= 5 && !process.env.MODEL_REPORT) break;
     }
     if (process.env.MODEL_WITNESS_OUT) {
       const out = resolve(process.env.MODEL_WITNESS_OUT);
       if (!out.startsWith('/Users/caved/dev/manga-typesetter-wt/tp-data/reports/')) throw new Error('MODEL_WITNESS_OUT must be a fresh private reports file');
-      writeFileSync(out, JSON.stringify({ summary: seen, witnesses: classifiedWitnesses }, null, 2), { flag: 'wx' });
+      writeFileSync(out, JSON.stringify({ summary: seen, witnesses: classifiedWitnesses, unknowns: classifiedUnknowns }, null, 2), { flag: 'wx' });
     } else if (classifiedWitnesses.length) {
       console.log(`exact browser witness orders: ${classifiedWitnesses.length}; full order/prefix/tail and both-file records require explicit MODEL_WITNESS_OUT`);
     }
@@ -1052,6 +1289,200 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(seen.asDocument).toBeGreaterThan(SEQUENCES / 2);
     }
   }, 600_000);
+
+  it('the original queued outgoing Rust order never writes the newly adopted untouched chapter', async () => {
+    expect(await run(sequence(20262371, 30))).toBe(null);
+    expect(state.lastRunProof.facts.choices.find(([id]) => id === chapters[0].id)?.[1] ?? []).toEqual([]);
+  });
+
+  it.each([['browser', 0], ['browser', 1], ['rust', 0], ['rust', 1]])(
+    'a queued %s save cannot acquire the fresh incoming ref (chapter index %s)', async (engine, index) => {
+      resetHand(); state.open = false;
+      const saves = [];
+      try {
+        if (engine === 'rust') { await EVENTS.switchOn(); await EVENTS.engineStarts(); }
+        await open(V1);
+        await EVENTS.editLine();
+        hand.hold = true; hand.holdTranslations = true;
+        saves.push(saveOpenChapter());
+        await pass(0);
+        expect(hand.writes).toHaveLength(1);
+        const outgoing = hand.writes[0].bytes;
+        saves.push(saveOpenChapter());
+        const oldRef = app.chapterRef;
+        closeChapter(); state.open = false;
+        await until(openChapter(p.id, chapters[index].id));
+        adopt(chapters[index]); state.open = true;
+        expect(app.chapterRef).not.toBe(oldRef);
+        const beforeAttempts = hand.began.length;
+        const incomingPath = paths(chapters[index]);
+        const incomingBefore = fsx._tree.files.get(incomingPath.chapter);
+        const incomingTextBefore = fsx._tree.files.get(incomingPath.text);
+        const outgoingChapterPath = paths(chapters[0]).chapter;
+        hand.writes.shift().ok(); await pass(0);
+        expect(hand.writes[0].path).toBe(paths(chapters[0]).text);
+        hand.writes.shift().ok(); await pass(0);
+        expect(hand.began.length, 'old queued request must stop before reading or stamping the new ref').toBe(beforeAttempts);
+        expect(hand.writes).toHaveLength(0);
+        for (const save of saves) await until(save);
+        if (index === 1) {
+          expect(fsx._tree.files.get(incomingPath.chapter)).toBe(incomingBefore);
+          expect(fsx._tree.files.get(incomingPath.text)).toBe(incomingTextBefore);
+        } else {
+          // The first already-started old write may finish at this same path;
+          // the second queued request still must not snapshot the fresh ref.
+          expect(fsx._tree.files.get(outgoingChapterPath)).toBe(outgoing);
+          expect(fsx._tree.files.get(incomingPath.text)).toBe(buildTextJson(JSON.parse(outgoing).pages));
+        }
+        expect(firstFitChanges()?.kept ?? false).toBe(false);
+      } finally { await cleanupModel(); }
+    });
+
+  it.each([false, true])('a valid same-ref browser queued save survives Rust acquisition %s', async (acquire) => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      const ref = app.chapterRef;
+      await EVENTS.editLine();
+      hand.hold = true;
+      const first = saveOpenChapter(); await pass(0);
+      await EVENTS.editLine();
+      const second = saveOpenChapter(); await pass(0);
+      if (acquire) { await EVENTS.switchOn(); await EVENTS.engineStarts(); await pass(0); }
+      expect(app.chapterRef).toBe(ref);
+      hand.writes.shift().ok(); await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      hand.writes.shift().ok(); await pass(0);
+      await until(first); await until(second);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAAA');
+      expect(app.chapterRef).toBe(ref);
+    } finally { await cleanupModel(); }
+  });
+
+  it('a saved browser choice starts a new independent untouched Rust baseline without erasing intent', async () => {
+    const events = ['open1', 'unmarkedHandle', 'debounce', 'switchOn'];
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.baselineReceipts).toHaveLength(1);
+    expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
+    expect(state.lastRunProof.facts.touched).toBe(false);
+  });
+
+  it.each(['chapter only', 'unsaved', 'queued saver', 'pending final', 'wrong live filename', 'wrong physical filename'])(
+    'a browser baseline refuses %s evidence', async (risk) => {
+      resetHand(); state.open = false;
+      try {
+        await open(V1);
+        if (risk === 'chapter only') {
+          hand.holdTranslations = true; await EVENTS.editLine(); await pass(DOC_SAVE_MS);
+        } else if (risk === 'unsaved') await EVENTS.editLine();
+        else if (risk === 'queued saver') {
+          hand.hold = true; const first = saveOpenChapter(); first.catch(() => {}); await pass(0);
+          saveOpenChapter().catch(() => {});
+        } else if (risk === 'pending final') {
+          hand.hold = true; await EVENTS.leave();
+        } else if (risk === 'wrong live filename') app.pages[0].file = 'wrong-live.png';
+        else {
+          const rec = JSON.parse(onDisk()); rec.pages[0].file = 'wrong-physical.png';
+          fsx._tree.files.set(chapterPath, JSON.stringify(rec));
+        }
+        expect(settlementReceipt()).toBe(null);
+        await EVENTS.switchOn();
+        expect(state.baselineReceipts).toEqual([]);
+      } finally { await cleanupModel(); }
+    });
+
+  it('a same-ID reopen retains the exact observed cancellation prefix and its unexecuted tail', async () => {
+    const events = ['open1', 'holdWrites', 'open1', 'editLine', 'writeLands', 'switchOn', 'engineStarts'];
+    const result = await run(events);
+    expect(result?.deferred?.category).toBe('exact-browser-cancellation');
+    expect(state.lastRunProof.unexecutedTail).toEqual(['switchOn', 'engineStarts']);
+    expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
+  });
+
+  it('the original stale browser final has a separate fired-timer witness after proven Rust retirement', async () => {
+    const result = await run(sequence(20261867, 30));
+    expect(result?.deferred?.category).toBe('exact-browser-stale-final');
+    expect(result.deferred.timer.cancelledByMarkSaved).toBe(false);
+    expect(result.deferred.newerDerivedFileNotYetObserved).toBe(true);
+    expect(state.lastRunProof.unexecutedTail.length).toBeGreaterThan(0);
+    expect(state.lastRunProof.facts.rustDebt).toEqual([]);
+  });
+
+  it('two actual rejected saver promises and public refusal/force replies retain a separate forced-exit prefix', async () => {
+    const result = await run(sequence(20261290, 30));
+    expect(result?.deferred?.category).toBe('explicit-forced-exit');
+    expect(result.deferred.failedSavers).toHaveLength(2);
+    expect(result.deferred.priorRefusal.answer).toBe(false);
+    expect(result.deferred.answer).toBe(true);
+    expect(result.deferred.rustDebtRetained).toBe(true);
+    expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
+    expect(state.lastRunProof.unexecutedTail.length).toBeGreaterThan(0);
+  });
+
+  it.each(['Rust acquisition', 'outstanding owned final', 'wrong retirement identity', 'only one retirement file', 'earlier ambiguous saver'])(
+    'a stale browser final refuses %s as a known witness', async (risk) => {
+      resetHand(); state.open = false;
+      try {
+        await EVENTS.switchOn(); await EVENTS.engineStarts(); await EVENTS.open2();
+        if (risk === 'only one retirement file') {
+          await EVENTS.editLine(); hand.holdTranslations = true; await pass(DOC_SAVE_MS);
+        }
+        await EVENTS.switchOff(); retireBrowserDebt();
+        expect(state.rustDebt.has(c.id)).toBe(risk === 'only one retirement file');
+        if (risk === 'wrong retirement identity') {
+          // Public close/open creates a fresh object ref at the same path.
+          closeChapter(); state.open = false;
+          await until(openChapter(p.id, c.id)); state.open = true;
+        }
+        if (risk === 'only one retirement file') expect(state.retirements.size).toBe(0);
+        hand.holdTranslations = true;
+        let earlier;
+        if (risk === 'earlier ambiguous saver') { earlier = flushSave(); earlier.catch(() => {}); await pass(0); }
+        const window = finalWindow('leave');
+        const request = flushBeforeLeaving('editor');
+        state.pending.add(request);
+        request.then((answer) => { window.pending = false; window.answer = answer; }).catch(() => {}).finally(() => state.pending.delete(request));
+        await pass(0);
+        await EVENTS.edit(); await pass(DOC_SAVE_MS);
+        hand.hold = true;
+        if (risk === 'Rust acquisition' || risk === 'outstanding owned final') {
+          await EVENTS.switchOn(); await EVENTS.engineStarts();
+          if (risk === 'outstanding owned final') {
+            const owned = finalWindow('leave');
+            const other = flushBeforeLeaving('editor'); state.pending.add(other);
+            other.then((answer) => { owned.pending = false; owned.answer = answer; }).catch(() => {}).finally(() => state.pending.delete(other));
+          }
+        }
+        hand.writes.shift()?.ok(); await pass(0);
+        expect(observedBrowserStaleFinal(window, c)).toBe(null);
+        expect(observedBrowserCancellation(window, c)).toBe(null);
+      } finally { await cleanupModel(); }
+    });
+
+  it('an intervening actual successful saver resets the public two-failure escape', async () => {
+    resetHand(); state.open = false;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); await open(V1); await EVENTS.editLine();
+      hand.hold = true;
+      const firstWindow = finalWindow('leave');
+      const first = flushBeforeLeaving('editor'); await pass(0);
+      await EVENTS.writeFails();
+      firstWindow.answer = await until(first); firstWindow.pending = false;
+      firstWindow.replyAt = Date.now(); firstWindow.toast = app.toast.msg;
+      expect(firstWindow.answer).toBe(false);
+      hand.hold = false; expect(await until(flushBeforeLeaving('editor'))).toBe(true);
+      await EVENTS.editLine(); hand.hold = true;
+      const secondWindow = finalWindow('leave');
+      const second = flushBeforeLeaving('editor'); await pass(0);
+      await EVENTS.writeFails();
+      secondWindow.answer = await until(second); secondWindow.pending = false;
+      secondWindow.replyAt = Date.now(); secondWindow.toast = app.toast.msg;
+      expect(secondWindow.answer).toBe(false);
+      expect(observedForcedExit(secondWindow, c)).toBe(null);
+      expect(state.savers.filter((save) => save.failed === 'disk full')).toHaveLength(2);
+    } finally { await cleanupModel(); }
+  });
 
   it.each(Object.entries(UNMARKED))('an unmarked %s change after a save snapshot reaches both files without a rescue flush', async (_, change) => {
     resetHand();
