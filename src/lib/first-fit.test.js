@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   app, loadProjectPages, page, autoFitBox, reviewOf, flaggedBoxes, useChapterTypesetting, setSaver, markSaved, markUnsaved, flushSave,
-  firstFit, firstFitChanges, keepFirstFit, KEEP_WAIT_MS, stampTypesetting, fitBoxNow, placeActiveAt, relayoutAll,
+  firstFit, firstFitChanges, keepFirstFit, KEEP_WAIT_MS, stampTypesetting, fitBoxNow, makeBoxAuto, placeActiveAt, relayoutAll,
 } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
 import { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch, _engineSwitchSync } from './engine-switch.svelte.js';
@@ -509,9 +509,8 @@ describe('a change to the document that nobody marked', () => {
   });
 });
 
-// "Fit now" on a box it cannot improve writes why, and returns before it
-// marks the chapter unsaved, since no geometry moved: under the browser
-// leaving writes it, as leaving writes everything there.
+// A review-only edit is still durable document intent, even when its
+// geometry return value stays false and creates no geometry undo entry.
 describe('"Fit now" on a box it cannot improve', () => {
   const curved = () => ({ ...box('curve', 'Narrow', 'AAAAAAAAAAAA BBBBBBBBBBBB', 40, 100), style: { ...style('Narrow'), size: 12, curve: 40 } });
   let file;
@@ -524,10 +523,10 @@ describe('"Fit now" on a box it cannot improve', () => {
     open(file);
   });
 
-  it('changes the reason and marks nothing', () => {
+  it('changes only the reason and marks it unsaved', () => {
     expect(fitBoxNow('curve', app.pages[0])).toBe(false);
     expect(by('curve').review.reason).toBe(REVIEW_REASONS.minSize);
-    expect(app.saved).toBe(true);
+    expect(app.saved).toBe(false);
   });
 
   it('is written by leaving', async () => {
@@ -537,6 +536,35 @@ describe('"Fit now" on a box it cannot improve', () => {
     await flushSave();
     expect(saves).toHaveLength(1);
     expect(saves[0].pages[0].boxes[0].review.reason).toBe(REVIEW_REASONS.minSize);
+  });
+
+  it.each(['Fit now', 'Make auto'])('%s persists a browser review-only change through its natural debounce', async (command) => {
+    await useTextEngine('browser');
+    const pages = command === 'Fit now' ? file.pages : [{ id: 1, w: 800, h: 1200, lines: [],
+      boxes: [{ ...box('auto', 'Narrow', 'AA', 200, 100), style: { ...style('Narrow'), autoHeight: true } }] }];
+    open({ pages, typesetting: { mode: 'smart', version: LAYOUT_VERSION } });
+    const b = all()[0];
+    if (command === 'Make auto') {
+      autoFitBox(b, page());
+      expect(b.review).toBeUndefined();
+      b.review = { kind: 'overflow', reason: REVIEW_REASONS.stale, overflow: { l: 0, t: 0, r: 1, b: 0 } };
+      markSaved();
+    }
+    const before = copy(b), review = (b.review === undefined ? undefined : copy(b.review));
+    const invoke = () => command === 'Fit now' ? fitBoxNow(b.id, page()) : makeBoxAuto(b.id, page());
+    expect(invoke(), 'no geometry or size moved').toBe(false);
+    expect(b.review, 'the command actually changes the persisted review').not.toEqual(review);
+    expect({ ...copy(b), review: before.review }).toEqual(before);
+    expect(app.saved, 'a review-only edit must schedule its save').toBe(false);
+    await wait(900);
+    expect(saves).toHaveLength(1);
+    expect(saves[0].pages[0].boxes[0].review).toEqual((b.review === undefined ? undefined : copy(b.review)));
+    expect(app.saved).toBe(true);
+    const count = saves.length;
+    expect(invoke(), 'the same review is an actual no-op').toBe(false);
+    expect(app.saved).toBe(true);
+    await wait(900);
+    expect(saves).toHaveLength(count);
   });
 
   it('and is not undone by the switch going off', async () => {
@@ -1111,8 +1139,8 @@ describe('in a long strip, a box the open does not grow', () => {
     expect(saves).toHaveLength(0);
   });
 
-  it('under the browser the pass is as it has always been: this phase changes nothing there', () => {
+  it('under the browser a no-growth open preserves its original top edge exactly', () => {
     open(strip());
-    expect(by('roomy').y).toBe(Y + 1200 - 1200);
+    expect(by('roomy').y).toBe(Y);
   });
 });

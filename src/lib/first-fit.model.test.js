@@ -15,12 +15,11 @@
 //   (b) the file is the document in memory, and its version is 2 if and only
 //       if the Rust engine has fitted every box in it.
 //   And leaving, while things are in motion, ends in one of the two.
-// This at-rest invariant covers Rust and its actual outstanding save debt.
-// Once both current browser files land, ordinary browser ownership resumes.
-// Real leave/open boundaries check both files under either engine. A fully
-// observed instance of the known browser autosave race stops its order and
-// records the executed prefix and unexecuted tail separately. Independently
-// retained user choices must survive automatic fits/restoration in memory
+// This at-rest invariant covers every completed browser and Rust order.
+// Successful ordinary leave/open replies must preserve every required choice
+// in both files. A deliberate force escape is explicitly unfinished; all
+// residual work retains its raw order, choices, debt and unexecuted tail.
+// Independently retained user choices must survive automatic fits/restoration in memory
 // and in chapter.json AND translations.json, across distinct chapter paths.
 //
 // And one thing more that the file alone cannot show: Keep is ONE write.
@@ -104,7 +103,7 @@ vi.mock('./fsx.js', () => {
 
 // Observe the public saver registration and the promise it actually returns.
 // Return that same promise: no extra save, wait, replacement, or queue policy.
-const saverObserver = vi.hoisted(() => ({ begin: null, finish: null, boundary: null, reply: null, toast: null, openBoundary: null, openReply: null, scope: null, invocationScope: null }));
+const saverObserver = vi.hoisted(() => ({ begin: null, finish: null, boundary: null, reply: null, toast: null, openBoundary: null, openReply: null, scope: null, invocationScope: null, settleScope: null, settleBegin: null, settleFinish: null }));
 vi.mock('./library.svelte.js', async (original) => {
   const { AsyncLocalStorage } = await import('node:async_hooks');
   saverObserver.scope = new AsyncLocalStorage();
@@ -136,8 +135,20 @@ vi.mock('./library.svelte.js', async (original) => {
   } };
 });
 vi.mock('./store.svelte.js', async (original) => {
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  saverObserver.settleScope = new AsyncLocalStorage();
   const module = await original();
-  return { ...module, toast(...args) {
+  const originalFlushSave = module.flushSave;
+  return { ...module, flushSave(...args) {
+    const receipt = args[0]?.settle === true ? saverObserver.settleBegin?.(args) : null;
+    try {
+      const done = saverObserver.settleScope.run(receipt, () => originalFlushSave(...args));
+      if (receipt) receipt.originalPromise = done;
+      if (receipt) Promise.resolve(done).then(() => saverObserver.settleFinish?.(receipt, true, undefined),
+        (error) => saverObserver.settleFinish?.(receipt, false, error));
+      return done;
+    } catch (error) { saverObserver.settleFinish?.(receipt, false, error); throw error; }
+  }, toast(...args) {
     const result = module.toast(...args);
     saverObserver.toast?.(saverObserver.scope?.getStore(), args[0]);
     return result;
@@ -155,6 +166,57 @@ vi.mock('./store.svelte.js', async (original) => {
   } };
 });
 
+const engineObserver = vi.hoisted(() => ({ scope: null, fontScope: null, begin: null, finish: null,
+  syncBegin: null, syncBound: null, faceBegin: null, faceFinish: null, disposed: null }));
+vi.mock('./engine-switch.svelte.js', async (original) => {
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  engineObserver.scope = new AsyncLocalStorage();
+  const module = await original();
+  return { ...module, useTextEngine(...args) {
+    const operation = engineObserver.begin?.(args);
+    try {
+      const done = engineObserver.scope.run(operation, () => module.useTextEngine(...args));
+      if (operation) operation.originalPromise = done;
+      Promise.resolve(done).then(() => engineObserver.finish?.(operation, true, undefined),
+        (error) => engineObserver.finish?.(operation, false, error));
+      return done;
+    } catch (error) { engineObserver.finish?.(operation, false, error); throw error; }
+  } };
+});
+vi.mock('./text-engine/font-sync.js', async (original) => {
+  const { AsyncLocalStorage } = await import('node:async_hooks');
+  engineObserver.fontScope = new AsyncLocalStorage();
+  const module = await original();
+  return { ...module, createFontSync(options) {
+    const owner = engineObserver.syncBegin?.(options);
+    const callback = options.systemFace;
+    const actual = callback ? { ...options, systemFace(...args) {
+      const call = engineObserver.faceBegin?.(owner, callback, this, args);
+      try {
+        const done = engineObserver.fontScope.run(call, () => callback.apply(this, args));
+        if (call) call.originalPromise = done;
+        Promise.resolve(done).then(() => engineObserver.faceFinish?.(call, true, undefined),
+          (error) => engineObserver.faceFinish?.(call, false, error));
+        return done;
+      } catch (error) { engineObserver.faceFinish?.(call, false, error); throw error; }
+    } } : options;
+    // A synchronous callback during construction still belongs to this token,
+    // but becomes authoritative only after this exact constructor returns.
+    const sync = module.createFontSync(actual);
+    engineObserver.syncBound?.(owner, sync);
+    const dispose = sync.dispose;
+    sync.dispose = function (...args) {
+      const operation = engineObserver.scope?.getStore();
+      try {
+        const result = dispose.apply(this, args);
+        engineObserver.disposed?.(owner, operation, this, args, result, true, undefined);
+        return result;
+      } catch (error) { engineObserver.disposed?.(owner, operation, this, args, undefined, false, error); throw error; }
+    };
+    return sync;
+  } };
+});
+
 const { fsx } = await import('./fsx.js');
 const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
@@ -164,6 +226,7 @@ const { buildTextJson } = await import('./text-json.js');
 const { initHistory } = await import('./editor/history.svelte.js');
 const { engineSwitch, useTextEngine, _setEngineSwitchDeps, _resetEngineSwitch } = await import('./engine-switch.svelte.js');
 const { textEngine, setTextEngine } = await import('./text-engine/index.js');
+const { createFontSync } = await import('./text-engine/font-sync.js');
 const { addFontFile, removeUserFont, systemFontEntry, watchUserFaces } = await import('./fonts.js');
 const { contentWidth, setTypesetEnabled, typesetEnabled, clearLayoutMemo } = await import('./measure.js');
 const { fakeRustEngine, SFNT, TTC } = await import('../test/fake-rust-engine.js');
@@ -249,18 +312,27 @@ const invoke = async (cmd, args) => {
   if (cmd === 'system_font_coverage') return { families: [], none: args.codePoints };
   if (cmd === 'font_to_sfnt') return SFNT().buffer;
   if (cmd !== 'system_font_face') throw new Error(`unexpected command ${cmd}`);
-  if (args.family === 'Zapfino' && hand.fontHeld) await new Promise((resolve) => hand.fonts.push(Object.assign(resolve, { family: args.family, turn: engineTurn })));
+  if (args.family === 'Zapfino' && hand.fontHeld) await new Promise((resolve) => {
+    const call = engineObserver.fontScope?.getStore();
+    const exact = !!call && call.pending && call.originalArgs[0] === args.family && call.originalArgs[1] === args.slot && call.originalArgs[2] === args.known;
+    if (call) { call.nativeGates ??= []; call.nativeGates.push(resolve); }
+    hand.fonts.push(Object.assign(resolve, { family: args.family, turn: engineTurn,
+      heldOrder: ++state.nextObservation, faceSerial: call?.serial ?? null, syncSerial: call?.syncSerial ?? null,
+      engineToken: call?.engineToken ?? null, exactCallbackArgs: exact }));
+  });
   const file = (FILES[args.family] ?? []).find((f) => args.slot in f.slots);
   if (!file) throw new Error(`no system font '${args.family}'`);
   return systemFaceAnswer(file.slots, file.bytes, { known: args.known });
 };
 const createEngine = async () => {
+  const factory = observeFactory();
   // An obsolete held factory completing later must not advance the turn
   // away from the currently requested engine's held font requests.
   engineTurn++;
-  if (hand.startHeld) await new Promise((resolve) => hand.starts.push(resolve));
+  if (hand.startHeld) await new Promise((resolve) => { factory.originalGate = resolve; hand.starts.push(Object.assign(resolve, { factorySerial: factory.serial, operationSerial: factory.operationSerial, heldOrder: ++state.nextObservation })); });
   const engine = fakeRustEngine();
   engine.wrapPlain = (face, text, opts) => fakePlain((part) => engine.advance(face, part), text, opts.width);
+  Object.assign(factory, { engine, engineToken: objectToken(engine), pending: false, bound: true, finishOrder: ++state.nextObservation });
   return engine;
 };
 
@@ -340,6 +412,7 @@ function timerSource(ms, setterStack) {
   return 'unknown';
 }
 
+let modelSwitchDeps;
 beforeAll(async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
   vi.stubGlobal('FontFace', class {
@@ -359,7 +432,7 @@ beforeAll(async () => {
       pending: true, event: state.event };
     const id = schedule((...values) => {
       observed.pending = false;
-      observed.firedAt = Date.now();
+      observed.firedAt = Date.now(); observed.fireOrder = ++state.nextObservation;
       for (const window of state.finalWindows) if (window.timer?.id === id) window.timer.firedAt = Date.now();
       return callback(...values);
     }, ms, ...args);
@@ -412,7 +485,7 @@ beforeAll(async () => {
   initHistory();
   setTextEngine(fakeBrowser());
   setTypesetEnabled(true);
-  _setEngineSwitchDeps({ available: () => true, createEngine, invoke: async () => invoke, booted: async () => {}, os: () => 'macos' });
+  _setEngineSwitchDeps(modelSwitchDeps = { available: () => true, createEngine, invoke: async () => invoke, booted: async () => {}, os: () => 'macos' });
   app.fonts.system = [
     systemFontEntry({ name: 'Helvetica Neue', faces: { regular: true, bold: true, italic: true, boldItalic: true } }),
     systemFontEntry({ name: 'Zapfino', faces: { regular: true } }),
@@ -428,19 +501,21 @@ beforeAll(async () => {
   chapterPath = `${c.dir}/chapter.json`;
   translationsPath = `${c.dir}/translations.json`;
   fsx._before = (path, text, write) => {
+    write.startOrder = ++state.nextObservation;
+    write.at = Date.now();
     if (chapters.some((ch) => path === `${ch.dir}/translations.json`)) {
-      finalSnapshot(path, text);
+      finalSnapshot(path, text, null, write);
       if (!hand.holdTranslations) return undefined;
       return new Promise((ok, fail) => {
         const writer = { path, bytes: text, ref: null, ok, fail };
-        finalSnapshot(path, text, writer);
+        finalSnapshot(path, text, writer, write);
         hand.writes.push(writer);
       });
     }
     if (!chapters.some((ch) => path === `${ch.dir}/chapter.json`)) return undefined;
     write.started = { path, bytes: text, ref: null, rawWriteSerial: write.serial, version: JSON.parse(text).typesetting?.version ?? null, at: Date.now(), browser: engineSwitch.phase === 'off' };
     hand.began.push(write.started);
-    finalSnapshot(path, text);
+    finalSnapshot(path, text, null, write);
     seen.writes++;
     const number = hand.began.at(-1).version;
     if (path === chapterPath && waiting() && number !== app.typesetting.version) hand.broke ??= `a save while the current chapter still waits changed its number from ${app.typesetting.version} to ${number}`;
@@ -452,7 +527,7 @@ beforeAll(async () => {
     if (!hand.hold) return undefined;
     return new Promise((ok, fail) => {
       const writer = { path, bytes: text, ref: null, ok, fail };
-      finalSnapshot(path, text, writer);
+      finalSnapshot(path, text, writer, write);
       hand.writes.push(writer);
     });
   };
@@ -465,7 +540,7 @@ beforeAll(async () => {
     }
     if (!snapshot || text !== (path === snapshot.chapterPath ? snapshot.chapter : snapshot.text)) return;
     save.physicalReceipts ??= [];
-    save.physicalReceipts.push({ order: ++state.nextObservation, at: Date.now(), path, bytes: text,
+    save.physicalReceipts.push({ order: ++state.nextObservation, at: Date.now(), path, bytes: text, rawWriteSerial: write.serial, startOrder: write.startOrder,
       saverSerial: save.serial, refToken: save.refToken });
     if (path === snapshot.textPath && snapshot.text === text &&
         fsx._tree.files.get(snapshot.chapterPath) === snapshot.chapter &&
@@ -526,10 +601,10 @@ class DeferredBrowser extends Error {
 }
 // What the sequences did, over a whole run.
 const stageCounts = () => ({ eventsByStage: { closed: {}, rustOrStarting: {}, crossSwitchDebt: {}, browserAfterDebt: {} }, inapplicablePublicActions: {} });
-const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, browserDeferred: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, staleBrowserFinalWitnessOrders: 0, forcedExitWitnessOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
+const seen = { sequences: 0, writes: 0, failed: 0, keeps: 0, asOpened: 0, asDocument: 0, left: 0, inapplicablePublicActions: 0, generatedStages: stageCounts(), completedInvariantOrders: 0, exactBrowserWitnessOrders: 0, staleBrowserFinalWitnessOrders: 0, forcedExitWitnessOrders: 0, settledOpenPrefixOrders: 0, settledLeavePrefixOrders: 0, actualFinalOnlyOpenPrefixOrders: 0, unknownFailedOrders: 0, generatedEvents: 0, executedEvents: 0, unexecutedTailEvents: 0 };
 const classifiedWitnesses = [];
 const classifiedUnknowns = [];
-const state = { open: false, opened: null, openedText: null, openedRef: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [], savers: [], timers: new Map(), nextObservation: 0, retirements: new Map(), browserSettlements: new Map(), baselineReceipts: [], failedWriters: [], publicRequests: [] };
+const state = { open: false, opened: null, openedText: null, openedRef: null, openedWrites: 0, touched: false, keep: null, choices: new Map(), rustChapters: new Set(), rustDebt: new Set(), transition: 0, pending: new Set(), finalWindows: [], event: null, witnesses: [], savers: [], timers: new Map(), nextObservation: 0, retirements: new Map(), browserSettlements: new Map(), baselineReceipts: [], failedWriters: [], publicRequests: [], underlyingSettles: [] };
 // Object identity is observed without serializing live refs or cyclic contexts.
 const refTokens = new WeakMap();
 let nextRefToken = 0;
@@ -538,6 +613,119 @@ function refToken(ref) {
   if (!refTokens.has(ref)) refTokens.set(ref, ++nextRefToken);
   return refTokens.get(ref);
 }
+// This ledger observes the actual public flushSave promise, separately from
+// an outer leave/open reply and separately from model reaction membership.
+saverObserver.settleBegin = (args) => {
+  const context = saverObserver.scope?.getStore();
+  const receipt = { serial: ++state.nextObservation, ref: app.chapterRef, refToken: refToken(app.chapterRef),
+    chapterId: app.chapterRef?.chapterId, at: Date.now(), pending: true, originalArgs: args,
+    browserAtCall: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
+    debtAtCall: state.rustDebt.has(app.chapterRef?.chapterId), historicalDebtAtCall: [...state.rustDebt], acquiredRust: false,
+    observedPublicContextSerial: context?.serial ?? null, observedPublicContextPending: context?.pending ?? false,
+    publicRequestSerial: context?.pending && context.ref === app.chapterRef ? context.serial : null };
+  state.underlyingSettles.push(receipt);
+  return receipt;
+};
+saverObserver.settleFinish = (receipt, didFulfill, reason) => {
+  if (!receipt) return;
+  receipt.pending = false; receipt.finishOrder = ++state.nextObservation; receipt.finishedAt = Date.now();
+  receipt.fulfilled = didFulfill; receipt.rejected = !didFulfill; receipt.error = reason; receipt.failureReason = reason;
+};
+const pendingUnderlyingOwned = () => state.underlyingSettles.filter((receipt) => receipt.pending &&
+  (!receipt.browserAtCall || receipt.debtAtCall || receipt.acquiredRust));
+function failureReasonFacts(reason) {
+  if (reason === undefined) return { kind: 'undefined' };
+  if (reason === null) return { kind: 'null', value: null };
+  const kind = typeof reason;
+  return { kind, value: kind === 'object' || kind === 'function' || kind === 'symbol' || kind === 'bigint' ? String(reason?.message ?? reason) : reason };
+}
+const underlyingSettleFacts = () => state.underlyingSettles.map(({ ref, originalPromise, originalArgs, error, failureReason, ...receipt }) =>
+  ({ ...receipt, failureReason: receipt.rejected ? failureReasonFacts(failureReason) : null,
+    currentIdentity: ref === app.chapterRef, originalPromiseObserved: !!originalPromise, settleOption: originalArgs[0]?.settle === true }));
+// Separate from chapter ownership, generator state, and public model reactions.
+// Raw gates remain physically held; only the separate exact unfinished-prefix certificate can scope an obsolete owner.
+const engineObservations = { operations: [], factories: [], syncs: [], faces: [] };
+const objectTokens = new WeakMap();
+let nextObjectToken = 0;
+function objectToken(object) {
+  if (!object || !['object', 'function'].includes(typeof object)) return null;
+  if (!objectTokens.has(object)) objectTokens.set(object, ++nextObjectToken);
+  return objectTokens.get(object);
+}
+engineObserver.begin = (args) => {
+  const mode = args[0] === 'rust' ? 'rust' : 'browser';
+  const operation = { serial: ++state.nextObservation, at: Date.now(), args, mode, beforeMode: engineSwitch.mode,
+    beforePhase: engineSwitch.phase, beforeEngine: textEngine(), beforeEngineToken: objectToken(textEngine()),
+    ref: app.chapterRef, refToken: refToken(app.chapterRef), pending: true, nonNoop: mode !== engineSwitch.mode };
+  if (mode === 'rust' && operation.nonNoop)
+    for (const receipt of state.underlyingSettles) if (receipt.pending && receipt.ref === app.chapterRef) receipt.acquiredRust = true;
+  engineObservations.operations.push(operation);
+  return operation;
+};
+engineObserver.finish = (operation, didFulfill, reason) => {
+  if (!operation) return;
+  Object.assign(operation, { pending: false, fulfilled: didFulfill, rejected: !didFulfill, failureReason: reason, replyOrder: ++state.nextObservation, replyAt: Date.now(),
+    afterMode: engineSwitch.mode, afterPhase: engineSwitch.phase,
+    afterEngineToken: objectToken(textEngine()) });
+};
+function observeFactory() {
+  const operation = engineObserver.scope?.getStore();
+  const factory = { serial: ++state.nextObservation, at: Date.now(), operation,
+    operationSerial: operation?.serial ?? null, activeRustContext: !!operation?.pending && operation.mode === 'rust' && operation.nonNoop,
+    pending: true, bound: false };
+  engineObservations.factories.push(factory);
+  return factory;
+}
+engineObserver.syncBegin = (options) => {
+  const operation = engineObserver.scope?.getStore();
+  const candidates = engineObservations.factories.filter((factory) => factory.bound && factory.engine === options.engine && factory.operation === operation);
+  const factory = candidates.length === 1 && operation?.pending && operation.mode === 'rust' && operation.nonNoop ? candidates[0] : null;
+  const owner = { serial: ++state.nextObservation, at: Date.now(), engine: options.engine, engineToken: objectToken(options.engine),
+    operation, operationSerial: operation?.serial ?? null, factorySerial: factory?.serial ?? null,
+    factoryBinding: factory ? 'exact-active-operation-engine' : candidates.length > 1 ? 'ambiguous' : 'unbound',
+    originalOptions: options, originalCallback: options.systemFace, bound: false, disposed: false, disposals: [] };
+  engineObservations.syncs.push(owner);
+  return owner;
+};
+engineObserver.syncBound = (owner, sync) => {
+  if (owner) Object.assign(owner, { sync, syncToken: objectToken(sync), bound: true, boundOrder: ++state.nextObservation });
+};
+engineObserver.faceBegin = (owner, callback, thisArg, args) => {
+  const call = { serial: ++state.nextObservation, at: Date.now(), owner, syncSerial: owner?.serial ?? null,
+    engineToken: owner?.engineToken ?? null, originalCallback: callback, thisArg, originalArgs: args, pending: true,
+    constructorBoundAtCall: owner?.bound ?? false };
+  engineObservations.faces.push(call);
+  return call;
+};
+engineObserver.faceFinish = (call, didFulfill, reason) => {
+  if (call) Object.assign(call, { pending: false, finishOrder: ++state.nextObservation,
+    fulfilled: didFulfill, rejected: !didFulfill, failureReason: reason });
+};
+engineObserver.disposed = (owner, operation, thisArg, args, result, didReturn, reason) => {
+  if (!owner) return;
+  const observation = { order: ++state.nextObservation, at: Date.now(), operationSerial: operation?.serial ?? null,
+    operationPending: operation?.pending ?? false, operationMode: operation?.mode ?? null, nonNoop: operation?.nonNoop ?? false,
+    thisMatches: thisArg === owner.sync, originalArgs: args, originalResult: result,
+    returned: didReturn, threw: !didReturn, failureReason: reason, error: didReturn ? null : String(reason?.message ?? reason) };
+  owner.disposals.push(observation);
+  if (didReturn && thisArg === owner.sync) { owner.disposed = true; owner.disposeOrder = observation.order; }
+};
+function engineOwnershipFacts() {
+  return {
+    operations: engineObservations.operations.map(({ originalPromise, args, beforeEngine, ref, failureReason, ...operation }) =>
+      ({ ...operation, failureReason: operation.rejected ? failureReasonFacts(failureReason) : null, originalPromiseObserved: !!originalPromise, args: [...args] })),
+    factories: engineObservations.factories.map(({ operation, engine, originalGate, ...factory }) => factory),
+    syncs: engineObservations.syncs.map(({ operation, engine, sync, originalOptions, originalCallback, disposals, ...owner }) =>
+      ({ ...owner, hasOriginalCallback: typeof originalCallback === 'function', disposals: disposals.map(({ originalResult, originalArgs, failureReason, ...disposal }) =>
+        ({ ...disposal, failureReason: disposal.threw ? failureReasonFacts(failureReason) : null, args: [...originalArgs], resultKind: typeof originalResult })) })),
+    faces: engineObservations.faces.map(({ owner, originalCallback, thisArg, originalArgs, originalPromise, nativeGates, failureReason, ...call }) =>
+      ({ ...call, failureReason: call.rejected ? failureReasonFacts(failureReason) : null, syncToken: owner?.syncToken ?? null, ownerBound: owner?.bound ?? false, ownerDisposed: owner?.disposed ?? false,
+        nativeGateCount: nativeGates?.length ?? 0, callbackMatches: originalCallback === owner?.originalCallback, args: copy(originalArgs), originalPromiseObserved: !!originalPromise })),
+    heldStarts: hand.starts.map((gate) => ({ factorySerial: gate.factorySerial ?? null, operationSerial: gate.operationSerial ?? null, heldOrder: gate.heldOrder ?? null })),
+    heldFonts: hand.fonts.map((gate) => ({ faceSerial: gate.faceSerial ?? null, syncSerial: gate.syncSerial ?? null,
+      engineToken: gate.engineToken ?? null, heldOrder: gate.heldOrder ?? null, exactCallbackArgs: gate.exactCallbackArgs ?? false })) };
+}
+
 saverObserver.boundary = (where) => {
   const window = state.finalWindows.findLast((window) => window.pending && window.kind === 'leave' && !window.publicRequest && window.ref === app.chapterRef) ?? finalWindow('leave');
   const request = { kind: 'leave', generation: window?.generation ?? state.transition, serial: ++state.nextObservation, where, ref: app.chapterRef, refToken: refToken(app.chapterRef),
@@ -568,6 +756,7 @@ saverObserver.openReply = (request, error) => {
     changedRef: app.chapterRef !== request.ref, loaded: app.loaded,
     targetMatches: app.chapterRef?.projectId === request.projectId && app.chapterRef?.chapterId === request.chapterId,
     generationMatches: request.generation === state.transition });
+  request.rejectedReason = error;
   if (request.window) { request.window.pending = false; request.window.fulfilled = request.fulfilled; }
 };
 saverObserver.toast = (request, message) => {
@@ -580,6 +769,7 @@ saverObserver.begin = () => {
     publicRequestSerial: null, observedPublicContextSerial: context?.serial ?? null,
     observedPublicContextPending: context?.pending ?? false, observedPublicContextRefToken: context?.refToken ?? null, observedPublicContextGeneration: context?.generation ?? null,
     contextDisposition: !context ? 'missing' : !context.pending ? 'expired' : context.ref !== app.chapterRef ? 'ref-mismatch' : 'active',
+    underlyingSettleSerial: saverObserver.settleScope?.getStore()?.serial ?? null,
     chapterId: app.chapterRef?.chapterId, event: state.event, at: Date.now(), pending: true,
     browser: engineSwitch.phase === 'off' && textEngine()?.id === 'browser', snapshot: null };
   const window = context?.window;
@@ -608,12 +798,13 @@ saverObserver.finish = (receipt, error) => {
   receipt.pending = false;
   receipt.finishedAt = Date.now(); receipt.finishOrder = ++state.nextObservation;
   receipt.failed = error ? String(error.message ?? error) : null;
+  receipt.failedReason = error;
 };
 const relevantTimers = (ref = app.chapterRef) => [...state.timers.values()].filter((timer) => timer.pending && timer.relevant && timer.ref === ref);
 const pendingSavers = (ref = app.chapterRef) => state.savers.filter((save) => save.pending && save.ref === ref);
 const pendingOwnedFinals = (ref = app.chapterRef) => state.finalWindows.filter((window) => window.pending && window.ref === ref && (window.debtAtRequest || !window.browserAtRequest || window.acquiredRust));
 function settlementReceipt() {
-  if (!live() || state.pending.size || state.publicRequests.some((request) => request.pending) || state.savers.some((save) => save.pending) || pendingOwnedFinals().length ||
+  if (!live() || pendingUnderlyingOwned().length || state.pending.size || state.publicRequests.some((request) => request.pending) || state.savers.some((save) => save.pending) || pendingOwnedFinals().length ||
       relevantTimers().length || hand.writes.length || firstFitChanges()?.keeping || !app.saved || app.saveFailed) return null;
   const rec = JSON.parse(onDisk());
   const current = documentNow();
@@ -632,7 +823,9 @@ function settlementReceipt() {
   try { for (const chapter of chapters) choicesOnDisk(chapter, 'settlement receipt retains every historical choice'); }
   catch (error) { if (error instanceof Broken) return null; throw error; }
   return { kind: currentDocument ? 'current-document' : 'untouched-opened', chapterId: c.id, ref: app.chapterRef, refToken: refToken(app.chapterRef), order: ++state.nextObservation,
-    chapter: onDisk(), text: textOnDisk(), writes: hand.began.length, at: Date.now(), event: state.event };
+    chapter: onDisk(), text: textOnDisk(), writes: hand.began.length, at: Date.now(), event: state.event,
+    chapterPath, textPath: translationsPath, identityAtSettlement: { projectId: app.chapterRef.projectId, chapterId: app.chapterRef.chapterId, mode: app.chapterMode, typesetting: copy(app.typesetting), pages: documentNow().map(({ id, file, cleaned }) => ({ id, file, cleaned })) }, choiceCut: copy([...state.choices].map(([id, choices]) => [id, [...choices]])),
+    physicalCut: chapters.map((chapter) => ({ chapterId: chapter.id, chapter: fsx._tree.files.get(paths(chapter).chapter), text: fsx._tree.files.get(paths(chapter).text) })) };
 }
 const live = () => state.open && app.loaded && app.chapterRef?.chapterId === c.id;
 const copy = (v) => JSON.parse(JSON.stringify(v));
@@ -642,6 +835,12 @@ function adopt(ch) {
   ({ chapter: chapterPath, text: translationsPath } = paths(ch));
 }
 function resetFiles() {
+  // Never erase an actually outstanding underlying final at a new fixture.
+  state.underlyingSettles = state.underlyingSettles.filter((receipt) => receipt.pending);
+  engineObservations.operations = engineObservations.operations.filter((operation) => operation.pending);
+  engineObservations.factories = engineObservations.factories.filter((factory) => factory.pending || factory.engine === textEngine());
+  engineObservations.syncs = engineObservations.syncs.filter((owner) => !owner.disposed);
+  engineObservations.faces = engineObservations.faces.filter((call) => call.pending);
   state.choices.clear();
   state.savers = [];
   state.retirements.clear();
@@ -723,7 +922,7 @@ function finalWindow(kind) {
     cleanAtRequest: !state.pending.size && !state.publicRequests.some((request) => request.pending) && !state.finalWindows.some((window) => window.pending) && !pendingSavers().length && !hand.writes.length && !firstFitChanges()?.keeping,
     retirement: state.retirements.get(c.id), saver: null, answer: null,
     browserAtRequest: engineSwitch.phase === 'off' && textEngine()?.id === 'browser',
-    debtAtRequest: state.rustDebt.has(c.id), acquiredRust: false,
+    debtAtRequest: state.rustDebt.has(c.id), historicalDebtAtRequest: [...state.rustDebt], acquiredRust: false,
     snapshot: null, heldWriter: null, laterChoices: new Map(), timer: null, counted: false,
   };
   state.finalWindows.push(window);
@@ -743,20 +942,21 @@ function invocationAt(path) {
   if (!save.snapshot && (path !== p.chapter || save.ref !== app.chapterRef)) return null;
   return save;
 }
-function finalSnapshot(path, text, writer = null) {
+function finalSnapshot(path, text, writer = null, write = null) {
   const save = invocationAt(path);
   if (!save) return;
-  if (writer) Object.assign(writer, { saverSerial: save.serial, ref: save.ref, refToken: save.refToken });
+  if (writer) Object.assign(writer, { saverSerial: save.serial, ref: save.ref, refToken: save.refToken, rawWriteSerial: write?.serial, startOrder: write?.startOrder, at: write?.at });
   const p = paths(chapters.find((chapter) => chapter.id === save.chapterId));
   if (path === p.chapter && !save.snapshot) {
     Object.assign(hand.began.at(-1), { ref: save.ref, refToken: save.refToken, saverSerial: save.serial });
     save.snapshot = { chapter: text, text: null, chapterPath: p.chapter, textPath: p.text,
       writeIndex: hand.began.length - 1, saverSerial: save.serial, refToken: save.refToken,
+      chapterStartOrder: write?.startOrder, chapterRawWriteSerial: write?.serial,
       earlierChoices: copy([...state.choices.get(save.chapterId) ?? []]),
       startedBrowser: save.browser, debtAtSnapshot: state.rustDebt.has(save.chapterId), at: Date.now() };
   }
   if (!save.snapshot) return;
-  if (path === p.text && save.snapshot.text == null) save.snapshot.text = text;
+  if (path === p.text && save.snapshot.text == null) { save.snapshot.text = text; save.snapshot.textStartOrder = write?.startOrder; save.snapshot.textRawWriteSerial = write?.serial; }
   if (save.window && !save.window.attributionAmbiguous) {
     save.window.snapshot = save.snapshot;
     if (writer) save.window.heldWriter = writer;
@@ -846,8 +1046,12 @@ function observedForcedExit(window, ch) {
   if (!window || window.attributionAmbiguous || window.kind !== 'leave' || window.chapter.id !== ch.id || window.answer !== true ||
       window.ref !== app.chapterRef || request?.answer !== true || request.where !== 'editor' || !force ||
       force.order < request.serial || force.order > request.replyOrder) return null;
-  const prior = state.finalWindows.findLast((old) => old !== window && old.ref === window.ref && old.publicRequest?.answer === false &&
-    old.publicRequest.replyOrder < request.replyOrder && old.publicRequest.emissions.some((emission) => emission.currentIdentity &&
+  // A refusal which arrives after this request started cannot authorize it.
+  // Generation is the observed public-operation cycle; no private documentTurn is inferred.
+  const prior = state.finalWindows.findLast((old) => old !== window && old.ref === window.ref &&
+    old.generation === window.generation && old.publicRequest?.generation === request.generation &&
+    old.publicRequest?.ref === request.ref && old.publicRequest?.where === 'editor' && old.publicRequest?.answer === false &&
+    old.publicRequest.replyOrder < request.serial && old.publicRequest.emissions.some((emission) => emission.currentIdentity &&
       emission.message.startsWith('Could not save: staying in the editor.')));
   if (!prior) return null;
   const failures = state.savers.filter((save) => save.ref === window.ref && save.failed === 'disk full' &&
@@ -855,8 +1059,8 @@ function observedForcedExit(window, ch) {
   if (failures.length !== 2 || failures[0].publicRequestSerial !== prior.publicRequest.serial ||
       failures[1].publicRequestSerial !== request.serial || failures[0].finishOrder >= failures[1].finishOrder || !failures.every((save) => state.failedWriters.some((writer) =>
         writer.ref === window.ref && writer.saverSerial === save.serial)) || state.savers.some((save) => save.ref === window.ref &&
-        save.bothFileReceipt?.order > failures[0].finishOrder && save.bothFileReceipt.order < failures[1].finishOrder) ||
-      state.publicRequests.some((reply) => reply.ref === window.ref && reply.answer === true &&
+        save.bothFileReceipt?.order > failures[0].finishOrder && save.bothFileReceipt.order < force.order) ||
+      state.publicRequests.some((reply) => reply.ref === window.ref && (reply.answer === true || reply.fulfilled === true) &&
         reply.replyOrder > failures[0].finishOrder && reply.replyOrder < force.order)) return null;
   choicesLive('forced exit preserves all intent in memory');
   try { choicesOnDisk(ch, 'force is not a durable successful exit'); }
@@ -873,15 +1077,34 @@ function observedForcedExit(window, ch) {
   return null;
 }
 
+
+// Model reactions remain distinct from each public operation’s original promise.
+function pendingOperationFacts() {
+  return [...state.pending].map((promise) => {
+    const request = state.publicRequests.find((request) => request.originalPromise === promise);
+    return { publicRequestSerial: request?.serial ?? null, kind: request?.kind ?? null, unmatched: !request, modelReactionPending: true, publicRequestPending: request?.pending ?? null, publicRequestFulfilled: request?.fulfilled ?? null };
+  });
+}
+
+
+
+
 function deferObservedBoundary(window, ch) {
-  const witness = observedForcedExit(window, ch) ?? observedBrowserCancellation(window, ch) ?? observedBrowserStaleFinal(window, ch);
+  // Only the actual deliberate force escape is an unfinished prefix.
+  // A fulfilled open or TRUE ordinary leave with missing pre-reply choices
+  // remains a failure even when its later writer or model reaction is pending.
+  let witness = observedForcedExit(window, ch);
   if (!witness) return false;
-  // A current boundary cannot hide a loss on another historical chapter.
+  const ownedSerials = new Set(pendingUnderlyingOwned().map((receipt) => receipt.serial));
+  witness = { ...witness,
+    pendingOwnedUnderlyingSettles: underlyingSettleFacts().filter((receipt) => ownedSerials.has(receipt.serial)),
+    classificationCutModelReactions: pendingOperationFacts(), currentRustDebt: [...state.rustDebt],
+    completedInvariantOrder: false, debtRetired: false, incompletePrefix: true };
+  // Deliberate force cannot excuse a loss on another historical chapter.
   try { for (const other of chapters) if (other.id !== ch.id) choicesOnDisk(other, 'unrelated chapter before a classified prefix'); }
   catch (error) { if (error instanceof Broken) return false; throw error; }
   if (!window.counted) { window.counted = true; state.witnesses.push(witness); }
-  // A fully proven counterexample ends this order. Historical intent is not
-  // quarantined, and no later Rust stage inherits a broad browser exemption.
+  // Keep all intent, debt, pending work and the unexecuted tail as obligations.
   throw new DeferredBrowser(witness);
 }
 // A prior Rust turn is not ownership forever. Retirement requires actual
@@ -955,6 +1178,33 @@ async function open(bytes) {
 
 // Real library transitions can wait behind a held write. Request them without
 // draining it; subsequent writeLands/writeFails/time events decide their order.
+// Only the exact controlled failed writer and original rejected open may explain this error.
+// Generation-mismatched saver public attribution stays null; the actual underlying binding is required.
+function ownInjectedOpenFailure(operation, originalPromise, error) {
+  if (!operation || operation.kind !== 'open' || operation.originalPromise !== originalPromise ||
+      operation.fulfilled !== false || operation.rejectedReason !== error || operation.rejected == null) return false;
+  const injected = state.failedWriters.filter((writer) => writer.error === error);
+  if (injected.length !== 1) return false;
+  const writer = injected[0];
+  const saves = state.savers.filter((save) => save.serial === writer.saverSerial && save.ref === writer.ref &&
+    save.pending === false && save.failedReason === error && save.originalPromise);
+  if (saves.length !== 1) return false;
+  const save = saves[0];
+  const settles = state.underlyingSettles.filter((settle) => settle.serial === save.underlyingSettleSerial &&
+    settle.ref === save.ref && settle.ref === operation.ref && settle.publicRequestSerial === operation.serial &&
+    settle.pending === false && settle.rejected === true && settle.fulfilled === false && settle.error === error && settle.originalPromise);
+  if (settles.length !== 1) return false;
+  const settle = settles[0];
+  const snapshot = save.snapshot;
+  const rawWriteSerial = writer.path === snapshot?.chapterPath ? snapshot.chapterRawWriteSerial
+    : writer.path === snapshot?.textPath ? snapshot.textRawWriteSerial : null;
+  const startOrder = writer.path === snapshot?.chapterPath ? snapshot.chapterStartOrder
+    : writer.path === snapshot?.textPath ? snapshot.textStartOrder : null;
+  return writer.refToken === save.refToken && writer.rawWriteSerial != null && writer.rawWriteSerial === rawWriteSerial &&
+    writer.startOrder != null && writer.startOrder === startOrder &&
+    writer.order < save.finishOrder && save.finishOrder < settle.finishOrder && settle.finishOrder < operation.replyOrder;
+}
+
 async function requestOpen(index) {
   const target = chapters[index];
   const outgoing = live() ? c : null;
@@ -985,8 +1235,9 @@ async function requestOpen(index) {
     if (window) { window.pending = false; window.rejected = String(error.message ?? error); }
     if (error instanceof DeferredBrowser) state.deferred = error.witness;
     else if (error instanceof Broken) hand.broke ??= error.message;
-    // A failed leave-save makes the actual open refuse; the old document stays.
-    else if (!app.saveFailed) hand.broke ??= `opening: ${error.message}`;
+    // The catch may also receive an error thrown by the fulfilled-open reaction.
+    // The current document's indicator does not establish this older caller's failure.
+    else if (!ownInjectedOpenFailure(operation, request, error)) hand.broke ??= `opening: ${error?.message ?? error}`;
   }).finally(() => state.pending.delete(request));
   await pass(0);
   if (!held) await until(request).catch(() => {});
@@ -1098,8 +1349,12 @@ const EVENTS = {
   },
   writeFails() {
     const w = hand.writes.shift();
-    if (w) { seen.failed++; state.failedWriters.push({ order: ++state.nextObservation, ref: w.ref, saverSerial: w.saverSerial, path: w.path, bytes: w.bytes, at: Date.now() }); }
-    w?.fail(new Error('disk full'));
+    if (w) {
+      const error = new Error('disk full');
+      seen.failed++; state.failedWriters.push({ order: ++state.nextObservation, ref: w.ref, refToken: w.refToken, saverSerial: w.saverSerial,
+        rawWriteSerial: w.rawWriteSerial, startOrder: w.startOrder, path: w.path, bytes: w.bytes, at: Date.now(), error });
+      w.fail(error);
+    }
   },
   keep() {
     const changes = firstFitChanges();
@@ -1156,8 +1411,9 @@ for (const [field, change] of Object.entries(UNMARKED)) {
   EVENTS[`unmarked_${field}`] = async () => {
     if (!live() || !app.pages[0].boxes.length) return;
     if (engineSwitch.phase === 'off' && !state.rustDebt.has(c.id) && ['file', 'cleaned', 'order'].includes(field)) { seen.inapplicablePublicActions++; return; }
+    const priorFit = field === 'fit' ? canon(app.pages[0].boxes[0].fit) : null;
     change();
-    state.touched = true;
+    if (field !== 'fit' || priorFit !== canon(app.pages[0].boxes[0].fit)) state.touched = true;
     // Under Rust the old raw robustness action reaches its relayout boundary.
     // Under the browser a completed action uses its actual public API/gesture
     // completion. Raw probes below call change() directly with no completion.
@@ -1219,7 +1475,7 @@ async function cleanupModel() {
   state.timers.clear();
 }
 
-async function run(events) {
+async function run(events, privatePrepare = null) {
   resetHand();
   state.open = false;
   state.keep = null;
@@ -1227,6 +1483,7 @@ async function run(events) {
   state.finalWindows = [];
   state.witnesses = [];
   resetFiles();
+  if (privatePrepare) await privatePrepare();
   const stages = stageCounts();
   let at = '';
   let executed = 0;
@@ -1253,7 +1510,7 @@ async function run(events) {
     await rest();
     if (hand.broke) throw new Broken(hand.broke);
     if (state.deferred) throw new DeferredBrowser(state.deferred);
-    if (state.pending.size || state.publicRequests.some((request) => request.pending) || hand.writes.length || hand.fonts.length || hand.starts.length ||
+    if (state.underlyingSettles.some((receipt) => receipt.pending) || state.pending.size || state.publicRequests.some((request) => request.pending) || hand.writes.length || hand.fonts.length || hand.starts.length ||
         state.savers.some((save) => save.pending) || [...state.timers.values()].some((timer) => timer.pending && timer.relevant) ||
         firstFitChanges()?.keeping || engineSwitch.phase === 'starting' || waiting()) {
       throw new Broken('coming to rest: residual public transition, saver, writer, timer, font, engine start, or Keep');
@@ -1261,11 +1518,9 @@ async function run(events) {
     retireBrowserDebt();
     if (hand.broke) throw new Broken(hand.broke);
     if (live()) {
-      // No final rescue flush. The invariant belongs to Rust or actual save
-      // debt it still owns. The old browser autosave race remains deferred; actual
-      // leave/open boundaries still assert both files for every engine.
-      if (state.rustDebt.has(c.id) || engineSwitch.mode === 'rust') checkFile('at rest');
-      else seen.browserDeferred++;
+      // No rescue flush: every completed browser or Rust order must satisfy
+      // the existing BOTH-file, ALL-choice and verified untouched-opened rules.
+      checkFile('at rest');
       choicesLive('at rest');
       // Keep is one write: pressed over a chapter with nothing of the user's
       // unsaved, and with nothing but time, fonts and the disk happening
@@ -1289,9 +1544,10 @@ async function run(events) {
     const timerRecord = (timer) => timer && Object.fromEntries(Object.entries(timer).filter(([key]) => key !== 'id' && key !== 'ref'));
     state.lastRunProof = copy({ boundaryOrder: state.nextObservation, fullOrder: [...events], executedPrefix: events.slice(0, executed), unexecutedTail: events.slice(executed),
       stages: copy(stages), windows: state.finalWindows.map((w) => ({ kind: w.kind, chapterId: w.chapter.id, refToken: w.refToken, generation: w.generation, targetId: w.targetId, fulfilled: w.fulfilled, saverSerials: w.saverSerials, attributionAmbiguous: w.attributionAmbiguous, browserAtRequest: w.browserAtRequest,
-        currentIdentity: w.ref === app.chapterRef, debtAtRequest: w.debtAtRequest, acquiredRust: w.acquiredRust, pending: w.pending, cleanAtRequest: w.cleanAtRequest,
+        currentIdentity: w.ref === app.chapterRef, debtAtRequest: w.debtAtRequest, historicalDebtAtRequest: w.historicalDebtAtRequest, acquiredRust: w.acquiredRust, pending: w.pending, cleanAtRequest: w.cleanAtRequest,
         publicRequest: w.publicRequest && (({ ref, incomingRef, originalPromise, window, ...request }) => request)(w.publicRequest), saverSerial: w.saver?.serial, replyAt: w.replyAt, retirement: w.retirement && (({ ref, ...receipt }) => receipt)(w.retirement), answer: w.answer, toast: w.toast, rejected: w.rejected, snapshot: w.snapshot,
         laterChoices: [...w.laterChoices], timer: timerRecord(w.timer) })), witnesses: copy(state.witnesses),
+      underlyingSettles: underlyingSettleFacts(), engineOwnership: engineOwnershipFacts(),
       publicRequests: state.publicRequests.map(({ ref, incomingRef, originalPromise, window, ...request }) => ({ ...request, currentIdentity: ref === app.chapterRef })),
       savers: state.savers.map(({ ref, originalPromise, window, ...save }) => ({ ...save, currentIdentity: ref === app.chapterRef })),
       timers: [...state.timers.values()].map(timerRecord),
@@ -1301,7 +1557,8 @@ async function run(events) {
         liveDocument: copy(documentNow()), liveTranslations: buildTextJson(app.pages), typesetting: copy(app.typesetting),
         mode: app.chapterMode, engine: { mode: engineSwitch.mode, phase: engineSwitch.phase, id: textEngine()?.id },
         openedRefCurrent: state.openedRef === app.chapterRef, firstFit: firstFitChanges(), gates: { fonts: hand.fonts.length, starts: hand.starts.length, writers: hand.writes.length }, touched: state.touched, saved: app.saved, saveFailed: app.saveFailed,
-        pendingTransitions: state.pending.size, heldWriters: hand.writes.map(({ path, bytes, saverSerial, refToken }) => ({ path, bytes, saverSerial, refToken })),
+        pendingTransitions: state.pending.size, heldWriters: hand.writes.map(({ path, bytes, saverSerial, refToken, rawWriteSerial, startOrder, at }) => ({ path, bytes, saverSerial, refToken, rawWriteSerial, startOrder, at })),
+        modelReactionsAtRunCut: pendingOperationFacts(),
         choices: [...state.choices].map(([id, choices]) => [id, [...choices]]), rustDebt: [...state.rustDebt],
         failedWriters: state.failedWriters.map(({ ref, ...writer }) => writer),
         physical: chapters.map((ch) => ({ chapterId: ch.id, chapter: fsx._tree.files.get(paths(ch).chapter), text: fsx._tree.files.get(paths(ch).text) })) } });
@@ -1369,21 +1626,24 @@ const STEPS = Number(process.env.MODEL_STEPS ?? 30);
 const ONE = process.env.MODEL_SEED ? Number(process.env.MODEL_SEED) : null;
 const FIRST = 20261009;
 
-// The measured original1358 prefix reaches a fresh browser ref with saved
-// 48px geometry and a 70px live reflow. All prior user choices have landed.
-// Leave the final receipt for the named control to accept or refuse.
+// A named receipt fixture, separate from original1358's preserved schedule.
+// Establish actual other-chapter intent, then reopen literal saved geometry
+// under the browser after a prior Rust cycle at this same durable identity.
 async function openedBrowserReflow() {
   resetHand(); state.open = false;
-  const prefix = sequence(20261358, 30).slice(0, 20);
-  for (const [index, name] of prefix.entries()) {
-    state.event = name;
-    await EVENTS[name](); await pass(0);
-    if (index < prefix.length - 1) retireBrowserDebt();
-    choicesLive(`browser reflow setup after ${name}`);
-  }
+  await EVENTS.openEmpty();
+  app.pages.reverse(); choose('order', app.pages.map((pg) => pg.id));
+  markUnsaved(); await pass(DOC_SAVE_MS);
+  choicesOnDisk(chapters[2], 'actual other-chapter order before reflow');
+  await EVENTS.open1(); await EVENTS.switchOn(); await EVENTS.engineStarts();
+  await open(V2); await EVENTS.switchOff();
+  const raw = JSON.parse(V1);
+  Object.assign(raw.pages[0].boxes.find((box) => box.id === 'late'), { text: 'AAAA BBBB CC', h: 48 });
+  await open(JSON.stringify(raw));
+  const late = app.pages[0].boxes.find((box) => box.id === 'late');
   expect(state.touched).toBe(false);
-  expect(JSON.parse(onDisk()).pages[0].boxes[3].h).toBe(48);
-  expect(app.pages[0].boxes[3].h).toBe(70);
+  expect(JSON.parse(onDisk()).pages[0].boxes.find((box) => box.id === 'late').h).toBe(48);
+  expect(late.h).toBe(70);
   expect(state.rustDebt.has(c.id)).toBe(true);
 }
 
@@ -1409,9 +1669,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       if (!why) { seen.completedInvariantOrders++; continue; }
       if (why.deferred) {
         const category = why.deferred.category;
-        if (category === 'exact-browser-cancellation') seen.exactBrowserWitnessOrders++;
-        else if (category === 'exact-browser-stale-final') seen.staleBrowserFinalWitnessOrders++;
-        else if (category === 'explicit-forced-exit') seen.forcedExitWitnessOrders++;
+        if (category === 'explicit-forced-exit') seen.forcedExitWitnessOrders++;
         else throw new Error(`unknown classification ${category}`);
         const least = await shrink(events, category);
         classifiedWitnesses.push({ seed, original: proof, shrunkOrder: least.events,
@@ -1429,7 +1687,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       if (!out.startsWith('/Users/caved/dev/manga-typesetter-wt/tp-data/reports/')) throw new Error('MODEL_WITNESS_OUT must be a fresh private reports file');
       writeFileSync(out, JSON.stringify({ summary: seen, witnesses: classifiedWitnesses, unknowns: classifiedUnknowns }, null, 2), { flag: 'wx' });
     } else if (classifiedWitnesses.length) {
-      console.log(`exact browser witness orders: ${classifiedWitnesses.length}; full order/prefix/tail and both-file records require explicit MODEL_WITNESS_OUT`);
+      console.log(`unfinished explicit-force orders: ${classifiedWitnesses.length}; full order/prefix/tail and both-file records require explicit MODEL_WITNESS_OUT`);
     }
     if (process.env.MODEL_REPORT) console.log(`the model: ${JSON.stringify(seen)}`);
     expect(broken.join('\n'), `replay one with MODEL_SEED=<seed>`).toBe('');
@@ -1517,6 +1775,44 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally { await cleanupModel(); }
   });
 
+  it('assigning the already saved canonical fit retains untouched first-fit bytes and every historical choice', async () => {
+    resetHand(); state.open = false;
+    try {
+      const raw = JSON.parse(V1);
+      const fit = { kind: 'rect', x: 0, y: 0, w: 120, h: 80 };
+      raw.pages[0].boxes[0].fit = fit;
+      await open(JSON.stringify(raw)); choose('fit', fit);
+      const history = copy([...state.choices].map(([id, choices]) => [id, [...choices]]));
+      const chapter = onDisk(), text = textOnDisk(), writes = hand.began.length;
+      await EVENTS.switchOn(); await EVENTS.engineStarts();
+      const debt = [...state.rustDebt];
+      await EVENTS.unmarked_fit(); await pass(DOC_SAVE_MS);
+      expect(state.touched, 'same canonical user field is not a new edit').toBe(false);
+      expect(onDisk()).toBe(chapter); expect(textOnDisk()).toBe(text); expect(hand.began.length).toBe(writes);
+      expect([...state.choices].map(([id, choices]) => [id, [...choices]])).toEqual(history);
+      expect([...state.rustDebt]).toEqual(debt);
+      expect(state.keep).toBe(null);
+      expect(() => choicesOnDisk(c, 'same fit retains all independent intent')).not.toThrow();
+      expect(() => checkFile('same-fit first-fit exemption')).not.toThrow();
+    } finally { await cleanupModel(); }
+  });
+
+  it.each([null, { kind: 'rect', x: 3, y: 4, w: 90, h: 60 }])('a genuinely different fit %j is touched and naturally persists BOTH at version2', async (priorFit) => {
+    resetHand(); state.open = false;
+    try {
+      const raw = JSON.parse(V1); raw.pages[0].boxes[0].fit = priorFit;
+      await open(JSON.stringify(raw)); hand.fontHeld = false;
+      await EVENTS.switchOn(); await EVENTS.engineStarts();
+      await EVENTS.unmarked_fit();
+      expect(state.touched).toBe(true);
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      expect(JSON.parse(onDisk()).pages[0].boxes[0].fit).toEqual({ kind: 'rect', x: 0, y: 0, w: 120, h: 80 });
+      expect(() => choicesOnDisk(c, 'true fit edit remains required in BOTH')).not.toThrow();
+      expect(() => checkFile('true fit edit version')).not.toThrow();
+    } finally { await cleanupModel(); }
+  });
+
   it('a saved browser choice starts a new independent untouched Rust baseline without erasing intent', async () => {
     const events = ['open1', 'unmarkedHandle', 'debounce', 'switchOn'];
     expect(await run(events)).toBe(null);
@@ -1528,6 +1824,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
   it('an untouched browser reflow retires old debt from its exact opened receipt and starts a Rust baseline without losing history', async () => {
     try {
       await openedBrowserReflow();
+      const baselineCount = state.baselineReceipts.length;
       const choices = copy([...state.choices].map(([id, values]) => [id, [...values]]));
       const opened = onDisk(); const openedText = textOnDisk(); const writes = hand.began.length;
       expect(state.openedRef).toBe(app.chapterRef);
@@ -1537,8 +1834,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(state.retirements.get(c.id)).toMatchObject({ kind: 'untouched-opened', ref: app.chapterRef, chapter: opened, text: openedText, writes });
       expect(state.browserSettlements.get(c.id)?.retiredRustDebt).toBe(true);
       await EVENTS.switchOn();
-      expect(state.baselineReceipts).toHaveLength(1);
-      expect(state.baselineReceipts[0]).toMatchObject({ kind: 'untouched-opened', ref: state.openedRef, chapter: opened, text: openedText, writes });
+      expect(state.baselineReceipts).toHaveLength(baselineCount + 1);
+      expect(state.baselineReceipts.at(-1)).toMatchObject({ kind: 'untouched-opened', ref: state.openedRef, chapter: opened, text: openedText, writes });
       expect(state.touched).toBe(false);
       expect(copy([...state.choices].map(([id, values]) => [id, [...values]]))).toEqual(choices);
       expect(onDisk()).toBe(opened); expect(textOnDisk()).toBe(openedText); expect(hand.began).toHaveLength(writes);
@@ -1550,6 +1847,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       let timer;
       try {
         await openedBrowserReflow();
+        const priorBaselines = [...state.baselineReceipts];
         if (risk === 'chapter bytes') fsx._tree.files.set(chapterPath, onDisk() + ' ');
         else if (risk === 'translation bytes') fsx._tree.files.set(translationsPath, textOnDisk() + ' ');
         else if (risk === 'opened ref') state.openedRef = { ...app.chapterRef };
@@ -1577,7 +1875,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
         expect(state.rustDebt.has(c.id)).toBe(true);
         expect(state.browserSettlements.get(c.id)).toBeUndefined();
         await EVENTS.switchOn();
-        expect(state.baselineReceipts).toEqual([]);
+        expect(state.baselineReceipts).toEqual(priorBaselines);
       } finally { if (timer) clearTimeout(timer); await cleanupModel(); }
     });
 
@@ -1725,7 +2023,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       } finally { await cleanupModel(); }
     });
 
-  it('an overlapping public open binds its own later snapshot and preserves the exact cancellation verdict', async () => {
+  it('an overlapping public open waits for both files containing every later choice', async () => {
     resetHand(); state.open = false; state.deferred = null;
     try {
       await open(V1); await EVENTS.editLine();
@@ -1738,10 +2036,12 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(JSON.parse(hand.writes[0].bytes).pages[0].lines[0].en).toBe('AAAA');
       await EVENTS.editLine();
       hand.writes.shift().ok(); await pass(0);
-      hand.writes.shift().ok(); await until(state.lastOpen); await pass(0);
-      expect(state.deferred?.category, 'only this public open actually cancels its later choice').toBe('exact-browser-cancellation');
-      expect(JSON.parse(state.deferred.physical.chapter).pages[0].lines[0].en).toBe('AAAA');
-      expect(JSON.parse(state.deferred.physical.text).pages[0].lines[0].en).toBe('AAAA');
+      hand.writes.shift().ok(); await pass(0);
+      expect(state.publicRequests.find((request) => request.originalPromise === state.lastOpen).pending, 'old BOTH cannot approve a later choice').toBe(true);
+      expect(() => choicesOnDisk(window.chapter, 'old receipt is still behind')).toThrow(Broken);
+      await rest(); await until(state.lastOpen);
+      expect(state.deferred).toBe(null);
+      choicesOnDisk(window.chapter, 'completed actual open retains every later choice');
       expect(window.saver.publicRequestSerial).toBe(window.publicRequest.serial);
       expect(window.saver.originalPromise).not.toBe(earlier);
       expect(window.cleanAtRequest).toBe(false);
@@ -1758,12 +2058,13 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.open2();
       await EVENTS.editLine();
       hand.writes.shift().ok(); await pass(0);
-      hand.writes.shift().ok(); await until(state.lastOpen); await pass(0);
+      hand.writes.shift().ok(); await pass(0);
       expect(state.deferred, 'a late same-key waiver must not conceal the earlier missing AAA').toBe(null);
-      expect(hand.broke).toContain('user translation choice');
       const window = state.finalWindows.at(-1);
       expect(earlierChoicesPresent(window, window.snapshot.chapter, window.snapshot.text)).toBe(false);
       expect(window.snapshot.earlierChoices.find(([, choice]) => choice.kind === 'translation')[1].value).toBe('AAA');
+      await rest(); await until(state.lastOpen);
+      choicesOnDisk(window.chapter, 'later actual follow-up does not erase the earlier snapshot evidence');
     } finally { await cleanupModel(); }
   });
 
@@ -1801,53 +2102,309 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(textOnDisk()).toBe(window.snapshot.text);
       await EVENTS.editLine();
       saverObserver.invocationScope.run(clearKind === 'expired invocation' ? finished : undefined, () => markSaved());
-      hand.writes.shift().ok(); await until(state.lastOpen); await pass(0);
+      hand.writes.shift().ok(); await pass(0);
+      expect(state.publicRequests.find((request) => request.originalPromise === state.lastOpen).pending).toBe(true);
+      expect(() => choicesOnDisk(window.chapter, 'unrelated markSaved does not approve stale bytes')).toThrow(Broken);
       expect(state.deferred, 'only the still-active exact final saver may prove this cancellation').toBe(null);
-      expect(hand.broke).toContain('user translation choice');
       expect(window.timer).toMatchObject({ cancelledByMarkSaved: true, saverContextPending: false, clearerSource: 'markSaved' });
       expect(observedBrowserCancellation(window, window.chapter)).toBe(null);
+      await rest(); await until(state.lastOpen);
+      choicesOnDisk(window.chapter, 'actual final repairs a misleading clear before returning');
     } finally { await cleanupModel(); }
   });
 
-  it('an incoming LOAD timer clear preserves the original strict open loss and cannot claim the outgoing saver', async () => {
-    const result = await run(sequence(20261094, 30));
-    expect(typeof result, 'pending newer outgoing work is not an old-final cancellation proof').toBe('string');
+  it('the original incoming LOAD order preserves every outgoing choice before adoption', async () => {
+    const events = sequence(20261094, 30);
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.unexecutedTail).toEqual([]);
     expect(state.lastRunProof.witnesses).toEqual([]);
-    const loadClears = state.lastRunProof.timers.filter((timer) => timer.source === 'document')
-      .flatMap((timer) => timer.clears ?? []).filter((clear) => clear.pendingBefore && clear.clearerSource === 'markSaved' && /at loadChapter \(/.test(clear.clearerStack));
-    expect(loadClears.length).toBeGreaterThan(0);
-    expect(loadClears.some((clear) => clear.saverContextPending)).toBe(false);
     expect(state.lastRunProof.facts.choices.length).toBeGreaterThan(0);
   });
 
-  it.each([[20261094, 'chapter'], [20262168, 'translations']])('original%s proof retains its actual held %s boundary before cleanup', async (seed, heldFile) => {
-    const result = await run(sequence(seed, 30));
-    expect(typeof result, 'pending browser work remains UNKNOWN, with no new category').toBe('string');
-    const proof = state.lastRunProof;
-    const held = proof.facts.heldWriters.find((writer) => writer.path.endsWith(`/${heldFile}.json`));
-    expect(held, 'the original boundary must have an actual held physical writer').toBeDefined();
-    const save = proof.savers.find((save) => save.serial === held.saverSerial);
-    // Cleanup really completes this started outgoing writer. The retained proof
-    // must still describe its earlier public boundary, not the cleanup receipt.
-    if (heldFile === 'chapter') {
-      expect(save.snapshot.text, 'held chapter had not started its translations at the boundary').toBe(null);
-      expect(save.physicalReceipts ?? [], 'held chapter had no physical landing at the boundary').toEqual([]);
-    } else {
-      expect(save.physicalReceipts, 'only the newer chapter had physically landed at the boundary').toHaveLength(1);
-      expect(save.physicalReceipts[0]).toMatchObject({ path: save.snapshot.chapterPath, bytes: save.snapshot.chapter });
-      expect(save.snapshot.text).toBe(held.bytes);
-    }
-    expect(save.bothFileReceipt, 'cleanup cannot supply a boundary BOTH receipt').toBeUndefined();
-    const completed = state.savers.find((actual) => actual.serial === save.serial);
-    expect(completed.snapshot.text, 'cleanup actually observed this writer’s translations later').not.toBe(null);
-    expect(completed.physicalReceipts).toHaveLength(2);
-    expect(proof.timers.flatMap((timer) => timer.clears ?? []).every((clear) => clear.cancelOrder <= proof.boundaryOrder)).toBe(true);
-    expect(save).not.toBe(completed);
-    expect(save.snapshot).not.toBe(completed.snapshot);
-    expect(proof.witnesses).toEqual([]);
-    const receipt = proof.browserSettlements.find(([id]) => id === save.chapterId)?.[1];
-    expect(receipt.refToken, 'outgoing settlement stays tied to that actual old ref after adoption').toBe(save.refToken);
-    expect(receipt.order).toBeLessThan(save.serial);
+  it.each([[20261094, 'chapter'], [20262168, 'translations']])('original%s completes its formerly held %s boundary with every retained choice', async (seed) => {
+    const events = sequence(seed, 30);
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.unexecutedTail).toEqual([]);
+    expect(state.lastRunProof.witnesses).toEqual([]);
+    expect(state.lastRunProof.facts.gates).toEqual({ fonts: 0, starts: 0, writers: 0 });
+  });
+
+  it.each(['chapter', 'translations'])('a genuinely pending public final proof retains its actual held %s cut before cleanup', async (heldFile) => {
+    const originalWriteLands = EVENTS.writeLands;
+    const events = ['open1', 'holdWrites', 'holdTranslations', 'leave', 'editLine', 'writeLands'];
+    let captured;
+    try {
+      EVENTS.writeLands = async () => {
+        originalWriteLands(); await pass(0);
+        originalWriteLands(); await pass(0);
+        if (heldFile === 'translations') { originalWriteLands(); await pass(0); }
+        const held = hand.writes[0];
+        expect(held.path.endsWith(`/${heldFile}.json`)).toBe(true);
+        const save = state.savers.find((save) => save.serial === held.saverSerial);
+        expect(state.publicRequests.find((request) => request.kind === 'leave').pending, 'required follow-up must precede TRUE').toBe(true);
+        if (heldFile === 'chapter') {
+          expect(save.snapshot.text).toBe(null);
+          choicesIn(save.chapterId, JSON.parse(held.bytes), null, 'pending actual chapter contains independent choices', new Set(), false);
+        } else {
+          choicesIn(save.chapterId, JSON.parse(onDisk()), JSON.parse(held.bytes), 'actual chapter and held TX contain independent choices');
+        }
+        captured = { serial: save.serial, clears: [...state.timers.values()].flatMap((timer) => timer.clears ?? []).length };
+        hand.broke = 'named genuine pending cut';
+      };
+      expect(await run(events)).toBe('named genuine pending cut');
+      const saved = state.lastRunProof.savers.find((save) => save.serial === captured.serial);
+      const completed = state.savers.find((save) => save.serial === captured.serial);
+      if (heldFile === 'chapter') {
+        expect(saved.snapshot.text, 'cleanup must not supply unstarted TX').toBe(null);
+        expect(saved.physicalReceipts ?? []).toEqual([]);
+      } else {
+        expect(saved.physicalReceipts).toHaveLength(1);
+        expect(saved.snapshot.text).not.toBe(null);
+      }
+      expect(saved.bothFileReceipt).toBeUndefined();
+      expect(completed.physicalReceipts).toHaveLength(2);
+      expect(completed.snapshot.text).not.toBe(null);
+      expect(state.lastRunProof.timers.flatMap((timer) => timer.clears ?? [])).toHaveLength(captured.clears);
+      expect(saved.snapshot).not.toBe(completed.snapshot);
+    } finally { EVENTS.writeLands = originalWriteLands; }
+  });
+
+  it('private underlying direct settle preserves the exact options, returned promise and rejected Error', async () => {
+    resetHand(); state.open = false;
+    let pending;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); hand.fontHeld = false;
+      await open(V1); await EVENTS.editLine(); hand.hold = true;
+      const options = { settle: true };
+      pending = flushSave(options); pending.catch(() => {}); await pass(0);
+      const receipt = state.underlyingSettles.find((receipt) => receipt.originalPromise === pending);
+      expect(receipt, 'direct public final must remain owned while its actual writer is held').toBeDefined();
+      expect(pendingUnderlyingOwned()).toContain(receipt);
+      expect(settlementReceipt(), 'held underlying final cannot retire through a saved-looking receipt').toBe(null);
+      const error = new Error('exact direct underlying failure');
+      hand.writes.shift().fail(error);
+      await expect(pending).rejects.toBe(error); await pass(0);
+      expect(receipt.pending).toBe(false); expect(receipt.error).toBe(error);
+      expect(receipt.originalArgs[0]).toBe(options);
+      expect(receipt.originalPromise).toBe(pending);
+    } finally { await cleanupModel(); if (pending) await until(pending).catch(() => {}); }
+  });
+
+  it('private a false timed-out outer leave cannot release its still-pending underlying Rust final on another ref', async () => {
+    resetHand(); state.open = false;
+    let outer, actual;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); hand.fontHeld = false;
+      await open(V1); await EVENTS.editLine(); hand.hold = true;
+      const outgoing = app.chapterRef;
+      outer = flushBeforeLeaving('editor'); await pass(0);
+      const request = state.publicRequests.find((request) => request.originalPromise === outer);
+      const receipt = state.underlyingSettles.find((receipt) => receipt.publicRequestSerial === request.serial);
+      actual = receipt.originalPromise; actual.catch(() => {});
+      await pass(10000);
+      expect(await until(outer)).toBe(false);
+      expect(receipt.pending, 'timeout is the outer answer, not an underlying final settlement').toBe(true);
+      expect(pendingUnderlyingOwned()).toContain(receipt);
+      closeChapter(); state.open = false; await EVENTS.switchOff(); adopt(chapters[1]); await open(V2);
+      expect(app.chapterRef).not.toBe(outgoing);
+      expect(settlementReceipt(), 'a quiet incoming chapter cannot hide an old-ref owned final').toBe(null);
+      retireBrowserDebt(); expect(state.browserSettlements.get(c.id)).toBeUndefined();
+      expect(receipt.ref).toBe(outgoing); expect(receipt.publicRequestSerial).toBe(request.serial);
+      expect(request.pending).toBe(false); expect(request.answer).toBe(false);
+      expect(state.pending.has(actual), 'underlying ownership is separate from model reaction membership').toBe(false);
+    } finally { await cleanupModel(); if (actual) await until(actual).catch(() => {}); }
+  });
+
+  it.each(['editor', 'quit'])('a stale %s timeout reports the previous chapter without changing incoming Keep or confirming discard', async (where) => {
+    resetHand(); state.open = false;
+    let outer, kept;
+    let keepStatus = 'pending';
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts();
+      await open(V1); await EVENTS.editLine(); hand.hold = true;
+      const outgoing = c, outgoingRef = app.chapterRef;
+      outer = flushBeforeLeaving(where); await pass(0);
+      const request = state.publicRequests.find((request) => request.originalPromise === outer);
+      const receipt = state.underlyingSettles.find((receipt) => receipt.publicRequestSerial === request.serial);
+      expect(hand.writes).toHaveLength(1);
+      const oldBytes = [onDisk(), textOnDisk()];
+      closeChapter(); state.open = false; adopt(chapters[1]); hand.fontHeld = true;
+      await open(V1);
+      const incomingRef = app.chapterRef, incomingBytes = [onDisk(), textOnDisk()];
+      expect(incomingRef).not.toBe(outgoingRef);
+      expect(waiting()).toBe(true);
+      kept = keepFirstFit();
+      kept.then(() => { keepStatus = 'fulfilled'; }, () => { keepStatus = 'rejected'; });
+      await pass(10000);
+      expect(await until(outer)).toBe(false);
+      expect(app.toast.msg, 'old timeout must not describe incoming editor work').toContain('previous chapter');
+      expect(app.toast.msg).not.toMatch(/staying in the editor|stay in the editor|ask to leave again|discard/);
+      expect(app.chapterRef).toBe(incomingRef); expect(app.saveFailed).toBe(false);
+      expect(keepStatus, 'old timeout cannot settle or reject incoming Keep').toBe('pending');
+      expect(firstFitChanges().keeping).toBe(true);
+      expect([onDisk(), textOnDisk()]).toEqual(incomingBytes);
+      expect([fsx._tree.files.get(paths(outgoing).chapter), fsx._tree.files.get(paths(outgoing).text)]).toEqual(oldBytes);
+      expect(receipt.pending).toBe(true); expect(receipt.ref).toBe(outgoingRef);
+      expect(request.answer).toBe(false);
+      expect(request.emissions.some((emission) => emission.message.includes('discard'))).toBe(false);
+    } finally { await cleanupModel(); await Promise.allSettled([outer, kept].filter(Boolean)); }
+  });
+
+  it('private an actual pending browser settle acquires Rust ownership only on its captured ref', async () => {
+    resetHand(); state.open = false;
+    let pending;
+    try {
+      await open(V1); await EVENTS.editLine(); hand.hold = true;
+      pending = flushSave({ settle: true }); pending.catch(() => {}); await pass(0);
+      const receipt = state.underlyingSettles.find((receipt) => receipt.originalPromise === pending);
+      expect(pendingUnderlyingOwned()).not.toContain(receipt);
+      await EVENTS.switchOn();
+      expect(pendingUnderlyingOwned(), 'actual reacquisition retains the final until its own promise settles').toContain(receipt);
+      expect(settlementReceipt()).toBe(null);
+      expect(receipt.acquiredRust).toBe(true); expect(receipt.ref).toBe(app.chapterRef);
+    } finally { await cleanupModel(); if (pending) await until(pending).catch(() => {}); }
+  });
+
+  it('private actual switch result identity and cancelled held factory remain observations without gate waiver', async () => {
+    resetHand(); state.open = false;
+    let starting;
+    try {
+      await open(V1); hand.startHeld = true;
+      starting = useTextEngine('rust'); starting.catch(() => {}); await pass(0);
+      const operation = engineObservations.operations.find((operation) => operation.originalPromise === starting);
+      expect(hand.starts).toHaveLength(1);
+      const gate = hand.starts[0], factory = engineObservations.factories.find((factory) => factory.serial === gate.factorySerial);
+      const browser = useTextEngine('browser'); await until(browser); await pass(0);
+      expect(hand.starts, 'observing cancellation must not resolve/remove the physical factory gate').toHaveLength(1);
+      expect(factory.pending).toBe(true); expect(operation.pending).toBe(true);
+      expect(operation.originalPromise).toBe(starting);
+      expect(factory.operation).toBe(operation); expect(factory.originalGate).toBe(gate);
+      expect(engineObservations.operations.find((operation) => operation.originalPromise === browser)).toMatchObject({ nonNoop: true, fulfilled: true });
+      expect(gate.operationSerial).toBe(operation.serial);
+    } finally { await cleanupModel(); if (starting) await until(starting).catch(() => {}); }
+  });
+
+  it('private actual system callback, sync object and disposal retain identity while an unowned native gate still blocks', async () => {
+    resetHand(); state.open = false;
+    let sync;
+    const returned = [];
+    try {
+      const engine = fakeRustEngine();
+      const callback = (...args) => { const promise = invoke('system_font_face', { family: args[0], slot: args[1], known: args[2] }); returned.push({ args, promise }); return promise; };
+      const options = { engine, fonts: { user: [], system: app.fonts.system }, systemFace: callback };
+      sync = createFontSync(options);
+      sync.ready('Zapfino'); await pass(0);
+      const owner = engineObservations.syncs.find((owner) => owner.sync === sync);
+      const call = engineObservations.faces.find((call) => call.owner === owner && call.originalArgs[0] === 'Zapfino');
+      const actual = returned.find((actual) => actual.promise === call.originalPromise);
+      expect(hand.fonts.length, 'callback observation does not drain the actual native gate').toBeGreaterThan(0);
+      expect(actual).toBeDefined(); expect(actual.args).toEqual(call.originalArgs);
+      expect(owner.sync).toBe(sync); expect(owner.originalOptions).toBe(options);
+      expect(call.originalCallback).toBe(callback); expect(owner.factorySerial).toBe(null);
+      const result = sync.dispose();
+      expect(owner.disposals.at(-1).originalResult).toBe(result);
+      expect(owner.disposals.at(-1)).toMatchObject({ thisMatches: true, returned: true, operationSerial: null });
+      expect(hand.fonts.length).toBeGreaterThan(0);
+    } finally { sync?.dispose(); await cleanupModel(); }
+  });
+
+  it('private original dispose Error is rethrown unchanged and supplies no successful disposal observation', async () => {
+    resetHand(); state.open = false;
+    const error = new Error('actual original dispose error');
+    const engine = fakeRustEngine();
+    const sync = createFontSync({ engine, fonts: { user: [], system: [] } });
+    const owner = engineObservations.syncs.find((owner) => owner.sync === sync);
+    const setFallbacks = engine.setFallbacks;
+    try {
+      engine.setFallbacks = () => { throw error; };
+      let caught; try { sync.dispose(); } catch (failure) { caught = failure; }
+      expect(caught).toBe(error);
+      expect(owner.disposed, 'a throwing original disposal is not a successful owner certificate').toBe(false);
+      expect(owner.disposals.at(-1)).toMatchObject({ returned: false, error: error.message });
+    } finally { engine.setFallbacks = setFallbacks; sync.dispose(); await cleanupModel(); }
+  });
+
+  it.each([null, undefined, false])('private underlying settle preserves actual falsy rejection %s as rejection', async (reason) => {
+    resetHand(); state.open = false;
+    let pending;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); hand.fontHeld = false;
+      await open(V1); await EVENTS.editLine(); hand.hold = true;
+      const options = { settle: true };
+      pending = flushSave(options); pending.catch(() => {}); await pass(0);
+      const receipt = state.underlyingSettles.find((receipt) => receipt.originalPromise === pending);
+      expect(pendingUnderlyingOwned()).toContain(receipt);
+      hand.writes.shift().fail(reason);
+      const outcome = await pending.then(() => ({ fulfilled: true }), (actual) => ({ fulfilled: false, reason: actual }));
+      await pass(0);
+      expect(outcome.fulfilled, 'the original public promise actually rejects, even with a falsy value').toBe(false);
+      expect(outcome.reason).toBe(reason);
+      expect(receipt.fulfilled, 'a falsy original rejection must never become successful ownership evidence').toBe(false);
+      expect(receipt.rejected).toBe(true); expect(receipt.pending).toBe(false);
+      expect(receipt.failureReason).toBe(reason); expect(receipt.originalArgs[0]).toBe(options);
+      expect(underlyingSettleFacts().find((facts) => facts.serial === receipt.serial).failureReason).toEqual(failureReasonFacts(reason));
+    } finally { await cleanupModel(); if (pending) await until(pending).catch(() => {}); }
+  });
+
+  it.each([null, undefined, false])('private public engine switch preserves actual falsy rejection %s as rejection', async (reason) => {
+    resetHand(); state.open = false;
+    let pending;
+    try {
+      _setEngineSwitchDeps({ ...modelSwitchDeps, watch(value) { if (value !== null) throw reason; return watchUserFaces(value); } });
+      pending = useTextEngine('rust'); pending.catch(() => {});
+      const outcome = await pending.then(() => ({ fulfilled: true }), (actual) => ({ fulfilled: false, reason: actual }));
+      await pass(0);
+      const operation = engineObservations.operations.find((operation) => operation.originalPromise === pending);
+      expect(outcome.fulfilled, 'actual async start rejects its original injected watcher failure').toBe(false);
+      expect(outcome.reason).toBe(reason);
+      expect(operation.fulfilled, 'falsy failure cannot certify an actually fulfilled transition').toBe(false);
+      expect(operation.rejected).toBe(true); expect(operation.pending).toBe(false);
+      expect(operation.failureReason).toBe(reason);
+      expect(operation.originalPromise).toBe(pending);
+      expect(engineOwnershipFacts().operations.find((facts) => facts.serial === operation.serial).failureReason).toEqual(failureReasonFacts(reason));
+    } finally { _setEngineSwitchDeps(modelSwitchDeps); await cleanupModel(); if (pending) await until(pending).catch(() => {}); }
+  });
+
+  it.each([null, undefined, false])('private original system callback preserves actual falsy rejection %s as rejection', async (reason) => {
+    resetHand(); state.open = false;
+    let sync;
+    const returned = [];
+    try {
+      const callback = (...args) => { const promise = Promise.reject(reason); promise.catch(() => {}); returned.push({ args, promise }); return promise; };
+      sync = createFontSync({ engine: fakeRustEngine(), fonts: { user: [], system: app.fonts.system }, systemFace: callback });
+      sync.ready('Zapfino'); await pass(0);
+      const owner = engineObservations.syncs.find((owner) => owner.sync === sync);
+      const call = engineObservations.faces.find((call) => call.owner === owner && call.originalArgs[0] === 'Zapfino');
+      const actual = returned.find((actual) => actual.promise === call.originalPromise);
+      expect(actual, 'the actual original callback result must remain the observed result').toBeDefined();
+      const outcome = await actual.promise.then(() => ({ fulfilled: true }), (value) => ({ fulfilled: false, reason: value }));
+      expect(outcome.fulfilled).toBe(false); expect(outcome.reason).toBe(reason);
+      expect(call.fulfilled, 'a rejected face result cannot become successful native-return evidence').toBe(false);
+      expect(call.rejected).toBe(true); expect(call.pending).toBe(false);
+      expect(call.failureReason).toBe(reason); expect(call.originalCallback).toBe(callback);
+      expect(call.originalArgs[2]).toBe(actual.args[2]);
+      expect(engineOwnershipFacts().faces.find((facts) => facts.serial === call.serial).failureReason).toEqual(failureReasonFacts(reason));
+    } finally { sync?.dispose(); await cleanupModel(); }
+  });
+
+  it.each([null, undefined, false])('private original dispose preserves actual falsy throw %s without successful disposal evidence', async (reason) => {
+    resetHand(); state.open = false;
+    const engine = fakeRustEngine(), setFallbacks = engine.setFallbacks;
+    const sync = createFontSync({ engine, fonts: { user: [], system: [] } });
+    const owner = engineObservations.syncs.find((owner) => owner.sync === sync);
+    try {
+      engine.setFallbacks = () => { throw reason; };
+      let caught = false, actual;
+      try { sync.dispose(); } catch (value) { caught = true; actual = value; }
+      expect(caught, 'the original public method actually throws').toBe(true); expect(actual).toBe(reason);
+      expect(owner.disposed, 'falsy throw cannot supply a successful disposal certificate').toBe(false);
+      const disposal = owner.disposals.at(-1);
+      expect(disposal.returned).toBe(false); expect(disposal.threw).toBe(true);
+      expect(disposal.failureReason).toBe(reason); expect(disposal.thisMatches).toBe(true);
+      expect(engineOwnershipFacts().syncs.find((facts) => facts.serial === owner.serial).disposals.at(-1).failureReason).toEqual(failureReasonFacts(reason));
+    } finally { engine.setFallbacks = setFallbacks; sync.dispose(); await cleanupModel(); }
   });
 
   it('a still-pending old public context cannot bind a fresh ref’s actual saver or waive its later loss', async () => {
@@ -1924,17 +2481,20 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       extra = saverObserver.scope.run(window.publicRequest, () => saveOpenChapter());
       await pass(0);
       hand.writes.shift().ok(); await pass(0);
-      hand.writes.shift().ok(); await until(state.lastOpen); await pass(0);
+      hand.writes.shift().ok(); await pass(0);
+      expect(state.publicRequests.find((request) => request.originalPromise === state.lastOpen).pending).toBe(true);
       expect(state.deferred, 'an ambiguous final cannot claim the pending physical loss').toBe(null);
       expect(observedBrowserCancellation(window, window.chapter)).toBe(null);
       expect(() => choicesOnDisk(window.chapter, 'ambiguous actual final retains strict intent')).toThrow(Broken);
       expect(window).toMatchObject({ attributionAmbiguous: true });
-      expect(window.saverSerials).toHaveLength(2);
+      expect(window.saverSerials.slice(0, 2)).toEqual([first.saver.serial, state.savers.find((save) => save.originalPromise === extra).serial]);
       expect(window.saver).toBe(first.saver);
       expect(window.snapshot).toBe(first.snapshot);
       expect(window.timer).toBe(first.timer);
       expect(window.heldWriter).toBe(first.held);
       expect(window.snapshot.earlierChoices).toEqual([]);
+      await rest(); await until(state.lastOpen);
+      choicesOnDisk(window.chapter, 'ambiguous observations cannot weaken actual final convergence');
     } finally { await cleanupModel(); if (extra) await until(extra).catch(() => {}); }
   });
 
@@ -1974,36 +2534,45 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally { release?.(); off?.(); await cleanupModel(); }
   });
 
-  it('a same-ID reopen retains the exact observed cancellation prefix and its unexecuted tail', async () => {
+  it('a same-ID reopen preserves all intent through the entire original cancellation order', async () => {
     const events = ['open1', 'holdWrites', 'open1', 'editLine', 'writeLands', 'switchOn', 'engineStarts'];
-    const result = await run(events);
-    expect(result?.deferred?.category).toBe('exact-browser-cancellation');
-    expect(state.lastRunProof.unexecutedTail).toEqual(['switchOn', 'engineStarts']);
-    const actual = state.savers.find((save) => save.serial === result.deferred.snapshot.saverSerial);
-    expect(result.deferred.snapshot).not.toBe(actual.snapshot);
-    expect(result.deferred.timer).not.toBe(actual.window.timer);
-    expect(result.deferred.snapshot).toEqual(state.lastRunProof.witnesses[0].snapshot);
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.unexecutedTail).toEqual([]);
+    expect(state.lastRunProof.witnesses).toEqual([]);
     expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
   });
 
-  it('the original stale browser final has a separate fired-timer witness after proven Rust retirement', async () => {
-    const result = await run(sequence(20261867, 30));
-    expect(result?.deferred?.category).toBe('exact-browser-stale-final');
-    expect(result.deferred.timer.cancelledByMarkSaved).toBe(false);
-    expect(result.deferred.newerDerivedFileNotYetObserved).toBe(true);
-    expect(state.lastRunProof.unexecutedTail.length).toBeGreaterThan(0);
-    expect(state.lastRunProof.facts.rustDebt).toEqual([]);
+  it('the original stale browser final now waits for every choice after Rust retirement', async () => {
+    const events = sequence(20261867, 30);
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.unexecutedTail).toEqual([]);
+    expect(state.lastRunProof.witnesses).toEqual([]);
   });
 
-  it('two actual rejected saver promises and public refusal/force replies retain a separate forced-exit prefix', async () => {
-    const result = await run(sequence(20261290, 30));
+  it('the original overlapping failure order no longer consumes a deliberate second-attempt escape', async () => {
+    const events = sequence(20261290, 30);
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.fullOrder).toEqual(events);
+    expect(state.lastRunProof.witnesses).toEqual([]);
+  });
+
+  it('two deliberate sequential refusals retain only an explicit unfinished force escape', async () => {
+    const events = ['switchOn', 'engineStarts', 'open1', 'editLine', 'holdWrites', 'leave', 'writeFails', 'leave', 'writeFails', 'switchOff'];
+    const result = await run(events);
     expect(result?.deferred?.category).toBe('explicit-forced-exit');
     expect(result.deferred.failedSavers).toHaveLength(2);
     expect(result.deferred.priorRefusal.answer).toBe(false);
     expect(result.deferred.answer).toBe(true);
-    expect(result.deferred.rustDebtRetained).toBe(true);
+    const prior = state.lastRunProof.publicRequests.find((request) => request.serial === result.deferred.priorRefusal.publicRequestSerial);
+    const forced = state.lastRunProof.publicRequests.find((request) => request.serial === result.deferred.publicRequestSerial);
+    expect(prior.replyOrder).toBeLessThan(forced.serial);
+    expect(result.deferred.completedInvariantOrder).toBe(false);
+    expect(result.deferred.debtRetired).toBe(false);
+    expect(result.deferred.currentRustDebt.length).toBeGreaterThan(0);
+    expect(state.lastRunProof.unexecutedTail).toEqual(['switchOff']);
     expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
-    expect(state.lastRunProof.unexecutedTail.length).toBeGreaterThan(0);
   });
 
   it.each(['Rust acquisition', 'outstanding owned final', 'wrong retirement identity', 'only one retirement file', 'earlier ambiguous saver'])(
@@ -2088,7 +2657,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(app.saved, 'an older snapshot cannot clear this change').toBe(false);
       await pass(DOC_SAVE_MS);
       state.touched = true;
-      checkFile('after the follow-up debounce, with the slow font still held');
+      expect(() => checkFile('after the follow-up debounce, with the slow font still held')).not.toThrow();
       expect(hand.fonts.length).toBeGreaterThan(0);
     } finally {
       await cleanupModel();
@@ -2350,6 +2919,55 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     } finally { fsx._before = beforeWrite; await cleanupModel(); }
   });
 
+  it.each(['Fit now', 'Make auto'])('%s persists its review-only browser edit through actual BOTH writes', async (command) => {
+    resetHand(); state.open = false;
+    try {
+      const raw = JSON.parse(V1);
+      if (command === 'Fit now') Object.assign(raw.pages[0].boxes[0], { text: 'A'.repeat(100), w: 40,
+        style: { ...raw.pages[0].boxes[0].style, size: 12, curve: 40 } });
+      await open(JSON.stringify(raw)); await EVENTS.editLine(); await pass(DOC_SAVE_MS);
+      const b = app.pages[0].boxes[0];
+      if (command === 'Make auto') {
+        autoFitBox(b, app.pages[0]);
+        expect(b.review).toBeUndefined();
+        b.review = { kind: 'overflow', reason: 'stale', overflow: { l: 0, t: 0, r: 1, b: 0 } };
+        await until(saveOpenChapter());
+      }
+      const prior = copy(b), priorReview = (b.review === undefined ? undefined : copy(b.review));
+      const invoke = () => command === 'Fit now' ? store.fitBoxNow(b.id, app.pages[0]) : store.makeBoxAuto(b.id, app.pages[0]);
+      expect(invoke(), 'only the review changes').toBe(false);
+      expect(b.review).not.toEqual(priorReview);
+      expect({ ...copy(b), review: prior.review }).toEqual(prior);
+      expect(app.saved, 'actual library persistence must be scheduled').toBe(false);
+      await pass(DOC_SAVE_MS);
+      expect(JSON.parse(onDisk()).pages[0].boxes[0].review).toEqual((b.review === undefined ? undefined : copy(b.review)));
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(() => choicesOnDisk(c, 'review-only BOTH receipt retains independent existing intent')).not.toThrow();
+      const wrote = hand.began.length;
+      expect(invoke(), 'the same review stays a no-op').toBe(false);
+      await pass(DOC_SAVE_MS);
+      expect(hand.began.length).toBe(wrote);
+    } finally { await cleanupModel(); }
+  });
+
+  it('a touched held startup does not rewrite identical browser bytes on every natural debounce', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1); await EVENTS.editLine();
+      hand.startHeld = true; useTextEngine('rust').catch(() => {}); await pass(0);
+      await pass(DOC_SAVE_MS);
+      const wrote = hand.began.length;
+      expect(wrote).toBe(1);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      await pass(DOC_SAVE_MS * 4);
+      expect(hand.began.length, 'equal physical bytes do not owe repeated writes while startup waits').toBe(wrote);
+      expect(hand.starts).toHaveLength(1);
+      await EVENTS.engineStarts(); await EVENTS.fontLands(); await pass(DOC_SAVE_MS);
+      checkFile('startup completion naturally persists its actual new debt');
+    } finally { await cleanupModel(); }
+  });
+
   it('a public saved approval cannot authorize edited startup begun after its reply', async () => {
     resetHand(); state.open = false;
     try {
@@ -2358,9 +2976,10 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(await until(request)).toBe(true);
       const { leaveApprovalCurrent } = await import('./library.svelte.js');
       expect(leaveApprovalCurrent(request)).toBe(true);
-      const ref = app.chapterRef, version = app.version;
+      const ref = app.chapterRef, version = app.typesetting.version;
+      expect(version).toBe(1);
       hand.startHeld = true; useTextEngine('rust').catch(() => {}); await pass(0);
-      expect(app.chapterRef).toBe(ref); expect(app.version).toBe(version);
+      expect(app.chapterRef).toBe(ref); expect(app.typesetting.version).toBe(version);
       expect(leaveApprovalCurrent(request), 'the last consumer must refuse a new pending startup even before version changes').toBe(false);
       expect(hand.starts).toHaveLength(1);
     } finally { await cleanupModel(); }
@@ -2704,14 +3323,9 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
   it.each([
     ['leave mode', ['open2', 'holdWrites', 'leave', 'unmarkedMode'], 'mode'],
     ['open text', ['open1', 'holdTranslations', 'openEmpty', 'edit'], 'text'],
-  ])('the exact known browser cancellation witness is retained for %s, with both physical files and its timer', async (_, events, choice) => {
-    const result = await run(events);
-    expect(result?.deferred).toMatchObject({ startedBrowser: true, acquiredRust: false,
-      timer: { ms: DOC_SAVE_MS, unsavedWhenArmed: true, cancelledByMarkSaved: true, bothFilesAtCancellation: true } });
-    const witness = result.deferred;
-    expect(witness.reason).toContain(`user ${choice} choice`);
-    expect(witness.physical).toEqual({ chapter: witness.snapshot.chapter, text: witness.snapshot.text });
-    expect(witness.timer.cancelledAt - witness.timer.at).toBeLessThan(DOC_SAVE_MS);
+  ])('the original browser %s order preserves its choice in BOTH files before success', async (_, events) => {
+    expect(await run(events)).toBe(null);
+    expect(state.lastRunProof.witnesses).toEqual([]);
     expect(state.lastRunProof.fullOrder).toEqual(events);
     expect(state.lastRunProof.unexecutedTail).toEqual([]);
   });
@@ -2976,8 +3590,8 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     }
   });
 
-  it.each(['same-ID fresh ref', 'same ref new load turn', 'delayed autosave rejection'])('a stale %s cannot cancel the current Keep or flag its save', async (cycle) => {
-    const mode = 'direct final rejection';
+  it.each(['same-ID fresh ref', 'same ref new load turn', 'delayed autosave rejection', 'public editor leave rejection'])('a stale %s cannot cancel the current Keep or flag its save', async (cycle) => {
+    const mode = cycle === 'public editor leave rejection' ? 'public editor leave' : 'direct final rejection';
     resetHand(); state.open = false;
     let first; let second; let kept;
     const firstState = { done: false, answer: null };
@@ -2995,7 +3609,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
         markUnsaved();
         await pass(DOC_SAVE_MS);
         second = state.savers.at(-1).originalPromise;
-      } else second = flushSave({ settle: true });
+      } else second = mode === 'public editor leave' ? flushBeforeLeaving('editor') : flushSave({ settle: true });
       second.then((answer) => { secondState.status = 'fulfilled'; secondState.answer = answer; },
         (error) => { secondState.status = 'rejected'; secondState.error = error; });
       await pass(0);
@@ -3065,6 +3679,10 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
         expect(app.toast.msg, 'A public refusal must still report its own failure').toContain(failure.message);
       }
       if (cycle === 'delayed autosave rejection') expect(app.toast.msg, 'the outgoing autosave still reports its original failure').toContain(failure.message);
+      if (mode !== 'direct final rejection' || cycle === 'delayed autosave rejection') {
+        expect(app.toast.msg).toContain('previous chapter');
+        expect(app.toast.msg).not.toMatch(/last edits.*on screen|ask to leave again to discard/);
+      }
       const cut = { mode, outgoingChapterId: outgoing.id, incomingChapterId: incoming.id,
         outgoingRefToken: refToken(outgoingRef), incomingRefToken: refToken(incomingRef),
         secondA: { status: secondState.status, answer: secondState.answer, sameOriginalError: secondState.error === failure },
@@ -3214,4 +3832,66 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       expect(await run(events)).toBe(null);
     });
   }
+
+  it('a foreign same-message physical open rejection is a model failure even when the current save flag is true', async () => {
+    resetHand(); state.open = false; state.keep = null; state.deferred = null;
+    let earlier;
+    try {
+      await open(V1); await EVENTS.editLine();
+      hand.hold = true;
+      earlier = flushSave({ settle: true }); earlier.catch(() => {});
+      await pass(0); EVENTS.writeFails(); await pass(0);
+      await until(earlier).catch(() => {});
+      const injected = state.failedWriters.at(-1).error;
+      expect(app.saveFailed).toBe(true);
+      await EVENTS.open2();
+      const operation = state.publicRequests.at(-1);
+      const foreign = new Error('disk full');
+      expect(foreign).not.toBe(injected);
+      const writer = hand.writes.shift();
+      expect(writer).toBeDefined();
+      writer.fail(foreign); await pass(0);
+      await until(state.lastOpen).catch(() => {}); await pass(0);
+      // Functional refusal precedes metadata: the indicator must not swallow this foreign error.
+      expect(hand.broke, 'an unrelated actual rejection must remain a model failure').toBe('opening: disk full');
+      expect(operation.rejectedReason).toBe(foreign);
+      expect(operation.fulfilled).toBe(false);
+      expect(app.saveFailed).toBe(true);
+      expect(state.failedWriters).toHaveLength(1);
+      expect(state.failedWriters[0].error).toBe(injected);
+    } finally { await cleanupModel(); await Promise.allSettled([earlier].filter(Boolean)); }
+  });
+
+  it('an error from the fulfilled-open reaction remains a model failure even when the current save flag is true', async () => {
+    resetHand(); state.open = false; state.keep = null; state.deferred = null;
+    const originalReply = saverObserver.openReply;
+    let choices;
+    try {
+      await open(V1); await EVENTS.editLine();
+      const outgoing = c;
+      const foreign = new Error('unrelated fulfilled-open reaction');
+      saverObserver.openReply = (request, error) => {
+        originalReply(request, error);
+        if (request.kind === 'open' && request.chapterId === chapters[1].id && error === null) {
+          // Deliberate model-oracle fault after the ACTUAL original public fulfillment.
+          // Physical bytes/retained Map entries and original source Promise remain unchanged.
+          app.saveFailed = true;
+          choices = state.choices.get(outgoing.id);
+          choices.entries = () => { throw foreign; };
+        }
+      };
+      await EVENTS.open2(); await until(state.lastOpen); await pass(0);
+      // Functional refusal precedes metadata: successful source fulfillment cannot own this error.
+      expect(hand.broke, 'a reaction error must not inherit the current indicator').toBe('opening: unrelated fulfilled-open reaction');
+      const operation = state.publicRequests.at(-1);
+      expect(operation.fulfilled).toBe(true);
+      expect(operation.rejectedReason).toBe(null);
+      expect(operation.originalPromise).toBe(state.lastOpen);
+      expect(app.saveFailed).toBe(true);
+    } finally {
+      if (choices) delete choices.entries;
+      saverObserver.openReply = originalReply;
+      await cleanupModel();
+    }
+  });
 });

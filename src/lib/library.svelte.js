@@ -2345,7 +2345,7 @@ async function saveBeforeLeaving(where, approve) {
       // interpreted as a refusal or a deliberate request to discard work.
       if ((await withinWait(flushSave({ settle: true }), Math.max(0, deadline - Date.now()))) === STILL_WRITING) {
         await finishHistory();
-        toast(copy.slow);
+        toast(current() ? copy.slow : 'Still writing the previous chapter. Try again when it finishes.');
         return false;
       }
       if (where === 'quit') await finishHistory();
@@ -2359,7 +2359,7 @@ async function saveBeforeLeaving(where, approve) {
   } catch (e) {
     await finishHistory();
     if (!current()) {
-      toast(copy.refuse(e?.message ?? e));
+      toast(`Could not save the previous chapter: ${e?.message ?? e}`);
       return false;
     }
     // Only an attempt begun AFTER a known refusal can spend the escape.

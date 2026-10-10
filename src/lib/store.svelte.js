@@ -1061,14 +1061,13 @@ function growHeightTo(b, lineCount, p, cand, place) {
   const next = extent && extent.total > 0
     ? growToFit({ y: from, h: b.h, valign: s.valign }, need, extent.total)
     : growToFit({ y: b.y, h: b.h, valign: s.valign }, need, p?.h ?? 0);
-  // Nothing to grow. Said here, in the extent's own coordinates, with the
-  // Rust engine switched on: a top edge taken into a long strip's coordinates
+  // Nothing to grow. Compare in the extent's own coordinates: a top edge
+  // taken into a long strip's coordinates
   // and back is not always the number it was (`(y + top) - top`, off in the
   // last bit), and the comparison below then reads that as a box that moved -
   // a `y` written by an open that grew nothing, in hundreds of boxes of a
-  // long chapter. Under the browser the pass is left exactly as it has
-  // always been.
-  if (fontSource && next.h === b.h && next.y === from) return false;
+  // long chapter. Neither engine may rewrite a no-growth top edge.
+  if (next.h === b.h && next.y === from) return false;
   if (extent && extent.total > 0) next.y -= extent.top;
   if (next.h === b.h && next.y === b.y) return false;
   b.y = next.y;
@@ -1118,6 +1117,7 @@ export function fitBoxNow(boxId = app.selectedId, p = page()) {
   settleEdits();
   const before = cloneStyle(b.style);
   const geomBefore = fitGeom(b);
+  const reviewBefore = b.review;
   const text = boxText(b, p);
   const cand = boxCandidate(b, text);
   const reason = manualReason(cand);
@@ -1131,7 +1131,10 @@ export function fitBoxNow(boxId = app.selectedId, p = page()) {
     changed = writeFit(b, r);
     writeReview(b, r.review);
   }
-  if (!changed) return false;
+  if (!changed) {
+    if (b.review !== reviewBefore) markUnsaved();
+    return false;
+  }
   recordEdit({ t: 'style', pageId: p.id, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
   markUnsaved();
   return true;
@@ -1147,9 +1150,13 @@ export function makeBoxAuto(boxId = app.selectedId, p = page()) {
   const before = cloneStyle(b.style);
   const geomBefore = fitGeom(b);
   const was = b.style.autoHeight;
+  const reviewBefore = b.review;
   b.style.autoHeight = true;
   const moved = autoFitBox(b, p);
-  if (was !== false && !moved) return false;
+  if (was !== false && !moved) {
+    if (b.review !== reviewBefore) markUnsaved();
+    return false;
+  }
   recordEdit({ t: 'style', pageId: p.id, boxId: b.id, before, after: cloneStyle(b.style), geomBefore, geomAfter: fitGeom(b) });
   markUnsaved();
   return true;
@@ -1773,7 +1780,7 @@ function landed(took = stamping) {
     }
   } else if (!disk?.owned && app.loaded) {
     // The loader marks the browser document saved without a stamped write.
-    // Retain its snapshot for a later Rust turn, but do not change browser saves.
+    // Retain the loaded snapshot for future actual save comparisons.
     disk = { doc: docText(), version: app.typesetting.version, mode: app.chapterMode, asOpened: true, owned: false };
   }
   settleDisk();
@@ -1829,7 +1836,7 @@ function settleDisk() {
       answer.writing = false;
       settleDisk();
     }, () => {});
-  } else if (app.saved) markUnsaved();
+  } else if (app.saved || !saveT) markUnsaved();
 }
 
 // ---------- a font arriving changes every measurement ----------
@@ -2383,23 +2390,31 @@ export function markUnsaved() {
   app.saved = false;
   if (!savers.size() || !app.chapterRef) return;
   clearTimeout(saveT);
+  saveT = null;
   // There is no manual save in this app, so a rejected autosave is the user's
   // only signal that their work is not reaching the disk. Never swallow it.
   saveT = setTimeout(() => {
+    saveT = null;
     const ref = app.chapterRef, turn = documentTurn;
     runSavers().catch((e) => {
       // A toast lasts two seconds; the work being off-disk lasts until a write
       // lands. The indicator carries the second half of that, so the user can
       // still find out why an hour later.
       saveFailed(e, ref, turn);
-      toast(`Could not save: ${e?.message ?? e}`);
+      const previous = app.chapterRef !== ref || documentTurn !== turn;
+      toast(`Could not save${previous ? ' the previous chapter' : ''}: ${e?.message ?? e}`);
     });
   }, DOC_SAVE_MS);
 }
 export function markSaved({ written = false } = {}) {
   // A writer has already supplied its exact BOTH-file snapshot. Never cancel
   // a newer edit's timer or manufacture a receipt from current live pages.
-  if (written && !chapterSaveCurrent()) return;
+  if (written && !chapterSaveCurrent()) {
+    // A raw gesture can change pages after the prior debounce has fired.
+    // Preserve any newer timer; otherwise arm the actual remaining intent.
+    if (!saveT && !chapterBytesCurrent()) markUnsaved();
+    return;
+  }
   // The debounce goes with the flag, and it has to: `markSaved` means "the disk
   // is current", and a timer left armed against work that has already landed
   // writes the whole document a second time 800ms later. On the way out of a
@@ -2409,6 +2424,7 @@ export function markSaved({ written = false } = {}) {
   // here rather than by each caller, because this is the one function every
   // "already written" path already calls.
   clearTimeout(saveT);
+  saveT = null;
   loaderDirty = false;
   app.saved = true;
   // The write that was stamped is on disk: the open chapter takes its number.
@@ -2429,13 +2445,15 @@ export function chapterSaveApproval() {
   return () => app.chapterRef === ref && documentTurn === turn && fontSource === source && docText() === doc &&
     versionNow() === version && app.chapterMode === mode;
 }
+const chapterBytesCurrent = () => !!disk && disk.doc === docText() && disk.version === versionNow() && disk.mode === app.chapterMode;
 export function chapterSaveCurrent() {
   if (!savers.size() || !app.chapterRef || !app.loaded || firstFitUntouched()) return true;
-  return !fontSource?.starting && !!disk && disk.doc === docText() && disk.version === versionNow() && disk.mode === app.chapterMode;
+  return !fontSource?.starting && chapterBytesCurrent();
 }
 
 export function flushSave({ settle = false } = {}) {
   clearTimeout(saveT);
+  saveT = null;
   // A chapter the Rust engine fitted for the first time, which the user has
   // neither edited nor kept: there is nothing of theirs to write, and what
   // the engine grew and flagged is not written by leaving (`firstFit`).
@@ -2474,6 +2492,7 @@ export function flushSave({ settle = false } = {}) {
           if (startup) await startup;
           if (app.chapterRef !== ref || documentTurn !== turn || chapterSaveCurrent()) break;
           clearTimeout(saveT);
+          saveT = null;
           await runSavers();
         }
       }).catch((e) => {

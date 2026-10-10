@@ -6,9 +6,10 @@ the report's own in the first; then the coordinator's merge of `text-port`
 All are listed in section 13.
 The briefs are `tp-data/briefs/p9-old-chapters.md` (sections 2 to 6 carry its
 item numbers) and `tp-data/briefs/p9b-old-chapters-fixes.md` (section 14,
-"Second round"). Sections 0 to 13 are corrected to what the code does after
-the second round; where a first-round statement was wrong, section 14 says
-so.
+"Second round"). Sections0–10 and12–14 retain historical measured proofs;
+section11 gives the current write contracts, and section15 separates current
+P9c repair evidence from its preserved failed drafts. Historical wording is
+not current acceptance policy.
 
 Every figure is marked **measured** or **inferred**. Measured on the 13
 chapter copies means: the app's own store, switch and font sync in node, the
@@ -22,6 +23,9 @@ No chapter text is in this file. Boxes are named by id. The pictures and the
 report for signing are under `tp-data/reports/p9`.
 
 ## 0. Result
+
+Current P9c persistence and model results are in section15. The table below
+is historical second-round evidence; it does not certify the current tree.
 
 Second round, final tree `3f368143` (every row measured):
 
@@ -679,20 +683,24 @@ Second round:
 
 ## 11. Exactly what is written to the user's files, and when
 
-Rewritten for the third round. These are the implementation contracts;
-final proof is pending, as section15 records. Section14
-records the previous implementation and its then-measured proofs. In
-particular, its remembered stamp debt and its immediate dirty flag on Keep
-are superseded.
+These are the current persistence contracts. Section15 separates current
+measured proofs from preserved historical runs; integrated captures and final
+whole-P9 review remain the coordinator's acceptance work.
 
-With the switch **off**, a chapter that has never used Rust follows the
-existing browser save/load policy; a snapshot actually saved by the browser
-of a version2 document writes version1. Turning the switch off alone can
-leave an already saved version2 file in place. The
-old browser race described in section15 remains. A chapter Rust owned
-retains its actual landed and in-flight snapshots across off/on. Outstanding
-cross-switch work still settles after an older write lands, and that
-ownership retires once the current browser document has actually landed.
+Both browser and Rust final saves converge on the actual outgoing document,
+version and mode before ordinary leave/quit/open succeeds. Every actual
+chapter.json AND translations.json receipt advances the snapshot ledger; an
+older receipt cannot mark newer live intent saved or cancel its pending timer.
+An already armed newer debounce keeps its deadline. Newly discovered actual
+byte debt arms the natural800ms save even when the saved flag was already false.
+Startup readiness alone does not cause repeated identical version1 writes.
+
+A snapshot actually saved under the browser changes version2 to version1;
+turning the switch off alone can leave a saved version2 file in place.
+Outstanding final ownership stays until its original operations settle.
+Physical writer/catalog receipts are retained for their own reference and load
+cycle; stale completion cannot alter incoming Keep, stamping or failure state.
+Ordinary successful replies are never accepted as known browser-loss prefixes.
 
 With the switch **on**, a version1 chapter is untouched when its durable
 chapter mode, typesetting settings, pages in order, and boxes equal the open
@@ -710,7 +718,7 @@ leave-save contract is retained.
 | leaving/quitting/switch off after an unmarked durable change (a held handle, style/fit/text, picture association, translation, page order or mode) | the two document files as the user's document stands; no restore over the change |
 | an edit save while a font is still held or the engine still starts | chapter.json and translations.json from one snapshot; the file's current version remains (1 or2) |
 | the engine starts/a font lands after a save snapshot | settlement compares the actual current document/version to the landed snapshot; a newer document arms a follow-up save, even if the older write cancelled a debounce |
-| a font lands while the final leave/quit/chapter-switch snapshot is held | the outgoing Rust-owned document's actual newer bytes must land before that boundary finishes; no debounce rescue or wait for a still-absent future font |
+| a font lands while the final leave/quit/chapter-switch snapshot is held | the outgoing document's actual newer bytes must land before that boundary finishes; no debounce rescue or wait for a still-absent future font |
 | an older Rust write lands after off/on, or a browser write already in flight lands after Rust is turned on | the original snapshot remains owned; the newer document cannot become an opened baseline; its natural follow-up debounce writes both files |
 | ready Rust save, with no box waiting on any page | the whole document at version2 |
 | Keep while a font waits | one deferred write; no ordinary debounce from the press; saved state can remain true while the visible notice says Keep is waiting |
@@ -720,7 +728,7 @@ leave-save contract is retained.
 | leaving/quitting/switch off during Keep's wait | honor the choice by writing what is ready; Keep's waiting state belongs to that chapter and is cleared when it ends |
 | chapter.json lands but translations.json fails | the whole save has failed: indicator stays failed/unsaved, no new ledger snapshot or kept claim; retry writes both files |
 | an older snapshot lands after a durable change | it cannot mark the newer document or fits kept/saved; settlement arms the outstanding write |
-| a Rust-owned snapshot's two files land while a newer final/Keep save is queued | its own receipt advances the actual disk ledger; only the latest queued call can clear the indicator/timer |
+| a snapshot's two files land while a newer final/Keep save is queued | its own receipt advances the actual disk ledger; only the latest queued call can clear the indicator/timer |
 | load that mints ids or repairs pages | the existing repair/save path remains; the saved snapshot follows the same version rule |
 
 No new persisted field is added. Line-break notes and Keep's waiting state
@@ -800,7 +808,11 @@ A list to walk through, on a copy of a chapter, with the switch on:
 | `3f368143` | the dry run's long-strip sentence |
 | this section's commit | `text-engine/P9-REPORT.md`, second round |
 
-## 14. Second round
+## 14. Historical second round
+
+This section preserves what was measured and intentionally left unchanged at
+that time. P9c now also fixes browser review-only persistence and no-growth
+longstrip drift; those current results are in section15.
 
 The brief is `tp-data/briefs/p9b-old-chapters-fixes.md`: an outside review
 (Codex, read only) of the first round found 11 defects and 5 mutations that
@@ -847,12 +859,14 @@ What the comparison does when it is unsure: it writes. A gesture cancelled
 back to the exact start compares equal and is untouched again; anything
 else is the user's.
 
-**Finding 10: what "Fit now" does today under the browser.** On a box it
+**Finding 10: historical browser behavior before the P9c repair.** On a box it
 cannot improve it writes the new reason into the box and returns before
 `markUnsaved` (`fitBoxNow`, `store.svelte.js:1134`, `:1136`). The chapter
 still reads "saved" and no save is scheduled. Under the browser the flush
 on leaving always writes, so the reason reaches the file then; a crash
-before that loses it. Old behaviour, not changed.
+before that loses it. This was left unchanged in the second round; P9c now
+marks an actual review-only change dirty, including Make auto clearing review,
+without inventing a geometry edit or history entry.
 
 ### The dry run
 
@@ -961,11 +975,12 @@ The second layout (finding 7) failed its own gate the first time it ran:
   (`growHeightTo`, `store.svelte.js:1071`). Test `first-fit.test.js:960`
   (2 tests; the second pins that the browser's pass is unchanged). Mutation
   R22.
-- **Not fixed: default mode.** Under the browser the pass still rewrites
+- **Historical default-mode omission, now fixed in P9c.** Under the browser the pass still rewrites
   such a top edge in its last bit and counts the box as moved, so in a long
   strip a font that lands after the open can schedule a save that changes
   nothing visible. It did so before this phase. The rule is that default
-  mode is untouched, so it is left and said here.
+  mode was then untouched. P9c now applies the same exact no-growth guard to
+  both engines, preserving the original top edge without a tolerance.
 - **What is left in the report.** 8 boxes come out differently as a long
   strip: each grew, and its top is where the strip lets it be (above the
   page's top or below its foot by 2 to 16 px) where the page holds it at
@@ -1001,7 +1016,8 @@ with `--legacy-mode smart`, on `3f368143`, wasm `1aba362c…`:
 
 - I did not run the desktop app.
 - I did not time the comparison.
-- I did not change "Fit now", or the long-strip rewrite, in default mode.
+- At this historical checkpoint I did not change "Fit now" or default-mode
+  longstrip behavior; the current P9c repair intentionally does both.
 - The dry run's refusal (finding 7) was run on a made-up chapter only: no
   real copy has such a page.
 - The first-round figure "a second run gave 201, 122 and 249 ms" is not
@@ -1010,12 +1026,20 @@ with `--legacy-mode smart`, on `3f368143`, wasm `1aba362c…`:
 
 ## 15. Third round (P9c)
 
-Implementation is in progress. **No merge readiness is claimed here.** The
-coordinator must repeat the proofs and obtain the independent final Codex
-review on the integrated P7c/P8c candidate before this branch is merged.
-No P10, main merge or push is part of this round.
+The current candidate fixes browser and related save defects as well as Rust
+persistence. It accepts no ordinary successful leave/open with missing required
+intent. The worker's strict6000 run completed all6000 invariant orders, all197113
+events, zero unfinished prefixes and zero unresolved cases. The coordinator
+must repeat the final pinned tests/captures and obtain independent whole-P9
+review before merge. No P10, main merge or push is part of this round.
 
-### Starting work and invariant
+The chronological records below preserve prior failures, diagnostic categories
+and then-unexecuted submissions. They describe their pinned historical trees,
+not present acceptance policy. The current implementation and measured repair
+proofs are under **Current persistence repair and strict model** below; old
+browser loss categories are now diagnostic evidence only.
+
+### Historical starting work and invariant
 
 The two paused files were preserved byte for byte before editing (measured:
 SHA256 store `a60516e5a61fb6106a68a4a1ef644c1ba2f3d418b0990fe984c488d64623100d`,
@@ -1042,7 +1066,7 @@ engine turns, and settles debt Rust acquired after switch-off. A chapter
 change clears that ledger, while a simple engine change does not. Settings changes the same
 chapter’s breaker without clearing the pending snapshot or document identity;
 a held-write mode-switch probe checks the independent chosen mode and both files.
-**These review fixes have not yet passed their new tests.**
+**This was the then-unexecuted submission; current repair proofs are below.**
 
 The static review of `10abda3b8357c6e2b623139580b110a6f46ae863`
 found four more gaps. Its findings and pin are preserved. The new source
@@ -1078,7 +1102,8 @@ final flush had the same risk. The new receipt seam separates these facts.
 Each completed Rust-owned/acquired snapshot carries its own private receipt
 through both physical writes. Its actual ledger is updated even when another
 save is queued. Only the latest call still clears the indicator and timer.
-Pure unowned browser saves keep the old policy. The receipt is in a WeakMap;
+At that historical submission pure unowned browser saves kept the old policy;
+the current repair below intentionally replaces that omission. The receipt is in a WeakMap;
 it adds no persisted field and validates the outgoing document turn.
 Two new probes hold the second final/Keep write while checking the first
 actual version2 bytes and completion. An omitted notification must fail
@@ -1120,8 +1145,9 @@ rescue flush. Explicit held Rust off/off-on and held browser-to-Rust cases
 observe both files after only the natural debounce and before leaving. A real
 second-chapter probe checks that each path retains its own choices.
 
-The at-rest Rust invariant includes chapters that crossed back to the browser.
-Pure never-Rust browser autosave loss is separately deferred; actual leave/open
+At this historical checkpoint the Rust invariant included chapters that crossed
+back to the browser, while pure never-Rust autosave loss was deferred. The
+current model instead checks BOTH files for every completed browser order. Actual leave/open
 boundaries still check both files under either engine. Generated unmarked
 actions finish with the same real `relayoutAll` boundary as the original
 unmarkedHandle action. The ten raw post-snapshot probes still call their
@@ -1206,7 +1232,7 @@ before writing any HTML. A missing-font or changed-wrap attribution also
 requires an independent numerical placement prediction; metadata cannot hide
 an unrelated100px move. The final real39-box division remains pending.
 
-### Old default-mode defect (source fix deferred)
+### Historical default-mode defect (now repaired)
 
 `library.svelte.js` calls markSaved at the end of writeOpenChapter only when
 no newer save CALL has incremented saveSeq. A user edit during the old
@@ -1215,7 +1241,7 @@ lands before that timer, its markSaved clears the timer and says saved;
 the newer edit was absent from that snapshot. The code was first read only;
 later generated synthetic orders measured this defect while a final leave
 or open snapshot was held. No user chapter was modified. It is an old
-browser defect whose production source fix remains deferred. Rust-owned
+browser defect whose source repair is now described below. Rust-owned
 cross-switch cases remain strict and cannot inherit that exemption.
 
 ### Proof record
@@ -1311,9 +1337,11 @@ The test oracle now starts every successful real open untouched while
 retaining and checking every historical independent choice in both files.
 Seeds20261019 and20261026 shrank to `open2,holdWrites,leave,unmarkedMode`
 and `open1,holdTranslations,openEmpty,edit`. They exposed the existing pure
-browser final-write cancellation. No production browser fix is made.
+browser final-write cancellation. No production browser fix had been made at
+that historical checkpoint; the current repair preserves those choices.
 
-The model now distinguishes one precisely measured deferred counterexample.
+The historical model then distinguished one precisely measured deferred
+counterexample. This acceptance dispatch has now been removed.
 A final-transition window must have begun under the browser with no Rust debt;
 it must capture the actual held chapter and translations snapshot. The user
 choice must occur while that exact gate is held. A pass-through fake-timer
@@ -1497,7 +1525,7 @@ error or source drift occurred. Raw evidence is preserved separately in
 p9c-root-public-final-4d1069-001/results.json; the original survivor remains.
 
 
-### Current P9c request identity and model evidence candidate
+### Historical request identity and model evidence candidate
 
 Root replayed five previously unknown ORIGINAL orders on frozen cc253fd:
 20261029,20261037,20261867,20261290,20262371. All failed by clean assertions,
@@ -1801,7 +1829,7 @@ is p9c-root-2c088-original-immutable-cut-summary-001.json
 (SHA256382985a92f2755de5824baf5ec3b87b9ee965a829b5e12cc9be34d5202c24671).
 No new category or full6000 acceptance follows from these bounded runs.
 
-### Outgoing physical rejection must not cancel incoming Keep (P2, fix unexecuted)
+### Outgoing physical rejection must not cancel incoming Keep (P2, verified)
 
 The independent whole-P9 source review identified an outgoing failure that
 unconditionally cleared current stamping, flagged current save failure and
@@ -1829,10 +1857,11 @@ clearing current stamping, changing its indicator or ending its Keep. Final
 save already captures both values at call time. Autosave captures them when
 its real document-timer callback starts, immediately before runSavers. Capturing
 only at timer arm would wrongly suppress a legitimate later-turn failure.
-Original rejection/caller behavior, autosave toast, failure streak, saver
-microtask scheduling, write destination policy and final ticket cleanup remain.
+Original rejection/caller behavior and current-document autosave/refusal wording
+remain; stale failure now explicitly identifies the previous chapter. The
+request-time refusal policy and queued destination repair are described below.
 
-Six expanded named public controls are added but UNEXECUTED: genuine same-ID
+Six expanded named public controls were added and are now verified: genuine same-ID
 fresh-ref reopen; same-ref/new public loader turn; delayed actual outgoing
 autosave rejection; current explicit-final failure; current actual-autosave
 failure while its own Keep waits; and a real autosave timer armed before a
@@ -1855,21 +1884,22 @@ still dispatches subscribers in a later microtask; this fix does not claim to
 bind save destination across a ref change in that separate dispatch window.
 
 Private preparation p9c-2c08871-save-failure-scope-private-v2 was independently
-statically approved and regenerated exactly from sealed2c inputs. Only JavaScript
-syntax and git whitespace checks have run on this candidate. Root's fixed
-original continuation, six-control runs, mutation sensitivity, remaining13
-original orders, full6000 model and final whole-P9 review remain pending. No
-transient browser category from the separately reviewed private prototypes is
-applied, and no completion is claimed.
+statically approved and regenerated exactly from sealed2c inputs. Root506 measured15 selected controls passing and the unchanged original
+continuation2PASS with2same-current supports. The current strict model and
+physical persistence proofs below supersede the earlier unexecuted submission.
+Mutation sensitivity and final integrated whole-P9 review remain coordinator
+acceptance work. No transient browser-loss category is applied.
 
-### Intermediate repair of browser persistence and public handoff (2026-10-10)
+### Current persistence repair and strict model (2026-10-10)
 
 The user's expanded scope requires fixing genuine browser and related save bugs.
-Earlier browser-loss/cancellation/transient verdicts in this report are retained
-as historical diagnostics, not accepted final behavior. Their model acceptance
-paths and the completed-browser disk-check omission still require a coordinated
-model update after the root's exact injected-error association replays. This
-intermediate candidate does not claim full P9 acceptance or a passing6000 run.
+Earlier browser-loss/cancellation/transient verdicts are retained as historical
+diagnostics. All five ordinary loss acceptance dispatches are removed, and
+every completed browser order checks actual BOTH files and ALL independent
+choices. Root's exact original3056/4050/6677 Error-identity replays prove the
+unique writer→saver→underlying→own original-public rejection chain; only that
+chain can let replay continue. It cannot waive the later disk/version/debt
+assertion, and a foreign same-message error or fulfilled-reaction error fails.
 
 Actual original startup seeds20262691/20263661/20264358/20265531 returned TRUE
 with Rust on, saved false and BOTH physical files at version1 although the actual
@@ -1925,10 +1955,85 @@ source/owned-process guards. Earlier failed fixture attempts remain preserved;
 old506-002 stopped before a child because the local Python tar API lacked its
 requested keyword.
 
-This is a reviewed intermediate repair. Root independent replays, strict model
-policy/error updates, Fit-now/auto-fit review persistence and longstrip
-round-trip follow-ups, full6000 accounting, final captures and whole-P9 review
-remain pending. The original outgoing-failure P2 source fix in the preceding
-section is now behaviorally verified: root506 selected15PASS and literal
-original continuation2PASS plus2same-current supports, with all old2c failures
-retained; its earlier UNEXECUTED label describes the historical submission.
+The worker then reproduced and fixed twelve actual post-snapshot persistence
+failures: all ten raw durable fields and two original font/startup orders. A
+fired timer is no longer mistaken for an armed timer. A stale BOTH receipt
+rearms only actual remaining bytes/version/mode debt, preserving any later
+edit's original deadline. A touched held-start support proves identical browser
+bytes are not rewritten every800ms; the final caller still waits for actual
+startup under its original bounded deadline.
+
+Fit now and Make auto now mark a genuinely changed/deleted review dirty even
+when geometry returns false. Equal review values still schedule no write, and
+no geometry history entry is added. Real-library controls observe chapter review
+and the actual translations/retained choices after natural800ms BOTH writes;
+the translations format has no review field. Browser no-growth longstrip passes
+now preserve y exactly, using the same algebraic early guard as Rust. These are
+intentional browser changes, not pixel-layout changes inferred from a capture.
+Final node/browser captures must verify that visual limit.
+
+Stale outgoing failure notices now say **previous chapter** and retain the
+original error. They cannot tell the incoming editor to discard its on-screen
+work. Actual public leave returns false; outgoing autosave still reports its
+failure; incoming Keep/deadline/flags and subsequent BOTH persistence remain
+strict. Current-document refusal/discard wording remains covered separately. A stale
+editor/quit timeout is now similarly contextualized: its old underlying writer
+remains pending, it returns false without banking discard permission, and it
+cannot describe incoming editor choices as the work keeping that caller there.
+The corrected actual incoming-font/Keep fixture reproduced both wrong notices
+before the source change in p9c-worker-stale-timeout-old-002 (2 clean functional
+AssertionErrors). Attempt001 had already-loaded fonts and failed setup instead;
+it is preserved and is not counted as source failure evidence.
+
+Measured worker proofs (all under tp-data/reports/resume-20261009):
+
+- p9c-worker-strict-named-all-002:427PASS/0 in model, first-fit, library,
+  route and App DOM, including literal original20266101, the public stale
+  leave and both stale timeout supports. This follows removal of3
+  certificate-only private controls whose unused loss waiver no longer exists.
+  The earlier all-001 also passed427 before those final control substitutions.
+- p9c-worker-review-persistence-old01b-001:19 clean functional AssertionErrors
+  on immutable01b source with identical corrected test files:10 raw fields,
+  2 original font/startup orders,2 actual-library review BOTH controls,
+  4 review/no-growth unit controls and1 stale-autosave notice. The earlier
+  Make-auto setup that actually resized was rejected as a fixture and retained;
+  the corrected review-only geometry proves the source defect.
+- p9c-worker-stale-public-notice-old01b-001:1 clean functional AssertionError
+  on unchanged publicFALSE/error attribution because old wording refers to
+  incoming on-screen edits instead of the previous failed chapter.
+- p9c-worker-strict-generated6000-001:5999 completed orders and1 unresolved
+  original20266101; all197113 events executed. The independent original audit
+  proves ALL7 choices already present in BOTH files before its fresh open.
+  Its final unmarked_fit assigns the same canonical fit; only engine-firstfit
+  h48→70 differs. The model now preserves prior touched state for that exact
+  no-op fit while retaining assignment, choice Map, relayout and debt. Named
+  null→rect and different-rect controls still require actual natural800ms
+  BOTH/version2 writes. No other action or at-rest rule is relaxed.
+- p9c-worker-fit-bookkeeping-old-wrapper-001: restoring only the old
+  unconditional touched=true bookkeeping gives1 clean functional same-fit
+  AssertionError;2 genuinely changed-fit controls still pass on identical
+  production source. The failed original6000-001 is preserved separately.
+- p9c-worker-strict-generated6000-003:6000 completed invariant orders,
+  0 unfinished force/ordinary-loss prefixes,0 unresolved;197113 generated and
+  executed events,0 tail. This used the unchanged seeded generator/weights,
+  schedules, clocks,14 drains, cleanup and independent retained choice oracles.
+  Exit0,47.839s, starting load1.83. This final code run follows the dead-waiver
+  removal and contextual stale-timeout repair; earlier002 also completed6000.
+  The deliberate sequential-refusal support is separately and explicitly
+  unfinished; concurrent original failures no longer count as confirmation.
+
+Every listed behavioral run has raw logs/reporters, input and before/after
+source snapshots, no timeout/runtime-suite/cleanup error, unchanged execution
+source and verified empty owned processes. Early failed named/fixture attempts
+remain preserved, including raw domain Broken failures (not mislabeled as
+AssertionError kills). Sealed privatev7/v9 old loss fixtures are historical;
+unused transient/obsolete-owner predicates and their private fault catalogs
+were omitted from current acceptance, not counted as passing proof. Actual
+promise/error/owner/disposal/falsy observations, pending underlying guards,
+ALL choice/debt checks and genuine public-PENDING CH/TX immutable cut controls
+remain. The raw cut controls first prove pending public approval and actual
+held bytes; cleanup's later TX/BOTH receipt cannot mutate their retained proof.
+
+These worker results are a concrete candidate, not merge authorization. Root
+independent pinned reruns, final mutation/capture/dry-run proofs and whole-P9
+review remain outstanding.
