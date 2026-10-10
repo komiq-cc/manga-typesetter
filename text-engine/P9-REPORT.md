@@ -2070,3 +2070,37 @@ hashes and commands. Neither timed out or changed execution source; the
 existing owned-process helper verified an empty process group with no
 cleanup or execution error. These focused results do not replace final
 root proofs, canonical dry runs or independent whole-P9 review.
+
+### Exact Error binding for the unfinished force escape (2026-10-10)
+
+The final independent reviewer found a model-only gap. The deliberate force
+certificate matched injected failed writers to two failed savers by reference,
+serial and the words `disk full`. It now requires the identical Error in the
+injected physical writer, the finished original saver and the rejected
+underlying original flush. The exact snapshot path/raw-write/start ordering,
+reference/token, public request and reply ordering must match too. Original
+saver, underlying flush and public Promise observations are required. Leave
+returns its real Boolean; no nonexistent public rejected Error is inferred.
+
+Measured evidence under `tp-data/reports/resume-20261009`:
+
+- `p9c-worker-force-bind-fixed-002`:7 targeted controls pass. Valid deliberate
+  force retains its original exact order, unexecuted `switchOff` tail, choices
+  and debt and stays explicitly unfinished. The original overlapping failure
+  order remains completed without consuming a force confirmation.
+- `p9c-worker-force-bind-old756e-001`:the identical five new controls fail
+  clean functional assertions on the immutable old classifier; the two
+  matching/concurrent controls pass. Distinct same-message actual writer
+  rejections on either failed leave, a foreign observed underlying Error,
+  and missing underlying/public Promise observations cannot now certify a
+  force prefix. These are model-certificate failures, not production kills.
+- `p9c-worker-force-bind-model-all-001`:173 passed,0 failed with generation
+  explicitly disabled. The full6000 run follows on the clean committed tree.
+
+Initial fixed attempt001 required an open-only `fulfilled` field from the
+leave observer and failed the valid-force control. It is retained and rejected
+as acceptance evidence. Corrected002 uses actual leave reply fields. No
+production bytes, assertions, generator, schedules, clock, drains, retained
+choices/debt or accepted categories were changed by this model correction.
+All final listed runs began below load8, retained logs/reporters and source
+guards, had no timeout/cleanup/execution errors and verified empty processes.

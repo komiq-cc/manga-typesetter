@@ -1057,8 +1057,28 @@ function observedForcedExit(window, ch) {
   const failures = state.savers.filter((save) => save.ref === window.ref && save.failed === 'disk full' &&
     [prior.publicRequest.serial, request.serial].includes(save.publicRequestSerial));
   if (failures.length !== 2 || failures[0].publicRequestSerial !== prior.publicRequest.serial ||
-      failures[1].publicRequestSerial !== request.serial || failures[0].finishOrder >= failures[1].finishOrder || !failures.every((save) => state.failedWriters.some((writer) =>
-        writer.ref === window.ref && writer.saverSerial === save.serial)) || state.savers.some((save) => save.ref === window.ref &&
+      failures[1].publicRequestSerial !== request.serial || failures[0].finishOrder >= failures[1].finishOrder || !failures.every((save) => {
+        const operation = [prior.publicRequest, request].find((operation) => operation.serial === save.publicRequestSerial);
+        if (save.pending !== false || !save.originalPromise || !operation.originalPromise ||
+            operation.pending !== false || operation.rejected !== null) return false;
+        // Leave catches the Error and resolves a Boolean. Its rejected flush
+        // must still carry the exact injected writer Error, not just its text.
+        const writers = state.failedWriters.filter((writer) => writer.ref === save.ref &&
+          writer.saverSerial === save.serial && writer.error === save.failedReason);
+        const settles = state.underlyingSettles.filter((settle) => settle.serial === save.underlyingSettleSerial &&
+          settle.ref === save.ref && settle.ref === operation.ref && settle.publicRequestSerial === operation.serial &&
+          settle.pending === false && settle.rejected === true && settle.fulfilled === false &&
+          settle.error === save.failedReason && settle.originalPromise);
+        if (writers.length !== 1 || settles.length !== 1) return false;
+        const writer = writers[0], settle = settles[0], snapshot = save.snapshot;
+        const rawWriteSerial = writer.path === snapshot?.chapterPath ? snapshot.chapterRawWriteSerial
+          : writer.path === snapshot?.textPath ? snapshot.textRawWriteSerial : null;
+        const startOrder = writer.path === snapshot?.chapterPath ? snapshot.chapterStartOrder
+          : writer.path === snapshot?.textPath ? snapshot.textStartOrder : null;
+        return writer.refToken === save.refToken && writer.rawWriteSerial != null && writer.rawWriteSerial === rawWriteSerial &&
+          writer.startOrder != null && writer.startOrder === startOrder &&
+          writer.order < save.finishOrder && save.finishOrder < settle.finishOrder && settle.finishOrder < operation.replyOrder;
+      }) || state.savers.some((save) => save.ref === window.ref &&
         save.bothFileReceipt?.order > failures[0].finishOrder && save.bothFileReceipt.order < force.order) ||
       state.publicRequests.some((reply) => reply.ref === window.ref && (reply.answer === true || reply.fulfilled === true) &&
         reply.replyOrder > failures[0].finishOrder && reply.replyOrder < force.order)) return null;
@@ -2574,6 +2594,58 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     expect(state.lastRunProof.unexecutedTail).toEqual(['switchOff']);
     expect(state.lastRunProof.facts.choices[0][1]).not.toHaveLength(0);
   });
+
+  it.each(['first writer Error', 'second writer Error', 'underlying Error', 'underlying Promise', 'public Promise'])(
+    'a deliberate force refuses a foreign or missing %s binding as an unfinished prefix', async (risk) => {
+      resetHand(); state.open = false; state.keep = null; state.deferred = null;
+      const originalSettleFinish = saverObserver.settleFinish;
+      const originalReply = saverObserver.reply;
+      const foreign = new Error('disk full');
+      const leaves = () => state.publicRequests.filter((request) => request.kind === 'leave');
+      let failed = 0;
+      try {
+        saverObserver.settleFinish = (receipt, didFulfill, error) => {
+          originalSettleFinish(receipt, didFulfill, error);
+          if (!didFulfill && leaves().length === 2) {
+            // Fault only the observation; the actual original flush Promise
+            // and rejected Error remain unchanged for these two controls.
+            if (risk === 'underlying Error') receipt.error = foreign;
+            if (risk === 'underlying Promise') receipt.originalPromise = null;
+          }
+        };
+        saverObserver.reply = (request, answer, error) => {
+          originalReply(request, answer, error);
+          if (risk === 'public Promise' && leaves().length === 2) request.originalPromise = null;
+        };
+        const events = ['switchOn', 'engineStarts', 'open1', 'editLine', 'holdWrites', 'leave', 'writeFails', 'leave', 'writeFails'];
+        for (const event of events) {
+          state.event = event;
+          if (event === 'writeFails') {
+            failed++;
+            if (risk === `${failed === 1 ? 'first' : 'second'} writer Error`) {
+              const writer = hand.writes[0];
+              expect(writer).toBeDefined();
+              const reject = writer.fail;
+              // EVENTS records its injected Error, but this original physical
+              // Promise actually rejects a distinct same-message Error.
+              writer.fail = (injected) => { expect(injected).not.toBe(foreign); reject(foreign); };
+            }
+          }
+          await EVENTS[event]();
+          await pass(0);
+        }
+        expect(leaves().map((request) => request.answer)).toEqual([false, true]);
+        expect(state.deferred, 'a matching message cannot certify the failed Error/Promise chain').toBe(null);
+        expect(hand.broke).toMatch(/^leaving:/);
+        expect(state.rustDebt.has(c.id)).toBe(true);
+        expect([...state.choices.get(c.id)]).not.toHaveLength(0);
+      } finally {
+        saverObserver.settleFinish = originalSettleFinish;
+        saverObserver.reply = originalReply;
+        await cleanupModel();
+      }
+    },
+  );
 
   it.each(['Rust acquisition', 'outstanding owned final', 'wrong retirement identity', 'only one retirement file', 'earlier ambiguous saver'])(
     'a stale browser final refuses %s as a known witness', async (risk) => {
