@@ -315,6 +315,18 @@ function resetHand() {
   hand.broke = null;
 }
 
+// Timer duration alone does not establish document ownership. History has
+// its own 800ms persistence timer; only its immediate, positively observed
+// setter is excluded. Missing, unfamiliar and similarly named origins stay
+// conservative, including every unrecognized save/Keep-duration timer.
+function timerSource(ms, setterStack) {
+  const caller = setterStack?.split('\n')[2]?.trim() ?? '';
+  if (ms === DOC_SAVE_MS && /^at schedule \(.*\/src\/lib\/editor\/history-file\.svelte\.js:\d+:\d+\)$/.test(caller)) return 'history';
+  if (ms === DOC_SAVE_MS && /^at markUnsaved \(.*\/src\/lib\/store\.svelte\.js:\d+:\d+\)$/.test(caller)) return 'document';
+  if (ms === KEEP_WAIT_MS && /^at keepFirstFit \(.*\/src\/lib\/store\.svelte\.js:\d+:\d+\)$/.test(caller)) return 'keep';
+  return 'unknown';
+}
+
 beforeAll(async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
   vi.stubGlobal('FontFace', class {
@@ -327,8 +339,11 @@ beforeAll(async () => {
   const schedule = globalThis.setTimeout.bind(globalThis);
   const cancel = globalThis.clearTimeout.bind(globalThis);
   vi.stubGlobal('setTimeout', (callback, ms, ...args) => {
+    const setterStack = new Error('observed timer arm').stack;
+    const source = timerSource(ms, setterStack);
     const observed = { serial: ++state.nextObservation, ms, at: Date.now(), ref: app.chapterRef,
-      relevant: ms === DOC_SAVE_MS || ms === KEEP_WAIT_MS, pending: true, event: state.event };
+      source, setterStack, relevant: (ms === DOC_SAVE_MS || ms === KEEP_WAIT_MS) && source !== 'history',
+      pending: true, event: state.event };
     const id = schedule((...values) => {
       observed.pending = false;
       observed.firedAt = Date.now();
@@ -1368,6 +1383,89 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
     expect(state.lastRunProof.facts.touched).toBe(false);
   });
 
+  it('a real pending history timer permits a saved browser baseline while retaining the line choice', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      await EVENTS.editLine();
+      await pass(DOC_SAVE_MS);
+      const history = [...state.timers.values()].filter((timer) => timer.pending && timer.source === 'history');
+      expect(history).toHaveLength(1);
+      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, relevant: false, ref: app.chapterRef });
+      expect(relevantTimers()).toEqual([]);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('AAA');
+      expect(app.saved).toBe(true);
+      const choices = copy([...state.choices.get(c.id)]);
+      await EVENTS.switchOn();
+      expect(state.baselineReceipts).toHaveLength(1);
+      expect(state.touched).toBe(false);
+      expect([...state.choices.get(c.id)]).toEqual(choices);
+      expect(history[0].pending).toBe(true);
+    } finally { await cleanupModel(); }
+  });
+
+  it.each([DOC_SAVE_MS, KEEP_WAIT_MS])('an unknown actual %sms timer blocks equal-file baseline and debt retirement', async (ms) => {
+    resetHand(); state.open = false;
+    let id;
+    try {
+      await open(V1);
+      expect(settlementReceipt()).not.toBe(null);
+      id = setTimeout(() => {}, ms);
+      expect(state.timers.get(id)).toMatchObject({ source: 'unknown', relevant: true, pending: true, ref: app.chapterRef });
+      state.rustDebt.add(c.id);
+      expect(settlementReceipt()).toBe(null);
+      retireBrowserDebt();
+      expect(state.rustDebt.has(c.id)).toBe(true);
+      await EVENTS.switchOn();
+      expect(state.baselineReceipts).toEqual([]);
+    } finally { clearTimeout(id); await cleanupModel(); }
+  });
+
+  it('a document autosave timer remains blocking even when a false saved flag and equal files look settled', async () => {
+    resetHand(); state.open = false;
+    try {
+      await open(V1);
+      markUnsaved();
+      // No document bytes change; the apparent saved flag cannot retire a
+      // real pending document request or establish a Rust baseline.
+      app.saved = true;
+      const timers = relevantTimers();
+      expect(timers).toHaveLength(1);
+      expect(timers[0]).toMatchObject({ source: 'document', ms: DOC_SAVE_MS, pending: true });
+      state.rustDebt.add(c.id);
+      expect(settlementReceipt()).toBe(null);
+      retireBrowserDebt();
+      expect(state.rustDebt.has(c.id)).toBe(true);
+      await EVENTS.switchOn();
+      expect(state.baselineReceipts).toEqual([]);
+    } finally { await cleanupModel(); }
+  });
+
+  it('a real waiting Keep timer retains ownership rather than qualifying as history', async () => {
+    resetHand(); state.open = false;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); await open(V1);
+      expect(waiting()).toBe(true);
+      await EVENTS.keep();
+      const timers = relevantTimers().filter((timer) => timer.ms === KEEP_WAIT_MS);
+      expect(timers).toHaveLength(1);
+      expect(timers[0]).toMatchObject({ source: 'keep', relevant: true, pending: true });
+      expect(firstFitChanges()).toMatchObject({ keeping: true, kept: false });
+      expect(settlementReceipt()).toBe(null);
+      expect(state.rustDebt.has(c.id)).toBe(true);
+      expect(state.baselineReceipts).toEqual([]);
+    } finally { await cleanupModel(); }
+  });
+
+  it('missing or lookalike history setter evidence never identifies a history timer', () => {
+    for (const ms of [DOC_SAVE_MS, KEEP_WAIT_MS]) {
+      expect(timerSource(ms, null)).toBe('unknown');
+      expect(timerSource(ms, 'Error\n    at observer (/src/lib/first-fit.model.test.js:1:1)\n    at schedule (/src/lib/other/history-file.svelte.js:570:11)')).toBe('unknown');
+      expect(timerSource(ms, 'Error\n    at observer (/src/lib/first-fit.model.test.js:1:1)\n    at anotherSetter (/src/lib/editor/history-file.svelte.js:570:11)')).toBe('unknown');
+    }
+  });
+
   it.each(['chapter only', 'unsaved', 'queued saver', 'pending final', 'wrong live filename', 'wrong physical filename'])(
     'a browser baseline refuses %s evidence', async (risk) => {
       resetHand(); state.open = false;
@@ -1894,8 +1992,15 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       await EVENTS.editLine();
       await pass(DOC_SAVE_MS);
       await EVENTS.switchOff();
+      const history = [...state.timers.values()].filter((timer) => timer.pending && timer.source === 'history');
+      expect(history).toHaveLength(1);
+      expect(history[0]).toMatchObject({ ms: DOC_SAVE_MS, relevant: false, ref: app.chapterRef });
+      expect(relevantTimers()).toEqual([]);
+      expect(settlementReceipt()).not.toBe(null);
       retireBrowserDebt();
       expect(state.rustDebt.has(c.id)).toBe(false);
+      expect(state.retirements.get(c.id)?.ref).toBe(app.chapterRef);
+      expect(history[0].pending).toBe(true);
       expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
       await EVENTS.unmarked_style();
       await pass(DOC_SAVE_MS);

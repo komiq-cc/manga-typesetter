@@ -1576,8 +1576,57 @@ orders, exact cancellation prefixes, stale-final prefixes, forced-exit prefixes
 and UNKNOWN orders have separate counts. Shrinks preserve the classification.
 All6000 seeds/events/weights and the ten raw robustness probes are retained.
 
-This candidate has passed syntax and whitespace checks only. Its new named
-controls, current31 original UNKNOWN-seed replay, full6000-order model, queued
-identity old-source/guard-removal proof, combined mutation/tool/dry/browser/
-capture lanes and final review remain pending root execution. No acceptance
-is claimed from the earlier20-order run or from diagnostic prefixes.
+Root executed the frozen b1b6643 candidate before the timer correction below.
+The focused20-order/four-file run returned219PASS/2FAIL, with no startup/runtime,
+timeout, cleanup or source drift. The generated test retained UNKNOWN originals
+20261011 and20261026; the existing Inspector retirement assertion also failed.
+All new named identity/witness/baseline controls started and passed. Replaying
+all31 previously UNKNOWN originals returned2 completed orders,5 exact
+cancellation prefixes,1 stale-final prefix,1 forced-exit prefix and22 UNKNOWN
+orders, with each original proof preserved separately. This is not acceptance.
+Evidence: p9c-root-b1b6643-focused20-001 and
+p9c-root-b1b6643-31-originals-001/results.json.
+
+The queued-request identity sensitivity proof passed on b1b6643: all4 public
+stale-ref controls and2 same-ref positive controls passed. Exact old4d1069 source
+with ONLY the current model-test blob, and the requested-ref guard-removal
+mutant, each failed all4 stale-ref controls by the same clean early physical
+write-attempt assertion before cleanup. No runtime, timeout, cleanup error or
+source drift occurred. Evidence: p9c-root-queue-identity-b1b664-001/results.json.
+
+### Narrow history timer ownership correction (execution pending)
+
+Root ran a separately sealed, observational copy of exact b1b6643 for the
+Inspector and original seeds20261011,20261037,20261601,20262087,20261094,20262168.
+All seven diagnostic executions finished without timeout/runtime/cleanup errors
+or feature drift; diagnostics are not acceptance. The Inspector had current
+matching chapter/translations and retained choices, saved=true, and no pending
+saver/public/final/writer/Keep; its only settlement blocker was an800ms timer
+whose immediate setter was schedule in editor/history-file.svelte.js. Originals
+20261037,20261601 and20262087 likewise had a saved current browser baseline
+blocked by that history timer. The document's own timer had already completed.
+Each original observation is retained before cleanup; minimized orders are
+separate evidence in p9c-root-b1-retirement-{inspector,seed20261037,
+seed20261601,seed20262087,seed20261011,seed20261094,seed20262168}-001.
+
+The model now records the immediate setter stack for every actual timer and
+excludes a DOC_SAVE_MS timer only when that observed caller is exactly schedule
+in src/lib/editor/history-file.svelte.js. Document markUnsaved, Keep, missing
+origin and unfamiliar800/4000ms timers continue to block settlement and
+quiescence. A similarly named function/file is insufficient. This changes no
+production source, generator event/order/weight, clock advance, drain round,
+intent history, ref-cycle debt or boundary classification. New controls require
+a real pending history timer alongside both actual current files and a retained
+line choice before allowing a browser baseline. The existing Inspector control
+also requires the real history timer to remain pending through debt retirement.
+Other controls exercise real document/Keep timers and actual unknown800/4000ms
+timers; unknown timers are the sole blocker over otherwise settled bytes.
+
+These timer corrections and controls have syntax/whitespace checks only and
+await root execution. Original20261011's later actual autosave cancellation has
+no final-window request and remains UNKNOWN; original20261094 has earlier and
+later saver work still outstanding at its failure; original20262168 has an
+actual partial newer chapter/older translations receipt at an outgoing load
+boundary. None is admitted by an old BOTH-file cancellation witness. The full
+6000-order model, remaining combined proof lanes and final review still await
+root execution; no completion is claimed from these diagnostic observations.
