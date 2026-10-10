@@ -2104,3 +2104,25 @@ production bytes, assertions, generator, schedules, clock, drains, retained
 choices/debt or accepted categories were changed by this model correction.
 All final listed runs began below load8, retained logs/reporters and source
 guards, had no timeout/cleanup/execution errors and verified empty processes.
+
+### The actual dry lane exposed its direct-style fixture error (2026-10-10)
+
+The first final canonical attempt on `1bd5bfc` failed its real-copy lane,
+not its historical-output comparison. `layOf` passed `cand.s` into the direct
+metric reader, but a containment candidate has `style`; `s` belongs to the
+placed block. The reader therefore threw while reading `style.size` for
+every straight layout. The fixture now passes `cand.style`. This uses the
+candidate's style directly and still takes no positioned geometry as a
+metric input. No layout/error assertion or denominator is weakened.
+
+The failed existing regression is retained at
+`p9c-root-dry-proofs-v3-owned/runs/worker-feature-canonical1-1bd5bfc/attempts/20261010T183441150613Z`
+under `tp-data/reports/resume-20261009`. Its raw verdict is complete but
+failed:6218 layout failures, all the same missing-style error,0 paint failures,
+13 chapters. The actual assertion at464 fails. The entire failed canonical
+output is preserved privately as `failed-canonical-output/` before any new
+regeneration. Its recorded output hashes match. Process safety, copied
+inputs/source, unlisted files and all9 canonical check files passed their
+guards; owned processes were empty after6.288s. This attempt does not count
+as either required passing worker dry run. Two fresh canonical runs and the
+root's independent comparison follow on the corrected clean tree.

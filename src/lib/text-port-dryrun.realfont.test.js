@@ -210,7 +210,7 @@ if (process.env.TP_DRYRUN !== '1') {
             const k = contain.boxInkRect(cand, place);
             return k ? { l: k.x, t: k.y, r: k.x + k.w, b: k.y + k.h } : null;
           })(),
-          directMetrics: place.isCurve ? null : directBlock(cand.s, place.lines, (s, text) => {
+          directMetrics: place.isCurve ? null : directBlock(cand.style, place.lines, (s, text) => {
             const face = measure.faceFor(s, s.size);
             return { font: seam.textEngine().fontBox(face), ink: seam.textEngine().lineInk(face, text) };
           }),
