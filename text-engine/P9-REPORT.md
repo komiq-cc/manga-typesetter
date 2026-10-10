@@ -1789,9 +1789,75 @@ remain unobserved/no physical receipt, or held translations to retain exactly
 one actual chapter receipt, after cleanup really completes both physical writes.
 Existing same-ID deferred-prefix checks verify returned observations are separate
 values from the live cleanup objects. Pure-browser receipt metadata remains
-explicitly separate from Rust retirement. This correction draft has only syntax
-and whitespace checks; no behavioral jobs or commit have run. Independent static
-review and root execution remain pending. Production, categories, generator
-seeds/events/weights/stages, fourteen drains, cleanup, raw robustness probes,
-historical choices and chapter-ID debt remain unchanged. Remaining13 originals
-and full6000 combined proof are pending.
+explicitly separate from Rust retirement. Root measured exact2c focused100-002:
+256PASS/1 generated UNKNOWN20261094; both cutoff controls and both direct-original
+markSaved controls passed. The exact31-original continuation remained5 completed,
+11 exact cancellation,1 stale-final,1 forced-exit and13 UNKNOWN,1007 generated/
+732 executed/275 tail. Both runs had zero runtime/timeout/cleanup/source errors
+and empty owned processes: p9c-root-2c088-focused100-002 and
+p9c-root-2c088-31-originals-001/results.json. Original event orders, stages,
+executed prefixes and tails were unchanged from2a94d. The immutable-cut summary
+is p9c-root-2c088-original-immutable-cut-summary-001.json
+(SHA256382985a92f2755de5824baf5ec3b87b9ee965a829b5e12cc9be34d5202c24671).
+No new category or full6000 acceptance follows from these bounded runs.
+
+### Outgoing physical rejection must not cancel incoming Keep (P2, fix unexecuted)
+
+The independent whole-P9 source review identified an outgoing failure that
+unconditionally cleared current stamping, flagged current save failure and
+ended current Keep in store.saveFailed. Root reproduced it on exact2c with the
+real public editor final, overlapping outgoing physical writes, an actual newly
+loaded incoming ref and its original font-waiting Keep. The first outgoing
+BOTH receipt permits close; only its later actual writer is rejected after
+incoming Keep starts. The direct outgoing caller receives the identical Error;
+the public outgoing leave still returns false and reports its own error. Yet
+incoming Keep rejects with that outgoing Error, its actual4000ms timer is
+cancelled and its save-failed indicator becomes true, without any incoming
+physical write. Both incoming files remain unchanged at that early assertion.
+
+Root-owned p9c-root-outgoing-rejection-incoming-keep-2c088-002/results.json
+confirmed2 clean regression AssertionErrors at the same functional Keep-pending
+assertion and2PASS existing same-current failure controls. There were no runtime,
+timeout, cleanup, source/configuration errors; all owned processes were empty.
+The preserved attempt001 did not start a child because load exceeded8. Original
+repro overlays and witnesses remain sealed separately for source-only fixed
+continuation; their failing evidence is not replaced by the support fixtures.
+
+The narrow source fix scopes saveFailed effects to the exact request ref object
+AND document load turn. A stale failure returns its original Error without
+clearing current stamping, changing its indicator or ending its Keep. Final
+save already captures both values at call time. Autosave captures them when
+its real document-timer callback starts, immediately before runSavers. Capturing
+only at timer arm would wrongly suppress a legitimate later-turn failure.
+Original rejection/caller behavior, autosave toast, failure streak, saver
+microtask scheduling, write destination policy and final ticket cleanup remain.
+
+Six expanded named public controls are added but UNEXECUTED: genuine same-ID
+fresh-ref reopen; same-ref/new public loader turn; delayed actual outgoing
+autosave rejection; current explicit-final failure; current actual-autosave
+failure while its own Keep waits; and a real autosave timer armed before a
+public turn change but fired afterward. Functional assertions cover original
+Error identity, the correct Keep/deadline/save indicator and actual BOTH files;
+autosave controls retain their own error toast. A diagnostic cut is captured
+before the earliest failure assertion; assertion eligibility does not depend
+on that metadata. No source-private turn/ticket/stamp inspection or rescue save
+is added. Generated events, seeds, weights, stages, fourteen drains, cleanup,
+raw probes, categories and all historical choices/debt are unchanged.
+
+The same-ref/new-turn support uses the actual public loader APIs; normal
+library reopen changes ref too. Real same-ID fresh-ref reopen changes load turn,
+so removal of only the ref comparison may redundantly survive and is not claimed
+to be independently killed. Incoming font-wait controls prove Keep and indicator
+preservation plus later physical persistence, but do not independently prove
+preservation of an already-created incoming stamp. The guarded stamp effect is
+statically scoped; stronger live-writer evidence remains separate. runSavers
+still dispatches subscribers in a later microtask; this fix does not claim to
+bind save destination across a ref change in that separate dispatch window.
+
+Private preparation p9c-2c08871-save-failure-scope-private-v2 was independently
+statically approved and regenerated exactly from sealed2c inputs. Only JavaScript
+syntax and git whitespace checks have run on this candidate. Root's fixed
+original continuation, six-control runs, mutation sensitivity, remaining13
+original orders, full6000 model and final whole-P9 review remain pending. No
+transient browser category from the separately reviewed private prototypes is
+applied, and no completion is claimed.

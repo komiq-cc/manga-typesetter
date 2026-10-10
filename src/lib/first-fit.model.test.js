@@ -158,7 +158,7 @@ vi.mock('./store.svelte.js', async (original) => {
 const { fsx } = await import('./fsx.js');
 const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
-const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, markSaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, DOC_SAVE_MS } = store;
+const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, markSaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, useChapterTypesetting, loadProjectPages, DOC_SAVE_MS } = store;
 const { defaultStyle } = await import('./data.js');
 const { buildTextJson } = await import('./text-json.js');
 const { initHistory } = await import('./editor/history.svelte.js');
@@ -2768,6 +2768,218 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
       checkFile('unchanged geometry Keep deadline, font never arrived');
     } finally {
       await cleanupModel();
+    }
+  });
+
+  it.each(['same-ID fresh ref', 'same ref new load turn', 'delayed autosave rejection'])('a stale %s cannot cancel the current Keep or flag its save', async (cycle) => {
+    const mode = 'direct final rejection';
+    resetHand(); state.open = false;
+    let first; let second; let kept;
+    const firstState = { done: false, answer: null };
+    const secondState = { status: 'pending', answer: null, error: null };
+    const keepState = { status: 'pending', error: null };
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts();
+      await open(V1);
+      expect(waiting(), 'A begins with the real model slow face held').toBe(true);
+      await EVENTS.editLine();
+      const outgoing = c; const outgoingRef = app.chapterRef;
+      hand.hold = true;
+      first = flushBeforeLeaving('editor').then((answer) => { firstState.done = true; firstState.answer = answer; return answer; });
+      if (cycle === 'delayed autosave rejection') {
+        markUnsaved();
+        await pass(DOC_SAVE_MS);
+        second = state.savers.at(-1).originalPromise;
+      } else second = flushSave({ settle: true });
+      second.then((answer) => { secondState.status = 'fulfilled'; secondState.answer = answer; },
+        (error) => { secondState.status = 'rejected'; secondState.error = error; });
+      await pass(0);
+      expect(hand.writes, 'first actual A chapter writer alone is held').toHaveLength(1);
+      expect(hand.writes[0].path).toBe(paths(outgoing).chapter);
+      hand.writes.shift().ok(); await pass(0);
+      expect(firstState, 'A first public final genuinely lets its caller close').toEqual({ done: true, answer: true });
+      expect(secondState.status, 'second A final is still pending').toBe('pending');
+      expect(hand.writes).toHaveLength(1);
+      const heldA = hand.writes[0];
+      expect(heldA.path).toBe(paths(outgoing).chapter);
+      expect(heldA.ref).toBe(outgoingRef);
+      const outgoingChapter = fsx._tree.files.get(paths(outgoing).chapter);
+      const outgoingText = fsx._tree.files.get(paths(outgoing).text);
+      expect(JSON.parse(outgoingChapter).pages[0].lines[0].en).toBe('AAA');
+      expect(JSON.parse(outgoingText).pages[0].lines[0].en).toBe('AAA');
+      const rawB = JSON.parse(V1);
+      if (cycle === 'same ref new load turn') {
+        rawB.id = c.id; rawB.number = c.number; rawB.title = 'Same Ref Reload';
+        rawB.pages[0].lines[0].en = 'B KEEP CHOICE';
+        fsx._tree.files.set(chapterPath, JSON.stringify(rawB));
+        fsx._tree.files.set(translationsPath, buildTextJson(rawB.pages));
+        // Public loader APIs advance documentTurn without replacing ref.
+        useChapterTypesetting(rawB.typesetting);
+        loadProjectPages(rawB.pages);
+        markSaved();
+        state.opened = onDisk(); state.openedText = textOnDisk(); state.openedRef = app.chapterRef;
+        state.openedWrites = hand.began.length; state.touched = false;
+      } else {
+        closeChapter(); state.open = false;
+        expect(app.chapterRef).toBe(null);
+        adopt(cycle === 'same-ID fresh ref' ? chapters[0] : chapters[1]);
+        rawB.id = c.id; rawB.number = c.number; rawB.title = 'Incoming Keep';
+        rawB.pages[0].lines[0].en = 'B KEEP CHOICE';
+        await open(JSON.stringify(rawB));
+      }
+      const incoming = c; const incomingRef = app.chapterRef;
+      if (cycle === 'same ref new load turn') expect(incomingRef).toBe(outgoingRef);
+      else expect(incomingRef).not.toBe(outgoingRef);
+      if (cycle === 'same-ID fresh ref') expect(incomingRef.chapterId).toBe(outgoingRef.chapterId);
+      expect(incomingRef.chapterId).toBe(incoming.id);
+      expect(app.loaded).toBe(true);
+      expect(textEngine().id).toBe('rust');
+      expect(waiting(), 'B has an actual unresolved face used by its own document').toBe(true);
+      expect(hand.writes, 'opening B from a null ref does not drain held A').toEqual([heldA]);
+      const bChapterBefore = onDisk(); const bTextBefore = textOnDisk();
+      const bWriteCount = () => hand.began.filter((write) => write.path === paths(incoming).chapter).length;
+      const beforeB = bWriteCount();
+      kept = keepFirstFit(); state.touched = true;
+      kept.then(() => { keepState.status = 'fulfilled'; }, (error) => { keepState.status = 'rejected'; keepState.error = error; });
+      await pass(0);
+      expect(firstFitChanges()).toMatchObject({ keeping: true, kept: false });
+      const keepTimer = [...state.timers.values()].findLast((timer) => timer.source === 'keep' && timer.ref === incomingRef && timer.pending);
+      expect(keepTimer, 'B Keep owns an actual pending 4000ms deadline').toBeDefined();
+      expect(keepTimer.ms).toBe(KEEP_WAIT_MS);
+      const keepClearCount = keepTimer.clears?.length ?? 0;
+      const failure = new Error('outgoing A held write rejected');
+      hand.hold = false;
+      expect(hand.writes.shift()).toBe(heldA);
+      heldA.fail(failure); await pass(0);
+      if (mode === 'direct final rejection') {
+        expect(secondState.status, 'A caller must retain its own rejection').toBe('rejected');
+        expect(secondState.error, 'A receives the identical original Error').toBe(failure);
+      } else {
+        expect(secondState.status).toBe('fulfilled');
+        expect(secondState.answer, 'A public leave must still refuse its failed final').toBe(false);
+        expect(app.toast.msg, 'A public refusal must still report its own failure').toContain(failure.message);
+      }
+      if (cycle === 'delayed autosave rejection') expect(app.toast.msg, 'the outgoing autosave still reports its original failure').toContain(failure.message);
+      const cut = { mode, outgoingChapterId: outgoing.id, incomingChapterId: incoming.id,
+        outgoingRefToken: refToken(outgoingRef), incomingRefToken: refToken(incomingRef),
+        secondA: { status: secondState.status, answer: secondState.answer, sameOriginalError: secondState.error === failure },
+        incomingKeep: { status: keepState.status, error: keepState.error?.message ?? null, waiting: waiting(), changes: firstFitChanges(),
+          timerSerial: keepTimer.serial, timerPending: keepTimer.pending, timerMs: keepTimer.ms,
+          timerClears: keepTimer.clears?.length ?? 0, timerFiredAt: keepTimer.firedAt ?? null },
+        incomingSaveFailed: app.saveFailed, incomingWriterCount: bWriteCount(),
+        outgoingBytesUnchanged: fsx._tree.files.get(paths(outgoing).chapter) === outgoingChapter && fsx._tree.files.get(paths(outgoing).text) === outgoingText,
+        incomingBytesUnchanged: onDisk() === bChapterBefore && textOnDisk() === bTextBefore };
+      state.privateFailureScopeCut = copy({ ...cut, cycle });
+      expect(keepState.status, 'stale A rejection must leave B Keep pending for its own font or deadline').toBe('pending');
+      expect(keepTimer.pending, 'A failure must not cancel B Keep deadline').toBe(true);
+      expect(keepTimer.clears?.length ?? 0).toBe(keepClearCount);
+      expect(firstFitChanges()).toMatchObject({ keeping: true, kept: false });
+      expect(app.saveFailed, 'A failure must not mark the newly loaded B save as failed').toBe(false);
+      expect(app.chapterRef).toBe(incomingRef);
+      await pass(KEEP_WAIT_MS - 1);
+      expect(keepState.status).toBe('pending');
+      expect(keepTimer.pending, 'the original B deadline survives until just before expiration').toBe(true);
+      expect(waiting()).toBe(true);
+      expect(bWriteCount(), 'B Keep waits for its actual font while deadline has time left').toBe(beforeB);
+      expect(onDisk()).toBe(bChapterBefore); expect(textOnDisk()).toBe(bTextBefore);
+      await EVENTS.fontLands(); await pass(0);
+      await until(kept);
+      expect(keepState.status, 'B own font readiness fulfills its original Keep').toBe('fulfilled');
+      expect(waiting()).toBe(false);
+      expect(bWriteCount()).toBe(beforeB + 1);
+      expect(JSON.parse(onDisk()).pages[0].lines[0].en).toBe('B KEEP CHOICE');
+      expect(JSON.parse(textOnDisk()).pages[0].lines[0].en).toBe('B KEEP CHOICE');
+      expect(JSON.parse(onDisk()).typesetting.version).toBe(2);
+      expect(canon(JSON.parse(onDisk()).pages)).toBe(canon(documentNow()));
+      expect(textOnDisk()).toBe(buildTextJson(app.pages));
+      if (incoming.id !== outgoing.id) {
+        expect(fsx._tree.files.get(paths(outgoing).chapter)).toBe(outgoingChapter);
+        expect(fsx._tree.files.get(paths(outgoing).text)).toBe(outgoingText);
+      }
+      expect(app.saved).toBe(true); expect(app.saveFailed).toBe(false);
+    } finally {
+      await cleanupModel();
+      await Promise.allSettled([first, second, kept].filter(Boolean));
+    }
+  });
+
+  it.each(['explicit final', 'actual autosave'])('a same-current failed %s still rejects Keep and marks its own save failed', async (saveMode) => {
+    resetHand(); state.open = false;
+    let kept; let failed;
+    const keepState = { status: 'pending', error: null };
+    let received;
+    try {
+      await EVENTS.switchOn(); await EVENTS.engineStarts(); await open(V1);
+      expect(waiting()).toBe(true);
+      const ref = app.chapterRef;
+      const chapterBefore = onDisk(); const textBefore = textOnDisk();
+      kept = keepFirstFit(); state.touched = true;
+      kept.then(() => { keepState.status = 'fulfilled'; }, (error) => { keepState.status = 'rejected'; keepState.error = error; });
+      await pass(0);
+      const deadline = [...state.timers.values()].findLast((timer) => timer.source === 'keep' && timer.ref === ref && timer.pending);
+      expect(deadline).toBeDefined();
+      hand.hold = true;
+      if (saveMode === 'actual autosave') {
+        markUnsaved(); await pass(DOC_SAVE_MS);
+        failed = state.savers.at(-1).originalPromise;
+      } else failed = flushSave({ settle: true });
+      failed.catch((error) => { received = error; });
+      await pass(0);
+      expect(hand.writes).toHaveLength(1);
+      const writer = hand.writes.shift();
+      expect(writer.path).toBe(chapterPath); expect(writer.ref).toBe(ref);
+      const failure = new Error('same current physical save failure');
+      writer.fail(failure); await pass(0);
+      await until(failed).catch(() => {});
+      expect(received, 'the current caller receives its original physical failure').toBe(failure);
+      expect(keepState, 'a current-cycle failure must still reject its own original Keep').toEqual({ status: 'rejected', error: failure });
+      expect(app.saveFailed, 'current save failure remains visible').toBe(true);
+      if (saveMode === 'actual autosave') expect(app.toast.msg, 'current autosave retains its own failure notice').toContain(failure.message);
+      expect(deadline.pending, 'current failure cancels its own Keep deadline').toBe(false);
+      expect(firstFitChanges().keeping).toBe(false);
+      expect(app.chapterRef).toBe(ref);
+      expect(onDisk()).toBe(chapterBefore); expect(textOnDisk()).toBe(textBefore);
+      expect(hand.landed).toHaveLength(0);
+    } finally {
+      await cleanupModel(); await Promise.allSettled([kept, failed].filter(Boolean));
+    }
+  });
+
+  it('an autosave failure belongs to the public load turn at timer fire rather than timer arm', async () => {
+    resetHand(); state.open = false;
+    let failed; let received;
+    try {
+      await open(V1); await EVENTS.editLine();
+      const ref = app.chapterRef;
+      const armed = [...state.timers.values()].findLast((timer) => timer.source === 'document' && timer.ref === ref && timer.pending);
+      expect(armed).toBeDefined();
+      const clears = armed.clears?.length ?? 0;
+      const chapterBefore = onDisk(); const textBefore = textOnDisk();
+      // The same public API used by loading advances the cycle; it neither
+      // changes ref nor replaces the already armed document timer.
+      useChapterTypesetting(copy(app.typesetting));
+      expect(app.chapterRef).toBe(ref);
+      expect(armed.pending).toBe(true); expect(armed.clears?.length ?? 0).toBe(clears);
+      hand.hold = true;
+      await pass(DOC_SAVE_MS);
+      expect(hand.writes).toHaveLength(1);
+      const writer = hand.writes.shift();
+      expect(writer.path).toBe(chapterPath); expect(writer.ref).toBe(ref);
+      const saver = state.savers.find((save) => save.serial === writer.saverSerial);
+      expect(saver?.originalPromise).toBeDefined(); failed = saver.originalPromise;
+      failed.catch((error) => { received = error; });
+      const failure = new Error('actual timer-start current-cycle failure');
+      writer.fail(failure); await pass(0);
+      await until(failed).catch(() => {});
+      expect(app.saveFailed, 'a legitimate later-turn autosave must flag its own actual failure').toBe(true);
+      expect(received).toBe(failure);
+      expect(app.toast.msg, 'the actual autosave failure still reaches its original notice').toContain(failure.message);
+      expect(app.chapterRef).toBe(ref);
+      expect(onDisk()).toBe(chapterBefore); expect(textOnDisk()).toBe(textBefore);
+      expect(hand.landed).toHaveLength(0);
+      expect(armed.pending).toBe(false); expect(armed.firedAt).toBeDefined();
+    } finally {
+      await cleanupModel(); await Promise.allSettled([failed].filter(Boolean));
     }
   });
 

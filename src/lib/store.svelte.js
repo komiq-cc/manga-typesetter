@@ -2368,7 +2368,10 @@ export function setSaver(fn) {
 const runSavers = () => Promise.resolve().then(() => Promise.all(savers.notify()));
 // A save that failed has stamped nothing (`stampTypesetting`), and a Keep
 // that was waiting on it has kept nothing: the notice offers it again.
-const saveFailed = (e) => {
+const saveFailed = (e, ref, turn) => {
+  // A delayed outgoing failure belongs only to that exact document cycle.
+  // The caller still receives the original error after another chapter loads.
+  if (app.chapterRef !== ref || documentTurn !== turn) return e;
   stamping = null;
   app.saveFailed = true;
   if (firstFit.keeping) endKeep(e);
@@ -2382,11 +2385,12 @@ export function markUnsaved() {
   // There is no manual save in this app, so a rejected autosave is the user's
   // only signal that their work is not reaching the disk. Never swallow it.
   saveT = setTimeout(() => {
+    const ref = app.chapterRef, turn = documentTurn;
     runSavers().catch((e) => {
       // A toast lasts two seconds; the work being off-disk lasts until a write
       // lands. The indicator carries the second half of that, so the user can
       // still find out why an hour later.
-      saveFailed(e);
+      saveFailed(e, ref, turn);
       toast(`Could not save: ${e?.message ?? e}`);
     });
   }, DOC_SAVE_MS);
@@ -2446,7 +2450,7 @@ export function flushSave({ settle = false } = {}) {
           await runSavers();
         }
       }).catch((e) => {
-        throw saveFailed(e);
+        throw saveFailed(e, ref, turn);
       }).finally(() => {
         if (!ticket) return;
         finalSettlements.delete(ticket);
