@@ -34,7 +34,8 @@
   // `letters` listens to nothing but the switch while the browser measures.
   // With the Rust engine on it is made from every box's text, and a keystroke
   // changes one box's: so each box's answer is kept by itself (`lettersIn`),
-  // made again when THAT box's text or face changes or a font lands, and the
+  // made again when THAT box's text, face or borrowed-letter layout changes
+  // or a font lands, and the
   // list reads the kept answers and no text. A keystroke is one box looked at
   // again, in a chapter of four hundred as in one of four; the list itself is
   // put together again only when that box's answer came out different, and a
@@ -91,7 +92,7 @@
   // read, or that could not be looked for at all, is said to be that - it may
   // well be in a font on this computer.
   function lettersLine(l) {
-    const parts = l.borrowed.map((b) => `${shown(b.letters)} drawn in ${b.family}`);
+    const parts = l.borrowed.map((b) => `${shown(b.letters)} drawn in ${b.family ?? 'another loaded font'}`);
     if (l.none.length) parts.push(`${lettersWereAskedFor() ? 'no installed font has' : 'no loaded font has'} ${shown(l.none)}`);
     for (const u of l.unread) parts.push(u.family ? `${shown(u.letters)} is in ${u.family}, which could not be read` : `could not look for a font with ${shown(u.letters)}`);
     return parts.join(' · ');

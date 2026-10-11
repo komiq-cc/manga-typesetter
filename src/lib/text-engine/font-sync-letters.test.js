@@ -54,6 +54,16 @@ async function withFace(ctx, name = 'Wild Words') {
 }
 
 describe('a letter the face lacks', () => {
+  it.each(['absent', 'null'])('keeps proven coverage without guessing a family when lineParts is %s', async (kind) => {
+    const ctx = setup();
+    ctx.engine.cover('Helvetica Neue', 'Ω');
+    const f = await withFace(ctx);
+    ctx.engine.lineParts = kind === 'absent' ? undefined : () => null;
+    expect(ctx.sync.lettersOf(f, 'Ωあ☃')).toEqual({ borrowed: [{ family: null, letters: [cp('Ω')] }], none: [], pending: [cp('あ'), cp('☃')], unread: [] });
+    await ctx.sync.settled();
+    expect(ctx.sync.lettersOf(f, 'Ωあ☃')).toEqual({ borrowed: [{ family: null, letters: [cp('Ω'), cp('あ')] }], none: [cp('☃')], pending: [], unread: [] });
+  });
+
   it('is not asked about when the face has every letter', async () => {
     const ctx = setup();
     const f = await withFace(ctx);

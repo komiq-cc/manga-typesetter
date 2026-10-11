@@ -111,6 +111,51 @@ function machine({ hold = false } = {}) {
 
 const TEXT = `I ${HEART} YOU ${NOTE}`;
 
+describe('the notice names the fallback that shaped the text', () => {
+  it.each([false, true])('a later fallback retains a shared letter (last-resort coverage=%s)', async (resortHasNote) => {
+    const firstOnly = '\u0606';
+    const fallbackFiles = resortHasNote ? [['Later', dejavu]] : [['Early', oblique], ['Later', dejavu]];
+    const files = new Map([['Helvetica Neue', resortHasNote ? oblique : bangers], ...fallbackFiles]);
+    const sync = createFontSync({
+      engine,
+      fonts: { user: [], system: [...files.keys()].map((name) => sysEntry(name, ['regular'])) },
+      os: 'macos',
+      systemFace: async (family, _slot, known) => systemFaceAnswer({ regular: 0 }, files.get(family), { known }),
+      systemCoverage: async (codePoints) => {
+        const remaining = new Set(codePoints);
+        const families = fallbackFiles.map(([name, bytes], i) => {
+          const ranges = coverage(bytes).ranges;
+          const mine = [...remaining].filter((c) => covers(ranges, c));
+          for (const c of mine) remaining.delete(c);
+          return { name, order: String(i), codePoints: mine };
+        }).filter((f) => f.codePoints.length);
+        return { families, none: [...remaining] };
+      },
+    });
+    sync.setUserFace('Primary', 'regular', comic);
+    sync.refresh();
+    await sync.settled();
+    const f = face('Primary');
+    const text = firstOnly + NOTE;
+    // The first letter exists only in Later; the note exists in both lenders.
+    expect(engine.missing(f, text, 0)).toEqual(expect.arrayContaining([cp(firstOnly), cp(NOTE)]));
+    expect(engine.missing(f, text, 0)).toHaveLength(2);
+    sync.lettersOf(f, text);
+    await sync.settled();
+    expect(engine.lineParts(f, text)).toEqual([{ font: engine.lenders(false, false).at(-1).font, bold: false, italic: false, start: 0, end: 2 }]);
+    const letters = sync.lettersOf(f, text);
+    expect(letters).toEqual({ borrowed: [{ family: 'Later', letters: expect.arrayContaining([cp(firstOnly), cp(NOTE)]) }], none: [], pending: [], unread: [] });
+    expect(letters.borrowed[0].letters).toHaveLength(2);
+    // A new line starts a fresh fallback choice, rather than retaining Later.
+    const separate = sync.lettersOf(f, firstOnly + '\n' + NOTE).borrowed;
+    expect(separate).toEqual(expect.arrayContaining([
+      { family: 'Later', letters: [cp(firstOnly)] },
+      { family: resortHasNote ? 'Helvetica Neue' : 'Early', letters: [cp(NOTE)] },
+    ]));
+    expect(separate).toHaveLength(2);
+  });
+});
+
 describe('a line that mixes a Latin face with letters it lacks', () => {
   it('is measured with the empty box until the family that has them is in, then with that family', async () => {
     const { sync, calls, onArrival, release } = machine({ hold: true });

@@ -14,7 +14,7 @@ vi.mock('./editor/box-picture.js', async (original) => {
 });
 
 import TextBox from './TextBox.svelte';
-import { app, loadProjectPages, page, beginEdit, endEdit, setZoom, boxText } from './store.svelte.js';
+import { app, loadProjectPages, page, beginEdit, endEdit, setZoom, boxText, relayoutAll } from './store.svelte.js';
 import { engineSwitch } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { paintBoxPicture, PICTURE_MAX_PX, PICTURE_DRAG_PX } from './editor/box-picture.js';
@@ -1214,6 +1214,44 @@ describe('the editable\'s own caret is kept under the drawn one', () => {
 });
 
 describe('a selection the browser moved itself starts again', () => {
+  it.each([
+    ['plain', 2, 9], ['plain', 9, 2], ['wrapped', 2, 11], ['wrapped', 11, 2], ['arc', 2, 9], ['arc', 9, 2],
+  ])('%s: a live zoom preserves selection [%i, %i] and the next edit replaces it', async (id, a, f) => {
+    const m = await typing(id);
+    const original = m.box.text;
+    nativeSel(m, a, f);
+    await tick();
+    setZoom(1.5);
+    await tick();
+    expect(m.sel()).toEqual([a, f]);
+    input(m, 'insertText', 'Z');
+    await tick();
+    expect(m.box.text).toBe(original.slice(0, Math.min(a, f)) + 'Z' + original.slice(Math.max(a, f)));
+  });
+
+  it('a font arrival preserves a backward selection through changed wrapping', async () => {
+    const listeners = new Set();
+    let width = 0.5;
+    setTextEngine({
+      ...half,
+      advance: (face, text) => text.length * face.size * width,
+      onFontsChange: (cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+    });
+    const m = await typing('wrapped');
+    nativeSel(m, 11, 2);
+    await tick();
+    const before = m.editable().innerHTML;
+    width = 0.8;
+    for (const cb of listeners) cb();
+    relayoutAll();
+    await tick();
+    expect(m.editable().innerHTML).not.toBe(before);
+    expect(m.sel()).toEqual([11, 2]);
+    input(m, 'insertText', 'Z');
+    await tick();
+    expect(m.box.text).toBe('AAZCCC');
+  });
+
   it('no side of a wrap is kept: the caret shows where the browser has it', async () => {
     const m = await typing('wrapped');
     const rows = rowsOf(m.box);
@@ -1434,6 +1472,51 @@ describe('while an IME composes, nothing the picture answers moves the caret or 
   });
   afterEach(() => setMacKeyboard(was));
   const composition = (m, type) => m.editable().dispatchEvent(new CompositionEvent(type, { bubbles: true }));
+  it.each([true, false])('undo/redo during composition leaves field history intact (painting=%s)', async (painting) => {
+    engineSwitch.painting = painting;
+    const m = await typing('plain');
+    input(m, 'insertFromPaste', 'A');
+    await tick();
+    input(m, 'insertFromPaste', 'B');
+    await tick();
+    expect(m.box.text).toBe('AB');
+    const ed = m.editable();
+    expect(key(m, 'z', { metaKey: true, isComposing: true }).defaultPrevented).toBe(false);
+    await tick();
+    expect(m.box.text).toBe('AB');
+    composition(m, 'compositionstart');
+    ed.textContent = 'AB漢';
+    nativeSel(m, 3);
+    ed.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    await tick();
+    for (const mod of [{ metaKey: true }, { ctrlKey: true }]) {
+      for (const shiftKey of [false, true]) {
+        expect(key(m, 'z', { ...mod, shiftKey }).defaultPrevented).toBe(false);
+        expect(input(m, shiftKey ? 'historyRedo' : 'historyUndo').defaultPrevented).toBe(false);
+        await tick();
+        expect(m.box.text).toBe('AB');
+        expect(ed.textContent).toBe('AB漢');
+        expect(m.sel()).toEqual([3, 3]);
+      }
+    }
+    composition(m, 'compositionend');
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+    expect(m.box.text).toBe('AB漢');
+    key(m, 'z', { metaKey: true });
+    await tick();
+    expect(m.box.text).toBe('AB');
+    key(m, 'z', { ctrlKey: true });
+    await tick();
+    expect(m.box.text).toBe('A');
+    key(m, 'z', { metaKey: true, shiftKey: true });
+    await tick();
+    expect(m.box.text).toBe('AB');
+    key(m, 'z', { ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(m.box.text).toBe('AB漢');
+  });
+
   // Every key the picture's rows, or a curve's glyphs, answer. Each arrives
   // WITHOUT `isComposing`, as a key can in the middle of a composition: the
   // one thing that says so is that a composition was started and has not ended.

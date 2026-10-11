@@ -4,12 +4,13 @@ import { systemFaceAnswer } from '../test/font-collection.js';
 import { coverage, covers } from '../../scripts/text-port/lib/cmap.mjs';
 import { app, loadProjectPages, page, autoFitBox, fontsSettling } from './store.svelte.js';
 import { initHistory, resetHistory } from './editor/history.svelte.js';
-import { engineSwitch, useTextEngine, lettersOf, boxesBorrowingLetters, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
+import { engineSwitch, useTextEngine, lettersOf, boxLetters, boxesBorrowingLetters, _setEngineSwitchDeps, _resetEngineSwitch } from './engine-switch.svelte.js';
 import { textEngine, setTextEngine } from './text-engine/index.js';
 import { addFontFile, removeUserFont, systemFontEntry, watchUserFaces } from './fonts.js';
 import { lineWidth, layoutLines, applyCase, contentWidth, textInset, setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
 import { neededHeight } from './typeset.js';
 import { fakeIndexedDB } from '../test/fake-indexeddb.js';
+import { boxCandidate, placeBlock } from './contain.js';
 
 // ===========================================================================
 // A borrowed letter through the whole app path, on the real engine
@@ -123,6 +124,74 @@ afterEach(async () => {
   setTypesetEnabled(original.typeset);
   clearLayoutMemo();
   vi.unstubAllGlobals();
+});
+
+describe('borrowed fonts follow the box’s painted runs', () => {
+  it('finds curve borrowing hidden by shaping a composed character in the primary face', async () => {
+    await on({ hold: true });
+    const text = '=\u0338';
+    const b = box('MyBangers', { text, style: { curve: 30 } });
+    const p = doc([b])[0];
+    expect(lettersOf(b.style, text)).toEqual({ borrowed: [], none: [], pending: [], unread: [] });
+    // Bangers composes the pair to its own ≠, but paints the curve's mark
+    // independently; that missing glyph must initiate coverage discovery.
+    let done = false;
+    const settling = fontsSettling([p]).then(() => { done = true; });
+    expect(boxLetters(b, p).pending).toContain(cp('\u0338'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(done).toBe(false);
+    for (let i = 0; i < 4 && !done; i++) {
+      invoke.release();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await settling;
+    expect(boxLetters(b, p)).toEqual({ borrowed: [{ family: 'DejaVu Sans', letters: [cp('\u0338')] }], none: [], pending: [], unread: [] });
+  });
+
+  it.each([
+    ['plain wrap', { shape: 'off' }, 20],
+    ['arc', { curve: 30 }, 150],
+    ['circle', { circle: { on: true } }, 150],
+    ['path', { path: { on: true, pts: [{ x: 0, y: 0, ix: 0, iy: 0, ox: 0, oy: 0 }, { x: 150, y: 0, ix: 0, iy: 0, ox: 0, oy: 0 }] } }, 150],
+  ])('%s starts a fresh fallback choice at each painted run', async (_name, style, width) => {
+    const files = new Map([['Helvetica Neue', comic], ['Early', oblique], ['Later', dejavu]]);
+    app.fonts.system = [...files.keys()].map((name) => systemFontEntry({ name, faces: { regular: true } }));
+    const invoke = async (cmd, args) => {
+      if (cmd === 'system_font_face') return systemFaceAnswer({ regular: 0 }, files.get(args.family), { known: args.known });
+      const remaining = new Set(args.codePoints);
+      const families = ['Early', 'Later'].map((name) => {
+        const ranges = coverage(files.get(name)).ranges;
+        const mine = [...remaining].filter((c) => covers(ranges, c));
+        for (const c of mine) remaining.delete(c);
+        return { name, order: name, codePoints: mine };
+      }).filter((f) => f.codePoints.length);
+      return { families, none: [...remaining] };
+    };
+    _setEngineSwitchDeps({ available: () => true, createEngine: async () => engine, invoke: async () => invoke, booted: async () => {}, os: () => 'macos' });
+    await addFontFile(fontFile('MyBangers.ttf', bangers));
+    await useTextEngine('rust');
+    const first = '\u0606';
+    const text = first + '♪'.repeat(4);
+    const b = box('MyBangers', { text, w: 2000, h: 500 });
+    const p = doc([b])[0];
+    lettersOf(b.style, text);
+    await fontsSettling([p]);
+    expect(lettersOf(b.style, text).borrowed).toEqual([{ family: 'Later', letters: expect.arrayContaining([cp(first), cp('♪')]) }]);
+    expect(boxLetters(b, p)).toEqual(lettersOf(b.style, text));
+    b.w = width;
+    Object.assign(b.style, style);
+    const placed = placeBlock(boxCandidate(b, text));
+    const runs = placed.isCurve ? placed.layout.map((g) => g.ch) : placed.lines;
+    expect(runs.length).toBeGreaterThan(1);
+    expect(runs.some((run) => run.startsWith('♪'))).toBe(true);
+    const actual = boxLetters(b, p);
+    expect(actual).toEqual({ borrowed: expect.arrayContaining([
+      { family: 'Later', letters: [cp(first)] },
+      { family: 'Early', letters: [cp('♪')] },
+    ]), none: [], pending: [], unread: [] });
+    expect(actual.borrowed).toHaveLength(2);
+    expect(boxesBorrowingLetters([p])[0].borrowed).toEqual(actual.borrowed);
+  });
 });
 
 describe('a box whose font lacks a heart and a note', () => {

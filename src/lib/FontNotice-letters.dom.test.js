@@ -68,6 +68,16 @@ afterEach(() => {
 });
 
 describe('the notice, for a box with letters its font lacks', () => {
+  it.each(['absent', 'null'])('does not claim absence or invent a family when lineParts is %s', async (kind) => {
+    await start();
+    engine.lineParts = kind === 'absent' ? undefined : () => null;
+    loadProjectPages([{ id: 1, w: 800, h: 1200, lines: [], boxes: [box('mixed', 'Ωあ☃')] }]);
+    const view = render(FontNotice);
+    await settled();
+    await fireEvent.click(view.getByRole('button', { name: /1 box with letters no font has · 1 box with letters from another font/ }));
+    expect(rows(view)).toEqual([{ page: 'p.1', text: 'Ωあ☃', why: 'Ω あ drawn in another loaded font · no installed font has ☃' }]);
+  });
+
   it('says which letters are drawn in which family, in one line a box', async () => {
     await start();
     loadProjectPages([

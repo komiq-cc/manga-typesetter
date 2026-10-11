@@ -116,7 +116,7 @@ export function boxCandidate(box, text) {
 // Glyph-by-glyph text - the bezier path, the closed ring, the arc - in the
 // precedence every renderer states (path > circle > arc). A style question only;
 // whether there is text to put on the curve is `placeBlock`'s.
-function curvedStyle(s) {
+export function curvedStyle(s) {
   return !!((s?.path?.on && (s.path.pts?.length ?? 0) >= 2) || s?.circle?.on || (s?.curve && s.curve !== 0));
 }
 

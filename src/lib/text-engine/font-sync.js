@@ -58,6 +58,7 @@
 // lets the same code run against the real engine with fixture fonts.
 import { FACE_SLOTS } from '../data.js';
 import { lastResortFamily } from './last-resort.js';
+import { drawnRuns } from './drawn-face.js';
 
 const TAG = (a, b, c, d) => ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
 const SFNT_TAGS = new Set([0x00010000, TAG(0x74, 0x72, 0x75, 0x65) /* true */, TAG(0x4f, 0x54, 0x54, 0x4f) /* OTTO */]);
@@ -195,8 +196,8 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
   let lettersGen = 0;
   // The chain the engine was last given, to give it another only when it is one.
   let chained = '[]';
-  // The families of that chain by name, in its order.
-  let chainNames = [];
+  // How many families that chain has.
+  let chainDepth = 0;
   const ASKING = Object.freeze({ state: 'asking' });
   const ABSENT = Object.freeze({ state: 'absent' });
   const UNASKED = Object.freeze({ state: 'unasked' });
@@ -232,7 +233,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
     const key = JSON.stringify(chain);
     if (key === chained) return;
     chained = key;
-    chainNames = chain.map((entry) => (typeof entry === 'string' ? entry : entry.family));
+    chainDepth = chain.length;
     engine.setFallbacks(chain);
   }
 
@@ -642,13 +643,13 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
 
     /**
      * What becomes of the letters of `text` that `face` itself has no glyph
-     * for, each code point once:
+     * for, each code point once per lending family:
      *
      *   borrowed  [{ family, letters }]: drawn from another family - the last
      *             resort, or one named for them. The family is read off the
-     *             engine, not off what was answered: it is the first of the
-     *             engine's list that has a glyph for the letter, which is
-     *             the one that draws it;
+     *             engine's shaped runs, not off what was answered or which
+     *             prefix of the fallback list first covers a letter;
+     *             null when coverage is known but the engine cannot name runs;
      *   none      the native side looked and no installed font has them (or
      *             there is nobody to ask): drawn as the face's empty box;
      *   unread    [{ family, letters }]: drawn as the empty box too, but not
@@ -671,36 +672,39 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       // last resort adds nothing to its own face.
       const beyond = resort && face.name !== resort ? engine.missing(face, text, 1) : own;
       want(beyond);
-      // The family of the engine's list a letter is drawn from: the first
-      // that leaves it out of what is still lacking. Asked of the engine one
-      // family further at a time, and only for a text that has such a letter.
-      const lacking = [];
-      const drawnIn = (cp) => {
-        for (let depth = 2; depth <= chainNames.length; depth++) {
-          lacking[depth] ??= engine.missing(face, text, depth);
-          if (!lacking[depth].includes(cp)) return chainNames[depth - 1];
+      // A shared letter stays in its preceding fallback. Read the actual
+      // runs, including fresh choices at line breaks, rather than coverage.
+      const drawn = new Map();
+      for (const run of drawnRuns(engine, face, text) ?? []) {
+        if (run.own || !run.family) continue;
+        for (const ch of text.slice(run.start, run.end)) {
+          const cp = ch.codePointAt(0);
+          if (!drawn.has(cp)) drawn.set(cp, new Set());
+          drawn.get(cp).add(run.family);
         }
-        return null;
-      };
+      }
       const group = (map, family, cp) => (map.get(family) ?? map.set(family, []).get(family)).push(cp);
       const list = (map) => [...map].map(([family, cps]) => ({ family, letters: cps }));
       const borrowed = new Map();
       const unread = new Map();
       const none = [];
       const pending = [];
+      let stillMissing;
       for (const cp of own) {
-        if (!beyond.includes(cp)) {
-          group(borrowed, resort, cp);
-          continue;
-        }
         const rec = letters.get(cp);
         const state = letterState(rec);
-        if (state === 'pending') {
+        if (beyond.includes(cp) && state === 'pending') {
           pending.push(cp);
           continue;
         }
-        const family = drawnIn(cp);
-        if (family) group(borrowed, family, cp);
+        const families = drawn.get(cp);
+        if (families) {
+          for (const family of families) group(borrowed, family, cp);
+        }
+        // An older wasm can prove coverage without naming shaped runs.
+        // Preserve that fact without guessing the family or claiming absence.
+        // A chain of the last resort alone was asked already (`beyond`).
+        else if (!(stillMissing ??= chainDepth > 1 ? engine.missing(face, text) : beyond).includes(cp)) group(borrowed, null, cp);
         else if (state === 'absent') none.push(cp);
         else group(unread, rec?.family ?? null, cp);
       }
@@ -754,7 +758,7 @@ export function createFontSync({ engine, fonts, os = null, systemFace = null, to
       covering.clear();
       resort = null;
       chained = '[]';
-      chainNames = [];
+      chainDepth = 0;
       engine.setFallbacks([]);
     },
     /** For tests and for looking: what is registered and how. */

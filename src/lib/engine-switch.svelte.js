@@ -48,6 +48,7 @@
 import { app, setFontSource, noteFontsChanged, toast, boxText } from './store.svelte.js';
 import { watchUserFaces, fontsBooted, loadedFaceRecords } from './fonts.js';
 import { faceFor, applyCase } from './measure.js';
+import { boxCandidate, placeBlock, curvedStyle } from './contain.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { createRustTextEngine } from './text-engine/rust.js';
 import { createRustGlyphPainter } from './text-engine/rust-painter.js';
@@ -274,7 +275,7 @@ async function start() {
       nameFor: (name) => s.nameFor(name),
       ready: (name) => s.ready(name),
       missing: (name) => s.missing(name),
-      lettersReady: (style, text) => !lettersOf(style, text).pending.length,
+      lettersReady: (style, text) => !(curvedStyle(style) ? lettersInRuns(style, [...applyCase(text, style)]) : lettersOf(style, text)).pending.length,
       settle: fontsSettled,
       // For a chapter this engine fits for the first time (`firstFit` in the
       // store): whether it is the one measuring, and who measured before it.
@@ -346,7 +347,7 @@ export async function fontsSettled(pages = app.pages) {
     for (const p of pages ?? []) {
       for (const b of p?.boxes ?? []) {
         if (!b?.style) continue;
-        if (!s.ready(b.style.font) || lettersOf(b.style, String(boxText(b, p) ?? '')).pending.length) waiting = true;
+        if (!s.ready(b.style.font) || boxLetters(b, p).pending.length) waiting = true;
       }
     }
     if (!waiting) return;
@@ -461,9 +462,35 @@ export function boxesBorrowingLetters(pages = app.pages, look = boxLetters) {
   });
   return out;
 }
-/** `lettersOf` for a box on its page. */
+/** Borrowed fonts in the actual wrapped lines or curved glyphs the box paints. */
 export function boxLetters(b, p) {
-  return lettersOf(b.style, String(boxText(b, p) ?? ''));
+  if (engineSwitch.phase !== 'on') return NO_LETTERS;
+  const text = String(boxText(b, p) ?? '');
+  const letters = lettersOf(b.style, text);
+  // Straight layout can wait until the raw text's lenders are in.
+  // Curves shape each glyph separately, even if the whole string composes
+  // successfully in the primary font (for example, = + combining slash).
+  if (!curvedStyle(b.style) && (!letters.borrowed.length || letters.pending.length)) return letters;
+  const placed = placeBlock(boxCandidate(b, text));
+  const runs = placed.isCurve ? placed.layout.map((g) => g.ch) : placed.lines;
+  // Each painted run starts its own fallback choice, including a soft wrap.
+  return lettersInRuns(b.style, runs);
+}
+
+function lettersInRuns(style, runs) {
+  const answers = [...new Set(runs)].map((text) => lettersOf(style, text));
+  if (answers.every((a) => a === NO_LETTERS)) return NO_LETTERS;
+  if (answers.length === 1) return answers[0];
+  const union = (key) => [...new Set(answers.flatMap((a) => a[key]))];
+  const groups = (key) => {
+    const families = new Map();
+    for (const a of answers) for (const g of a[key]) {
+      if (!families.has(g.family)) families.set(g.family, new Set());
+      for (const cp of g.letters) families.get(g.family).add(cp);
+    }
+    return [...families].map(([family, letters]) => ({ family, letters: [...letters] }));
+  };
+  return { borrowed: groups('borrowed'), none: union('none'), pending: union('pending'), unread: groups('unread') };
 }
 
 /** Whether a letter nothing has was looked for among the installed fonts, or there was nobody to ask (a plain browser). */

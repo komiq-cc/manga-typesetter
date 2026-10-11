@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import { at, storedIds, requiredStoredLayouts, assertPartners, unrepairedPages, changeOf, caseIdOf, INK_TOL_PX } from '../../../scripts/text-port/lib/dry-compare.mjs';
-import { explain, inkMoved, stripAgainst, assertLanePassed, assertReportRecords } from '../../../scripts/text-port/lib/dry-report.mjs';
+import { explain, inkMoved, stripAgainst, assertLanePassed, assertReportRecords, whatChanged } from '../../../scripts/text-port/lib/dry-report.mjs';
 import { predictMiddle } from '../../../scripts/text-port/lib/dry-metrics.mjs';
 import { p9CheckResult } from '../../../scripts/text-port/lib/p9-check-result.mjs';
 
@@ -65,6 +65,22 @@ describe('a box whose layout threw', () => {
 });
 
 describe('a block that moved and nothing else did', () => {
+  it('reports proven borrowing without claiming an unavailable family name', () => {
+    const row = rowOf(layOf(), { fontFacts: { ...font, borrowed: [{ family: null, letters: [0x266a] }] } });
+    const words = explain(row, { lines: true, borrows: true }, wkOf()).find((x) => x.what === 'lines').cause;
+    expect(words).toContain('drawn from another loaded font');
+    expect(words).not.toContain('null');
+  });
+
+  it.each([
+    [-23.7603125, null, 'block -23.76 px down, horizontal movement unknown'],
+    [null, 4, 'block vertical movement unknown, 4 px right'],
+    [2, 0, 'block 2 px down, 0 px right'],
+  ])('reports measured movement (%s, %s) without inventing zero', (blockDy, blockDx, words) => {
+    // HTML and Markdown both render this shared list of change descriptions.
+    expect(whatChanged({ change: { moved: true, blockDy, blockDx } })).toEqual([words]);
+  });
+
   // The engine's ink sits 1.5 px higher against the line boxes, top and
   // bottom: a block centred on its ink is then 1.5 px lower.
   const moved = (dy, ink = dy) => layOf({ directMetrics: directOf(ink), blockY: 60 + dy, ink: { l: 12, t: 64 + dy - ink, r: 88, b: 122 + dy - ink } });

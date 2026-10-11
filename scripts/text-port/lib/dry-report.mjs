@@ -56,7 +56,7 @@ export function explain(row, c, wk) {
   const o = row.rust.lay?.overflow ?? {};
   const missing = c.missing ? `the font '${row.font}' is not on this machine (${font.kind === 'builtin' ? 'a former built-in' : 'not loaded'}): the engine sets the box in ${font.drawnIn}` : null;
   const borrowed = c.borrows
-    ? `a letter the font lacks is drawn from ${[...new Set(font.borrowed.map((b) => b.family))].join(', ') || 'no font'}; Safari takes it from a font of its own choosing`
+    ? `a letter the font lacks is drawn from ${[...new Set(font.borrowed.map((b) => b.family ?? 'another loaded font'))].join(', ') || 'no font'}; Safari takes it from a font of its own choosing`
     : null;
   if (c.x || c.w || c.size) say('geometry', null);
   if (c.shrank) say('shrank', null);
@@ -533,7 +533,7 @@ const INK_WORDS = `A block set in the middle is centred on its ink. Direct syste
 
 const mdTable = ({ head, rows }) => [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.join(' | ')} |`)].join('\n');
 
-function whatChanged(b) {
+export function whatChanged(b) {
   const c = b.change;
   const parts = [];
   if (c.x || c.w || c.size) parts.push(`GEOMETRY x ${b.stored.x} to ${b.after.x}, w ${b.stored.w} to ${b.after.w}, size ${b.stored.size} to ${b.after.size}`);
@@ -542,7 +542,11 @@ function whatChanged(b) {
   if (c.newlyFlagged) parts.push(`newly flagged: ${b.after.review.reason}, ${overflowWords(b.after.review.overflow)}`);
   if (c.unflagged) parts.push(`no longer flagged (was: ${b.stored.review.reason}, ${overflowWords(b.stored.review.overflow)})`);
   if (c.lines) parts.push(`lines ${b.linesBefore.length} to ${b.linesAfter.length}`);
-  if (c.moved) parts.push(`block ${px(c.blockDy ?? 0)} px down, ${px(c.blockDx ?? 0)} px right`);
+  if (c.moved) {
+    const vertical = c.blockDy == null ? 'vertical movement unknown' : `${px(c.blockDy)} px down`;
+    const horizontal = c.blockDx == null ? 'horizontal movement unknown' : `${px(c.blockDx)} px right`;
+    parts.push(`block ${vertical}, ${horizontal}`);
+  }
   return parts;
 }
 
@@ -602,7 +606,10 @@ function markdown(t, changed, borrowing) {
   }
   out.push('## 5. Letters borrowed from another font', '', `${borrowing.length} boxes hold a letter their font has no glyph for.`, '');
   const fams = new Map();
-  for (const b of borrowing) for (const x of b.borrowed) fams.set(x.family, (fams.get(x.family) ?? 0) + 1);
+  for (const b of borrowing) for (const x of b.borrowed) {
+    const family = x.family ?? 'another loaded font';
+    fams.set(family, (fams.get(family) ?? 0) + 1);
+  }
   if (fams.size) out.push(mdTable({ head: ['drawn from', 'boxes'], rows: [...fams].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) }), '');
   out.push(`Boxes with a letter no installed font has: ${borrowing.filter((b) => b.none.length).length}. Boxes with a letter whose font could not be read: ${borrowing.filter((b) => b.unread.length).length}.`, '');
   out.push('## 6. Going back: a chapter the Rust engine fitted, opened by the browser engine', '');
@@ -660,7 +667,10 @@ function html(t, changed, borrowing, uris) {
   }
   parts.push('<h2>5. Letters borrowed from another font</h2>', `<p>${borrowing.length} boxes hold a letter their font has no glyph for.</p>`);
   const fams = new Map();
-  for (const b of borrowing) for (const x of b.borrowed) fams.set(x.family, (fams.get(x.family) ?? 0) + 1);
+  for (const b of borrowing) for (const x of b.borrowed) {
+    const family = x.family ?? 'another loaded font';
+    fams.set(family, (fams.get(family) ?? 0) + 1);
+  }
   if (fams.size) parts.push(table({ head: ['drawn from', 'boxes'], rows: [...fams].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) }));
   parts.push(`<p>Boxes with a letter no installed font has: ${borrowing.filter((b) => b.none.length).length}. Boxes with a letter whose font could not be read: ${borrowing.filter((b) => b.unread.length).length}.</p>`);
   parts.push('<h2>6. Going back: a chapter the Rust engine fitted, opened by the browser engine</h2>');

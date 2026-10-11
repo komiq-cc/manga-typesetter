@@ -1932,29 +1932,35 @@
           resyncField(fieldUndo, text);
           node.focus();
           drawEdit(node, null);
-        } else drawEdit(node, caretNext ?? caretNow(node) ?? text.length);
+        } else {
+          const sel = window.getSelection();
+          const anchor = sel.rangeCount ? rawOffset(node, sel.anchorNode, sel.anchorOffset) : null;
+          const caret = caretNext ?? caretNow(node) ?? text.length;
+          drawEdit(node, caret, caretNext ?? anchor ?? caret);
+        }
         caretNext = null;
       });
     });
   }
 
-  // Draws the lines and puts the caret at raw offset `caret`, or selects all.
-  function drawEdit(node, caret) {
+  // Draws the lines, restoring both raw selection endpoints, or selects all.
+  function drawEdit(node, caret, anchor = caret) {
     drawEditLines(node, text, editSegs, hangWidth, indents && { side: s.align, px: indents.map((v) => v * z) });
-    const r = document.createRange();
-    if (caret == null) r.selectNodeContents(node);
-    else {
-      const [c, i] = domPoint(node, Math.min(caret, text.length));
-      r.setStart(c, i);
-      r.collapse(true);
-    }
     const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(r);
+    if (caret == null) {
+      const r = document.createRange();
+      r.selectNodeContents(node);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } else {
+      const [ac, ai] = domPoint(node, Math.min(anchor, text.length));
+      const [fc, fi] = domPoint(node, Math.min(caret, text.length));
+      sel.setBaseAndExtent(ac, ai, fc, fi);
+    }
     // Now, not at the selectionchange that follows, so the caret on the curve
     // is never drawn for one frame at the old offset on the new glyphs.
     const o = caret == null ? null : Math.min(caret, text.length);
-    edSel = o == null ? { a: 0, f: text.length } : { a: o, f: o };
+    edSel = o == null ? { a: 0, f: text.length } : { a: Math.min(anchor, text.length), f: o };
     if (typing) {
       edUp = false;
       goalX = null;
@@ -2000,7 +2006,7 @@
     // browser's (`composing`: an input can arrive in the middle of one without
     // saying so). Nothing is cut from the picture's rows then, and the box's
     // text is not written under the composition.
-    if (pictureEdit && composing) return;
+    if (composing && (pictureEdit || t === 'historyUndo' || t === 'historyRedo')) return;
     e.preventDefault();
     const node = e.currentTarget;
     if (t === 'historyUndo' || t === 'historyRedo') return stepField(node, t === 'historyRedo');
@@ -2092,12 +2098,12 @@
     // No key the picture answers moves the caret or cuts text while a
     // composition is open; and a key can arrive in the middle of one without
     // `isComposing`, so the composition's own start and end are asked too.
-    // (With the switch off a curve's keys are what they were; and undo and
-    // Escape, below, are as they were with either.)
+    // With the switch off a curve's keys are what they were.
     const open = pictureEdit && (composing || e.isComposing);
     if (!open && typeFlat && typeKey(e)) return;
     if (!open && (curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+      if (composing || e.isComposing) return;
       e.preventDefault();
       stepField(e.currentTarget, e.shiftKey);
       return;

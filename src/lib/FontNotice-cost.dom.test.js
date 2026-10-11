@@ -213,11 +213,17 @@ describe('with the Rust engine measuring, the list of borrowed letters', () => {
     await read();
     expect(view.getByRole('button', { name: new RegExp(`${PAGES} boxes with letters from another font`) })).toBeTruthy();
 
-    // Moving, resizing and restyling a box that is not its font read nothing.
+    // Borrowing depends on the painted layout: moving/resizing reads only
+    // that box. A box borrowing nothing still ignores geometry changes.
     moveBoxTo(plain, 300, 400);
     plain.h = 90;
     boxEdited(plain);
     app.selectedId = plain.id;
+    expect(await read()).toBe(1);
+    const other = app.pages[8].boxes[4];
+    moveBoxTo(other, 300, 400);
+    other.h = 90;
+    boxEdited(other);
     expect(await read()).toBe(0);
   });
 

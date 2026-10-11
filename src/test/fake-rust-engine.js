@@ -78,6 +78,24 @@ export function fakeRustEngine() {
       return () => listeners.delete(cb);
     },
     faceReady: (face) => families.has(face.name),
+    resolveFace: (face) => families.has(face.name) ? { slot: Object.keys(families.get(face.name))[0], fauxBold: false, fauxItalic: false } : null,
+    handle: (face) => ({ font: face.name, size: face.size, flags: 0 }),
+    lineParts(face, text) {
+      fam(face);
+      const chain = [face.name, ...fallbacks.map(nameOf).filter((name) => families.has(name))];
+      const parts = [];
+      let current = face.name;
+      let start = 0;
+      for (const ch of text) {
+        const font = [face.name, current, ...chain].find((name) => has(name, ch.codePointAt(0))) ?? face.name;
+        const end = start + ch.length;
+        if (parts.at(-1)?.font === font) parts.at(-1).end = end;
+        else parts.push({ font, bold: false, italic: false, start, end });
+        current = font;
+        start = end;
+      }
+      return parts;
+    },
     // As the adapter: what neither the face nor the first `depth` families
     // of the fallback list have, the families that are registered. Anything
     // outside Latin-1 is a letter no fake face has until `cover` says it has.
@@ -143,7 +161,10 @@ export function fakeRustEngine() {
     },
     fallbacks: () => fallbacks.map(nameOf),
     /** The list as it was given, entry by entry. */
-    lenders: () => fallbacks.map((f) => (typeof f === 'string' ? f : { ...f })),
+    lenders(bold, italic) {
+      if (bold !== undefined || italic !== undefined) return fallbacks.map(nameOf).map((family) => families.has(family) ? { family, font: family, slot: 'regular' } : null);
+      return fallbacks.map((f) => (typeof f === 'string' ? f : { ...f }));
+    },
 
     // For the assertions.
     families,
