@@ -93,8 +93,10 @@ export const prefs = $state({
   // text engine on the user's own font files (engine-switch.svelte.js). Off by
   // default while the port is being checked against the browser. A machine
   // preference like the rest: it says how this computer measures, and a
-  // chapter carries nothing of it.
-  textEngine: 'browser',
+  // chapter carries nothing of it. The side-by-side test copy
+  // (scripts/install-sxs.sh) is built with VITE_MT_TEXT_ENGINE=rust and starts
+  // on the engine it exists to show; every other build starts on the browser.
+  textEngine: import.meta.env?.VITE_MT_TEXT_ENGINE === 'rust' ? 'rust' : 'browser',
 });
 
 // The two font lists are string arrays; anything else in them is dropped.

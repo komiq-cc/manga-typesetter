@@ -1,0 +1,30 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Manga Typesetter Rust",
+  "identifier": "com.mangatypesetter.rust",
+  "build": {
+    "beforeBuildCommand": "npm run build:engine && VITE_MT_TEXT_ENGINE=rust npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Manga Typesetter Rust",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}
