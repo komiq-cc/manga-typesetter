@@ -10,6 +10,8 @@
     clearPageCleaned,
     removeAllCleaned,
     applyTranslations,
+    restoreChapterSnapshot,
+    sourcesUndo,
   } from '../library.svelte.js';
   import { pickImageFiles, pickJsonFile, readTranslations } from '../importer.js';
   import { toast } from '../store.svelte.js';
@@ -23,6 +25,10 @@
   let error = $state('');
   let pendingBulk = $state(null); // files picked for a bulk replace, awaiting Apply
   let confirmingRemoveAll = $state(false);
+  // The version kept just before this sheet's last change (UND-2), which Undo
+  // puts back - images included (CLN-11). Read off the library after each
+  // change, so a change made and then superseded by an open is not offered.
+  let undoName = $state(null);
 
   const chapter = $derived(projectId && chapterId ? chapterById(projectId, chapterId) : null);
   const pages = $derived(sources?.pages ?? []);
@@ -55,6 +61,7 @@
     error = '';
     pendingBulk = null;
     confirmingRemoveAll = false;
+    undoName = sourcesUndo(cid);
     try {
       await read(pid, cid);
     } catch (e) {
@@ -80,6 +87,7 @@
       error = `${e?.message ?? e}`;
       toast(error);
     } finally {
+      if (pid === projectId && cid === chapterId) undoName = sourcesUndo(cid);
       try {
         await read(pid, cid);
       } catch {
@@ -89,6 +97,17 @@
       busy = false;
     }
   }
+
+  const onUndo = () => {
+    const pid = projectId;
+    const cid = chapterId;
+    const name = undoName;
+    if (!name) return;
+    return run(pid, cid, async () => {
+      await restoreChapterSnapshot(pid, cid, name);
+      toast('Undid the last change. The version it replaced is kept under Versions.');
+    });
+  };
 
   // Open native file picker (Tauri only).
   async function picking(label, fn) {
@@ -127,7 +146,7 @@
     const replaced = pages.slice(0, n).filter((pg) => pg.cleaned).length;
     if (replaced) {
       notes.push({
-        text: `${plural(replaced, 'page')} already ${replaced === 1 ? 'has' : 'have'} a cleaned image. Applying replaces ${replaced === 1 ? 'it' : 'them'} - the old ${replaced === 1 ? 'file is' : 'files are'} deleted. No undo.`,
+        text: `${plural(replaced, 'page')} already ${replaced === 1 ? 'has' : 'have'} a cleaned image. Applying replaces ${replaced === 1 ? 'it' : 'them'}. Undo brings the old ${replaced === 1 ? 'one' : 'ones'} back.`,
         warn: true,
       });
     }
@@ -253,12 +272,17 @@
         <button class="soft-btn" onclick={onAddTranslations} disabled={busy || !pages.length}>
           Add translations…
         </button>
+        {#if undoName}
+          <button class="soft-btn" onclick={onUndo} disabled={busy} title="Put the chapter back as it was before the last change here">
+            Undo last change
+          </button>
+        {/if}
       </div>
 
       {#if confirmingRemoveAll}
         <div class="pair-note warn" role="alert">
           Deletes the cleaned image on {plural(cleanedCount, 'page')} and puts every page back on its
-          raw. The raws are untouched. No undo.
+          raw. The raws are untouched. Undo brings them back.
         </div>
       {/if}
 

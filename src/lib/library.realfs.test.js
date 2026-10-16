@@ -312,7 +312,7 @@ describe('six raws and four cleaned, on a real disk', () => {
 });
 
 describe('changing a chapter’s sources afterwards, on a real disk', () => {
-  it('swaps one page’s cleaned image, deletes the old file, and the swap survives a reopen', async () => {
+  it('swaps one page’s cleaned image, keeps the old file, and the swap survives a reopen', async () => {
     const { p, c } = await sixAndFour();
     const before = await record(c);
     const pageId = before.pages[1].id;
@@ -329,11 +329,14 @@ describe('changing a chapter’s sources afterwards, on a real disk', () => {
       null,
       null,
     ]);
-    // The new bytes are the source's, and the image it replaced is gone.
+    // The new bytes are the source's, and the image it replaced is kept for undo.
     expect(await readFile(join(c.dir, 'cleaned', 'swap.png'))).toEqual(
       await readFile(join(srcDir, 'swap.png')),
     );
     await expect(readFile(join(c.dir, 'cleaned', 'clean-02.png'))).rejects.toThrow();
+    expect(await readFile(join(c.dir, 'logs', 'previous-cleaned', 'clean-02.png'))).toEqual(
+      await readFile(join(srcDir, 'clean-02.png')),
+    );
 
     await openChapter(p.id, c.id);
     try {

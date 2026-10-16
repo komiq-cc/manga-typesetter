@@ -10,7 +10,7 @@
 //   <root>/<project-slug>/<chapter-slug>/cleaned/   (only once a page has one)
 
 import { fsx } from './fsx.js';
-import { takeSnapshot, listSnapshots, isSnapshotName } from './snapshots.js';
+import { takeSnapshot, requireSnapshot, listSnapshots, isSnapshotName } from './snapshots.js';
 import { uniqueSlug, chapterSlug } from './paths.js';
 import {
   app,
@@ -59,6 +59,11 @@ const ROOT_KEY = 'mt.libraryRoot';
 const SCHEMA = 1;
 const lastSnapshot = new Map();
 const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
+const sourceUndos = new Map();
+
+export function sourcesUndo(chapterId) {
+  return sourceUndos.get(chapterId) ?? null;
+}
 
 // The Korean branch stored language as an installation preference. Adopt it
 // only for projects written before the language moved into project.json.
@@ -1191,33 +1196,41 @@ export const restoreChapterSnapshot = guarded(async function (projectId, chapter
   if (!Array.isArray(record.pages)) throw new Error('Snapshot has no pages array');
   const currentText = await fsx.readTextFile(path);
   const current = JSON.parse(currentText);
-  // Not best-effort: a restore without the replaced bytes on the shelf cannot
-  // be undone. Dedupe may mean they are already there under another reason;
-  // verify those bytes rather than assuming a hand-edited updatedAt is unique.
-  let before = await takeSnapshot(c.dir, currentText, current, 'before-restore');
-  if (!before) {
-    for (const snapshot of await listSnapshots(c.dir)) {
-      if (await fsx.readTextFile(await fsx.join(snapshotsDir, snapshot.name)) === currentText) {
-        before = snapshot.name;
-        break;
-      }
-    }
-  }
-  if (!before || !(await fsx.exists(await fsx.join(snapshotsDir, before)))) {
-    throw new Error('The current chapter could not be retained before restore');
-  }
   const cleanedDir = await fsx.join(c.dir, 'cleaned');
+  const previousDir = await fsx.join(c.dir, 'logs', 'previous-cleaned');
+  const ensureCleaned = lazyDir(cleanedDir);
   let missingCleaned = 0;
   for (const pg of record.pages) {
-    if (pg.cleaned && (!isPlainFileName(pg.cleaned) ||
-      !(await fsx.exists(await fsx.join(cleanedDir, pg.cleaned))))) missingCleaned++;
+    if (!pg.cleaned) continue;
+    if (!isPlainFileName(pg.cleaned)) {
+      missingCleaned++;
+      continue;
+    }
+    const target = await fsx.join(cleanedDir, pg.cleaned);
+    if (await fsx.exists(target)) continue;
+    const previous = await fsx.join(previousDir, pg.cleaned);
+    if (await fsx.exists(previous)) {
+      await ensureCleaned();
+      await fsx.rename(previous, target);
+    }
+    if (!(await fsx.exists(target))) missingCleaned++;
   }
+  // Recover the selected version's rasters BEFORE taking the safety snapshot:
+  // adding it can prune the selected (oldest) version, whose kept files would
+  // then be garbage. Files already back in cleaned/ are outside that sweep.
+  // A later failure leaves extra files there, never destroys a user's raster.
+  const before = await requireSnapshot(c.dir, currentText, current, 'before-restore');
   // Pass the whole snapshot record: mode, typesetting and every other field
   // belong to that moment too. Only commitPages' updatedAt is new - and the id,
   // which is the catalogue's handle on this chapter and must not change under
   // it whatever a file in the shelf says.
   record.id = current.id ?? record.id;
+  // commitPages advances from the version being replaced, including a restore
+  // to an older record inside the same millisecond as the preceding change.
+  record.updatedAt = current.updatedAt;
   await commitPages(c, path, record, record.pages);
+  sourceUndos.delete(chapterId);
+  await dropCleaned(c.dir, (current.pages ?? []).map((pg) => pg.cleaned), record.pages);
   c.number = record.number;
   c.title = record.title ?? '';
   c.createdAt = record.createdAt;
@@ -1314,7 +1327,12 @@ async function commitPages(c, path, record, pages) {
   // windows. Refused here, the caller rolls its files back and says so; left
   // out, the editor's first autosave silently replaces everything below.
   assertClosed(c.id);
-  record.updatedAt = now();
+  // The timestamp is also the snapshot version key. Two closed-chapter edits
+  // can finish within one millisecond; they must still get distinct versions,
+  // or the next required snapshot would dedupe against different bytes.
+  const previous = Date.parse(record.updatedAt);
+  const at = Date.now();
+  record.updatedAt = new Date(Number.isFinite(previous) ? Math.max(at, previous + 1) : at).toISOString();
   record.pages = pages;
   await writeTranslationsJson(c.dir, buildTextJson(pages));
   await writeJson(path, record);
@@ -1376,8 +1394,8 @@ function respacePage(pg, size, notes) {
   const known = hasPageSpace(pg);
   // The balloons measured for the detected blocks (`placeDetectedInChapter` in
   // the store) are answers about the raster being replaced, whatever the new
-  // one's size, so they go. A key naming the raster could not do this: a clean
-  // redelivered twice can get its first file name back (`copyInto`).
+  // one's size, so they go. A key naming the raster could not do this: its name
+  // can be reused once the last snapshot that kept the old bytes has expired.
   if (pg.detect?.boxes?.some((d) => d.fit !== undefined)) {
     pg = {
       ...pg,
@@ -1470,17 +1488,38 @@ async function rawSize(c, pg) {
   }
 }
 
-// Unlink the cleaned files nothing points at any more. Only names that came out
-// of the record, only inside this chapter's own `cleaned/`, and only once the
-// record no longer references them - so a failure here leaves a stray file,
-// never a page pointing at one that is gone.
+// Keep the cleaned files the live record no longer points at. Earlier snapshots
+// still name them, so a replacement is a move onto the shelf, never a delete.
+// Only after the record commits: a failed move leaves a stray in cleaned/,
+// never a live page pointing at an image we have already moved away.
 //
-// `dropCleaned` checks `isPlainFileName`: `fsx.remove` is recursive, and
-// chapter.json is an ordinary file on disk that a half-written save, a hand edit
-// or a foreign tool can put anything into - so a separator or a dot-dot in a
-// `cleaned` value would aim a recursive delete at a directory this app never
-// created. Such a name is not one of ours; it is left alone.
-async function dropCleaned(cleanedDir, names, pages) {
+// Both ends are built from a plain name. chapter.json is an ordinary file a
+// hand edit can put anything into; a separator or a dot-dot cannot grant us a
+// move out of somebody else's directory. An existing destination is left
+// alone too: a hand edit may have reused a name for different bytes.
+async function dropCleaned(chapterDir, names, pages) {
+  const cleanedDir = await fsx.join(chapterDir, 'cleaned');
+  const previousDir = await fsx.join(chapterDir, 'logs', 'previous-cleaned');
+  const ensurePrevious = lazyDir(previousDir);
+  const kept = new Set(pages.map((pg) => pg.cleaned).filter(Boolean));
+  for (const name of new Set(names)) {
+    if (!isPlainFileName(name) || kept.has(name)) continue;
+    try {
+      const source = await fsx.join(cleanedDir, name);
+      const target = await fsx.join(previousDir, name);
+      if (!(await fsx.exists(source)) || await fsx.exists(target)) continue;
+      await ensurePrevious();
+      await fsx.rename(source, target);
+    } catch {
+      /* Leave it where it is. A failed move is never followed by a delete. */
+    }
+  }
+}
+
+// New copies a failed commit never adopted are this run's own litter, not a
+// prior version of the user's art. Keep that rollback separate from retention;
+// otherwise failed imports would accumulate files no document has ever named.
+async function removeCopiedCleaned(cleanedDir, names, pages) {
   const kept = new Set(pages.map((pg) => pg.cleaned).filter(Boolean));
   for (const name of names) {
     if (!isPlainFileName(name) || kept.has(name)) continue;
@@ -1492,23 +1531,39 @@ async function dropCleaned(cleanedDir, names, pages) {
   }
 }
 
+// A missing live file still owns its name, and a retained old file does too.
+// Reusing either would alias two versions onto different bytes under one name,
+// leaving restore unable to tell which image a snapshot was written against.
+async function usedCleanedNames(chapterDir, pages) {
+  const used = new Set(pages.map((pg) => pg.cleaned).filter(Boolean));
+  const previous = await fsx.join(chapterDir, 'logs', 'previous-cleaned');
+  if (await fsx.exists(previous)) {
+    for (const entry of await fsx.readDir(previous)) {
+      if (isPlainFileName(entry.name)) used.add(entry.name);
+    }
+  }
+  return used;
+}
+
 // Copy files onto pages 1..N, replacing whatever those pages had. Pages past N
 // keep theirs; files past the page count are ignored.
 //
 // A failure part-way is NOT rolled back. The pages already replaced keep their
-// new image and the error names the page it stopped at - the previous files are
-// gone by then, and a half-restored chapter is worse than a stated partial one.
+// new image and the error names the page it stopped at. The undo snapshot is
+// remembered as soon as those pages commit, so a partial run can be undone too.
 export const replaceCleanedPages = guarded(async function replaceCleanedPages(
   projectId,
   chapterId,
   files,
 ) {
   const { c, path } = await chapterFile(projectId, chapterId);
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
+  const record = JSON.parse(chapterText);
   const pages = record.pages ?? [];
   const ordered = [...files].sort(naturalSort);
   const n = Math.min(ordered.length, pages.length);
   if (!n) return { replaced: 0, ignored: ordered.length };
+  const before = await requireSnapshot(c.dir, chapterText, record, 'before-cleaned');
 
   const cleanedDir = await fsx.join(c.dir, 'cleaned');
   const ensureCleaned = lazyDir(cleanedDir);
@@ -1517,7 +1572,7 @@ export const replaceCleanedPages = guarded(async function replaceCleanedPages(
   // A page whose cleaned file has gone missing still points at that name, and
   // handing the same name to a new copy would silently alias two pages onto one
   // image - the missing file being exactly what this sheet exists to repair.
-  const used = new Set(pages.map((pg) => pg.cleaned).filter(Boolean));
+  const used = await usedCleanedNames(c.dir, pages);
   const copied = [];
   let failure = null;
   for (let i = 0; i < n; i++) {
@@ -1556,10 +1611,11 @@ export const replaceCleanedPages = guarded(async function replaceCleanedPages(
       await commitPages(c, path, record, next);
     } catch (e) {
       // Nothing points at the new files, so they are this run's own litter.
-      await dropCleaned(cleanedDir, copied.map(({ name }) => name), pages);
+      await removeCopiedCleaned(cleanedDir, copied.map(({ name }) => name), pages);
       throw e;
     }
-    await dropCleaned(cleanedDir, previous, next);
+    sourceUndos.set(chapterId, before);
+    await dropCleaned(c.dir, previous, next);
     await afterRespace(c, notes);
   }
 
@@ -1579,21 +1635,24 @@ export const setPageCleaned = guarded(async function setPageCleaned(
   file,
 ) {
   const { c, path } = await chapterFile(projectId, chapterId);
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
+  const record = JSON.parse(chapterText);
   const pages = record.pages ?? [];
   const idx = pages.findIndex((pg) => pg.id === pageId);
   if (idx === -1) throw new Error('That page is no longer in this chapter');
+  const before = await requireSnapshot(c.dir, chapterText, record, 'before-cleaned');
 
   const cleanedDir = await fsx.join(c.dir, 'cleaned');
   const ensureCleaned = lazyDir(cleanedDir);
+  const used = await usedCleanedNames(c.dir, pages);
   const bytes = new Uint8Array(await file.arrayBuffer());
   await ensureCleaned();
-  // Same reasoning as the bulk path: never reuse a name the record still claims.
+  // Same reasoning as the bulk path: live and retained names are both claimed.
   const name = await copyInto(
     cleanedDir,
     file.name,
     bytes,
-    new Set(pages.map((pg) => pg.cleaned).filter(Boolean)),
+    used,
   );
 
   const previous = pages[idx].cleaned;
@@ -1608,10 +1667,11 @@ export const setPageCleaned = guarded(async function setPageCleaned(
   try {
     await commitPages(c, path, record, next);
   } catch (e) {
-    await dropCleaned(cleanedDir, [name], pages);
+    await removeCopiedCleaned(cleanedDir, [name], pages);
     throw e;
   }
-  await dropCleaned(cleanedDir, [previous], next);
+  sourceUndos.set(chapterId, before);
+  await dropCleaned(c.dir, [previous], next);
   await afterRespace(c, notes);
   return name;
 });
@@ -1622,12 +1682,14 @@ export const clearPageCleaned = guarded(async function clearPageCleaned(
   pageId,
 ) {
   const { c, path } = await chapterFile(projectId, chapterId);
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
+  const record = JSON.parse(chapterText);
   const pages = record.pages ?? [];
   const idx = pages.findIndex((pg) => pg.id === pageId);
   if (idx === -1) throw new Error('That page is no longer in this chapter');
   const previous = pages[idx].cleaned;
   if (!previous) return;
+  const before = await requireSnapshot(c.dir, chapterText, record, 'before-cleaned');
   const next = pages.map((pg) => ({ ...pg }));
   // The page draws its raw again, and the raw is not necessarily the size the
   // cleaned raster was - so this is a change of coordinate space like any other,
@@ -1638,16 +1700,19 @@ export const clearPageCleaned = guarded(async function clearPageCleaned(
   next[idx] = respacePage(next[idx], await rawSize(c, pages[idx]), notes);
   next[idx].cleaned = null;
   await commitPages(c, path, record, next);
-  await dropCleaned(await fsx.join(c.dir, 'cleaned'), [previous], next);
+  sourceUndos.set(chapterId, before);
+  await dropCleaned(c.dir, [previous], next);
   await afterRespace(c, notes);
 });
 
 export const removeAllCleaned = guarded(async function removeAllCleaned(projectId, chapterId) {
   const { c, path } = await chapterFile(projectId, chapterId);
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
+  const record = JSON.parse(chapterText);
   const pages = record.pages ?? [];
   const previous = pages.map((pg) => pg.cleaned).filter(Boolean);
   if (!previous.length) return 0;
+  const before = await requireSnapshot(c.dir, chapterText, record, 'before-cleaned');
   // Only the pages that actually lose an image change space - see
   // `clearPageCleaned`, which this is the whole-chapter form of. A page that
   // never had a cleaned raster keeps the measurement of the raw it has been
@@ -1664,7 +1729,8 @@ export const removeAllCleaned = guarded(async function removeAllCleaned(projectI
     next.push(moved);
   }
   await commitPages(c, path, record, next);
-  await dropCleaned(await fsx.join(c.dir, 'cleaned'), previous, next);
+  sourceUndos.set(chapterId, before);
+  await dropCleaned(c.dir, previous, next);
   await afterRespace(c, notes);
   return previous.length;
 });
@@ -1686,13 +1752,16 @@ export const applyTranslations = guarded(async function applyTranslations(
   parsed,
 ) {
   const { c, path } = await chapterFile(projectId, chapterId);
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
+  const record = JSON.parse(chapterText);
+  const before = await requireSnapshot(c.dir, chapterText, record, 'before-translations');
   const pages = record.pages ?? [];
   const covered = Math.min(parsed.length, pages.length);
   const next = pages.map((pg, i) =>
     i < covered ? { ...pg, lines: carryTagsForward(pg.lines ?? [], parsed[i].lines) } : pg,
   );
   await commitPages(c, path, record, next);
+  sourceUndos.set(chapterId, before);
 
   // A box placed from the queue carries no text of its own - it renders
   // whichever line has its number. A file that numbers its lines differently
@@ -1824,6 +1893,9 @@ export async function openChapter(projectId, chapterId) {
   await mutationsSettled();
   if (!mine()) return;
   opening = mark;
+  // After the gate settles: an in-flight Sources edit may have just installed
+  // its undo point. Opening takes ownership of the document from that sheet.
+  sourceUndos.delete(chapterId);
   // Nothing has been given up until the ref has been. Until then a failure
   // leaves the chapter on screen exactly as it was - which is what a rejected
   // `flushSave` below has to do, because the work it could not write is still in

@@ -877,6 +877,8 @@ const {
   clearPageCleaned,
   removeAllCleaned,
   applyTranslations,
+  sourcesUndo,
+  restoreChapterSnapshot,
 } = await import('./library.svelte.js');
 const { route, goEditor, goLibrary, resetRoute } = await import('./route.svelte.js');
 
@@ -1477,9 +1479,35 @@ describe('the chapter sources sheet', () => {
     const out = await replaceCleanedPages(p.id, c.id, [fakeFile('new.png', 20)]);
     expect(out).toEqual({ replaced: 1, ignored: 0 });
     expect(chapterJson(c).pages.map((pg) => pg.cleaned)).toEqual(['new.png', 'y.png', 'z.png']);
-    // The image it replaced is gone, and the ones it did not touch are not.
+    // The old image is kept for undo, and the later pages stay where they are.
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
     expect(fsx._tree.files.has(`${c.dir}/cleaned/z.png`)).toBe(true);
+  });
+
+  it('restores the sources undo point with its kept cleaned image', async () => {
+    const { p, c } = await seedThree([fakeFile('x.png', 9)]);
+    const original = chapterJson(c);
+    await replaceCleanedPages(p.id, c.id, [fakeFile('new.png', 20)]);
+    const undo = sourcesUndo(c.id);
+    expect(undo).toContain('--before-cleaned.json');
+    expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
+
+    const restored = await restoreChapterSnapshot(p.id, c.id, undo);
+
+    expect(restored.missingCleaned).toBe(0);
+    expect(chapterJson(c).pages).toEqual(original.pages);
+    expect(fsx._tree.files.get(`${c.dir}/cleaned/x.png`)).toEqual(new Uint8Array([9]));
+    expect(fsx._tree.files.has(`${c.dir}/logs/previous-cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/new.png`)).toEqual(new Uint8Array([20]));
+    expect(sourcesUndo(c.id)).toBeNull();
+
+    // Restoring the safety snapshot is a redo, with its own raster recovered.
+    const redone = await restoreChapterSnapshot(p.id, c.id, restored.before);
+    expect(redone.missingCleaned).toBe(0);
+    expect(chapterJson(c).pages[0].cleaned).toBe('new.png');
+    expect(fsx._tree.files.get(`${c.dir}/cleaned/new.png`)).toEqual(new Uint8Array([20]));
   });
 
   it('ignores bulk files past the last page', async () => {
@@ -1556,6 +1584,7 @@ describe('the chapter sources sheet', () => {
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(true);
     await clearPageCleaned(p.id, c.id, record.pages[1].id);
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
   });
 
   it('refuses to aim a delete outside the chapter, whatever the record says', async () => {
@@ -1579,20 +1608,26 @@ describe('the chapter sources sheet', () => {
     expect(chapterJson(c).pages.map((pg) => pg.cleaned)).toEqual(['x.png', null, 'third.png']);
   });
 
-  it('deletes the image a per-page set replaced', async () => {
+  it('keeps the image a per-page set replaced', async () => {
     const { p, c } = await seedThree([fakeFile('x.png', 9)]);
     const id = chapterJson(c).pages[0].id;
     const name = await setPageCleaned(p.id, c.id, id, fakeFile('x.png', 30));
     // Same name as the one already there, so it lands beside it and the old one
-    // goes - never overwritten in place.
+    // is kept for undo - never overwritten in place.
     expect(name).toBe('x-2.png');
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
     expect(fsx._tree.files.get(`${c.dir}/cleaned/x-2.png`)).toEqual(new Uint8Array([30]));
+    // The original name is now off the live record, but still belongs to the
+    // retained image. Redelivery must reserve it just as a live name is reserved.
+    expect(await setPageCleaned(p.id, c.id, id, fakeFile('x.png', 40))).toBe('x-3.png');
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x-2.png`)).toEqual(new Uint8Array([30]));
   });
 
   // The balloons "Place chapter" measured are answers about the raster, and a
   // new clean is a new raster - whatever it is called. A name alone would not
-  // do: a page redelivered twice gets `x.png` back (`x.png`, `x-2.png`, `x.png`).
+  // do: a raster can change while keeping its name after a restore or hand edit.
   it('drops the balloons measured for the raster a per-page set replaced', async () => {
     const { p, c } = await seedThree([fakeFile('x.png', 9)]);
     const record = chapterJson(c);
@@ -1608,11 +1643,12 @@ describe('the chapter sources sheet', () => {
     expect(second.detect.boxes.map((d) => d.fit)).toEqual([fit, null]);
   });
 
-  it('unlinks one page without touching the others', async () => {
+  it('keeps one page’s removed image without touching the others', async () => {
     const { p, c } = await seedThree([fakeFile('x.png', 9), fakeFile('y.png', 8)]);
     await clearPageCleaned(p.id, c.id, chapterJson(c).pages[0].id);
     expect(chapterJson(c).pages.map((pg) => pg.cleaned)).toEqual([null, 'y.png', null]);
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
     expect(fsx._tree.files.has(`${c.dir}/cleaned/y.png`)).toBe(true);
   });
 
@@ -1621,6 +1657,8 @@ describe('the chapter sources sheet', () => {
     expect(await removeAllCleaned(p.id, c.id)).toBe(2);
     expect(chapterJson(c).pages.every((pg) => pg.cleaned === null)).toBe(true);
     expect(fsx._tree.files.has(`${c.dir}/cleaned/x.png`)).toBe(false);
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/x.png`)).toEqual(new Uint8Array([9]));
+    expect(fsx._tree.files.get(`${c.dir}/logs/previous-cleaned/y.png`)).toEqual(new Uint8Array([8]));
     expect(fsx._tree.files.get(`${c.dir}/raws/a.png`)).toEqual(new Uint8Array([1]));
   });
 
@@ -1697,6 +1735,7 @@ describe('the chapter sources sheet', () => {
       // The document the editor is holding is the one the edit wrote, not the
       // one it read.
       expect(app.pages[0].cleanedFile).toBe('n.png');
+      expect(sourcesUndo(c.id)).toBeNull();
     } finally {
       closeChapter();
     }

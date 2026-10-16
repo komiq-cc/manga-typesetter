@@ -6,6 +6,17 @@ import { fsx } from './fsx.js';
 const NAME = /^(\d{8}T\d{9}Z)--([a-z-]+)\.json(?![\s\S])/;
 const now = () => new Date().toISOString();
 
+// File names come from records and directory listings, neither of which is a
+// path grant. In particular, garbage collection must never resolve a name
+// outside previous-cleaned, even when a record has been edited by hand.
+const isPlainFileName = (name) =>
+  typeof name === 'string' &&
+  name.trim().length > 0 &&
+  !name.includes('/') &&
+  !name.includes('\\') &&
+  name !== '.' &&
+  name !== '..';
+
 export function isSnapshotName(name) {
   return typeof name === 'string' && NAME.test(name);
 }
@@ -41,11 +52,81 @@ export async function takeSnapshot(chapterDir, text, record, reason) {
   const name = `${stamp}--${reason}.json`;
   await fsx.writeTextFileAtomic(await fsx.join(dir, name), text);
   // Only our own file names are pruned. A stray file in logs is still the
-  // user's, and a failed prune must reach restore's caller just like a failed
-  // snapshot write: before-restore is the one snapshot we may not give up.
+  // user's, and a failed prune must reach the caller just like a failed write:
+  // restore and destructive source edits require a retained undo snapshot.
   const newest = [...names, name].sort().reverse();
-  for (const old of newest.slice(20)) await fsx.remove(await fsx.join(dir, old));
+  let pruned = false;
+  try {
+    for (const old of newest.slice(20)) {
+      await fsx.remove(await fsx.join(dir, old));
+      pruned = true;
+    }
+  } finally {
+    if (pruned) await prunePreviousCleaned(chapterDir);
+  }
   return name;
+}
+
+// A required undo point, including the version already on the shelf when the
+// timestamp dedupes. Compare bytes: a hand edit can reuse updatedAt for a
+// different document, and returning that older name would promise a false undo.
+export async function requireSnapshot(chapterDir, text, record, reason) {
+  try {
+    let name = await takeSnapshot(chapterDir, text, record, reason);
+    const dir = await folder(chapterDir);
+    if (!name) {
+      for (const existing of await namesIn(dir)) {
+        try {
+          if (await fsx.readTextFile(await fsx.join(dir, existing)) === text) {
+            name = existing;
+            break;
+          }
+        } catch {
+          /* One unreadable file must not hide a readable exact copy. */
+        }
+      }
+    }
+    if (!name || !(await fsx.exists(await fsx.join(dir, name)))) {
+      throw new Error('The current chapter could not be retained');
+    }
+    return name;
+  } catch (e) {
+    throw new Error(`Could not keep an undo snapshot (${reason}): ${e?.message ?? e}`);
+  }
+}
+
+// A kept raster can go only after the last document that names it has gone.
+// Read the live record as well as every remaining snapshot; if any one cannot
+// be read, the safe answer is to keep everything. This is housekeeping, never
+// a reason to fail the snapshot, and its only removal targets are plain files
+// directly inside previous-cleaned.
+async function prunePreviousCleaned(chapterDir) {
+  try {
+    const previous = await fsx.join(chapterDir, 'logs', 'previous-cleaned');
+    if (!(await fsx.exists(previous))) return;
+    // Fix the candidates before reading references, so a file newly kept by
+    // another operation during the scan is never swept by this older pass.
+    const candidates = await fsx.readDir(previous);
+    const needed = new Set();
+    const collect = (text) => {
+      const record = JSON.parse(text);
+      if (!Array.isArray(record.pages)) throw new Error('Unreadable chapter pages');
+      for (const pg of record.pages) {
+        if (isPlainFileName(pg.cleaned)) needed.add(pg.cleaned);
+      }
+    };
+    collect(await fsx.readTextFile(await fsx.join(chapterDir, 'chapter.json')));
+    const dir = await folder(chapterDir);
+    for (const name of await namesIn(dir)) {
+      collect(await fsx.readTextFile(await fsx.join(dir, name)));
+    }
+    for (const entry of candidates) {
+      if (!entry.isFile || !isPlainFileName(entry.name) || needed.has(entry.name)) continue;
+      await fsx.remove(await fsx.join(previous, entry.name));
+    }
+  } catch {
+    /* Best-effort: uncertainty keeps the files, never discards their bytes. */
+  }
 }
 
 export async function listSnapshots(chapterDir) {
