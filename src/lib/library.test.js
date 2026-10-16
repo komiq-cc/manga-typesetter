@@ -931,20 +931,27 @@ describe('chapter snapshots', () => {
     expect(fsx._tree.files.has(`${c.dir}/logs/history.json`)).toBe(false);
   });
 
-  // SAV-2. A write from outside the app while the chapter is open would be
-  // silently replaced by the next autosave; it has to be on the shelf first.
-  it('keeps an outside change to chapter.json before the next save writes over it', async () => {
+  // SAV-2. A write from outside the app while the chapter is open was made on
+  // purpose: it stays in chapter.json, the editor's version goes on the shelf,
+  // and the editor reloads what is on disk.
+  it('an outside change wins: it stays on disk, ours is kept, and the chapter reloads', async () => {
     const { listChapterSnapshots } = await import('./library.svelte.js');
     const { p, c } = await seedOpenChapter();
-    const outside = { ...chapterJson(c), updatedAt: '2030-01-01T00:00:00.000Z', title: 'Edited elsewhere' };
+    const outside = { ...chapterJson(c), title: 'Edited elsewhere' };
+    outside.pages[0].lines = [{ n: 1, jp: '外', en: 'FROM OUTSIDE' }];
     const outsideText = JSON.stringify(outside);
     fsx._tree.files.set(`${c.dir}/chapter.json`, outsideText);
+    app.pages[1].lines = [{ n: 1, jp: '内', en: 'MINE' }];
+    markUnsaved();
     await saveOpenChapter();
+    await vi.waitFor(() => expect(app.errors.at(-1)?.msg).toMatch(/reloaded from disk/));
+    expect(fsx._tree.files.get(`${c.dir}/chapter.json`)).toBe(outsideText);
+    expect(app.pages[0].lines[0].en).toBe('FROM OUTSIDE');
+    expect(app.chapterRef?.chapterId).toBe(c.id);
     closeChapter();
-    const kept = (await listChapterSnapshots(p.id, c.id)).find((s) => s.reason === 'outside-change');
-    expect(fsx._tree.files.get(`${c.dir}/logs/snapshots/${kept.name}`)).toBe(outsideText);
-    expect(chapterJson(c).updatedAt).not.toBe(outside.updatedAt);
-    expect(app.errors.at(-1)?.msg).toMatch(/changed outside the app/);
+    const kept = (await listChapterSnapshots(p.id, c.id)).find((s) => s.reason === 'app-edits');
+    const mine = JSON.parse(fsx._tree.files.get(`${c.dir}/logs/snapshots/${kept.name}`));
+    expect(mine.pages[1].lines[0].en).toBe('MINE');
   });
 });
 

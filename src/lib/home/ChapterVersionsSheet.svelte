@@ -23,6 +23,7 @@
     'before-cleaned': 'Before cleaned pages changed',
     'before-translations': 'Before translations were added',
     'outside-change': 'Changed outside the app',
+    'app-edits': 'Your edits before a reload',
   };
   const reasonLabel = (r) => REASONS[r] ?? r.replace(/-/g, ' ');
   const exactTime = (at) => new Date(at).toLocaleString();
