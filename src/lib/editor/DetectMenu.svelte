@@ -2,9 +2,9 @@
   // Detection has two scopes and one artefact - more than a pill can hold, so
   // the pill opens this instead. Per-page detection has never had a UI before;
   // it was whole-chapter or nothing, which is a long wait to fix one page.
-  import { app, toast, toastError } from '../store.svelte.js';
+  import { app } from '../store.svelte.js';
   import { sidecarReady, detectCurrentPage, detectAllPages } from '../sidecar.js';
-  import { exportTextJson } from '../exporter.js';
+  import { exportImages } from '../exporter.js';
 
   let { anchor = null, onClose } = $props();
 
@@ -78,20 +78,10 @@
   // two can never drift. Scope is the whole chapter: choosing between scopes is
   // what that dialog is for, and the detection JSON is a chapter-level artefact.
   //
-  // app.exporting is held here rather than inside exportTextJson, exactly as
-  // exportImages holds it, so the export pill greys out while the save dialog
-  // is up. The catch mirrors exportImages' too - nothing else is left to
-  // report a rejected native write.
+  // exportImages owns the busy flag, job and errors for this path too.
   async function saveDetectionJson() {
     close({ restoreFocus: true });
-    app.exporting = true;
-    try {
-      await exportTextJson('all');
-    } catch (e) {
-      toastError('Export failed: ' + (e?.message || e));
-    } finally {
-      app.exporting = false;
-    }
+    await exportImages('JSON', 'all');
   }
 </script>
 
@@ -99,5 +89,5 @@
   <button role="menuitem" disabled={!canDetect} onclick={() => run(detectCurrentPage)}>This page</button>
   <button role="menuitem" disabled={!canDetect} onclick={() => run(detectAllPages)}>Whole chapter</button>
   <div class="chrome-menu-sep"></div>
-  <button role="menuitem" disabled={!canSaveJson} onclick={saveDetectionJson}>Save detection JSON…</button>
+  <button role="menuitem" disabled={!canSaveJson || app.exporting} onclick={saveDetectionJson}>Save detection JSON…</button>
 </div>

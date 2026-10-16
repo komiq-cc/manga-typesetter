@@ -27,6 +27,7 @@ import {
 import { sidecarReady, detectCurrentPage, detectAllPages } from './sidecar.js';
 import { SHORTCUTS, comboFor, formatCombo, hasShortcutHandler, runShortcut } from './shortcuts.svelte.js';
 import { prefs } from './prefs.svelte.js';
+import { jobs } from './jobs.svelte.js';
 
 // A chapter open in typeset mode: what nearly every action needs.
 const typeset = () => app.loaded && !isTranslateMode();
@@ -104,6 +105,7 @@ export const ACTIONS = [
   { id: 'detect.page', label: 'Detect text on this page', group: 'Detect', keywords: 'ocr scan read find', when: canDetect, run: () => detectCurrentPage() },
   { id: 'detect.chapter', label: 'Detect text in whole chapter', group: 'Detect', keywords: 'ocr scan read find all pages', when: canDetect, run: () => detectAllPages() },
   { id: 'queue.placeChapter', label: 'Place detected bubbles in whole chapter', group: 'Text queue', keywords: 'place all pages', when: () => typeset() && app.pages.length > 0 && !app.chapterPlace, run: () => placeDetectedInChapter() },
+  { id: 'jobs.retry', label: 'Retry failed pages', group: 'Detect', keywords: 'again failed errors jobs', when: () => !!retryable() && sidecarReady() && !app.detecting, run: () => retryable()?.retry() },
   { id: 'chapter.export', label: 'Export…', group: 'Chapter', keywords: 'save png psd zip pages images', when: () => typeset() && !app.exporting, run: () => { app.exportOpen = true; } },
   { id: 'bulk.open', label: 'Bulk style', group: 'Text box', keywords: 'many boxes style all batch', when: () => typeset() && !app.bulk.active, run: () => openBulk() },
   { id: 'view.rawShow', label: 'Show raw page', group: 'View', keywords: 'compare raw original reference sidebar japanese', when: () => typeset() && app.sidebarHidden, run: toggleRaw },
@@ -118,6 +120,9 @@ export const ACTIONS = [
     run: (ctx) => ctx.openSettings?.(t.id),
   })),
 ];
+
+// The newest finished job with failed pages it can run again (FLOW-5).
+const retryable = () => jobs.items.findLast((j) => !j.running && j.failed.length && j.retry && j.current());
 
 // The rail's caret, from the palette: the same flag and the same save.
 function toggleRaw() {

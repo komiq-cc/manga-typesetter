@@ -8,10 +8,11 @@
   // left of it, app drawers on the right.
   // Nothing here is laid out by a parent, every row pins itself to the window,
   // so the canvas underneath is never inset by chrome it does not know about.
-  import { app, openBulk, closeBulk, isTranslateMode, toast, toastError, checks, goNextCheck } from '../store.svelte.js';
+  import { app, openBulk, closeBulk, isTranslateMode, checks, goNextCheck } from '../store.svelte.js';
   import { goProject, goLibrary } from '../route.svelte.js';
   import { projectById, chapterById } from '../library.svelte.js';
-  import { exportTextJson } from '../exporter.js';
+  import { exportImages } from '../exporter.js';
+  import { jobs, dismissJob } from '../jobs.svelte.js';
   import { sidecarReady } from '../sidecar.js';
   import DetectMenu from './DetectMenu.svelte';
   import { comboFor, formatCombo } from '../shortcuts.svelte.js';
@@ -26,18 +27,16 @@
 
   // The export in a translate chapter has one meaningful format and one
   // meaningful scope, so the dialog that asks about both is skipped and the
-  // button does the thing. The busy flag and the catch are held here rather than
-  // inside `exportTextJson`, exactly as `exportImages` and the detect menu's own
-  // JSON item hold them, see the note on that function.
+  // button does the thing, through the same job and cancel path as the dialog.
   async function saveJson() {
-    app.exporting = true;
-    try {
-      await exportTextJson('all');
-    } catch (e) {
-      toastError('Export failed: ' + (e?.message || e));
-    } finally {
-      app.exporting = false;
-    }
+    await exportImages('JSON', 'all');
+  }
+
+  const visibleJobs = $derived(jobs.items.filter((j) => (j.running || j.failed.length) && j.current()));
+
+  function pageLabel(id) {
+    const index = app.pages.findIndex((p) => p.id === id);
+    return index < 0 ? String(id) : String(index + 1);
   }
 
   const label = $derived.by(() => {
@@ -79,11 +78,9 @@
     }
   }
 
-  // The pill is the only thing on screen while detection runs, the menu closes
-  // itself the moment an item is chosen, so it carries the whole progress
-  // report. `app.detecting` is what both scopes set, and it is what says
-  // something is happening at all; the count is the extra a whole-chapter run
-  // has to say and a single page does not.
+  // The menu closes when work starts, so the detect glyph keeps its busy note
+  // beside the jobs pill. `app.detecting` covers both scopes; `detectBatch`
+  // adds the count for chapter work, including a retry of its failed pages.
   const detectNote = $derived.by(() => {
     if (!app.detecting) return null;
     const b = app.detectBatch;
@@ -132,6 +129,34 @@
     </button>
   {/if}
 </div>
+
+{#if visibleJobs.length}
+  <div class="pill-jobs" aria-label="Jobs">
+    {#each visibleJobs as job (job.id)}
+      <div class="pill-job">
+        <div class="pill pill-job-head">
+          <span>{job.label}</span>
+          <span class="pill-count" role="status">{job.done} / {job.total}</span>
+          {#if job.running}
+            <button onclick={() => job.cancel()} disabled={job.cancelled}>{job.cancelled ? 'Cancelling…' : 'Cancel'}</button>
+          {:else if job.failed.length}
+            {#if job.retry}
+              <button onclick={() => job.retry()} disabled={app.detecting || !sidecarReady()}>Retry failed pages</button>
+            {/if}
+            <button onclick={() => dismissJob(job)}>Dismiss</button>
+          {/if}
+        </div>
+        {#if job.failed.length}
+          <ul class="pill-job-failures">
+            {#each job.failed as failure (failure.pageId)}
+              <li><span>Page {pageLabel(failure.pageId)}</span> {failure.error}</li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/each}
+  </div>
+{/if}
 
 <div class="pill-row far-right">
   <div class="pill-anchor">

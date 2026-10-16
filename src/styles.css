@@ -1582,6 +1582,17 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .pill-check-n{ font-weight:700; color:var(--warn); font-variant-numeric:tabular-nums; }
 .pill-check svg{ width:13px; height:13px; opacity:.7; }
 
+.pill-jobs{ position:fixed; top:52px; right:16px; z-index:30; display:flex; flex-direction:column; align-items:flex-end; gap:8px; max-width:calc(100vw - 32px); max-height:calc(100vh - 100px); overflow:auto; }
+.pill-job{ max-width:100%; }
+.pill-job-head{ cursor:default; }
+.pill-job-head .pill-count{ font-variant-numeric:tabular-nums; }
+.pill-job-head button{ border:0; border-left:1px solid var(--line2); padding:0 0 0 8px; background:none; color:var(--text); font:inherit; cursor:pointer; }
+.pill-job-head button:hover{ color:var(--accent); }
+.pill-job-head button:disabled{ color:var(--t3); cursor:default; }
+.pill-job-failures{ list-style:none; margin:4px 0 0; padding:8px 12px; border:1px solid var(--line2); border-radius:12px; background:var(--panel); box-shadow:var(--edge); color:var(--t2); font-size:11px; max-width:420px; max-height:180px; overflow:auto; overflow-wrap:anywhere; }
+.pill-job-failures li + li{ margin-top:5px; }
+.pill-job-failures li span{ color:var(--warn); margin-right:4px; }
+
 /* The save indicator. There is no manual save in this app, so a rejected
    autosave is the user's only signal that their work is not reaching the disk -
    which is why the failed state is the one and only --warn in the editor, and

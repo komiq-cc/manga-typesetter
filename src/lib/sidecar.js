@@ -10,6 +10,8 @@ import { app, page, applyDetection, toast, toastError } from './store.svelte.js'
 import { withPageImages, hasRawImage } from './page-images.js';
 import { prefs } from './prefs.svelte.js';
 import { ocrModelForLanguage } from './ocr-models.js';
+import { chapterOpenSeq } from './library.svelte.js';
+import { startJob, finishJob } from './jobs.svelte.js';
 
 // app.sidecar is initialized lazily so older saved state stays compatible.
 function ensureState() {
@@ -54,26 +56,39 @@ export async function analyzeImage(imageUrl, options = {}, maybeLanguage) {
 // Detect + OCR one page object and apply results to it. Returns { lines } on
 // success or { error } on failure. Shared by the single-page and whole-chapter
 // paths. Pins the write to `p` - detection may resolve after the user navigates.
-async function detectOnePage(p, { ocr = true, language, lang } = {}) {
+async function detectOnePage(p, { ocr = true, language, lang } = {}, current = () => true) {
+  if (!current()) return { stopped: true };
   if (!hasRawImage(p)) return { skipped: true };
   // A batch runs over every page in the chapter, but only five pages' images
   // are in memory at a time (see page-images.js) - so each page is minted for
   // the length of its own detection and given back after it. The pin is what
   // keeps a page turn from revoking the image the engine is reading.
-  return await withPageImages(p, async () => {
-    if (!p.raw) return { skipped: true };
-    try {
+  try {
+    return await withPageImages(p, async () => {
+      if (!current()) return { stopped: true };
+      if (!p.raw) return { error: 'Raw page could not be read' };
       const result = await analyzeImage(p.raw, { ocr, language: language ?? lang });
+      // applyDetection also marks the open chapter unsaved. Even writing to
+      // the old page object would let a late result affect the new document.
+      if (!current()) return { stopped: true };
       applyDetection(result, p);
       return { lines: result.lines.length };
-    } catch (e) {
-      return { error: String(e) };
-    }
-  });
+    });
+  } catch (e) {
+    return { error: String(e?.message || e) };
+  }
+}
+
+function detectionChapter() {
+  const seq = chapterOpenSeq();
+  const pages = app.pages;
+  const ref = app.chapterRef;
+  return () => seq === chapterOpenSeq() && app.pages === pages && app.chapterRef === ref;
 }
 
 // Orchestrates detection for the current page's raw image and applies results.
 export async function detectCurrentPage({ ocr = true, language, lang } = {}) {
+  if (app.detecting) return;
   const p = page();
   if (!hasRawImage(p)) {
     toast('No raw page to detect - import a raw image first');
@@ -84,8 +99,10 @@ export async function detectCurrentPage({ ocr = true, language, lang } = {}) {
     return;
   }
   app.detecting = true;
+  const current = detectionChapter();
   try {
-    const r = await detectOnePage(p, { ocr, language, lang });
+    const r = await detectOnePage(p, { ocr, language, lang }, current);
+    if (!current() || r.stopped) return;
     if (r.error) toastError(`Detection failed: ${r.error}`);
     else toast(`Detected ${r.lines} text region(s)`);
   } finally {
@@ -97,6 +114,7 @@ export async function detectCurrentPage({ ocr = true, language, lang } = {}) {
 // engine isn't hammered with concurrent requests; the ONNX sessions stay warm
 // across pages. Pages without a raw image are skipped.
 export async function detectAllPages({ ocr = true, language, lang } = {}) {
+  if (app.detecting) return;
   if (!sidecarReady()) {
     toast('Detection engine not ready');
     return;
@@ -109,29 +127,57 @@ export async function detectAllPages({ ocr = true, language, lang } = {}) {
     toast('No raw pages to detect - import raw images first');
     return;
   }
+  const current = detectionChapter();
+  const options = { ocr, language: language ?? lang ?? app.projectOcrLanguage };
+  const job = startJob('detect', 'Detect chapter', targets.length, current);
+  job.retry = () => {
+    if (app.detecting || !current()) return;
+    if (!sidecarReady()) { toast('Detection engine not ready'); return; }
+    const failed = new Set(job.failed.map((f) => f.pageId));
+    return runDetection(targets.filter((p) => failed.has(p.id)), options, job);
+  };
+  return await runDetection(targets, options, job);
+}
+
+// A cancelled page finishes; the next page never starts. Yield between pages
+// so progress can paint and Cancel can run even when the engine answers fast.
+async function runDetection(targets, options, job) {
+  job.running = true;
+  job.cancelled = false;
+  job.done = 0;
+  job.total = targets.length;
   app.detecting = true;
-  app.detectBatch = { done: 0, total: targets.length };
+  app.detectBatch = { done: 0, total: job.total };
   let linesTotal = 0;
-  let failed = 0;
-  let firstError = '';
+  let completed = 0;
   try {
     for (const p of targets) {
-      const r = await detectOnePage(p, { ocr, language, lang });
+      if (job.cancelled || !job.current()) break;
+      const r = await detectOnePage(p, options, job.current);
+      if (!job.current() || r.stopped) break;
+      job.failed = job.failed.filter((f) => f.pageId !== p.id);
       if (r.error) {
-        failed++;
-        if (!firstError) firstError = r.error;
+        job.failed.push({ pageId: p.id, error: r.error });
+      } else {
+        completed++;
+        linesTotal += r.lines ?? 0;
       }
-      else linesTotal += r.lines ?? 0;
-      app.detectBatch = { done: app.detectBatch.done + 1, total: targets.length };
+      job.done++;
+      app.detectBatch = { done: job.done, total: job.total };
+      if (job.done < job.total) await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    toast(
-      `Detected ${targets.length} page(s) · ${linesTotal} text region(s)` +
-        (failed ? ` · ${failed} page(s) failed · ${firstError}` : ''),
-    );
+    if (job.current()) {
+      toast(
+        (job.cancelled ? `Detection cancelled · ${job.done}/${job.total} pages` : `Detected ${completed} page(s) · ${linesTotal} text region(s)`) +
+          (job.failed.length ? ` · ${job.failed.length} page(s) failed` : ''),
+      );
+    }
   } finally {
     app.detecting = false;
     app.detectBatch = null;
+    finishJob(job);
   }
+  return job;
 }
 
 // ---- model cache (Settings) -----------------------------------------------

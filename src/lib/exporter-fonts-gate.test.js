@@ -4,6 +4,7 @@ import { exportImages } from './exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { releaseAllPageImages } from './page-images.js';
 import { fsx } from './fsx.js';
+import { jobs } from './jobs.svelte.js';
 
 // The native side of a folder export, for the one test that takes it: the
 // folder dialog answers '/out', and a path is its parts joined.
@@ -50,6 +51,7 @@ const flush = async () => {
 };
 
 beforeEach(() => {
+  jobs.items = [];
   Object.assign(native, {
     open: async () => '/out', save: async () => null, join: async (...parts) => parts.join('/'),
     dirname: async (path) => path.slice(0, path.lastIndexOf('/')), basename: async (path) => path.slice(path.lastIndexOf('/') + 1),
@@ -163,7 +165,7 @@ describe('an export waits for the fonts its pages need', () => {
     expect(await exportImages('PSD', 'all')).toBe(false);
     expect(built).not.toHaveBeenCalled();
     expect(downloaded).toEqual([]);
-    expect(app.toast.msg).toBe('Export failed: the fonts kept changing while it waited for them; nothing was written. Try again.');
+    expect(app.toast.msg).toMatch(/^Export failed: the fonts kept changing.*0 files were written\.$/);
     expect(app.exporting).toBe(false);
   });
 
@@ -496,7 +498,48 @@ describe('an export waits for the fonts its pages need', () => {
     expect(await exportImages('PNG', 'current')).toBe(false);
     expect(made).toEqual([]);
     expect(downloaded).toEqual([]);
-    expect(app.toast.msg).toBe('Export failed: the fonts never settled');
+    expect(app.toast.msg).toBe('Export failed: the fonts never settled. 0 files were written.');
     expect(app.exporting).toBe(false);
+  });
+});
+
+describe('export jobs stop at file boundaries', () => {
+  it.each(['pages', 'longstrip'])('%s counts written files and stops before the next one on cancel', async (layout) => {
+    app.projectLayout = layout;
+    app.stripSliceH = 1000;
+    const create = globalThis.document.createElement;
+    let job;
+    globalThis.document.createElement = (tag) => {
+      const element = create(tag);
+      if (tag !== 'canvas') element.click = function () {
+        downloaded.push(this.download);
+        job = jobs.items[0];
+        job.cancel();
+      };
+      return element;
+    };
+    expect(await exportImages('PNG', 'all')).toBe(false);
+    expect(downloaded).toHaveLength(1);
+    expect(job.done).toBe(1);
+    expect(job.total).toBe(layout === 'longstrip' ? 3 : 2);
+    expect(app.toast.msg).toBe('Export cancelled: 1 file written.');
+    expect(app.exporting).toBe(false);
+    expect(jobs.items).toEqual([]);
+  });
+
+  it('cancelling the native save dialog writes nothing after it closes', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+    const write = vi.spyOn(fsx, 'writeFileAtomic').mockResolvedValue();
+    native.save = async () => {
+      jobs.items[0].cancel();
+      return '/out/ch01-22.png';
+    };
+    try {
+      expect(await exportImages('PNG', 'current')).toBe(false);
+      expect(write).not.toHaveBeenCalled();
+      expect(app.toast.msg).toBe('Export cancelled: 0 files written.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

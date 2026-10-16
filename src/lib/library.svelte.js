@@ -1870,6 +1870,12 @@ const writeChapterMode = guarded(async function writeChapterMode(projectId, chap
 // every edit the user then makes is autosaved into the wrong chapter's file.
 let openSeq = 0;
 
+// Async chapter jobs pin the ticket too: a new open invalidates their writes
+// before its first await, while the old pages may still be on screen.
+export function chapterOpenSeq() {
+  return openSeq;
+}
+
 // The chapter an open is loading right now. `app.chapterRef` is deliberately
 // null for the whole of a load (see below), so this is the only thing left that
 // can tell `assertClosed` a chapter is on its way to the screen.

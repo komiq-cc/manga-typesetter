@@ -36,6 +36,8 @@ import { planStripCuts, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
 // existing caller (and the export dialog's JSON format) asks for it.
 import { buildTextJson } from './text-json.js';
 import { fsx } from './fsx.js';
+import { chapterOpenSeq } from './library.svelte.js';
+import { startJob, finishJob } from './jobs.svelte.js';
 export { buildTextJson };
 
 // A box can have several reasons, but the export names places to look rather
@@ -1436,6 +1438,7 @@ async function exportStripImages(fmt, held, chapter, pages) {
   }
   const ext = EXT[fmt];
   const n = cuts.length - 1;
+  chapter.job.total = n;
   const digits = Math.max(2, String(n).length);
   const baseName = sanitizeExportName(app.exportName);
   // Destination first, then render: each slice is written and dropped as it is
@@ -1445,7 +1448,7 @@ async function exportStripImages(fmt, held, chapter, pages) {
   const dir = isTauri() ? await pickExportDir() : null;
   enginesHeld(held);
   chapterHeld(chapter);
-  if (isTauri() && !dir) return true; // user cancelled
+  if (isTauri() && !dir) throw new ExportCancelled();
   let written = 0;
   try {
     for (let i = 0; i < n; i++) {
@@ -1461,10 +1464,13 @@ async function exportStripImages(fmt, held, chapter, pages) {
       enginesHeld(held, written);
       same();
       const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
-      if (dir) await writeItemTo(dir, name, blob, held, written);
+      if (dir) await writeItemTo(dir, name, blob, held, written, chapter);
       else downloadBlob(blob, name);
       written++;
+      chapter.job.done = written;
       enginesHeld(held, written);
+      same();
+      if (written < n) await new Promise((resolve) => setTimeout(resolve, 0));
     }
   } catch (e) {
     throw exportFailure(e, written);
@@ -1520,13 +1526,14 @@ async function pickExportDir() {
 }
 
 // Write one export item into a directory picked by `pickExportDir`.
-async function writeItemTo(dir, name, blob, held, written = 0) {
+async function writeItemTo(dir, name, blob, held, written = 0, chapter) {
+  const check = () => { enginesHeld(held, written); chapterHeld(chapter, written); };
   const { join } = await import('@tauri-apps/api/path');
-  enginesHeld(held, written);
+  check();
   const path = await join(dir, name);
-  enginesHeld(held, written);
+  check();
   const bytes = await blobBytes(blob);
-  enginesHeld(held, written);
+  check();
   await fsx.writeFileAtomic(path, bytes);
 }
 
@@ -1534,9 +1541,9 @@ async function writeItemTo(dir, name, blob, held, written = 0) {
 // directory used. Batch scopes do not come through here any more: they pick a
 // directory up front (`pickExportDir`) and stream each file as it is rendered,
 // so nothing ever accumulates a chapter's worth of blobs behind a dialog.
-async function saveNative(items, fmt, held) {
+async function saveNative(items, fmt, held, chapter) {
   let written = 0;
-  const check = () => { if (held) enginesHeld(held, written); };
+  const check = () => { if (held) enginesHeld(held, written); chapterHeld(chapter, written); };
   try {
     const [{ save }, { join, dirname, basename }] = await Promise.all([
       import('@tauri-apps/plugin-dialog'),
@@ -1552,11 +1559,12 @@ async function saveNative(items, fmt, held) {
       filters: [{ name: fmt, extensions: [ext] }],
     });
     check();
-    if (!path) return null; // user cancelled
+    if (!path) throw new ExportCancelled();
     const bytes = await blobBytes(first.blob);
     check();
     await fsx.writeFileAtomic(path, bytes);
     written++;
+    if (chapter?.job) chapter.job.done = written;
     check();
     const dir = await dirname(path);
     check();
@@ -1582,26 +1590,36 @@ async function saveNative(items, fmt, held) {
 // and the same document the export dialog's JSON format produces. Lifted out of
 // exportImages so the detect menu and the dialog run identical code - two
 // serialisers for one file format would drift the moment either was touched.
-// Does NOT set app.exporting: exportImages already holds it across this call,
-// and every other caller wraps it the same way.
-export async function exportTextJson(scope, held, pages = snapshotExportPages(scope === 'all' ? app.pages : [page()])) {
-  const suffix = scope === 'all' ? 'text' : `${pages[0].id}-text`;
-  const baseName = sanitizeExportName(app.exportName);
-  const items = [
-    {
-      name: `${baseName}-${suffix}.json`,
-      blob: new Blob([buildTextJson(pages)], { type: MIME.JSON }),
-      page: pages[0],
-    },
-  ];
-  if (isTauri()) {
-    // Always the single-file save dialog - 'all' is still one document.
-    await saveNative(items, 'JSON', held);
-  } else {
-    downloadBlob(items[0].blob, items[0].name);
-    toast(`Exported text for ${pages.length} page(s) as JSON (browser download)`);
+// Does not set app.exporting: UI callers enter through exportImages, which
+// holds it across this call. A direct caller still gets a job of its own.
+export async function exportTextJson(scope, held, pages = snapshotExportPages(scope === 'all' ? app.pages : [page()]), chapter = chapterNow()) {
+  const ownJob = !chapter.job;
+  if (ownJob) chapter = { ...chapter, job: startJob('export', 'Export JSON', 1) };
+  try {
+    chapterHeld(chapter);
+    const suffix = scope === 'all' ? 'text' : `${pages[0].id}-text`;
+    const baseName = sanitizeExportName(app.exportName);
+    const items = [
+      {
+        name: `${baseName}-${suffix}.json`,
+        blob: new Blob([buildTextJson(pages)], { type: MIME.JSON }),
+        page: pages[0],
+      },
+    ];
+    if (isTauri()) {
+      // Always the single-file save dialog - 'all' is still one document.
+      await saveNative(items, 'JSON', held, chapter);
+    } else {
+      downloadBlob(items[0].blob, items[0].name);
+      chapter.job.done = 1;
+      toast(`Exported text for ${pages.length} page(s) as JSON (browser download)`);
+    }
+    return true;
+  } catch (e) {
+    throw exportFailure(e, chapter.job.done);
+  } finally {
+    if (ownJob) finishJob(chapter.job);
   }
-  return true;
 }
 
 // ONE EXPORT, ONE ENGINE (`enginesNow`, text-engine/index.js). An export
@@ -1661,14 +1679,21 @@ export function enginesHeld(held, written = 0) {
 // chapter's lettering over a blank sheet, or over the NEW chapter's page of
 // the same file name, and wrote it under the old chapter's name.
 //
-// `chapterNow` is the document the export began on: `app.pages` and
-// `app.chapterRef`, which are only ever replaced by a chapter closing or
-// opening. `chapterHeld` is asked before a page's pictures are loaded and
+// `chapterNow` is the document and open ticket the export began on. The ticket
+// changes before a new open's first await, before its pages replace these.
+// `chapterHeld` is asked before a page's pictures are loaded and
 // again before its file is written; another document by then stops the
 // export there, and the files already written - each of them whole, and the
 // old chapter's - stand and are counted, as an engine switch counts them.
 export function chapterNow() {
-  return { pages: app.pages, ref: app.chapterRef };
+  return { pages: app.pages, ref: app.chapterRef, openSeq: chapterOpenSeq() };
+}
+export class ExportCancelled extends Error {
+  constructor(written = 0) {
+    super(`${written} ${written === 1 ? 'file' : 'files'} written.`);
+    this.name = 'ExportCancelled';
+    this.written = written;
+  }
 }
 export class ChapterSwitched extends Error {
   constructor(written = 0) {
@@ -1682,7 +1707,9 @@ export class ChapterSwitched extends Error {
   }
 }
 export function chapterHeld(chapter, written = 0) {
-  if (chapter && (app.pages !== chapter.pages || app.chapterRef !== chapter.ref)) throw new ChapterSwitched(written);
+  if (chapter && (app.pages !== chapter.pages || app.chapterRef !== chapter.ref ||
+    (chapter.openSeq !== undefined && chapter.openSeq !== chapterOpenSeq()))) throw new ChapterSwitched(written);
+  if (chapter?.job?.cancelled) throw new ExportCancelled(written);
 }
 
 // Nested builders have written no file of their own. The writer supplies the
@@ -1690,20 +1717,25 @@ export function chapterHeld(chapter, written = 0) {
 function exportFailure(error, written) {
   if (error instanceof EngineSwitched) return new EngineSwitched(Math.max(written, error.written));
   if (error instanceof ChapterSwitched) return new ChapterSwitched(Math.max(written, error.written));
-  if (!written || (error?.exportWritten ?? 0) >= written) return error;
+  if (error instanceof ExportCancelled) return new ExportCancelled(Math.max(written, error.written));
+  if ((error?.exportWritten ?? -1) >= written) return error;
   const reason = String(error?.message || error).replace(/nothing was written\.?/gi, '').trim();
-  const before = `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the remaining files were not written.`;
-  const failure = new Error(`${reason} ${before}`);
+  const before = written
+    ? `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the remaining files were not written.`
+    : '0 files were written.';
+  const failure = new Error(`${reason}${/[.!?]$/.test(reason) ? '' : '.'} ${before}`);
   failure.exportWritten = written;
   return failure;
 }
 
 // Public entry: scope = 'current' | 'page' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
 export async function exportImages(fmt, scope) {
+  if (app.exporting) return false;
   app.exporting = true;
   let written = 0;
+  const job = startJob('export', `Export ${fmt}`, fmt === 'JSON' || scope !== 'all' ? 1 : app.pages.length);
   // Before the first await: the chapter the user asked to export.
-  const chapter = chapterNow();
+  const chapter = { ...chapterNow(), job };
   try {
     const longstrip = isLongstrip();
     const selected = page();
@@ -1739,7 +1771,7 @@ export async function exportImages(fmt, scope) {
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
-    if (fmt === 'JSON') return await exportTextJson(scope, held, pages);
+    if (fmt === 'JSON') return await exportTextJson(scope, held, pages, chapter);
 
     // A whole longstrip chapter is one column, and the files it ships as are
     // slices of that column rather than its source pages. Only 'all' - a single
@@ -1758,7 +1790,7 @@ export async function exportImages(fmt, scope) {
     const streamDir = isTauri() && scope === 'all' ? await pickExportDir() : null;
     enginesHeld(held);
     chapterHeld(chapter);
-    if (isTauri() && scope === 'all' && !streamDir) return true; // cancelled
+    if (isTauri() && scope === 'all' && !streamDir) throw new ExportCancelled();
     const items = [];
     for (const p of pages) {
       // Only five pages' pictures are in memory at a time (see page-images.js),
@@ -1795,34 +1827,48 @@ export async function exportImages(fmt, scope) {
       chapterHeld(chapter, written);
       const name = `${baseName}-${p.id}.${ext}`;
       if (streamDir) {
-        await writeItemTo(streamDir, name, blob, held, written);
+        await writeItemTo(streamDir, name, blob, held, written, chapter);
         written++;
+        job.done = written;
         enginesHeld(held, written);
       } else if (!isTauri() && scope === 'all') {
         downloadBlob(blob, name);
         written++;
+        job.done = written;
       } else {
         items.push({ name, blob, page: p });
       }
+      chapterHeld(chapter, written);
+      if (written && written < pages.length) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     if (streamDir) {
       saveExportPrefs(streamDir, app.exportName);
       toast(`Saved ${written} file(s) to ${streamDir}`);
     } else if (isTauri()) {
-      await saveNative(items, fmt, held);
+      await saveNative(items, fmt, held, chapter);
     } else if (scope === 'all') {
       toast(`Exported ${written} image(s) as ${fmt} (browser download)`);
     } else {
-      for (const it of items) downloadBlob(it.blob, it.name);
+      for (const it of items) {
+        chapterHeld(chapter, written);
+        downloadBlob(it.blob, it.name);
+        job.done = ++written;
+      }
       toast(`Exported ${items.length} image(s) as ${fmt} (browser download)`);
     }
     return true;
   } catch (e) {
-    const failure = exportFailure(e, written);
-    toastError('Export failed: ' + (failure?.message || failure));
+    const failure = exportFailure(e, Math.max(written, job.done));
+    // A closed file picker is the user saying no before anything ran: nothing
+    // to report. Cancel pressed mid-export says how far it got.
+    if (failure instanceof ExportCancelled) {
+      if (job.cancelled) toast('Export cancelled: ' + failure.message);
+    }
+    else toastError('Export failed: ' + (failure?.message || failure));
     return false;
   } finally {
     app.exporting = false;
+    finishJob(job);
   }
 }
 
