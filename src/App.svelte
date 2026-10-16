@@ -9,6 +9,7 @@
   import BrushModal from './lib/BrushModal.svelte';
   import SettingsModal from './lib/SettingsModal.svelte';
   import ExportDialog from './lib/ExportDialog.svelte';
+  import CommandPalette from './lib/CommandPalette.svelte';
   import Toast from './lib/Toast.svelte';
   import HomeFrame from './lib/home/HomeFrame.svelte';
   import LibraryView from './lib/home/LibraryView.svelte';
@@ -38,6 +39,8 @@
 
   let fontModalOpen = $state(false);
   let settingsOpen = $state(false);
+  let settingsTab = $state('general');
+  let paletteOpen = $state(false);
   let newChapterOpen = $state(false);
   let newChapterBusy = $state(false);
   let newChapterProject = $state(null);
@@ -261,6 +264,13 @@
     versionsOpen = true;
   }
 
+  // Settings on one tab: the command palette's "Settings: Shortcuts" and the
+  // like. The pills open it on whichever tab it was last left on.
+  function openSettingsTab(tab) {
+    settingsTab = tab;
+    settingsOpen = true;
+  }
+
   function openSources(projectId, chapterId) {
     sourcesRef = { projectId, chapterId };
     sourcesOpen = true;
@@ -375,6 +385,12 @@
     'inspector.tabFill': () => setInspectorTab('fill'),
     'inspector.tabEffects': () => setInspectorTab('effects'),
     'inspector.tabLayout': () => setInspectorTab('layout'),
+
+    // The palette (FLOW-4). It closes itself on its own key: while it is up,
+    // the modal guard in `onKeydown` keeps this dispatch from running at all.
+    'palette.open': () => {
+      paletteOpen = true;
+    },
   });
   onDestroy(() => {
     releaseShortcuts();
@@ -435,6 +451,9 @@
     // everything else stands down. The registry decides which is which.
     const typing = isTypingTarget(e.target) || !!app.editingId;
     if (!typing && e.key === 'Escape') {
+      // Focus is in the palette's field nearly always, and the field takes its
+      // own Escape; this is for the press that arrives with focus elsewhere.
+      if (paletteOpen) return (paletteOpen = false);
       if (newChapterOpen) {
         // In-flight chapter copy is not dismissible.
         if (!newChapterBusy) newChapterOpen = false;
@@ -583,6 +602,11 @@
 />
 <FontModal bind:open={fontModalOpen} />
 <BrushModal />
-<SettingsModal bind:open={settingsOpen} />
+<SettingsModal bind:open={settingsOpen} bind:tab={settingsTab} />
 <ExportDialog />
+<CommandPalette
+  bind:open={paletteOpen}
+  openFonts={() => (fontModalOpen = true)}
+  openSettings={openSettingsTab}
+/>
 <Toast />

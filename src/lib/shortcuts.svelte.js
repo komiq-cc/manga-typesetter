@@ -320,6 +320,11 @@ const DEFS = [
   { id: 'inspector.tabFill', label: 'Go to Fill tab', group: 'Text box options', combo: 'Mod+Alt+2', whenTyping: true },
   { id: 'inspector.tabEffects', label: 'Go to Effects tab', group: 'Text box options', combo: 'Mod+Alt+3', whenTyping: true },
   { id: 'inspector.tabLayout', label: 'Go to Layout tab', group: 'Text box options', combo: 'Mod+Alt+4', whenTyping: true },
+
+  // The command palette (FLOW-4): every action above, and the ones with no key,
+  // found by typing. Live while typing, since the caret is nearly always in a
+  // field and the palette is how a key nobody remembers gets found.
+  { id: 'palette.open', label: 'Command palette', group: 'General', combo: 'Mod+k', whenTyping: true },
 ];
 
 // Defaults are canonicalised once, here, so nothing downstream has to wonder

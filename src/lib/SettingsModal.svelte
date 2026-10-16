@@ -25,7 +25,8 @@
   import { checkForUpdate } from './updater.js';
   import UpdateDialog from './home/UpdateDialog.svelte';
 
-  let { open = $bindable() } = $props();
+  // `tab` is bindable so the command palette can open Settings on one tab.
+  let { open = $bindable(), tab = $bindable('general') } = $props();
 
   // ---------- tabs ----------
   // Same shape as the Inspector's strip: a handful of panes, one job each,
@@ -36,7 +37,6 @@
     { id: 'shortcuts', label: 'Shortcuts', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" /></svg>' },
     { id: 'system', label: 'System', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>' },
   ];
-  let tab = $state('general');
 
   // The registry shortcut groups follow preferences like the brush tool toggle,
   // while each row combo comes from comboFor reading preferences.
