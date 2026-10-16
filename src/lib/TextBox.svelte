@@ -26,7 +26,9 @@
     reviewBox,
     reviewOf,
     edgeDragFloor,
+    isTranslateMode,
   } from './store.svelte.js';
+  import { openBoxMenu } from './editor/BoxMenu.svelte';
   import { stripDragYBounds } from './editor/strip.js';
 
   import { untrack, flushSync } from 'svelte';
@@ -1317,6 +1319,20 @@
     e.stopPropagation();
     if (!selected) selectBox(box.id);
     startMove(e);
+  }
+
+  // The right button: select the box and open its menu (FLOW-9). Not while it
+  // is typed into, where the system's Cut / Copy / Paste is the menu wanted
+  // (`typeMenu`, and the context-menu guard lets it through on an editable),
+  // nor while the Bulk panel is picking boxes, where a press means "this box".
+  // The guard in App.svelte has already kept the webview's own menu away.
+  function onBoxContextMenu(e) {
+    if (editing || bulkOn || isTranslateMode()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    focusPage(pg);
+    if (!selected) selectBox(box.id);
+    openBoxMenu(box.id, e.clientX, e.clientY);
   }
 
   function onDblClick(e) {
@@ -2751,6 +2767,7 @@
   role={spoken ? 'group' : undefined}
   aria-label={spoken ?? undefined}
   onpointerdown={onBoxPointerDown}
+  oncontextmenu={onBoxContextMenu}
   ondblclick={onDblClick}
 >
   {#if s.roughen.on && !engineShown}

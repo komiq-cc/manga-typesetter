@@ -20,6 +20,7 @@
   import Inspector from '../Inspector.svelte';
   import Queue from '../Queue.svelte';
   import BulkStylePanel from '../BulkStylePanel.svelte';
+  import BoxMenu from './BoxMenu.svelte';
   import { app, page, placedLineNs, isTranslateMode, isLongstrip, translatedCount } from '../store.svelte.js';
   import { brushArmed } from '../brush-tool.svelte.js';
   import { loadPanels, clampAll } from './panels.svelte.js';
@@ -199,4 +200,8 @@
   >
     <Queue />
   </FloatingPanel>
+
+  <!-- A box's right-click menu (FLOW-9), drawn here over the panels rather
+       than inside the box, where the page frame would clip it. -->
+  {#if !translate}<BoxMenu />{/if}
 </div>

@@ -1,3 +1,12 @@
+<script module>
+  // "Show in queue" (the box menu): scroll to the active row even when it has
+  // not changed - the user may have scrolled the list away from it since.
+  const asked = $state({ turn: 0 });
+  export function showActiveRow() {
+    asked.turn++;
+  }
+</script>
+
 <script>
   import {
     app,
@@ -185,7 +194,8 @@
   // from flinching: typing in the active row's textarea re-renders it, and a
   // scroll on every render - even a smooth one - is the twitch this is trying
   // not to be. The guard on top of that is `lastFollowed`, so this answers only
-  // to the active line CHANGING, never to the row's contents changing.
+  // to the active line CHANGING, never to the row's contents changing - or to
+  // being asked (`showActiveRow`).
   let listEl = $state(null);
   let lastFollowed = null;
   let followRaf = 0;
@@ -214,11 +224,14 @@
     scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: reduce ? 'auto' : 'smooth' });
   }
 
+  let lastAsked = asked.turn;
   $effect(() => {
     const key = p.activeLineN == null ? null : `${p.id}:${p.activeLineN}`;
+    const turn = asked.turn;
     untrack(() => {
-      if (key === lastFollowed) return;
+      if (key === lastFollowed && turn === lastAsked) return;
       lastFollowed = key;
+      lastAsked = turn;
       if (!key) return;
       // A frame later: the row that just became active grows into its expanded
       // form (the tag strip, the textarea), and a scroll measured before that

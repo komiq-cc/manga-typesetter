@@ -126,6 +126,10 @@ export function copyStyle(box) {
   return clipboardStyle;
 }
 
+// Whether there is a style to paste: the box menu greys Paste style out
+// without one, rather than offering a paste that does nothing.
+export const hasCopiedStyle = () => clipboardStyle != null;
+
 // What a style PASTE declines to move: a box's transform belongs to where it
 // sits on the page, not to how its text looks, and pasting a look should not
 // tilt or mirror the target. Nor the box's own hand-placed geometry - its
