@@ -21,7 +21,7 @@ import { textEngine, engineDraws, enginesNow, enginesAre } from './text-engine/i
 import { drawnFace, drawnRuns } from './text-engine/drawn-face.js';
 import { boxCandidate, placeBlock } from './contain.js';
 import { sfxActive } from './sfx.js';
-import { normalizeFit, normalizeAuto } from './data.js';
+import { normalizeFit, normalizeAuto, normalizeOutline } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
 import { warpActive } from './warp.js';
 import { withPageImages } from './page-images.js';
@@ -198,6 +198,10 @@ export function serializePage(p) {
       // of the page rebuilt from it are the same JSON, which is what
       // `psdSelfTest` compares.
       fit: normalizeFit(b.fit),
+      // Its outline record (Bubble A), null on a box with none, for the same
+      // reason: a round trip that lost it would bring every approved outline
+      // back unapproved.
+      outline: normalizeOutline(b.outline),
       // The solver's record (FIT-5): the size the user chose and what is
       // locked. Lost here, a re-imported box would be solved from the size it
       // was shrunk to and ratchet smaller. Null for a box the solver never

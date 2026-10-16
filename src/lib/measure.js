@@ -1,7 +1,7 @@
 // Shared text measurement + line wrapping (used by curved rendering and export).
 import { fontCssFor, measuredFontFor } from './store.svelte.js';
 import { balanceLines, neededHeight, balancedBlockSize, BALANCED_DEFAULTS, ovalProfile } from './typeset.js';
-import { interiorLineWidths, safetyInset } from './balloon.js';
+import { interiorLineWidths, safetyInset, layoutShape } from './balloon.js';
 import { normalizeFit } from './data.js';
 import { strokeExtent } from './text-paint.js';
 import { textEngine, setTextEngine, onTextEngineChange } from './text-engine/index.js';
@@ -1017,7 +1017,7 @@ export function balloonWidthsFor(box, style, sizePx) {
   // existed and the state `layoutLines` treats as "just wrap it".
   if (!typesetEnabled()) return null;
   if (!box || !style || style.balloon === false) return null;
-  const shape = normalizeFit(box.fit);
+  const shape = layoutShape(normalizeFit(box.fit));
   if (!shape) return null;
   const inset = textInset(style);
   const contentW = contentWidth(box.w, style);

@@ -925,7 +925,63 @@ export function normalizeFit(f) {
     if (!spans.some(Boolean)) return null;
     return { kind: 'rows', y0, step, spans };
   }
+  if (f.kind === 'poly') {
+    // The bubble outline itself (01-bubble-check.md): the points the finder
+    // traced, or the user dragged, in page pixels. Layout never reads it
+    // directly - `layoutShape` in balloon.js turns it into one of the three
+    // above - so all this gate owes the rest of the app is a polygon that
+    // encloses something.
+    const src = f.pts;
+    if (!Array.isArray(src) || src.length < 3 || src.length > MAX_POLY_POINTS) return null;
+    const pts = [];
+    for (const p of src) {
+      if (!Array.isArray(p) || p.length !== 2) return null;
+      const x = n(p[0]);
+      const y = n(p[1]);
+      if (!Number.isFinite(x + y)) return null;
+      pts.push([x, y]);
+    }
+    let area = 0;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      area += pts[j][0] * pts[i][1] - pts[i][0] * pts[j][1];
+    }
+    if (!(Math.abs(area) / 2 >= 1)) return null;
+    return { kind: 'poly', pts };
+  }
   return null;
+}
+export const MAX_POLY_POINTS = 256;
+
+// ---- the bubble outline's record ----
+//
+// `box.outline` says where a box's `poly` fit came from and whether anyone has
+// looked at it (01-bubble-check.md). Absent on every box saved before outlines
+// existed, and on a box typed onto the page that was never fitted: both read
+// as "no outline record", which is what they are.
+//
+//   { source,       how it was found - see OUTLINE_SOURCES
+//     confidence,   0..1, measured by the finder (edge contrast), not a constant
+//     approved,     null | 'ai' | 'user'
+//     note?,        why an approver left it unapproved
+//     open? }       true: no closed outline was found; the box keeps its rectangle
+//
+// Any edit to the points, a refit, or a move of the box clears `approved`.
+export const OUTLINE_SOURCES = Object.freeze(['ring', 'flood', 'dark', 'caption', 'fill', 'manual', 'box']);
+const OUTLINE_APPROVERS = ['ai', 'user'];
+export function normalizeOutline(o) {
+  if (!o || typeof o !== 'object') return null;
+  // A source some later build names is still an outline somebody made; the one
+  // word that claims nothing about how is 'manual'.
+  const source = OUTLINE_SOURCES.includes(o.source) ? o.source : 'manual';
+  const c = Number(o.confidence);
+  const out = {
+    source,
+    confidence: Number.isFinite(c) ? Math.min(1, Math.max(0, c)) : 0,
+    approved: OUTLINE_APPROVERS.includes(o.approved) ? o.approved : null,
+  };
+  if (typeof o.note === 'string' && o.note.trim()) out.note = o.note.trim().slice(0, 500);
+  if (o.open === true) out.open = true;
+  return out;
 }
 
 // ---- the containment flag ----

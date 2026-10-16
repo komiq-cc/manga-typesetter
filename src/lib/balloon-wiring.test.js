@@ -75,6 +75,7 @@ const {
   moveGeom,
   moveBoxTo,
   duplicateBox,
+  translateFit,
 } = await import('./store.svelte.js');
 const { copyStyle, pasteStyle } = await import('./presets.svelte.js');
 const { tags } = await import('./tags.svelte.js');
@@ -85,7 +86,13 @@ const { balloonWidthsFor, lineIndents, textInset, contentWidth, layoutLines, lin
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
 setTypesetEnabled(true);
-const { inscribedRect, balloonFrame, interiorLineWidths } = await import('./balloon.js');
+const { inscribedRect, balloonFrame, interiorLineWidths, layoutShape, shapeBounds } = await import('./balloon.js');
+// What layout reads for a stored fit: a found outline is a `poly`, laid out
+// as the formula that explains it (`layoutShape`).
+const L = (fit) => layoutShape(fit);
+// The outline's own extent, which is what containment holds a box inside.
+const top = (fit) => shapeBounds(fit).y;
+const bottom = (fit) => shapeBounds(fit).y + shapeBounds(fit).h;
 const { defaultStyle, normalizeStyle, normalizeFit } = await import('./data.js');
 const { serializePage } = await import('./psd.js');
 const hist = await import('./editor/history.svelte.js');
@@ -219,11 +226,11 @@ describe('placement, when the page can be looked at', () => {
 
     // The fit is stored, and it is the plain JSON the schema promises - two
     // decimals, five keys, no mask anywhere near it.
-    expect(b.fit.kind).toBe('ellipse');
-    expect(Object.keys(b.fit).sort()).toEqual(['cx', 'cy', 'kind', 'rx', 'ry']);
+    expect(L(b.fit).kind).toBe('ellipse');
+    expect(Object.keys(L(b.fit)).sort()).toEqual(['cx', 'cy', 'kind', 'rx', 'ry']);
     expect(JSON.parse(JSON.stringify(b.fit))).toEqual(b.fit);
-    expect(b.fit.cx).toBeCloseTo(250, -1);
-    expect(b.fit.cy).toBeCloseTo(250, -1);
+    expect(L(b.fit).cx).toBeCloseTo(250, -1);
+    expect(L(b.fit).cy).toBeCloseTo(250, -1);
 
     // And the box is that shape's frame - not the detector's rect inset by 8%,
     // which is what it would have been. GEO-1 changed it from the inscribed
@@ -251,7 +258,7 @@ describe('placement, when the page can be looked at', () => {
     pixels = img;
     placeActiveAt(250, 250);
     const b = page().boxes[0];
-    expect(b.fit.kind).toBe('rows');
+    expect(L(b.fit).kind).toBe('rows');
     expect(JSON.parse(JSON.stringify(b.fit))).toEqual(b.fit);
     const r = balloonFrame(b.fit);
     expect([b.x, b.y, b.w, b.h].map(round2)).toEqual([r.x, r.y, r.w, r.h].map(round2));
@@ -291,9 +298,9 @@ describe('placement, when the page can be looked at', () => {
     pixels = img;
     placeActiveAt(190, 120);
     const b = page().boxes[0];
-    expect(b.fit.kind).toBe('rect');
-    expect(Object.keys(b.fit).sort()).toEqual(['h', 'kind', 'w', 'x', 'y']);
-    expect(b.fit.w).toBeCloseTo(260, -1);
+    expect(L(b.fit).kind).toBe('rect');
+    expect(Object.keys(L(b.fit)).sort()).toEqual(['h', 'kind', 'w', 'x', 'y']);
+    expect(L(b.fit).w).toBeCloseTo(260, -1);
   });
 
   // Off the page is recoverable by dragging; a box that hangs off it because the
@@ -946,8 +953,8 @@ describe('re-fitting by hand', () => {
     pixels = img;
     expect(refitBalloon('b1')).toBe(true);
     const b = page().boxes[0];
-    expect(b.fit.kind).toBe('ellipse');
-    expect(b.fit.rx).toBeGreaterThan(120);
+    expect(L(b.fit).kind).toBe('ellipse');
+    expect(L(b.fit).rx).toBeGreaterThan(120);
   });
 
   // A stale fit is worse than none: the text would be laid out to a curve that
@@ -1008,7 +1015,7 @@ describe('re-fitting by hand', () => {
     placeActiveAt(250, 250);
     const b = page().boxes[0];
     const placed = geom(b);
-    expect(placed.fit?.kind).toBe('ellipse');
+    expect(L(placed.fit)?.kind).toBe('ellipse');
     expect(refitBalloon(b.id)).toBe(true);
     expect(geom(b)).toEqual(placed);
     expect(refitBalloon(b.id)).toBe(true);
@@ -1070,7 +1077,7 @@ describe('re-fitting by hand', () => {
     const placed = hist.peekStack().undo.length;
     refitBalloon(b.id);
     const fitted = geom(b);
-    expect(fitted.fit?.kind).toBe('ellipse');
+    expect(L(fitted.fit)?.kind).toBe('ellipse');
     expect(fitted.size).not.toBe(fallback.size);
     expect(hist.peekStack().undo.length).toBe(placed + 1);
     hist.undo();
@@ -1144,7 +1151,7 @@ describe('re-fitting by hand', () => {
     refitBalloon('b1');
     expect(b.auto).toMatchObject({ on: true, refSize: 30 });
     expect(['ok', 'shrunk', 'overflow']).toContain(b.auto.status);
-    expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
+    expect(b.y).toBeGreaterThanOrEqual(L(b.fit).cy - L(b.fit).ry);
     hist.undo();
     expect(b.auto).toBeUndefined();
     expect(geom(b)).toEqual(before);
@@ -1200,12 +1207,12 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     const b = page().boxes[0];
 
     expect(b.fit).not.toBe(null);
-    expect(b.fit.kind).toBe('ellipse');
-    expect(Object.keys(b.fit).sort()).toEqual(['cx', 'cy', 'kind', 'rx', 'ry']);
-    expect(b.fit.cx).toBeCloseTo(250, -1);
-    expect(b.fit.cy).toBeCloseTo(250, -1);
-    expect(b.fit.rx).toBeCloseTo(130, -1);
-    expect(b.fit.ry).toBeCloseTo(80, -1);
+    expect(L(b.fit).kind).toBe('ellipse');
+    expect(Object.keys(L(b.fit)).sort()).toEqual(['cx', 'cy', 'kind', 'rx', 'ry']);
+    expect(L(b.fit).cx).toBeCloseTo(250, -1);
+    expect(L(b.fit).cy).toBeCloseTo(250, -1);
+    expect(L(b.fit).rx).toBeCloseTo(130, -1);
+    expect(L(b.fit).ry).toBeCloseTo(80, -1);
   });
 
   // The box is centred on the shape's frame and no wider than it: the text is
@@ -1229,7 +1236,7 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     loadProjectPages(noDetect());
     pixels = ovalPage();
     placeActiveAt(180, 270); // off-centre, still inside
-    expect(round2(page().boxes[0].fit.rx)).toBe(round2(centre.rx));
+    expect(round2(L(page().boxes[0].fit).rx)).toBe(round2(L(centre).rx));
   });
 
   it('fits a narration panel as a rect, which the Inspector shows as one', () => {
@@ -1239,8 +1246,8 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     pixels = img;
     placeActiveAt(190, 120);
     const b = page().boxes[0];
-    expect(b.fit.kind).toBe('rect');
-    expect(b.fit.w).toBeCloseTo(260, -1);
+    expect(L(b.fit).kind).toBe('rect');
+    expect(L(b.fit).w).toBeCloseTo(260, -1);
   });
 
   // The detector measured where THIS line's Japanese sat. A click is where the
@@ -1255,8 +1262,8 @@ describe('a click on a balloon is enough, with no detection at all', () => {
     pixels = img;
     placeActiveAt(360, 360); // pointing at the OTHER balloon
     const b = page().boxes[0];
-    expect(b.fit.cx).toBeCloseTo(120, -1);
-    expect(b.fit.cy).toBeCloseTo(120, -1);
+    expect(L(b.fit).cx).toBeCloseTo(120, -1);
+    expect(L(b.fit).cy).toBeCloseTo(120, -1);
   });
 
   it('refuses a click on art, and never spends a fill on it', () => {
@@ -1505,8 +1512,8 @@ describe('placement chooses the size (FIT-1)', () => {
   };
   const inside = (b) => {
     expect(containBox(boxCandidate(b, TEXT)).fits).toBe(true);
-    expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
-    expect(b.y + b.h).toBeLessThanOrEqual(b.fit.cy + b.fit.ry);
+    expect(b.y).toBeGreaterThanOrEqual(L(b.fit).cy - L(b.fit).ry);
+    expect(b.y + b.h).toBeLessThanOrEqual(L(b.fit).cy + L(b.fit).ry);
   };
 
   beforeEach(() => {
@@ -1700,8 +1707,8 @@ describe('placement chooses the size (FIT-1)', () => {
     it('stays inside its balloon when the text outgrows it, and is flagged', () => {
       const b = placeAt(26);
       setBoxText(b, `${TEXT} ${TEXT} ${TEXT} ${TEXT}`, page());
-      expect(b.y).toBeGreaterThanOrEqual(b.fit.cy - b.fit.ry);
-      expect(b.y + b.h).toBeLessThanOrEqual(b.fit.cy + b.fit.ry);
+      expect(b.y).toBeGreaterThanOrEqual(top(b.fit));
+      expect(b.y + b.h).toBeLessThanOrEqual(bottom(b.fit));
       expect(b.auto.status).toBe('overflow');
       expect(reviewOf(b, page())).not.toBeNull();
     });
@@ -1721,15 +1728,15 @@ describe('placement chooses the size (FIT-1)', () => {
       app.projectLayout = 'longstrip';
       try {
         const b = placeAt(26);
-        const bottom = b.fit.cy + b.fit.ry;
+        const floor = bottom(b.fit);
         autoFitBoxTo(b, 20, page());
-        expect(b.y + b.h).toBeLessThanOrEqual(bottom);
+        expect(b.y + b.h).toBeLessThanOrEqual(floor);
         // The same box saved before the solver existed is grown as it always
         // was, past the balloon and bounded by the page.
         const legacy = placeAt(26);
         delete legacy.auto;
         autoFitBoxTo(legacy, 20, page());
-        expect(legacy.y + legacy.h).toBeGreaterThan(bottom);
+        expect(legacy.y + legacy.h).toBeGreaterThan(floor);
       } finally {
         app.projectLayout = 'pages';
       }
@@ -1799,7 +1806,7 @@ describe('placement chooses the size (FIT-1)', () => {
       selectBox(b.id);
       for (const [dy, total] of [[8, 8], [-20, -12]]) {
         nudgeBox(b.id, 0, dy);
-        expect(b.fit).toEqual({ ...fit, cy: fit.cy + total });
+        expect(b.fit).toEqual(translateFit(fit, 0, total));
         expect(editorLines(b)).toEqual(lines);
         expect(exportLines(b)).toEqual(lines);
         expect(textLayerFor(page(), b, null).text.text).toBe(lines.join('\n'));
@@ -1812,7 +1819,7 @@ describe('placement chooses the size (FIT-1)', () => {
       const lines = editorLines(b);
       const from = moveGeom(b);
       for (const dy of [3.25, 17.5, 40]) moveBoxTo(b, from.x + 5, from.y + dy, page(), from);
-      expect(b.fit).toEqual({ ...from.fit, cx: from.fit.cx + 5, cy: from.fit.cy + 40 });
+      expect(b.fit).toEqual(translateFit(from.fit, 5, 40));
       expect(editorLines(b)).toEqual(lines);
     });
 
@@ -1863,7 +1870,7 @@ describe('placement chooses the size (FIT-1)', () => {
       resizeBox(page().id, b.id, { y: b.y - 10 });
       resizeBox(page().id, b.id, { x: b.x + 7 });
       boxEdited(b, page());
-      expect(b.fit).toEqual({ ...before.fit, cx: before.fit.cx + 7, cy: before.fit.cy - 10 });
+      expect(b.fit).toEqual(translateFit(before.fit, 7, -10));
       expect(editorLines(b)).toEqual(lines);
       expect(exportLines(b)).toEqual(lines);
       expect([b.w, b.h, b.style.size]).toEqual([before.w, before.h, before.style.size]);
@@ -1882,7 +1889,7 @@ describe('placement chooses the size (FIT-1)', () => {
       const id = duplicateBox(b.id);
       const copy = page().boxes.find((x) => x.id === id);
       expect(copy.y).not.toBe(b.y);
-      expect(copy.fit.cy - b.fit.cy).toBe(copy.y - b.y);
+      expect(L(copy.fit).cy - L(b.fit).cy).toBeCloseTo(copy.y - b.y, 6);
       expect(editorLines(copy)).toEqual(editorLines(b));
     });
   });

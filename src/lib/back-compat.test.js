@@ -459,6 +459,11 @@ describe('a whole chapter.json from the last release', () => {
     expect(byId('b1').fit).toEqual({ kind: 'ellipse', cx: 200, cy: 190, rx: 90, ry: 60 });
   });
 
+  it('gives a box saved before bubble outlines no outline record', () => {
+    expect('outline' in byId('b1')).toBe(false);
+    expect('outline' in byId('b2')).toBe(false);
+  });
+
   it('keeps the lines, their tags, and the silence of a line that has none', () => {
     const [l1, l2] = pageById(1).lines;
     expect(l1.tags).toEqual(['shout']);
@@ -993,5 +998,54 @@ describe('a newborn box and the previous box\'s geometry', () => {
     expect(s.path).toEqual({ on: false, pts: [] });
     expect(s.warp).toEqual({ on: false, cols: 3, rows: 3, pts: [] });
     expect(s.clip.shapes).toEqual([]);
+  });
+});
+
+// Bubble outlines (M2, Bubble A): `box.fit` gained a `poly` kind and the box
+// an `outline` record; a detected block measured by a chapter place carries
+// the same pair. A file written with them loads as written; a hand-edited or
+// future one degrades to "no fit" / "no record" rather than failing the load.
+describe('a chapter with bubble outlines', () => {
+  const PAGE = (box, det = {}) =>
+    JSON.parse(`{
+      "id": 7, "file": "007.png", "cleaned": null, "w": 1000, "h": 1400,
+      "lines": [{ "n": 1, "type": "dialogue", "jp": "", "en": "Hi." }],
+      "detect": { "panels": [], "boxes": [${JSON.stringify({ n: 1, box: [100, 100, 200, 300], ...det })}] },
+      "boxes": [${JSON.stringify({ id: 'o1', lineN: 1, text: null, x: 100, y: 120, w: 180, h: 140, style: { font: 'Bangers', size: 30 }, ...box })}]
+    }`);
+  const POLY = { kind: 'poly', pts: [[80, 100], [300, 100], [320, 200], [300, 300], [80, 300]] };
+
+  it('keeps a poly fit and its outline record as written', () => {
+    const outline = { source: 'ring', confidence: 0.93, approved: 'user', note: 'ok' };
+    loadProjectPages([PAGE({ fit: POLY, outline })]);
+    expect(byId('o1').fit).toEqual(POLY);
+    expect(byId('o1').outline).toEqual(outline);
+  });
+
+  it('keeps an open outline with no fit', () => {
+    loadProjectPages([PAGE({ fit: null, outline: { source: 'box', confidence: 0, approved: null, open: true } })]);
+    expect(byId('o1').fit).toBe(null);
+    expect(byId('o1').outline).toEqual({ source: 'box', confidence: 0, approved: null, open: true });
+  });
+
+  it('reads a broken poly as no fit, and a broken record as a safe one', () => {
+    loadProjectPages([
+      PAGE({
+        fit: { kind: 'poly', pts: [[0, 0], [10, 0]] },
+        outline: { source: 'sam9', confidence: 7, approved: 'robot', open: 'yes', note: 3 },
+      }),
+    ]);
+    expect(byId('o1').fit).toBe(null);
+    expect(byId('o1').outline).toEqual({ source: 'manual', confidence: 1, approved: null });
+  });
+
+  it('keeps a measured block’s outline record, and drops a record with no measurement', () => {
+    const outline = { source: 'flood', confidence: 0.8, approved: null };
+    loadProjectPages([PAGE({}, { fit: POLY, outline })]);
+    expect(pageById(7).detect.boxes[0].fit).toEqual(POLY);
+    expect(pageById(7).detect.boxes[0].outline).toEqual(outline);
+    loadProjectPages([PAGE({}, { outline })]);
+    expect('fit' in pageById(7).detect.boxes[0]).toBe(false);
+    expect('outline' in pageById(7).detect.boxes[0]).toBe(false);
   });
 });

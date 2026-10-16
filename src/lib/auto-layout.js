@@ -83,7 +83,7 @@
 
 import { placeBlock, placeAtHeight, containBox, inkHeight, fitBox, CONTAIN_TOL, REVIEW_REASONS } from './contain.js';
 import { applyCase, lineWidth, textInset, blockYFor, layoutLines, withFamiliesHeld } from './measure.js';
-import { interiorLineWidths, inscribedRect, balloonFrame, safetyInset } from './balloon.js';
+import { interiorLineWidths, inscribedRect, balloonFrame, safetyInset, layoutShape } from './balloon.js';
 import { neededHeight, BALANCED_DEFAULTS, ovalProfile } from './typeset.js';
 import { normalizeFit } from './data.js';
 
@@ -109,7 +109,7 @@ function regionOf(region) {
     if (!Number.isFinite(x + y + w + h)) return null;
     return { kind: 'hint', cx: x + w / 2, cy: y + h / 2 };
   }
-  const shape = normalizeFit(region);
+  const shape = layoutShape(normalizeFit(region));
   if (!shape) return null;
   const r = inscribedRect(shape);
   const f = balloonFrame(shape);

@@ -72,6 +72,10 @@ const setFields = (b, from) => {
     else if (k === 'autoHeight') b.style.autoHeight = from.autoHeight;
     else if (k === 'ink') b.style.ink = structuredClone(from.ink);
     else if (k === 'fit') b.fit = from.fit ? structuredClone(from.fit) : null;
+    else if (k === 'outline') {
+      if (from.outline) b.outline = structuredClone(from.outline);
+      else delete b.outline;
+    }
     else if (k === 'auto') {
       if (from.auto) b.auto = structuredClone(from.auto);
       else delete b.auto;

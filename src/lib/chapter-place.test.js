@@ -60,7 +60,9 @@ const {
   placeDetectedOnPage,
   cancelChapterPlace,
   rescalePageGeometry,
+  scaleFit,
 } = await import('./store.svelte.js');
+const { layoutShape } = await import('./balloon.js');
 const hist = await import('./editor/history.svelte.js');
 
 // ---------------------------------------------------------------------------
@@ -141,7 +143,9 @@ describe('placing a whole chapter', () => {
       expect(await placeDetectedInChapter()).toBe(3);
       runs.push(placed());
     }
-    expect(runs[0][0][0].fit?.kind).toBe('ellipse');
+    // A found outline, laid out as the oval it is.
+    expect(runs[0][0][0].fit?.kind).toBe('poly');
+    expect(layoutShape(runs[0][0][0].fit).kind).toBe('ellipse');
     // Every page the same as every other, and every run the same as every other.
     for (const run of runs) for (const boxes of run) expect(boxes).toEqual(runs[0][0]);
     // And the same box a click on a decoded page gives.
@@ -213,7 +217,8 @@ describe('placing a whole chapter', () => {
     loadProjectPages(chapter());
     await placeDetectedInChapter();
     const fits = app.pages.map((p) => p.detect.boxes[0].fit);
-    expect(fits.every((f) => f?.kind === 'ellipse')).toBe(true);
+    expect(fits.every((f) => f?.kind === 'poly')).toBe(true);
+    expect(app.pages.every((p) => p.detect.boxes[0].outline?.source === 'ring')).toBe(true);
     // Saved, and reopened with every box deleted.
     const saved = JSON.parse(JSON.stringify(app.pages)).map((p) => ({
       ...p,
@@ -226,7 +231,7 @@ describe('placing a whole chapter', () => {
     app.pages[0].w = 1000;
     app.pages[0].h = 1000;
     const f = fits[0];
-    expect(app.pages[0].detect.boxes[0].fit).toEqual({ kind: 'ellipse', cx: f.cx * 2, cy: f.cy * 2, rx: f.rx * 2, ry: f.ry * 2 });
+    expect(app.pages[0].detect.boxes[0].fit).toEqual(scaleFit(f, 2, 2));
     decodes = [];
     expect(await placeDetectedInChapter()).toBe(3);
     expect(decodes).toEqual([]);

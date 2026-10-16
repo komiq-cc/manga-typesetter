@@ -9,6 +9,7 @@ import {
   applyBoxDefaults,
   normalizeStyle,
   normalizeFit,
+  normalizeOutline,
   normalizeInkStroke,
   normalizeFinish,
   normalizeReview,
@@ -96,7 +97,8 @@ import { takesHeightFloor } from './resize-math.js';
 // app's answer to "where do the pixels come from", and it answers null wherever
 // there is no canvas - which is to say under node, where every test below takes
 // the fallback path exactly as a page nobody has opened does.
-import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint } from './balloon.js';
+import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint, localUniformity } from './balloon.js';
+import { findOutline } from './bubble-outline.js';
 import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
 import { measureChapterFits } from './chapter-fit.js';
 // One-way, and it must stay that way: the brush tool's state module knows only
@@ -176,6 +178,10 @@ const autoField = (a) => {
   const auto = normalizeAuto(a);
   return auto ? { auto } : null;
 };
+const outlineField = (o) => {
+  const outline = normalizeOutline(o);
+  return outline ? { outline } : null;
+};
 
 // A loaded box given the plain wrap, for a chapter laid out under the old
 // chapter-wide plain switch (`openTypesetting` in data.js). A solve that still
@@ -252,9 +258,11 @@ export function loadProjectPages(rawPages, { plain = false } = {}) {
             // A measured fit (see `placeDetectedInChapter`) through the same
             // `normalizeFit` a box's goes through. Absent stays absent: that is
             // "not measured", which is not the same answer as null.
-            boxes: (p.detect.boxes ?? []).map((b) =>
-              b.fit === undefined ? { ...b } : { ...b, fit: normalizeFit(b.fit) },
-            ),
+            boxes: (p.detect.boxes ?? []).map((b) => {
+              const { outline, ...d } = b;
+              if (b.fit === undefined) return d;
+              return { ...d, fit: normalizeFit(b.fit), ...outlineField(outline) };
+            }),
           }
         : null,
       // NOT migrated: a box already on disk with `lineN: null` is loaded as it
@@ -298,6 +306,9 @@ export function loadProjectPages(rawPages, { plain = false } = {}) {
           // against this build's measurements and brings it up to date, keeping
           // the saved reason when the box still does not fit.
           ...reviewField(b.review),
+          // Where the fit came from and whether anyone approved it (Bubble A),
+          // absent on a box saved before outlines existed.
+          ...outlineField(b.outline),
           // The solver's record (FIT-5), absent on a box it has never managed.
           // Carried and nothing more: a load re-checks, it never re-solves.
           ...autoField(b.auto),
@@ -3101,6 +3112,7 @@ export const scaleFit = (f, sx, sy) => {
     const spans = f.spans.map((sp) => sp && [sp[0] * sx, sp[1] * sx]);
     return { kind: 'rows', y0: f.y0 * sy, step: f.step * sy, spans };
   }
+  if (f.kind === 'poly') return { kind: 'poly', pts: f.pts.map(([x, y]) => [x * sx, y * sy]) };
   return null;
 };
 
@@ -3115,6 +3127,7 @@ export const translateFit = (f, dx, dy) => {
     const spans = f.spans.map((sp) => sp && [sp[0] + dx, sp[1] + dx]);
     return { kind: 'rows', y0: f.y0 + dy, step: f.step, spans };
   }
+  if (f.kind === 'poly') return { kind: 'poly', pts: f.pts.map(([x, y]) => [x + dx, y + dy]) };
   return null;
 };
 
@@ -3594,20 +3607,63 @@ export function fittedRect(p, shape, align) {
 // `pixels` is for a caller that has the page's pixels in hand rather than in the
 // click cache - the chapter-wide measure (`placeDetectedInChapter`).
 export function balloonFitFor(p, block, pixels) {
+  return measureBalloon(p, block, pixels)?.fit ?? null;
+}
+
+// A fit worth keeping has room in it: a balloon so small that the safety inset
+// eats it whole leaves no rectangle to put text in. `interiorLineWidths` would
+// answer its own floor of one pixel for every line, which no line breaker can
+// do anything sensible with.
+function hasRoom(shape) {
+  const room = shape && inscribedRect(shape);
+  return !!room && room.w > 0 && room.h > 0;
+}
+
+// The outline finder's answer as a measurement: the `poly` fit and its record.
+// Null when the finder found no closed outline, or one with no room in it.
+function outlineMeasure(found) {
+  if (!found || found.open || !Array.isArray(found.pts)) return null;
+  const fit = normalizeFit({ kind: 'poly', pts: found.pts });
+  if (!fit || !hasRoom(fit)) return null;
+  return { fit, outline: { source: found.source, confidence: found.confidence, approved: null } };
+}
+
+// The old fill-and-fit's answer as a measurement, for a bubble the outline
+// finder could not close: its shape, with the fit's own confidence.
+function fillMeasure(res) {
+  if (!res || !res.shape || res.escaped) return null;
+  if (!(res.confidence >= MIN_FIT_CONFIDENCE)) return null;
+  const fit = normalizeFit(res.shape);
+  if (!fit || !hasRoom(fit)) return null;
+  return { fit, outline: { source: 'fill', confidence: res.confidence, approved: null } };
+}
+
+// The record of a box measured and found in no closed bubble: no fit, and an
+// outline that says so, so the check list can ask for one (01-bubble-check.md).
+export const OPEN_OUTLINE = Object.freeze({ source: 'box', confidence: 0, approved: null, open: true });
+const openMeasure = () => ({ fit: null, outline: { ...OPEN_OUTLINE } });
+
+// The first of two measurements that found a bubble; else the first that was
+// measured at all, so "looked and found nothing" is not lost to "could not
+// look". `second` is a thunk: it is not measured when the first one answers.
+function firstFound(first, second) {
+  if (first?.fit) return first;
+  const next = second();
+  if (next?.fit) return next;
+  return first ?? next ?? null;
+}
+
+// The bubble around a block, measured: `{ fit, outline }`, or null when the
+// page's pixels are not in hand or the block is not a block. The outline
+// finder's ladder first (`findOutline` in bubble-outline.js: caption, ring,
+// flood, dark bubble); then the old fill-and-fit, which still answers some
+// bubbles the ladder's solidity gate refuses, with a stored outline record
+// that says so; then no fit and an open outline.
+export function measureBalloon(p, block, pixels) {
   if (!Array.isArray(block) || block.length !== 4) return null;
   const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
-  const res = detectBalloon(image, block);
-  if (!res || !res.shape || res.escaped) return null;
-  if (!(res.confidence >= MIN_FIT_CONFIDENCE)) return null;
-  const shape = normalizeFit(res.shape);
-  // And one last one: a balloon so small that the safety inset eats it whole
-  // leaves no rectangle to put text in. `interiorLineWidths` would answer its
-  // own floor of one pixel for every line, which no line breaker can do anything
-  // sensible with. A shape with no room in it is not a shape worth keeping.
-  const room = shape && inscribedRect(shape);
-  if (!room || !(room.w > 0) || !(room.h > 0)) return null;
-  return shape;
+  return outlineMeasure(findOutline(image, block)) ?? fillMeasure(detectBalloon(image, block)) ?? openMeasure();
 }
 
 // The same answer, from a CLICK instead of a detected block.
@@ -3637,18 +3693,30 @@ export function balloonFitFor(p, block, pixels) {
 // somebody expects to succeed: a click on artwork is refused by a 13x13 sample
 // of pixels and never reaches a flood fill.
 export function balloonFitAt(p, imgX, imgY, pixels) {
+  return measureBalloonAt(p, imgX, imgY, pixels)?.fit ?? null;
+}
+
+// How far the outline finder looks around a click, as its `minPad`: there is
+// no block to scale a window from, so the floor is the window, about the
+// half-extent the click fill searches (`pointWindow` in balloon.js).
+const CLICK_PAD = 160;
+
+// `balloonFitAt` as a measurement, by `measureBalloon`'s rules. The finder is
+// asked first with the click as a two-pixel block; the click must be on a solid
+// light colour (`localUniformity`) before either looks, and inside what they
+// found after.
+export function measureBalloonAt(p, imgX, imgY, pixels) {
   if (!Number.isFinite(+imgX) || !Number.isFinite(+imgY)) return null;
   const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
-  const res = detectBalloonAt(image, imgX, imgY);
-  if (!res || !res.shape || res.escaped) return null;
-  if (!(res.confidence >= MIN_FIT_CONFIDENCE)) return null;
-  const shape = normalizeFit(res.shape);
-  if (!shape) return null;
-  if (!shapeContainsPoint(shape, imgX, imgY)) return null;
-  const room = inscribedRect(shape);
-  if (!room || !(room.w > 0) || !(room.h > 0)) return null;
-  return shape;
+  const x = +imgX;
+  const y = +imgY;
+  if (!localUniformity(image, x, y)?.uniform) return openMeasure();
+  const found = outlineMeasure(findOutline(image, [x - 1, y - 1, x + 1, y + 1], { minPad: CLICK_PAD }));
+  if (found && shapeContainsPoint(found.fit, x, y)) return found;
+  const filled = fillMeasure(detectBalloonAt(image, x, y));
+  if (filled && shapeContainsPoint(filled.fit, x, y)) return filled;
+  return openMeasure();
 }
 
 // Is this detected block a column whose rectangle should be transposed for
@@ -3756,9 +3824,9 @@ const ontoPage = (p, r) => {
 // inheritance is enabled, size follows the tag group and the rest follows
 // `lastStyle`; otherwise, styling and size start from app and tag defaults.
 //
-// `measured` is a fit already measured for this line's block, or null for one
-// measured and found irregular (`placeDetectedInChapter`); undefined measures
-// here.
+// `measured` is a measurement already taken for this line's block
+// (`placeDetectedInChapter`): `{ fit, outline }`, with a null fit for one
+// measured and found in no bubble. Undefined measures here.
 function bornBox(p, ln, imgX, imgY, measured) {
   const style = inheritedStyleFor(ln, p);
   const text = lineText(ln);
@@ -3769,8 +3837,12 @@ function bornBox(p, ln, imgX, imgY, measured) {
   // in THIS line sat, so it seeds the fill closer to the right balloon than a
   // click can when the two disagree. The click is the answer when there is no
   // block, which is most of the time in paste mode.
-  let fit =
-    measured !== undefined ? measured : (balloonFitFor(p, det?.box ?? null) ?? balloonFitAt(p, imgX, imgY));
+  const m =
+    measured !== undefined
+      ? measured
+      : firstFound(measureBalloon(p, det?.box ?? null), () => measureBalloonAt(p, imgX, imgY));
+  let fit = m?.fit ?? null;
+  let outline = m?.outline ?? null;
   let g = fit ? fittedRect(p, fit, style.align) : null;
   let at = { x: imgX, y: imgY };
   // The two are dropped together, deliberately: a fit the box was not sized from
@@ -3779,6 +3851,7 @@ function bornBox(p, ln, imgX, imgY, measured) {
   // describing two different bubbles.
   if (!g) {
     fit = null;
+    if (outline && !outline.open) outline = { ...OPEN_OUTLINE };
     const rect = looksVertical(det, ln, p) ? transposeRect(det.box) : (det?.box ?? null);
     // The block says where the Japanese sat - which bubble, and its centre - and
     // nothing about how much room the English needs: a short line, or a column
@@ -3826,6 +3899,9 @@ function bornBox(p, ln, imgX, imgY, measured) {
     // below (`$state.snapshot(b)` takes the whole box), so an undo of a
     // placement takes the fit with it.
     fit,
+    // Where the fit came from, and that nobody has approved it yet. Absent when
+    // the page's pixels were not in hand to look.
+    ...(outline ? { outline } : null),
     auto: normalizeAuto({ refSize: style.size }),
   };
   // Before the push and before the record, so the one `place` entry this gesture
@@ -4173,7 +4249,7 @@ function placeDetectedInto(p) {
     const cx = (x1 + x2) / 2;
     const cy = (y1 + y2) / 2;
     // A copy: the box's fit is its own from here on, not the block's.
-    const b = bornBox(p, ln, cx, cy, det.fit && { ...det.fit });
+    const b = bornBox(p, ln, cx, cy, storedMeasure(det));
     p.boxes.push(b);
     items.push({ index: p.boxes.length - 1, box: $state.snapshot(b) });
   }
@@ -4186,6 +4262,17 @@ function placeDetectedInto(p) {
     activeAfter: p.activeLineN,
   });
   return items;
+}
+
+// The measurement stored on a detected block, as `bornBox` takes it: undefined
+// when it was never measured. Fresh copies, never the block's own objects. A
+// block measured before outlines existed has no record; one with no fit was
+// measured and found in no bubble.
+function storedMeasure(det) {
+  if (det.fit === undefined) return undefined;
+  const fit = normalizeFit(det.fit);
+  const outline = normalizeOutline(det.outline) ?? (fit ? null : { ...OPEN_OUTLINE });
+  return { fit, outline };
 }
 
 // How many lines on a page still want a box and have no detected bubble to put
@@ -4295,7 +4382,13 @@ export async function placeDetectedInChapter() {
       if (placeableDetectedLines(p).length) changed++;
       return [];
     }
-    for (const d of p.detect?.boxes ?? []) if (fits.has(d)) d.fit = fits.get(d);
+    for (const d of p.detect?.boxes ?? []) {
+      if (!fits.has(d)) continue;
+      const m = fits.get(d);
+      d.fit = m?.fit ?? null;
+      if (m?.outline) d.outline = m.outline;
+      else delete d.outline;
+    }
     const items = placeDetectedInto(p);
     if (items.length) {
       total += items.length;
@@ -4343,10 +4436,11 @@ function measureBlock(p, det, pixels) {
   const sx = p.w > 0 ? pixels.width / p.w : 1;
   const sy = p.h > 0 ? pixels.height / p.h : 1;
   const [x1, y1, x2, y2] = det.box;
-  const fit =
-    balloonFitFor(p, [x1 * sx, y1 * sy, x2 * sx, y2 * sy], pixels) ??
-    balloonFitAt(p, ((x1 + x2) / 2) * sx, ((y1 + y2) / 2) * sy, pixels);
-  return sx === 1 && sy === 1 ? fit : scaleFit(fit, 1 / sx, 1 / sy);
+  const m = firstFound(measureBalloon(p, [x1 * sx, y1 * sy, x2 * sx, y2 * sy], pixels), () =>
+    measureBalloonAt(p, ((x1 + x2) / 2) * sx, ((y1 + y2) / 2) * sy, pixels),
+  );
+  if (!m || (sx === 1 && sy === 1)) return m;
+  return { ...m, fit: scaleFit(m.fit, 1 / sx, 1 / sy) };
 }
 
 // ---------- re-running a fit by hand ----------
@@ -4407,8 +4501,10 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   settleEdits();
   const before = b.fit;
   const geomBefore = refitGeom(b);
-  const fit = balloonUnder(p, b);
+  const m = balloonUnder(p, b);
+  const fit = m?.fit ?? null;
   b.fit = fit;
+  setOutline(b, m?.outline);
   const text = boxText(b, p);
   const auto = isAutoBox(boxCandidate(b, text));
   if (auto && !b.auto && b.style.size > 0) b.auto = normalizeAuto({ refSize: b.style.size });
@@ -4427,7 +4523,7 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   if (JSON.stringify(geomAfter) !== JSON.stringify(geomBefore)) {
     recordEdit({ t: 'refit', pageId: p.id, boxId: b.id, geomBefore, geomAfter });
   }
-  const where = fit ? `the ${fit.kind === 'rect' ? 'panel' : 'balloon'} under this box` : null;
+  const where = fit ? `the ${panelLike(b) ? 'panel' : 'balloon'} under this box` : null;
   if (fit) toast(solved != null ? `Typeset again in ${where}` : `Fitted to ${where}`);
   else if (before) toast('No balloon found under this box - layout is rectangular again');
   else toast('No balloon found under this box');
@@ -4442,6 +4538,7 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
 const refitGeom = (b) => ({
   ...fitGeom(b),
   fit: b.fit ? $state.snapshot(b.fit) : null,
+  outline: b.outline ? $state.snapshot(b.outline) : null,
   auto: b.auto ? $state.snapshot(b.auto) : null,
 });
 
@@ -4574,13 +4671,25 @@ function balloonUnder(p, b) {
   if (det) blocks.push(det.box);
   const room = b.fit && inscribedRect(b.fit);
   if (room) blocks.push([room.x, room.y, room.x + room.w, room.y + room.h]);
+  let first = null;
   for (const block of blocks) {
     if (!covers(...centreOf(block))) continue;
-    const fit = balloonFitFor(p, block);
-    if (fit) return fit;
+    const m = measureBalloon(p, block);
+    if (m?.fit) return m;
+    first ??= m;
   }
-  return balloonFitAt(p, b.x + b.w / 2, b.y + b.h / 2);
+  return firstFound(first, () => measureBalloonAt(p, b.x + b.w / 2, b.y + b.h / 2));
 }
+
+// A box's outline record, written or taken away. A fresh object, never one
+// shared with a measurement or a stored block.
+function setOutline(b, outline) {
+  if (outline) b.outline = { ...outline };
+  else delete b.outline;
+}
+
+// Is the fit under this box a panel rather than a balloon - for a toast's word.
+const panelLike = (b) => b.fit?.kind === 'rect' || b.outline?.source === 'caption';
 
 // ---------- turning balloon fit on and off for one box ----------
 // The switch, not the measurement. `refitBalloon` above re-measures the balloon
@@ -4613,7 +4722,11 @@ export function toggleBalloonFit(boxId = app.selectedId, p = page()) {
   const geomBefore = fitGeom(b);
   const on = b.style.balloon !== false;
   b.style.balloon = !on;
-  if (!on && !b.fit) b.fit = balloonUnder(p, b);
+  if (!on && !b.fit) {
+    const m = balloonUnder(p, b);
+    b.fit = m?.fit ?? null;
+    setOutline(b, m?.outline);
+  }
   // The height follows the flag: a box laid out to a curve breaks into a
   // different number of lines than the same box laid out flat.
   autoFitBox(b, p);
@@ -4628,7 +4741,7 @@ export function toggleBalloonFit(boxId = app.selectedId, p = page()) {
   });
   markUnsaved();
   if (on) toast('Balloon fit off for this box');
-  else if (b.fit) toast(`Balloon fit on - ${b.fit.kind === 'rect' ? 'panel' : 'balloon'} under this box`);
+  else if (b.fit) toast(`Balloon fit on - ${panelLike(b) ? 'panel' : 'balloon'} under this box`);
   else toast('Balloon fit on - no balloon found under this box');
   return !on;
 }
@@ -4816,6 +4929,7 @@ function boxSnapshot(src, p) {
       h: src.h,
       style: cloneStyle(src.style),
       fit: normalizeFit($state.snapshot(src.fit)),
+      outline: normalizeOutline($state.snapshot(src.outline)),
       // The solver's record: whether it manages the box, the size it was solved
       // from and the locks the user set. A copy that lost it would lay itself
       // out differently the first time either box is edited.
@@ -4867,6 +4981,10 @@ function placeSnapshot(p, snap, x, y) {
   // balloon is would break the copy's lines on other rows. With it carried,
   // the copy breaks exactly where the original does.
   b.fit = translateFit(normalizeFit(structuredClone(src.fit)), b.x - src.x, b.y - src.y);
+  // Its outline record too, unapproved: the copy's outline sits where the copy
+  // does, and nobody has looked at it there.
+  const outline = normalizeOutline(src.outline);
+  if (outline) b.outline = { ...outline, approved: null };
   if (src.auto) {
     b.auto = normalizeAuto(structuredClone(src.auto));
     if (src.solved) b.auto.stamp = solveStamp(b, ln.en);
@@ -5152,6 +5270,7 @@ export const moveGeom = (b) => ({
   x: b.x,
   y: b.y,
   ...(b.fit ? { fit: $state.snapshot(b.fit) } : null),
+  ...(b.outline ? { outline: $state.snapshot(b.outline) } : null),
   ...(b.auto ? { auto: $state.snapshot(b.auto) } : null),
 });
 
@@ -5161,6 +5280,8 @@ export function moveBoxTo(b, x, y, p = page(), from = moveGeom(b)) {
   b.x = x;
   b.y = y;
   if (from.fit) b.fit = translateFit(from.fit, x - from.x, y - from.y);
+  // The outline went with the box, off the bubble it was approved on.
+  if (b.outline?.approved && (x !== from.x || y !== from.y)) b.outline.approved = null;
   if (stood) b.auto.stamp = solveStamp(b, text);
 }
 

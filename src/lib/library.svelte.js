@@ -1409,7 +1409,7 @@ function respacePage(pg, size, notes) {
       ...pg,
       detect: {
         ...pg.detect,
-        boxes: pg.detect.boxes.map(({ fit, ...d }) => d),
+        boxes: pg.detect.boxes.map(({ fit, outline, ...d }) => d),
       },
     };
   }

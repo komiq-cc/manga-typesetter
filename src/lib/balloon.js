@@ -195,7 +195,7 @@ const r2 = (v) => Math.round(v * 100) / 100;
 // everything above alpha 128 as fully opaque, which is what this used to do,
 // let a semi-transparent overlay - a screen-toned gradient, a lightened panel -
 // count as solid paper at its full colour and bias the threshold with it.
-const lumaOf = (data, i) => {
+export const lumaOf = (data, i) => {
   const r = data[i];
   const g = data[i + 1];
   const b = data[i + 2];
@@ -1226,16 +1226,162 @@ const roomAt = (span, axis) => (span ? 2 * Math.max(0, Math.min(axis - span[0], 
 // box laid out through this module gets the same inset it gets today.
 export function safetyInset(shape, opts = {}) {
   const o = { ...BALLOON_DEFAULTS, ...opts };
-  const b = shapeBounds(shape);
+  const b = shapeBounds(layoutShape(shape));
   if (!b) return o.insetMin;
   const short = Math.min(b.w, b.h);
   return clamp(Math.round(short * o.insetFrac), o.insetMin, o.insetMax);
+}
+
+// ---------- outlines stored as points ----------
+//
+// A `poly` fit is the bubble outline itself (01-bubble-check.md): the points the
+// finder traced (bubble-outline.js) or the user dragged. It is what is stored,
+// drawn and edited. Layout never reads it directly. `layoutShape` turns it into
+// one of the three kinds every function below already handles, so the solver,
+// the breaker and the round-block rules work on outlines unchanged.
+
+// The interior of the polygon on the horizontal line at `y`, as sorted [l, r]
+// pairs (even-odd rule).
+function polyIntervals(pts, y) {
+  const xs = [];
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const yi = pts[i][1];
+    const yj = pts[j][1];
+    if (yi > y !== yj > y) xs.push(pts[i][0] + ((y - yi) * (pts[j][0] - pts[i][0])) / (yj - yi));
+  }
+  xs.sort((a, b) => a - b);
+  const out = [];
+  for (let k = 0; k + 1 < xs.length; k += 2) if (xs[k + 1] > xs[k]) out.push([xs[k], xs[k + 1]]);
+  return out;
+}
+
+function polyBox(pts) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+const widest = (ivs) => {
+  let best = null;
+  for (const iv of ivs) if (!best || iv[1] - iv[0] > best[1] - best[0]) best = iv;
+  return best;
+};
+
+// The outline as bands of rows, by Komatose's scanline rule: each band takes the
+// narrowest room over its whole height - its top, its bottom and every vertex
+// between - so a line set in the band never crosses the outline anywhere along
+// it. A band follows the piece of the outline widest at its middle; a concave
+// outline's other pieces in the same band are not room a centred line can use.
+// `step` defaults to the band size `rowsOf` uses, so a poly costs layout what a
+// rows fit does.
+export function polyToRows(poly, step) {
+  const pts = poly?.pts;
+  if (!Array.isArray(pts) || pts.length < 3) return null;
+  const b = polyBox(pts);
+  if (!(b.w > 0) || !(b.h > 0)) return null;
+  const st = step > 0 ? step : Math.max(1, Math.ceil(b.h / BALLOON_DEFAULTS.rowsMaxBands));
+  let y0 = Math.floor(b.y);
+  const count = Math.ceil((b.y + b.h - y0) / st);
+  const eps = 1e-6;
+  const spans = [];
+  for (let i = 0; i < count; i++) {
+    const a = y0 + i * st;
+    const z = a + st;
+    let cut = widest(polyIntervals(pts, (a + z) / 2));
+    if (cut) {
+      let [l, r] = cut;
+      const ys = [a + eps, z - eps];
+      for (const p of pts) if (p[1] > a && p[1] < z) ys.push(p[1]);
+      for (const y of ys) {
+        let pick = null;
+        let over = 0;
+        for (const iv of polyIntervals(pts, y)) {
+          const o = Math.min(r, iv[1]) - Math.max(l, iv[0]);
+          if (o > over) {
+            over = o;
+            pick = iv;
+          }
+        }
+        if (!pick) {
+          cut = null;
+          break;
+        }
+        l = Math.max(l, pick[0]);
+        r = Math.min(r, pick[1]);
+      }
+      if (cut) {
+        l = Math.ceil(l * 100) / 100;
+        r = Math.floor(r * 100) / 100;
+        cut = r > l ? [l, r] : null;
+      }
+    }
+    spans.push(cut);
+  }
+  while (spans.length && !spans[0]) {
+    spans.shift();
+    y0 += st;
+  }
+  while (spans.length && !spans[spans.length - 1]) spans.pop();
+  return spans.length ? { kind: 'rows', y0, step: st, spans } : null;
+}
+
+// The outline as the profile `fitBalloonShape` reads: the widest run of each
+// pixel row whose centre is inside it.
+function polyProfile(pts) {
+  const b = polyBox(pts);
+  const top = Math.floor(b.y);
+  const rows = [];
+  for (let y = top; y < Math.ceil(b.y + b.h); y++) {
+    const iv = widest(polyIntervals(pts, y + 0.5));
+    const l = iv ? Math.round(iv[0]) : 0;
+    const r = iv ? Math.round(iv[1]) - 1 : -1;
+    rows.push(r >= l ? [l, r] : null);
+  }
+  let first = 0;
+  while (first < rows.length && !rows[first]) first++;
+  let last = rows.length - 1;
+  while (last >= first && !rows[last]) last--;
+  const kept = rows.slice(first, last + 1);
+  return { y: top + first, rows: kept, holes: kept.filter((r) => !r).length, escaped: false };
+}
+
+// What layout reads for a fit. Every kind but `poly` is itself. A poly is the
+// formula that explains it, when one does - an oval outline is laid out as the
+// ellipse it is, so the round-block rules that key on an ellipse still apply,
+// and a caption frame as the rectangle it is - and its own bands when none does.
+// The answer depends only on the points, so it is kept: the breaker asks for it
+// once per candidate line count.
+const layoutCache = new Map();
+const LAYOUT_CACHE_MAX = 256;
+export function layoutShape(shape) {
+  if (!shape || shape.kind !== 'poly') return shape;
+  if (!Array.isArray(shape.pts) || shape.pts.length < 3) return null;
+  const key = JSON.stringify(shape.pts);
+  let hit = layoutCache.get(key);
+  if (hit === undefined) {
+    const fit = fitBalloonShape(polyProfile(shape.pts));
+    hit = fit.shape && fit.confidence >= 0.5 ? fit.shape : polyToRows(shape);
+    if (layoutCache.size >= LAYOUT_CACHE_MAX) layoutCache.delete(layoutCache.keys().next().value);
+  } else {
+    layoutCache.delete(key);
+  }
+  layoutCache.set(key, hit);
+  return hit && { ...hit };
 }
 
 // The shape's bounding box, in page coordinates. Handy for the caller that has
 // to turn a shape back into something the rest of the app understands.
 export function shapeBounds(shape) {
   if (!shape) return null;
+  if (shape.kind === 'poly') return Array.isArray(shape.pts) && shape.pts.length >= 3 ? polyBox(shape.pts) : null;
   if (shape.kind === 'ellipse') {
     return { x: shape.cx - shape.rx, y: shape.cy - shape.ry, w: 2 * shape.rx, h: 2 * shape.ry };
   }
@@ -1259,6 +1405,10 @@ export function shapeBounds(shape) {
 // click having been ignored - so the caller checks and falls back instead.
 export function shapeContainsPoint(shape, x, y) {
   if (!shape || !Number.isFinite(+x) || !Number.isFinite(+y)) return false;
+  if (shape.kind === 'poly') {
+    if (!Array.isArray(shape.pts) || shape.pts.length < 3) return false;
+    return polyIntervals(shape.pts, +y).some(([l, r]) => x >= l && x <= r);
+  }
   if (shape.kind === 'ellipse') {
     if (!(shape.rx > 0) || !(shape.ry > 0)) return false;
     const dx = (x - shape.cx) / shape.rx;
@@ -1286,6 +1436,7 @@ export function shapeContainsPoint(shape, x, y) {
 // same margin. The result carries the axis of the rows it came from, so the
 // margin never moves it.
 function insetShape(shape, o) {
+  shape = layoutShape(shape);
   const inset = Number.isFinite(o.inset) ? o.inset : safetyInset(shape, o);
   if (shape.kind === 'rows') {
     const { y0, step, spans } = shape;
@@ -1333,6 +1484,7 @@ function insetShape(shape, o) {
 // at something like 95% of the bounding box - nearly a third wider than an oval
 // can actually hold - and the corners of that rectangle are outside the balloon.
 export function inscribedRect(shape, opts = {}) {
+  shape = layoutShape(shape);
   if (!shape) return null;
   const o = { ...BALLOON_DEFAULTS, ...opts };
   const s = insetShape(shape, o);
@@ -1378,6 +1530,7 @@ export function inscribedRect(shape, opts = {}) {
 // bands around it with at least 1/√2 of that - which for an ellipse is exactly
 // its inscribed height.
 export function balloonFrame(shape, opts = {}) {
+  shape = layoutShape(shape);
   if (!shape) return null;
   const o = { ...BALLOON_DEFAULTS, ...opts };
   const s = insetShape(shape, o);
@@ -1448,6 +1601,7 @@ export function balloonFrame(shape, opts = {}) {
 // text in a box no wider than the balloon.
 export function interiorLineWidths(shape, lineHeight, lineCount, valign = 'middle', opts = {}) {
   const n = Number.isFinite(+lineCount) ? Math.max(0, Math.floor(+lineCount)) : 0;
+  shape = layoutShape(shape);
   if (!shape || n === 0) return [];
   const o = { ...BALLOON_DEFAULTS, ...opts };
   const s = insetShape(shape, o);
