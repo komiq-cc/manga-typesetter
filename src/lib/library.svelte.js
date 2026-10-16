@@ -384,15 +384,18 @@ const tagFields = (p) => ({ tags: p.tags ?? [], tagSizes: p.tagSizes ?? {} });
 // Writes of the open project's registry are chained, so two clicks in quick
 // succession cannot land their whole-record rewrites out of order and leave the
 // older list on disk. Only the latest snapshot is ever written: a write that
-// finds a newer one queued behind it hands over to that.
-let tagWrite = Promise.resolve();
+// finds a newer one queued behind it hands over to that. The language change
+// joins the same chain (`setProjectOcrLanguage`): Settings ▸ Project edits both
+// at once, and a tag write racing a language write would put the old language
+// back on disk under the new one in memory.
+let recordWrite = Promise.resolve();
 const tagWriteSeq = new WeakMap(); // project record -> number of registry writes asked for
 function saveProjectTags(p, next) {
   p.tags = next.list;
   p.tagSizes = next.sizes;
   const mine = (tagWriteSeq.get(p) ?? 0) + 1;
   tagWriteSeq.set(p, mine);
-  tagWrite = tagWrite
+  recordWrite = recordWrite
     .then(async () => {
       if (tagWriteSeq.get(p) !== mine) return;
       await writeProjectRecord(p, {});
@@ -400,7 +403,7 @@ function saveProjectTags(p, next) {
     .catch((e) => {
       toastError(`Could not save tags: ${e?.message ?? e}`);
     });
-  return tagWrite;
+  return recordWrite;
 }
 
 // Bind the registry to the project whose chapter is on screen. Called on every
@@ -672,13 +675,20 @@ async function writeProjectRecord(p, patch) {
 
 // Language can be corrected after import or changed for an existing project;
 // detection reads it from the open project rather than a machine-wide setting.
+// Queued behind any tag write, and adopted inside its turn: a tag write queued
+// after it then builds its record with the new language, not the old one.
 export async function setProjectOcrLanguage(projectId, language) {
   const p = projectById(projectId);
   if (!p || p.unreadable) throw new Error('No such readable project');
   const next = normalizeOcrLanguage(language);
-  const record = await writeProjectRecord(p, { ocrLanguage: next });
-  p.ocrLanguage = next;
-  p.updatedAt = record.updatedAt;
+  const run = recordWrite.then(async () => {
+    const record = await writeProjectRecord(p, { ocrLanguage: next });
+    p.ocrLanguage = next;
+    p.updatedAt = record.updatedAt;
+  });
+  // The chain goes on past a failure; the caller is the one told of it.
+  recordWrite = run.catch(() => {});
+  await run;
   if (app.chapterRef?.projectId === projectId) app.projectOcrLanguage = next;
   return next;
 }

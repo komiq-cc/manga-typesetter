@@ -26,7 +26,6 @@
     placeDetectedInChapter,
     cancelChapterPlace,
   } from './store.svelte.js';
-  import { fontGroups, fontCaveat } from './font-menu.js';
   import { untrack } from 'svelte';
   import {
     knownTags,
@@ -34,7 +33,6 @@
     hasTag,
     createTag,
     saveTagDefaults,
-    deleteTag,
     tagFormFields,
     tagFormDefaults,
     findTag,
@@ -54,7 +52,7 @@
   import ReviewList from './ReviewList.svelte';
   import FontNotice from './FontNotice.svelte';
   import EngineNotice from './EngineNotice.svelte';
-  import ColorPicker from './ColorPicker.svelte';
+  import TagDefaultsForm from './TagDefaultsForm.svelte';
 
   const p = $derived(page());
   // Which lines already have a box, in one pass over the page's boxes rather
@@ -170,13 +168,6 @@
     const b = page().boxes.find((x) => x.id === id);
 
     if (b) page().activeLineN = b.lineN;
-  }
-
-  function doDelete() {
-    const name = form?.name;
-    if (!name) return;
-    form = null;
-    if (deleteTag(name)) toast(`Forgot the defaults for “${name}” - lines keep the tag`);
   }
 
   // ---------- following the active line ----------
@@ -393,55 +384,8 @@
                   “{form.name}” already existed and is now on this line. Its saved defaults are untouched - press Save to replace them with what you set here.
                 </span>
               {/if}
-              {#if form.tools}
-
-                <span class="qtf-row">
-                  <label class="qtf-lbl" for="qtf-font-{line.n}">Font</label>
-                  <select id="qtf-font-{line.n}" value={form.font} onchange={(e) => (form.font = e.currentTarget.value)}>
-                    <option value="">-</option>
-                    {#if fontCaveat(form.font)}
-                      <option value={form.font}>{form.font} ({fontCaveat(form.font)})</option>
-                    {/if}
-                    {#each fontGroups() as g (g.key)}
-                      <optgroup label={g.label}>
-                        {#each g.fonts as f (f.name)}<option value={f.name}>{f.name}</option>{/each}
-                      </optgroup>
-                    {/each}
-                  </select>
-                </span>
-
-                <span class="qtf-row">
-                  <label class="qtf-lbl" for="qtf-out-{line.n}">Outline</label>
-                  <input class="btick" id="qtf-out-{line.n}" type="checkbox" checked={form.outlineOn} onchange={(e) => (form.outlineOn = e.currentTarget.checked)} />
-                  {#if form.outlineOn}
-                    <ColorPicker value={form.outline} label="Outline colour" size={20} unclipped onchange={(hex) => (form.outline = hex)} />
-                    <input type="number" min="0" max="20" step="0.5" value={form.outlineWidth} oninput={(e) => (form.outlineWidth = Math.max(0, Math.min(20, +e.currentTarget.value || 0)))} />
-                  {/if}
-                </span>
-
-                <!-- The size a box of this tag starts at when no box of it comes
-                     before. Empty is no default. -->
-                <span class="qtf-row">
-                  <label class="qtf-lbl" for="qtf-size-{line.n}">Size</label>
-                  <input id="qtf-size-{line.n}" type="number" min="6" max="200" step="1" placeholder="-" title="Font size, px" value={form.size} onchange={(e) => { const v = e.currentTarget.value.trim(); form.size = v === '' ? '' : Math.max(6, Math.min(200, +v || 6)); e.currentTarget.value = String(form.size); }} />
-                </span>
-              {/if}
-              {#if form.edit}
-
-                <span class="qtf-del">
-                  {#if form.confirmDelete}
-                    <span class="qtf-note">
-                      Forget “{form.name}”? It leaves your tag list and stops setting defaults for boxes placed from now on. Lines already tagged “{form.name}” keep the tag, and their boxes keep the style they were placed with - here and in every other chapter. While a line in this chapter still carries it, it stays in this list with no defaults.
-                    </span>
-                    <span class="qtf-delrow">
-                      <button class="qtf-danger" onclick={doDelete}>Forget it</button>
-                      <button class="qtf-quiet" onclick={() => (form.confirmDelete = false)}>Keep</button>
-                    </span>
-                  {:else}
-                    <button class="qtf-quiet" onclick={() => (form.confirmDelete = true)}>Delete tag…</button>
-                  {/if}
-                </span>
-              {/if}
+              <!-- The defaults and Delete are shared with Settings ▸ Project. -->
+              <TagDefaultsForm bind:form key={line.n} onforget={() => (form = null)} />
             </span>
           {/if}
 

@@ -161,7 +161,8 @@
   <div class="grp">
     <div class="insp-none">SFX lettering needs the Rust text engine.</div>
     {#if onSettings}
-      <button type="button" class="rbtn sfx-settings" onclick={onSettings}>Open settings</button>
+      <!-- Straight to the tab the engine switch is on, not the last one open. -->
+      <button type="button" class="rbtn sfx-settings" onclick={() => onSettings('typesetting')}>Open settings</button>
     {/if}
   </div>
 {:else}

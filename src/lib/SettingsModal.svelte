@@ -4,7 +4,18 @@
   import { app, saveExportPrefs, toast, toastError } from './store.svelte.js';
   import { checkSidecar, modelsCacheInfo, clearModelsCache } from './sidecar.js';
   import { theme, setTheme } from './theme.svelte.js';
-  import { library, setRoot, scanLibrary, withinHome } from './library.svelte.js';
+  import { library, setRoot, scanLibrary, withinHome, projectById, setProjectOcrLanguage } from './library.svelte.js';
+  import { settingsView, shownSettingsTab } from './settings-tabs.svelte.js';
+  import {
+    knownTags,
+    findTag,
+    saveTagDefaults,
+    tagFormFields,
+    tagFormDefaults,
+    normalizeTagName,
+    MAX_TAG_LEN,
+  } from './tags.svelte.js';
+  import TagDefaultsForm from './TagDefaultsForm.svelte';
   import { resetPanels } from './editor/panels.svelte.js';
   import { processMemory, ROLE_LABELS } from './memory.js';
   import { prefs, setPref } from './prefs.svelte.js';
@@ -26,7 +37,7 @@
   import UpdateDialog from './home/UpdateDialog.svelte';
 
   // `tab` is bindable so the command palette can open Settings on one tab.
-  let { open = $bindable(), tab = $bindable('general') } = $props();
+  let { open = $bindable() } = $props();
 
   // ---------- tabs ----------
   // Same shape as the Inspector's strip: a handful of panes, one job each,
@@ -34,9 +45,89 @@
   const TABS = [
     { id: 'general', label: 'General', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" /><path d="M1 14h6M9 8h6M17 16h6" /></svg>' },
     { id: 'typesetting', label: 'Typesetting', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7V4h16v3" /><path d="M9 20h6" /><path d="M12 4v16" /></svg>' },
+    { id: 'project', label: 'Project', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2z" /><path d="M4 21V5" /><path d="M8 7h6" /></svg>' },
     { id: 'shortcuts', label: 'Shortcuts', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" /></svg>' },
     { id: 'system', label: 'System', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>' },
   ];
+
+  // The open chapter's project, or null. The Project tab is shown only while
+  // there is one: everything on it is that project's, and with no chapter open
+  // there is no single project for it to mean.
+  const project = $derived(app.chapterRef ? (projectById(app.chapterRef.projectId) ?? null) : null);
+  const tabs = $derived(project ? TABS : TABS.filter((t) => t.id !== 'project'));
+  // Which tab is open lives in `settings-tabs.svelte.js`, so the command palette
+  // and the panes that send the user here can choose it.
+  const tab = $derived(shownSettingsTab(!!project));
+
+  // ---------- scope ----------
+  // Every section says where what it changes is kept, because three kinds of
+  // setting sit side by side here and look alike: the series' (project.json,
+  // every chapter of it, and whoever the folder is handed to), one chapter's
+  // (chapter.json), and this person's on this computer (prefs, localStorage).
+  const SCOPES = {
+    series: { label: 'This series', title: 'Saved with the series, for every chapter in it' },
+    chapter: { label: 'This chapter', title: 'Saved with this chapter only' },
+    you: { label: 'Just you', title: 'Saved on this computer, for every series' },
+  };
+
+  // ---------- project ----------
+  // The language goes through the same call the project screen makes, which
+  // is also what tells detection in the open chapter.
+  let changingLanguage = $state(false);
+  async function onLanguage(language) {
+    if (!project || changingLanguage || language === project.ocrLanguage) return;
+    changingLanguage = true;
+    try {
+      await setProjectOcrLanguage(project.id, language);
+    } catch (e) {
+      toastError(`Could not change source language: ${e?.message ?? e}`);
+    } finally {
+      changingLanguage = false;
+    }
+  }
+
+  // The tag registry, edited here with the queue's own form (TagDefaultsForm)
+  // and the queue's own calls. One tag's form open at a time. A tag the open
+  // chapter uses that the registry has never seen is listed too, as the queue
+  // lists it, and saving its form admits it at the end of the list.
+  const projectTags = $derived(project ? knownTags(app.pages) : []);
+  let tagForm = $state(null);
+  let newTagName = $state('');
+
+  function openTagForm(name) {
+    tagForm = { name, edit: true, tools: true, existed: false, confirmDelete: false, ...tagFormFields(findTag(name)) };
+  }
+
+  function saveTagForm() {
+    if (!tagForm) return;
+    saveTagDefaults(tagForm.name, tagFormDefaults(tagForm));
+    tagForm = null;
+  }
+
+  // A tag made here has no line to go on, so it joins the end of the list with
+  // no defaults (`saveTagDefaults`, which never re-ranks) and its form opens for
+  // them. A name already there just opens its form.
+  function addTag() {
+    const name = normalizeTagName(newTagName);
+    if (!name) return;
+    if (!projectTags.some((t) => t.name === name)) saveTagDefaults(name, {});
+    newTagName = '';
+    openTagForm(name);
+  }
+
+  function tagSummary(t) {
+    const bits = [];
+    if (t.font) bits.push(t.font);
+    if (t.outline != null || t.outlineWidth != null) bits.push(`outline ${t.outlineWidth ?? 3}px`);
+    if (t.size) bits.push(`${t.size}px`);
+    return bits.join(' · ') || 'No defaults';
+  }
+
+  function selectTab(id) {
+    // A row waiting for keys stops waiting when its pane goes away.
+    if (capturing) { capture.end(); capturing = null; captureErr = ''; }
+    settingsView.tab = id;
+  }
 
   // The registry shortcut groups follow preferences like the brush tool toggle,
   // while each row combo comes from comboFor reading preferences.
@@ -293,6 +384,8 @@
       confirmResetKeys = false;
       capturing = null;
       captureErr = '';
+      tagForm = null;
+      newTagName = '';
       checkSidecar();
       loadCache();
     }
@@ -316,8 +409,9 @@
      things - a knob, the preference it writes, and the name a screen reader
      reads - and the row that spells them out by hand is the row that ends up
      writing the wrong key. `disabled` is a look and a refusal, not an attribute:
-     the element is a div, so it also leaves the tab order. `set` is for the one
-     switch that writes the open chapter rather than a preference. -->
+     the element is a div, so it also leaves the tab order. `set` is for a
+     switch whose preference is not a plain true/false (the text engine's is
+     'rust' or 'browser'). -->
 {#snippet toggle(key, label, on, disabled = false, set = null)}
   <div
     class="switch"
@@ -339,6 +433,11 @@
   ><span class="knob"></span></div>
 {/snippet}
 
+<!-- Where a section's settings are kept: see SCOPES. -->
+{#snippet scope(kind)}
+  <span class="scope-chip {kind}" title={SCOPES[kind].title}>{SCOPES[kind].label}</span>
+{/snippet}
+
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div class="modal-overlay" class:open onclick={onOverlayClick}>
   <div class="modal">
@@ -351,7 +450,7 @@
     </div>
 
     <div class="set-tabs" role="tablist" aria-label="Settings sections">
-      {#each TABS as t (t.id)}
+      {#each tabs as t (t.id)}
         <button
           role="tab"
           id="set-tab-{t.id}"
@@ -359,11 +458,7 @@
           class:on={tab === t.id}
           aria-selected={tab === t.id}
           aria-controls="set-pane-{t.id}"
-          onclick={() => {
-            // A row waiting for keys stops waiting when its pane goes away.
-            if (capturing) { capture.end(); capturing = null; captureErr = ''; }
-            tab = t.id;
-          }}
+          onclick={() => selectTab(t.id)}
         >
           {@html t.icon}
           <span>{t.label}</span>
@@ -375,7 +470,7 @@
       {#if tab === 'general'}
       <div class="set-pane" role="tabpanel" id="set-pane-general" aria-labelledby="set-tab-general">
       <div class="settings-section">
-        <div class="settings-title">APPEARANCE</div>
+        <div class="settings-title">APPEARANCE{@render scope('you')}</div>
         <div class="field">
           <span>Theme</span>
 
@@ -402,7 +497,7 @@
       </div>
 
       <div class="settings-section">
-        <div class="settings-title">EDITOR</div>
+        <div class="settings-title">EDITOR{@render scope('you')}</div>
         <div class="field">
           <span>Inherit previous box settings</span>
           {@render toggle('inheritBoxStyle', 'Inherit previous box settings', prefs.inheritBoxStyle)}
@@ -416,7 +511,7 @@
       </div>
 
       <div class="settings-section">
-        <div class="settings-title">LIBRARY</div>
+        <div class="settings-title">LIBRARY{@render scope('you')}</div>
         <div class="field">
           <span>Folder</span>
           <code class="path" title={library.root}>{library.root}</code>
@@ -435,7 +530,7 @@
       </div>
 
       <div class="settings-section">
-        <div class="settings-title">EXPORT</div>
+        <div class="settings-title">EXPORT{@render scope('you')}</div>
         <div class="model-card">
           <div class="mc-top">
             <div class="mc-title">
@@ -473,7 +568,7 @@
            with the old switch off opens with its boxes plain, as they were
            drawn (`openTypesetting` in data.js); Bulk style changes them. -->
       <div class="settings-section ts-section">
-        <div class="settings-title">TYPESETTING</div>
+        <div class="settings-title">TYPESETTING{@render scope('you')}</div>
         <div class="group-label">Defaults for new text boxes</div>
         <div class="field">
           <span>Auto height</span>
@@ -540,7 +635,7 @@
            say in it. Disabled, and saying why, in a build made without the
            engine - the wasm is its own build step. -->
       <div class="settings-section">
-        <div class="settings-title">TEXT ENGINE <span class="beta-badge">Experimental</span></div>
+        <div class="settings-title">TEXT ENGINE <span class="beta-badge">Experimental</span>{@render scope('you')}</div>
         <div class="field">
           <span>Measure text with the Rust engine</span>
           {@render toggle(
@@ -589,13 +684,99 @@
       </div>
       {/if}
 
+      {#if tab === 'project' && project}
+      <!-- The open chapter's project: what used to be spread over the project
+           screen (language), the queue (tag defaults) and the new-project
+           dialog (layout). Everything here is in project.json, so it travels
+           with the series folder and applies to every chapter in it. -->
+      <div class="set-pane" role="tabpanel" id="set-pane-project" aria-labelledby="set-tab-project">
+      <div class="qhint pt-intro">Settings for <b>{project.name}</b>, shared by every chapter in it.</div>
+
+      <div class="settings-section">
+        <div class="settings-title">SOURCE LANGUAGE{@render scope('series')}</div>
+        <div class="field">
+          <span>Language</span>
+          <div class="seg" role="group" aria-label="Source language">
+            {#each [['ja', 'Japanese'], ['zh', 'Chinese'], ['ko', 'Korean']] as [v, label]}
+              <button
+                class:on={project.ocrLanguage === v}
+                disabled={changingLanguage}
+                onclick={() => onLanguage(v)}
+              >{label}</button>
+            {/each}
+          </div>
+        </div>
+        <div class="qhint">
+          What <b>Detect</b> reads on this series' pages. Text already read is
+          left as it is. The model for each language is under System.
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">TAGS{@render scope('series')}</div>
+        <div class="qhint pt-lead">
+          The font, outline and size a box of each tag starts with. Boxes
+          already placed keep their style.
+        </div>
+        {#each projectTags as t (t.name)}
+          <div class="pt-row">
+            <span class="pt-name">{t.name}</span>
+            <span class="pt-sum">{tagSummary(t)}</span>
+            <button
+              class="btn tiny"
+              aria-expanded={tagForm?.name === t.name}
+              onclick={() => (tagForm?.name === t.name ? (tagForm = null) : openTagForm(t.name))}
+            >{tagForm?.name === t.name ? 'Close' : 'Edit'}</button>
+          </div>
+          {#if tagForm?.name === t.name}
+            <div class="qtagform pt-form">
+              <TagDefaultsForm bind:form={tagForm} key="settings" onforget={() => (tagForm = null)} />
+              <span class="qtf-top">
+                <button class="qtf-go" onclick={saveTagForm}>Save</button>
+              </span>
+            </div>
+          {/if}
+        {:else}
+          <div class="qhint">No tags yet.</div>
+        {/each}
+        <div class="pt-add">
+          <input
+            class="qtf-input"
+            placeholder="New tag…"
+            aria-label="New tag name"
+            maxlength={MAX_TAG_LEN}
+            bind:value={newTagName}
+            onkeydown={(e) => e.key === 'Enter' && addTag()}
+          />
+          <button class="btn tiny" disabled={!normalizeTagName(newTagName)} onclick={addTag}>Add</button>
+        </div>
+      </div>
+
+      <!-- M4 puts the series guide here (docs/AI_TYPESETTING_PLAN.md section
+           4): full styles per tag, text rules and free notes, all in
+           project.json beside the tags above. -->
+
+      <div class="settings-section">
+        <div class="settings-title">LAYOUT{@render scope('series')}</div>
+        <div class="field">
+          <span>Layout</span>
+          <span class="pt-value">{project.layout === 'longstrip' ? 'Longstrip' : 'Pages'}</span>
+        </div>
+        <div class="qhint">
+          Set when the series was made. Longstrip pages are slices of one long
+          image, so they cannot be read as separate pages, or the other way round.
+        </div>
+      </div>
+      </div>
+      {/if}
+
       {#if tab === 'shortcuts'}
       <div class="set-pane" role="tabpanel" id="set-pane-shortcuts" aria-labelledby="set-tab-shortcuts">
       <!-- Every key the editor answers to by name. The three contextual ones -
            Escape, Tab and the arrows - are listed at the bottom as what they
            are: fixed, because their meaning depends on what is selected. -->
       <div class="settings-section">
-        <div class="settings-title">SHORTCUTS</div>
+        <div class="settings-title">SHORTCUTS{@render scope('you')}</div>
         <div class="qhint sc-intro">
           Click a shortcut, then press the keys you want. <b>Esc</b> cancels.
         </div>
@@ -653,7 +834,7 @@
 
       {#if tab === 'system'}
       <div class="set-pane" role="tabpanel" id="set-pane-system" aria-labelledby="set-tab-system">
-      <div class="group-label">Updates</div>
+      <div class="group-label">Updates{@render scope('you')}</div>
 
       <div class="model-card">
         <div class="mc-top">
@@ -694,7 +875,7 @@
         {/if}
       </div>
 
-      <div class="group-label">Engine</div>
+      <div class="group-label">Engine{@render scope('you')}</div>
 
       <div class="srow">
         <span class="slabel">Detection engine</span>
@@ -708,7 +889,7 @@
         </div>
       {/if}
 
-      <div class="group-label">Models</div>
+      <div class="group-label">Models{@render scope('you')}</div>
 
       <div class="model-card">
         <div class="mc-top">
@@ -821,7 +1002,7 @@
         {/if}
       </div>
 
-      <div class="group-label">Memory</div>
+      <div class="group-label">Memory{@render scope('you')}</div>
 
 
       <div class="model-card">
@@ -882,7 +1063,7 @@
       </div>
 
       {#if DEV}
-        <div class="group-label">Developer</div>
+        <div class="group-label">Developer{@render scope('you')}</div>
 
 
         <div class="model-card">
@@ -930,7 +1111,10 @@
   .set-tabs {
     flex: 0 0 auto;
     display: grid;
-    grid-template-columns: repeat(4, minmax(64px, 1fr));
+    /* As many columns as there are tabs: Project comes and goes with the
+       open chapter. */
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(56px, 1fr);
     gap: 4px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--line);
@@ -1310,5 +1494,94 @@
   .ts-num:focus {
     outline: none;
     border-color: var(--accent);
+  }
+
+  /* The scope chip rides at the right end of a section's heading, where the
+     eye lands after reading the name. Quiet: it answers "where is this kept",
+     which matters when you go looking, not on every glance. The series one is
+     tinted, because it is the one whose change reaches other chapters and
+     other people. */
+  .settings-title,
+  .group-label {
+    display: flex;
+    align-items: center;
+  }
+  .scope-chip {
+    margin-left: auto;
+    flex: none;
+    padding: 1px 8px;
+    border: 1px solid var(--line2);
+    border-radius: 999px;
+    color: var(--t2);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+  .scope-chip.series {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .scope-chip.chapter {
+    border-style: dashed;
+  }
+
+  /* Project tab. */
+  .pt-intro {
+    margin: 0 0 16px;
+  }
+  .pt-lead {
+    margin: 0 0 10px;
+  }
+  .field > .pt-value {
+    color: var(--text);
+    font-size: 12px;
+  }
+  .pt-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .pt-name {
+    flex: none;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+  .pt-sum {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11.5px;
+    color: var(--t2);
+  }
+  .pt-form {
+    margin: 6px 0 8px;
+  }
+  .pt-form .qtf-top {
+    justify-content: flex-end;
+  }
+  .pt-add {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .pt-add .qtf-input {
+    max-width: 220px;
+    padding: 5px 8px;
+    font-size: 12px;
   }
 </style>

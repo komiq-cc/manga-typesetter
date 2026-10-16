@@ -22,6 +22,7 @@
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
+  import { settingsView, openSettings, closeSettings } from './lib/settings-tabs.svelte.js';
   import { brushTool, closeBrushManager } from './lib/brush-tool.svelte.js';
   import { initHistory, undo, redo } from './lib/editor/history.svelte.js';
   import { flushPanels } from './lib/editor/panels.svelte.js';
@@ -38,8 +39,6 @@
   import { watchFontLoads, installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
 
   let fontModalOpen = $state(false);
-  let settingsOpen = $state(false);
-  let settingsTab = $state('general');
   let paletteOpen = $state(false);
   let newChapterOpen = $state(false);
   let newChapterBusy = $state(false);
@@ -264,13 +263,6 @@
     versionsOpen = true;
   }
 
-  // Settings on one tab: the command palette's "Settings: Shortcuts" and the
-  // like. The pills open it on whichever tab it was last left on.
-  function openSettingsTab(tab) {
-    settingsTab = tab;
-    settingsOpen = true;
-  }
-
   function openSources(projectId, chapterId) {
     sourcesRef = { projectId, chapterId };
     sourcesOpen = true;
@@ -471,7 +463,7 @@
       }
       if (app.exportOpen) return (app.exportOpen = false);
       if (app.bulk.active) return closeBulk();
-      if (settingsOpen) return (settingsOpen = false);
+      if (settingsView.open) return closeSettings();
       if (fontModalOpen) return (fontModalOpen = false);
       if (brushTool.manager) return closeBrushManager();
       return deselect();
@@ -564,9 +556,9 @@
 />
 
 {#if route.name === 'editor'}
-  <EditorRoot onFontLib={() => (fontModalOpen = true)} onSettings={() => (settingsOpen = true)} />
+  <EditorRoot onFontLib={() => (fontModalOpen = true)} onSettings={openSettings} />
 {:else if booted}
-  <HomeFrame onSettings={() => (settingsOpen = true)}>
+  <HomeFrame onSettings={openSettings}>
     {#if route.name === 'project'}
       <ProjectView
         onNewChapter={(id) => openNewChapter(id)}
@@ -602,11 +594,11 @@
 />
 <FontModal bind:open={fontModalOpen} />
 <BrushModal />
-<SettingsModal bind:open={settingsOpen} bind:tab={settingsTab} />
+<SettingsModal bind:open={settingsView.open} />
 <ExportDialog />
 <CommandPalette
   bind:open={paletteOpen}
   openFonts={() => (fontModalOpen = true)}
-  openSettings={openSettingsTab}
+  {openSettings}
 />
 <Toast />
