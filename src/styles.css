@@ -745,6 +745,19 @@ input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none; width:14px; he
   box-shadow:var(--edge);
 }
 .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+.toast-errors{
+  position:fixed; bottom:38px; right:16px; z-index:301; display:flex; flex-direction:column; gap:6px;
+  max-width:min(420px, calc(100vw - 32px));
+}
+.toast-error{
+  display:flex; align-items:flex-start; gap:10px; padding:9px 10px 9px 14px; border-radius:8px;
+  background:var(--panel); color:var(--text); border:1px solid var(--warn); border-left-width:3px;
+  font-size:12.5px; box-shadow:var(--edge); user-select:text; -webkit-user-select:text;
+}
+.toast-error .msg{ flex:1; overflow-wrap:anywhere; line-height:1.4; }
+.toast-error .count{ color:var(--t3); margin-left:6px; }
+.toast-error .x{ border:0; background:none; color:var(--t2); cursor:pointer; padding:0 2px; font-size:12px; line-height:1.4; }
+.toast-error .x:hover{ color:var(--text); }
 
 /* ===== v2 additions: editing, curve, effects, tools ===== */
 

@@ -10,7 +10,7 @@
   import { goEditor } from '../route.svelte.js';
   import { pickImageFiles, pickJsonFile, readTranslations } from '../importer.js';
   import { pickPackageFile, inspectPackage, importChapterPackage } from '../package-flow.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { plural, relativeTime } from '../format.js';
 
   // In-flight creation blocks dismissal.
@@ -280,7 +280,7 @@
         : '';
       error = `Could not create the chapter: ${e?.message ?? e}.${orphan}`;
 
-      toast(error);
+      toastError(error);
     } finally {
       busy = false;
     }

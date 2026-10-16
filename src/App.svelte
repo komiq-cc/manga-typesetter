@@ -17,7 +17,7 @@
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import ChapterVersionsSheet from './lib/home/ChapterVersionsSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, toastError, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -178,7 +178,7 @@
       // the top is still standing, which is what makes this a degradation and not
       // a silent data loss.
       console.error('Could not arm the quit flush', e);
-      toast(`Quitting may not save the last edits: ${e?.message ?? e}`);
+      toastError(`Quitting may not save the last edits: ${e?.message ?? e}`);
     }
   }
 
@@ -245,7 +245,7 @@
     let active = true;
     openChapter(projectId, chapterId).catch((e) => {
       if (!active || route.name !== 'editor' || route.projectId !== projectId || route.chapterId !== chapterId) return;
-      toast(`Could not open that chapter: ${e?.message ?? e}`);
+      toastError(`Could not open that chapter: ${e?.message ?? e}`);
       goBack();
     });
     return () => { active = false; };

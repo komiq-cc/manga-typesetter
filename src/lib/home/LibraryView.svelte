@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { library, scanLibrary, createProject, deleteProject } from '../library.svelte.js';
   import { goProject } from '../route.svelte.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { plural } from '../format.js';
   import ProjectCard from './ProjectCard.svelte';
 
@@ -31,7 +31,7 @@
       const p = await createProject(name, { layout: chosen, ocrLanguage: chosenLanguage });
       goProject(p.id);
     } catch (e) {
-      toast(`Could not create ${name}: ${e?.message ?? e}`);
+      toastError(`Could not create ${name}: ${e?.message ?? e}`);
     }
   }
 
@@ -49,7 +49,7 @@
       await deleteProject(project.id);
       toast(`Deleted ${project.name}`);
     } catch (e) {
-      toast(`Could not delete: ${e?.message ?? e}`);
+      toastError(`Could not delete: ${e?.message ?? e}`);
     }
   }
 </script>

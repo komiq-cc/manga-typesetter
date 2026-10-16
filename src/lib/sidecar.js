@@ -6,7 +6,7 @@
 // / preview) there's no Tauri runtime, so these become no-ops and the app
 // degrades to manual workflows.
 
-import { app, page, applyDetection, toast } from './store.svelte.js';
+import { app, page, applyDetection, toast, toastError } from './store.svelte.js';
 import { withPageImages, hasRawImage } from './page-images.js';
 import { prefs } from './prefs.svelte.js';
 import { ocrModelForLanguage } from './ocr-models.js';
@@ -86,7 +86,7 @@ export async function detectCurrentPage({ ocr = true, language, lang } = {}) {
   app.detecting = true;
   try {
     const r = await detectOnePage(p, { ocr, language, lang });
-    if (r.error) toast(`Detection failed: ${r.error}`);
+    if (r.error) toastError(`Detection failed: ${r.error}`);
     else toast(`Detected ${r.lines} text region(s)`);
   } finally {
     app.detecting = false;

@@ -1,7 +1,7 @@
 <script>
 
   import { onDestroy } from 'svelte';
-  import { app, saveExportPrefs, toast } from './store.svelte.js';
+  import { app, saveExportPrefs, toast, toastError } from './store.svelte.js';
   import { checkSidecar, modelsCacheInfo, clearModelsCache } from './sidecar.js';
   import { theme, setTheme } from './theme.svelte.js';
   import { library, setRoot, scanLibrary, withinHome } from './library.svelte.js';
@@ -119,7 +119,7 @@
 
       const { psdSelfTest } = await import('./psd.js');
       selfTest = await psdSelfTest(app.pages[app.pageIndex]);
-      toast(selfTest.ok ? 'PSD self-test passed' : 'PSD self-test FAILED - see Settings');
+      selfTest.ok ? toast('PSD self-test passed') : toastError('PSD self-test FAILED - see Settings');
     } catch (e) {
       selfTest = { ok: false, error: String(e?.message ?? e) };
       toast('PSD self-test threw - see Settings');
@@ -214,10 +214,10 @@
     clearing = true;
     try {
       const r = await clearModelsCache();
-      toast(r?.ok ? `Cleared cache · freed ${fmtBytes(r.freed_bytes)}` : 'Cache clear had errors - see logs');
+      r?.ok ? toast(`Cleared cache · freed ${fmtBytes(r.freed_bytes)}`) : toastError('Cache clear had errors - see logs');
       await loadCache();
     } catch (e) {
-      toast(`Clear cache failed: ${e}`);
+      toastError(`Clear cache failed: ${e}`);
     } finally {
       clearing = false;
     }

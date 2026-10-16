@@ -5,7 +5,7 @@
   // import that adds more. Opened from the panel's Manage button and from a
   // right-click on any tip, which lands straight in that brush's editor.
   import { untrack } from 'svelte';
-  import { toast } from './store.svelte.js';
+  import { toast, toastError } from './store.svelte.js';
   import { brushTool, closeBrushManager } from './brush-tool.svelte.js';
   import {
     brushLibrary,
@@ -69,7 +69,7 @@
     saving = true;
     try {
       const ok = await updateBrush(editId, $state.snapshot(draft));
-      toast(ok ? 'Brush saved' : 'That brush could not be saved');
+      ok ? toast('Brush saved') : toastError('That brush could not be saved');
       if (ok) cancelEdit();
     } finally {
       saving = false;
@@ -87,7 +87,7 @@
     clearTimeout(rmArmT);
     const ok = await removeBrush(b.id);
     if (ok && editId === b.id) cancelEdit();
-    toast(ok ? 'Brush removed' : 'That brush could not be removed');
+    ok ? toast('Brush removed') : toastError('That brush could not be removed');
   }
 
   // Escape backs out of the editor first and only then, on a second press,
@@ -102,7 +102,7 @@
 
   async function onImport() {
     if (importing) return;
-    if (brushLibrary.readOnly) return toast(brushLibrary.error);
+    if (brushLibrary.readOnly) return toastError(brushLibrary.error);
     if (!isTauri()) return toast('Importing brushes needs the desktop app');
     importing = true;
     try {
@@ -112,7 +112,7 @@
       if (!paths.length) return;
       toast(importSentence(await importBrushes(paths)));
     } catch (e) {
-      toast(`Couldn't import brushes: ${e?.message ?? e}`);
+      toastError(`Couldn't import brushes: ${e?.message ?? e}`);
     } finally {
       importing = false;
     }

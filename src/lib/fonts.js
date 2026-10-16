@@ -16,7 +16,7 @@
 // names ("Manga Temple Bold") would instead have meant teaching every one of
 // those call sites - and every style.font string already saved to disk - about
 // names that did not exist when the document was written.
-import { app, toast, noteFontsChanged, fontByName } from './store.svelte.js';
+import { app, toast, toastError, noteFontsChanged, fontByName } from './store.svelte.js';
 import { FACE_SLOTS, emptyFaces } from './data.js';
 
 export { FACE_SLOTS };
@@ -375,7 +375,7 @@ export function scanSystemFonts() {
       // now, if the chapter opened before the scan landed.
       noteFontsChanged();
     } catch (e) {
-      toast(`Could not read the system fonts - ${e?.message || e}`);
+      toastError(`Could not read the system fonts - ${e?.message || e}`);
     } finally {
       scanning = null;
       scanSettled();
@@ -765,7 +765,7 @@ export async function installFontFace({ family, slot, file, data }) {
     await dbPut({ key: recordKey(family, slot), name: family, slot, file, data: buf });
   } catch (e) {
     couldNotSave(family, slot, file, buf);
-    toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
+    toastError(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return 'installed';
 }
@@ -782,7 +782,7 @@ export async function restoreFonts() {
       // indistinguishable from having no fonts, and the two reasons this throws -
       // another window holding the database open, and an upgrade that aborted -
       // are both things the user can act on once they know.
-      toast(`Font library unavailable - ${e?.message || e}`);
+      toastError(`Font library unavailable - ${e?.message || e}`);
       return;
     }
     await _restoreFontRecords(records);
@@ -799,7 +799,7 @@ export async function addFontFile(file, target = null) {
   const family = target?.family || inferred.family;
   const slot = target?.slot || inferred.slot;
   if (!family) {
-    toast(`Could not read a font name from "${file.name}"`);
+    toastError(`Could not read a font name from "${file.name}"`);
     return false;
   }
   if (app.fonts.builtin.some((f) => f.name === family)) {
@@ -816,7 +816,7 @@ export async function addFontFile(file, target = null) {
     buf = await file.arrayBuffer();
     await registerFace(family, buf, slot);
   } catch {
-    toast(`Could not load "${file.name}": unsupported or corrupt`);
+    toastError(`Could not load "${file.name}": unsupported or corrupt`);
     return null;
   }
   putGroupFace(family, slot, file.name);
@@ -831,7 +831,7 @@ export async function addFontFile(file, target = null) {
     // separately from the load failure above because the two ask the user for
     // completely different things.
     couldNotSave(family, slot, file.name, buf);
-    toast(`"${family}" loaded but could not be saved - ${e?.message || e}`);
+    toastError(`"${family}" loaded but could not be saved - ${e?.message || e}`);
   }
   return { family, slot };
 }

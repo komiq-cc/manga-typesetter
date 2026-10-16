@@ -33,6 +33,7 @@ import {
   normalizeLayout,
   normalizeOcrLanguage,
   toast,
+  toastError,
   cancelChapterPlace,
   useChapterTypesetting,
   stampTypesetting,
@@ -361,7 +362,7 @@ function saveProjectTags(p, next) {
       await writeProjectRecord(p, {});
     })
     .catch((e) => {
-      toast(`Could not save tags: ${e?.message ?? e}`);
+      toastError(`Could not save tags: ${e?.message ?? e}`);
     });
   return tagWrite;
 }
@@ -2531,7 +2532,7 @@ async function saveBeforeLeaving(where, approve) {
   } catch (e) {
     await finishHistory();
     if (!current()) {
-      toast(`Could not save the previous chapter: ${e?.message ?? e}`);
+      toastError(`Could not save the previous chapter: ${e?.message ?? e}`);
       return false;
     }
     // Only an attempt begun AFTER a known refusal can spend the escape.
@@ -2540,7 +2541,7 @@ async function saveBeforeLeaving(where, approve) {
       refusalAtRequest.ref === ref && refusalAtRequest.turn === turn && epochAtRequest === saveFailureEpoch;
     if (!deliberate) {
       saveRefusal = { ref, turn };
-      toast(copy.refuse(e?.message ?? e));
+      toastError(copy.refuse(e?.message ?? e));
       return false;
     }
     resetSaveFailures();

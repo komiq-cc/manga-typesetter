@@ -152,6 +152,11 @@ vi.mock('./store.svelte.js', async (original) => {
     const result = module.toast(...args);
     saverObserver.toast?.(saverObserver.scope?.getStore(), args[0]);
     return result;
+  }, toastError(...args) {
+    // An error is a toast that stays (FLOW-6); the model counts it the same.
+    const result = module.toastError(...args);
+    saverObserver.toast?.(saverObserver.scope?.getStore(), args[0]);
+    return result;
   }, setSaver(fn) {
     return module.setSaver((...args) => {
       const receipt = saverObserver.begin?.();

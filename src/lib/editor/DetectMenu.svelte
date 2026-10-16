@@ -2,7 +2,7 @@
   // Detection has two scopes and one artefact - more than a pill can hold, so
   // the pill opens this instead. Per-page detection has never had a UI before;
   // it was whole-chapter or nothing, which is a long wait to fix one page.
-  import { app, toast } from '../store.svelte.js';
+  import { app, toast, toastError } from '../store.svelte.js';
   import { sidecarReady, detectCurrentPage, detectAllPages } from '../sidecar.js';
   import { exportTextJson } from '../exporter.js';
 
@@ -88,7 +88,7 @@
     try {
       await exportTextJson('all');
     } catch (e) {
-      toast('Export failed: ' + (e?.message || e));
+      toastError('Export failed: ' + (e?.message || e));
     } finally {
       app.exporting = false;
     }

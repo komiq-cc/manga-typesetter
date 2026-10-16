@@ -11,7 +11,7 @@
 // nothing on the document's own save path ever waits on this one.
 import { fsx } from '../fsx.js';
 import { normalizeStyle, plainStyle } from '../data.js';
-import { toast, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, rescaleAuto, scaleFit, lengthScale } from '../store.svelte.js';
+import { toast, toastError, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, rescaleAuto, scaleFit, lengthScale } from '../store.svelte.js';
 import { scaleStroke } from '../brush.js';
 import {
   takeStack,
@@ -466,7 +466,7 @@ async function pathsFor(base) {
 function complainOnce(e) {
   if (told) return;
   told = true;
-  toast(`Undo history is not being saved - ${e?.message ?? e}`);
+  toastError(`Undo history is not being saved - ${e?.message ?? e}`);
 }
 
 // `plain`: the chapter was laid out plain - see `migrateEntry`.

@@ -8,7 +8,7 @@
   // left of it, app drawers on the right.
   // Nothing here is laid out by a parent, every row pins itself to the window,
   // so the canvas underneath is never inset by chrome it does not know about.
-  import { app, openBulk, closeBulk, isTranslateMode, toast } from '../store.svelte.js';
+  import { app, openBulk, closeBulk, isTranslateMode, toast, toastError } from '../store.svelte.js';
   import { goProject, goLibrary } from '../route.svelte.js';
   import { projectById, chapterById } from '../library.svelte.js';
   import { exportTextJson } from '../exporter.js';
@@ -33,7 +33,7 @@
     try {
       await exportTextJson('all');
     } catch (e) {
-      toast('Export failed: ' + (e?.message || e));
+      toastError('Export failed: ' + (e?.message || e));
     } finally {
       app.exporting = false;
     }

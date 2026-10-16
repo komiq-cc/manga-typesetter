@@ -45,7 +45,7 @@
 // Not imported by anything on the measuring path (store, measure.js,
 // fonts.js): prefs.svelte.js applies the preference through here, and the UI
 // reads `engineSwitch`.
-import { app, setFontSource, noteFontsChanged, toast, boxText } from './store.svelte.js';
+import { app, setFontSource, noteFontsChanged, toast, toastError, boxText } from './store.svelte.js';
 import { watchUserFaces, fontsBooted, loadedFaceRecords } from './fonts.js';
 import { faceFor, applyCase } from './measure.js';
 import { boxCandidate, placeBlock, curvedStyle } from './contain.js';
@@ -288,7 +288,7 @@ async function start() {
     if (stale()) return;
     const message = String(error?.message ?? error);
     leave('failed', message);
-    toast(`The Rust text engine could not start - ${message}`);
+    toastError(`The Rust text engine could not start - ${message}`);
   }
 }
 

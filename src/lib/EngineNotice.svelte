@@ -24,7 +24,7 @@
   // It is the review list's sibling and sits above it, so it wears the same
   // clothes: the rules below are that component's, copied because a
   // component's styles are its own.
-  import { app, firstFitChanges, keepFirstFit, gotoPage, selectBox, isLongstrip, toast } from './store.svelte.js';
+  import { app, firstFitChanges, keepFirstFit, gotoPage, selectBox, isLongstrip, toast, toastError } from './store.svelte.js';
   import { revealInStrip } from './editor/strip-sync.svelte.js';
   import { plural } from './format.js';
 
@@ -62,7 +62,7 @@
     try {
       await keepFirstFit();
     } catch (e) {
-      toast(`Could not save: ${e?.message ?? e}`);
+      toastError(`Could not save: ${e?.message ?? e}`);
     } finally {
       busy = false;
     }

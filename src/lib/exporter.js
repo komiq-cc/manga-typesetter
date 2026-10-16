@@ -1,5 +1,5 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
-import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
+import { app, page, toast, toastError, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth, glyphInk } from './measure.js';
 import { glyphPainter, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
 import { boxCandidate, placeBlock, blockRect, linesInkRect, turnedInk } from './contain.js';
@@ -1794,7 +1794,7 @@ export async function exportImages(fmt, scope) {
     return true;
   } catch (e) {
     const failure = exportFailure(e, written);
-    toast('Export failed: ' + (failure?.message || failure));
+    toastError('Export failed: ' + (failure?.message || failure));
     return false;
   } finally {
     app.exporting = false;

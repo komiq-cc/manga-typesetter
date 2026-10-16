@@ -14,7 +14,7 @@
     sourcesUndo,
   } from '../library.svelte.js';
   import { pickImageFiles, pickJsonFile, readTranslations } from '../importer.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { plural } from '../format.js';
   import { joinPath } from '../paths.js';
 
@@ -85,7 +85,7 @@
       await fn();
     } catch (e) {
       error = `${e?.message ?? e}`;
-      toast(error);
+      toastError(error);
     } finally {
       if (pid === projectId && cid === chapterId) undoName = sourcesUndo(cid);
       try {
@@ -115,7 +115,7 @@
       await fn();
     } catch (e) {
       error = `${label} - ${e?.message ?? e}`;
-      toast(error);
+      toastError(error);
     }
   }
 

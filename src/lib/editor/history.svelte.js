@@ -8,6 +8,7 @@ import {
   pageById,
   markUnsaved,
   toast,
+  toastError,
   selectBox,
   setRecorder,
   cloneStyle,
@@ -668,7 +669,7 @@ function step(from, to, dir) {
   } catch (err) {
     // Replay and fail loudly: the entry is dropped, the user is told what it
     // was, and the next press carries on to whatever is still valid beneath it.
-    toast(`Could not ${dir} ${KINDS[entry.t].label}: ${err.message}`);
+    toastError(`Could not ${dir} ${KINDS[entry.t].label}: ${err.message}`);
     sync();
     return false;
   } finally {

@@ -1,7 +1,7 @@
 <script>
   import { projectById, deleteChapter, setChapterMode, setProjectOcrLanguage } from '../library.svelte.js';
   import { route, goLibrary, goEditor } from '../route.svelte.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { relativeTime, plural } from '../format.js';
   import { exportChapterPackage, stayingNote } from '../package-flow.js';
 
@@ -32,7 +32,7 @@
       await setProjectOcrLanguage(project.id, select.value);
     } catch (e) {
       select.value = project.ocrLanguage;
-      toast(`Could not change source language: ${e?.message ?? e}`);
+      toastError(`Could not change source language: ${e?.message ?? e}`);
     } finally {
       changingLanguage = false;
     }
@@ -50,7 +50,7 @@
       const note = stayingNote(saved?.staying);
       if (saved) toast(note ? `Saved to ${saved.path}. ${note}` : `Saved to ${saved.path}`);
     } catch (e) {
-      toast(`Could not export: ${e?.message ?? e}`);
+      toastError(`Could not export: ${e?.message ?? e}`);
     } finally {
       exportingId = null;
     }
@@ -65,7 +65,7 @@
       await setChapterMode(project.id, c.id, next);
       toast(`Chapter ${c.number} is now a ${next} chapter`);
     } catch (e) {
-      toast(`Could not change the mode: ${e?.message ?? e}`);
+      toastError(`Could not change the mode: ${e?.message ?? e}`);
     } finally {
       switchingId = null;
     }
@@ -81,7 +81,7 @@
       await deleteChapter(project.id, chapter.id);
       toast(`Deleted chapter ${chapter.number}`);
     } catch (e) {
-      toast(`Could not delete: ${e?.message ?? e}`);
+      toastError(`Could not delete: ${e?.message ?? e}`);
     }
   }
 </script>

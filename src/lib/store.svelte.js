@@ -491,7 +491,11 @@ export const app = $state({
   exporting: false,
   leftWidth: 280,
   sidebarHidden: false, // raw reference sidebar collapsed to the rail's caret
-  toast: { msg: '', seq: 0 },
+  toast: { msg: '', seq: 0, kind: 'info' },
+  // Errors that stay until the user closes them (FLOW-6). A failure gone in two
+  // seconds is a failure the user may never have seen, so these are kept apart
+  // from the passing toast above and stack, newest last. See `toastError`.
+  errors: [],
   sidecar: { status: 'unknown', device: null, info: null }, // in-process detection engine health
   detecting: false, // detection/OCR request in flight
   detectBatch: null, // { done, total } while a whole-chapter detect runs, else null
@@ -2426,7 +2430,7 @@ export function markUnsaved() {
       // still find out why an hour later.
       saveFailed(e, ref, turn);
       const previous = app.chapterRef !== ref || documentTurn !== turn;
-      toast(`Could not save${previous ? ' the previous chapter' : ''}: ${e?.message ?? e}`);
+      toastError(`Could not save${previous ? ' the previous chapter' : ''}: ${e?.message ?? e}`);
     });
   }, DOC_SAVE_MS);
 }
@@ -2740,12 +2744,33 @@ function settleText() {
 
 // ---------- toast ----------
 let toastT;
-export function toast(msg) {
-  app.toast = { msg, seq: app.toast.seq + 1 };
+// `app.toast` is always the last thing said, whatever its kind, so a reader
+// asking "what did the app just tell the user" has one place to look. Only an
+// info toast is drawn from it; an error is drawn from `app.errors`.
+export function toast(msg, kind = 'info') {
+  app.toast = { msg, seq: app.toast.seq + 1, kind };
   clearTimeout(toastT);
   toastT = setTimeout(() => {
-    app.toast = { msg: '', seq: app.toast.seq + 1 };
+    app.toast = { msg: '', seq: app.toast.seq + 1, kind: 'info' };
   }, 2200);
+}
+
+// An error that stays until it is closed. The same message raised again - an
+// autosave failing on every keystroke - is one card that moves to the front
+// and counts, not a wall of copies. Capped: past that many, the oldest goes.
+const ERRORS_MAX = 4;
+let errorSeq = 0;
+export function toastError(msg) {
+  toast(msg, 'error');
+  const text = String(msg);
+  const same = app.errors.find((e) => e.msg === text);
+  const rest = app.errors.filter((e) => e !== same);
+  const entry = same ? { ...same, count: same.count + 1 } : { id: ++errorSeq, msg: text, count: 1 };
+  app.errors = [...rest, entry].slice(-ERRORS_MAX);
+}
+
+export function dismissError(id) {
+  app.errors = app.errors.filter((e) => e.id !== id);
 }
 
 // ---------- page nav ----------

@@ -1,7 +1,7 @@
 <script>
   import { getVersion } from '@tauri-apps/api/app';
   import { installUpdate } from '../updater.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { isTauri } from '../importer.js';
 
   let { open = $bindable(false), update = null } = $props();
@@ -64,7 +64,7 @@
       percent = null;
       const msg = e?.message ?? String(e);
       error = msg;
-      toast(`Update failed: ${msg}`);
+      toastError(`Update failed: ${msg}`);
     }
   }
 </script>
