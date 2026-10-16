@@ -923,7 +923,7 @@ function writeReview(b, review) {
 }
 
 // Whether a box needs review, and why: what every reader of the flag asks - the
-// editor's badge, the queue's list, the export's pre-flight, the PSD's layer
+// editor's badge, the shared check list and export preflight, the PSD's layer
 // name. The containment check's flag (`box.review`), or else the solver's
 // (below), which is not written anywhere: it is worked out from the solver's
 // record each time it is read, so it can never outlive the box it was about.

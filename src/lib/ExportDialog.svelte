@@ -1,6 +1,6 @@
 <script>
-  import { app, saveExportPrefs, isLongstrip } from './store.svelte.js';
-  import { exportImages } from './exporter.js';
+  import { app, saveExportPrefs, isLongstrip, checks, openCheck } from './store.svelte.js';
+  import { exportImages, exportPreflight } from './exporter.js';
   import { SLICE_H_MIN, SLICE_H_MAX, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
 
   const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
@@ -9,6 +9,39 @@
   const isJson = $derived(app.fmt === 'JSON');
   // Longstrip raster export re-cuts column for non-PSD/JSON formats.
   const isStrip = $derived(isLongstrip() && !isJson && app.fmt !== 'PSD');
+
+  let preflight = $state(null);
+  let checkError = $state('');
+  const needsLook = $derived(!!preflight?.items.length);
+  const checkNote = $derived(preflight ? [
+    preflight.boxes ? `${preflight.boxes} ${preflight.boxes === 1 ? 'box needs' : 'boxes need'} a look` : '',
+    preflight.lines ? `${preflight.lines} ${preflight.lines === 1 ? 'line' : 'lines'} unplaced` : '',
+  ].filter(Boolean).join(' · ') : '');
+
+  $effect(() => {
+    if (!app.exportOpen) {
+      preflight = null;
+      checkError = '';
+      return;
+    }
+    const pages = app.pages;
+    // Subscribe to the shared list, including font arrivals. The async check
+    // counts only after the font gate; a superseded answer cannot replace it.
+    checks.items;
+    app.fontsVersion;
+    let current = true;
+    exportPreflight(pages).then((result) => {
+      if (current) { preflight = result; checkError = ''; }
+    }).catch(() => {
+      if (current) { preflight = null; checkError = 'Could not finish the check. You can still export.'; }
+    });
+    return () => { current = false; };
+  });
+
+  function showCheck() {
+    close();
+    openCheck(preflight?.items[0]);
+  }
 
   // Clamp slice height when committed.
   function onSliceH(e) {
@@ -101,6 +134,16 @@
 
       <div class="grp">
         <label class="lbl">What to export?</label>
+        {#if needsLook}
+          <div class="exp-check">
+            <span>{checkNote}. Export anyway, or look first.</span>
+            <button class="btn" onclick={showCheck}>Show</button>
+            {#if app.fmt === 'PSD' && preflight.raster}
+              <div class="exp-sub">{preflight.raster} {preflight.raster === 1 ? 'box will' : 'boxes will'} be raster layers in Photoshop.</div>
+            {/if}
+          </div>
+        {/if}
+        {#if checkError}<div class="exp-sub">{checkError}</div>{/if}
         <div class="exp-choices">
           <button class="exp-card" onclick={() => go('current')}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>

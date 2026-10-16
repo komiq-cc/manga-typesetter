@@ -1,5 +1,5 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
-import { app, page, toast, toastError, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
+import { app, page, toast, toastError, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, checks, checkItems, PAGE_W, PAGE_H } from './store.svelte.js';
 import { faceFor, textInset, contentWidth, glyphInk } from './measure.js';
 import { glyphPainter, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
 import { boxCandidate, placeBlock, blockRect, linesInkRect, turnedInk } from './contain.js';
@@ -37,6 +37,30 @@ import { planStripCuts, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
 import { buildTextJson } from './text-json.js';
 import { fsx } from './fsx.js';
 export { buildTextJson };
+
+// A box can have several reasons, but the export names places to look rather
+// than adding the same box twice. The open chapter shares FLOW-1's lazy list;
+// callers checking a smaller scope use the same builder on those pages.
+export async function exportPreflight(pages = app.pages) {
+  const settling = fontsSettling(pages);
+  if (settling) await settling;
+  const { isRasterOnly } = await import('./psd.js');
+  const items = pages === app.pages ? checks.items : checkItems(pages);
+  const boxes = new Set();
+  let lines = 0;
+  for (const it of items) {
+    if (it.reason === 'unplaced') lines++;
+    else boxes.add(`${it.pageIndex}:${it.boxId}`);
+  }
+  let raster = 0;
+  for (const p of pages ?? []) {
+    for (const b of p?.boxes ?? []) {
+      // Empty raster-only boxes produce no layer in textLayerFor either.
+      if (isRasterOnly(b.style) && (String(boxText(b, p) ?? '').trim() || inkActive(b.style?.ink))) raster++;
+    }
+  }
+  return { items, boxes: boxes.size, lines, raster };
+}
 
 // Reduce a free-text export name to something every platform will accept as a
 // filename, keeping unicode and spaces.
