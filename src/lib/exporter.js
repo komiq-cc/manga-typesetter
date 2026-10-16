@@ -27,7 +27,7 @@ import {
 import { warpActive, meshMap } from './warp.js';
 import { warpBoxCanvas, warpExtent, warpPlan, MAX_DEVICE_AREA } from './warp-paint.js';
 import { settleBoxTips } from './brush-tips.js';
-import { withPageImages } from './page-images.js';
+import { snapshotExportPages, withExportPageImages, setExportPageSize } from './export-pages.svelte.js';
 import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
 import { planStripCuts, SLICE_H_DEFAULT } from './editor/strip-cuts.js';
 // The detected-text JSON serialiser lives in a leaf module so the library can
@@ -1006,6 +1006,7 @@ const QUALITY = { PNG: undefined, JPG: 0.95, WebP: 0.92, PSD: undefined };
 // already rendered 2x internally, an outer scale maps that bitmap 1:1 to device
 // pixels - so 2x output stays genuinely sharp, not a soft upscale.
 export async function renderPageCanvas(p, scale = 1) {
+  p = snapshotExportPages([p])[0];
   // Never `p.w` directly: an unmeasured page is 0, and a 0x0 canvas exports as
   // a broken file with a success toast over it. See `pageSpace`.
   const { w: W, h: H } = await pageSpace(p);
@@ -1258,10 +1259,9 @@ export async function measureStrip(pages, check = null) {
     check?.();
     // One page's picture at a time: the point of the slice loop below is that
     // the whole chapter is never resident, and measuring must not undo that.
-    const { w, h } = await withPageImages(p, () => pageSpace(p));
+    const { w, h } = await withExportPageImages(p, () => pageSpace(p));
     check?.();
-    p.w = w;
-    p.h = h;
+    setExportPageSize(p, w, h);
   }
   const { tops, total } = stripOffsets(pages);
   return { tops, total, width: maxPageWidth(pages) || PAGE_W };
@@ -1275,7 +1275,7 @@ export async function measureStrip(pages, check = null) {
 async function withPagesImages(list, fn) {
   if (!list.length) return fn();
   const [head, ...rest] = list;
-  return withPageImages(head, () => withPagesImages(rest, fn));
+  return withExportPageImages(head, () => withPagesImages(rest, fn));
 }
 
 // One output image: the strip from y0 to y1, at the width of the widest page.
@@ -1374,17 +1374,17 @@ export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1, che
 // Render one source page of a longstrip column to a Blob via the strip compositor,
 // slicing at [top, top + h] in document space so cross-seam lettering and neighbor
 // boxes are preserved.
-// `column` is the pages of the document the export holds (`chapterNow`):
+// `column` is the copied pages of the document the export holds:
 // `app.pages` by the time this runs can be another chapter's.
-async function renderStripPageBlob(p, fmt, column = app.pages) {
+async function renderStripPageBlob(p, fmt, column, check) {
   const pages = column?.length ? column : [p];
   const idx = pages.findIndex((pg) => pg?.id === p?.id);
   // The current source boundary and the column width use the same measured
   // layout as whole-chapter export. Measurement pins one image at a time, so
   // it does not retain the whole chapter's decoded artwork.
-  const { tops } = await measureStrip(pages);
+  const { tops } = await measureStrip(pages, check);
   const top = idx >= 0 ? tops[idx] ?? 0 : 0;
-  const canvas = await renderStripSliceCanvas(pages, tops, top, top + (p.h || PAGE_H));
+  const canvas = await renderStripSliceCanvas(pages, tops, top, top + (p.h || PAGE_H), 1, check);
   const blob = await new Promise((res) => canvas.toBlob(res, MIME[fmt], QUALITY[fmt]));
   canvas.width = 0;
   canvas.height = 0;
@@ -1402,8 +1402,7 @@ const RASTER = new Set(['PNG', 'JPG', 'WebP']);
 
 // The whole-chapter strip export. Called only from `exportImages`, which already
 // holds `app.exporting` across it.
-async function exportStripImages(fmt, held, chapter = null) {
-  const pages = chapter?.pages ?? app.pages;
+async function exportStripImages(fmt, held, chapter, pages) {
   const { tops, total } = await measureStrip(pages, () => chapterHeld(chapter));
   const target = app.stripSliceH > 0 ? app.stripSliceH : SLICE_H_DEFAULT;
   const { cuts, warnings } = planStripCuts(pages, target);
@@ -1561,8 +1560,7 @@ async function saveNative(items, fmt, held) {
 // serialisers for one file format would drift the moment either was touched.
 // Does NOT set app.exporting: exportImages already holds it across this call,
 // and every other caller wraps it the same way.
-export async function exportTextJson(scope, held) {
-  const pages = scope === 'all' ? app.pages : [page()];
+export async function exportTextJson(scope, held, pages = snapshotExportPages(scope === 'all' ? app.pages : [page()])) {
   const suffix = scope === 'all' ? 'text' : `${pages[0].id}-text`;
   const baseName = sanitizeExportName(app.exportName);
   const items = [
@@ -1676,20 +1674,24 @@ function exportFailure(error, written) {
   return failure;
 }
 
-// Public entry: scope = 'current' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
+// Public entry: scope = 'current' | 'page' | 'all', fmt = PNG|JPG|WebP|PSD|JSON.
 export async function exportImages(fmt, scope) {
   app.exporting = true;
   let written = 0;
   // Before the first await: the chapter the user asked to export.
   const chapter = chapterNow();
   try {
+    const longstrip = isLongstrip();
+    const selected = page();
+    const column = snapshotExportPages(longstrip || scope === 'all' ? chapter.pages : [selected], longstrip);
+    const selectedCopy = column[longstrip ? chapter.pages.indexOf(selected) : 0];
+    const pages = scope === 'all' ? column : [selectedCopy ?? snapshotExportPages([selected])[0]];
     let held = enginesNow();
     // The browser's own font set is the browser path's wait, and with the
     // Rust engine switched on it is not the one that matters: the gate below
     // is (and it is asked first only so that, with the switch off, this line
     // runs exactly where it always ran).
     if (!fontsGated()) await document.fonts.ready;
-    const pages = scope === 'all' ? app.pages : [page()];
     const ext = EXT[fmt];
     // THE ONE GATE for every file this writes - a page, the whole chapter,
     // strip slices, a PSD's rasters. With the Rust engine measuring, a family
@@ -1699,7 +1701,7 @@ export async function exportImages(fmt, scope) {
     // pages need is in, or is known not to be coming. A strip slice paints
     // its neighbours' lettering too, so a strip waits for the whole chapter.
     // With the browser measuring this is null and nothing is awaited.
-    const settling = fontsSettling(isLongstrip() ? app.pages : pages);
+    const settling = fontsSettling(column);
     if (settling) await settling;
     // The switch can be on with nothing of the engine's drawing - no font on
     // this machine it can read - and then the browser paints the text after
@@ -1707,21 +1709,20 @@ export async function exportImages(fmt, scope) {
     if (settling && !engineDraws()) await document.fonts.ready;
     // The engine these waits began on is not the one installed: they were the
     // wrong waits. (Never taken with the switch left alone.)
-    if (!enginesAre(held)) held = await enginesSettled(isLongstrip() ? app.pages : pages);
-    // The waits above are where a chapter could have been swapped in under
-    // `pages`, and nothing has been read off it yet.
+    if (!enginesAre(held)) held = await enginesSettled(column);
+    // The waits above can outlive the chapter whose pages were copied.
     chapterHeld(chapter);
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
-    if (fmt === 'JSON') return await exportTextJson(scope, held);
+    if (fmt === 'JSON') return await exportTextJson(scope, held, pages);
 
     // A whole longstrip chapter is one column, and the files it ships as are
     // slices of that column rather than its source pages. Only 'all' - a single
     // page is still a single page, and the user asking for "this page" in a
     // strip is asking for the slice they are looking at, not a re-cut of it.
-    if (isLongstrip() && scope === 'all' && RASTER.has(fmt)) {
-      return await exportStripImages(fmt, held, chapter);
+    if (longstrip && scope === 'all' && RASTER.has(fmt)) {
+      return await exportStripImages(fmt, held, chapter, column);
     }
 
     const baseName = sanitizeExportName(app.exportName);
@@ -1746,17 +1747,17 @@ export async function exportImages(fmt, scope) {
       // of the chapter this asks about.
       chapterHeld(chapter, written);
       try {
-        blob = await withPageImages(p, async () => {
+        blob = await withExportPageImages(p, async () => {
           if (fmt === 'PSD') {
             // Layered, editable PSD carrying the full project as embedded JSON so
             // it round-trips losslessly (one .psd per page). Lazily imported so
             // ag-psd isn't pulled into the raster-export path.
             const { buildPagePsd } = await import('./psd.js');
-            const bytes = await buildPagePsd(p);
+            const bytes = await buildPagePsd(p, { chapter, column: longstrip ? column : null });
             return new Blob([bytes], { type: MIME.PSD });
           }
-          if (isLongstrip() && RASTER.has(fmt)) {
-            return await renderStripPageBlob(p, fmt, chapter.pages);
+          if (longstrip && RASTER.has(fmt)) {
+            return await renderStripPageBlob(p, fmt, column, () => chapterHeld(chapter, written));
           }
           return await renderPageBlob(p, fmt);
         });

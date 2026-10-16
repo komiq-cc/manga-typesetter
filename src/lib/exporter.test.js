@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fsx } from './fsx.js';
-import { setChapterImageDirs, releaseAllPageImages } from './page-images.js';
+import { setChapterImageDirs, setResidentWindow, releasePageImages, releaseAllPageImages } from './page-images.js';
 import { app, loadProjectPages } from './store.svelte.js';
 import {
   exportTextJson,
@@ -307,6 +307,89 @@ describe('exportTextJson', () => {
     await exportTextJson('current');
     expect(downloaded).toEqual(['ch01-22-text.json']);
     expect(app.toast.msg).toBe('Exported text for 1 page(s) as JSON (browser download)');
+  });
+});
+
+describe('an export holds one moment of the document', () => {
+  const editablePages = () => [1, 2].map((id) => ({
+    id, w: 800, h: 1000,
+    lines: [{ n: 1, en: id === 1 ? 'BEFORE' : 'SECOND', tags: ['shout'] }],
+    boxes: [{ id: `b${id}`, lineN: 1, text: null, x: 20, y: id === 1 ? 900 : 100,
+      w: 300, h: 200, style: normalizeStyle({ size: 20 }) }],
+    detect: { panels: [[0, 0, 800, 1000]], boxes: [{ n: 1, box: [1, 2, 3, 4] }] },
+  }));
+  const pauseFonts = () => {
+    let resume;
+    document.fonts.ready = new Promise((resolve) => { resume = resolve; });
+    return resume;
+  };
+  const edit = () => {
+    for (const p of app.pages) {
+      p.lines[0].en = 'AFTER';
+      p.lines[0].tags.push('edited');
+      p.boxes[0].x = 250;
+      p.boxes[0].style.size = 40;
+      p.detect.panels[0][0] = 100;
+      p.detect.boxes[0].box[0] = 200;
+    }
+    app.pageIndex = 0;
+    app.pages.push({ ...editablePages()[0], id: 3 });
+  };
+
+  it.each([
+    ['all', 'pages'], ['page', 'pages'], ['all', 'longstrip'], ['page', 'longstrip'],
+  ])('PNG %s, %s: edits during the font wait do not reach any page or neighbour', async (scope, layout) => {
+    loadProjectPages(editablePages());
+    app.projectLayout = layout;
+    app.pageIndex = 1;
+    app.stripSliceH = 1000;
+    const resume = pauseFonts();
+    const exporting = exportImages('PNG', scope);
+    edit();
+    resume();
+
+    expect(await exporting).toBe(true);
+    expect(painted).toContain('SECOND');
+    expect(painted).not.toContain('AFTER');
+    if (scope === 'all' || layout === 'longstrip') expect(painted).toContain('BEFORE');
+    else expect(painted).not.toContain('BEFORE');
+    // The strip's cut moves clear of BEFORE's lettering, leaving a short tail.
+    expect(downloaded).toHaveLength(scope === 'all' ? (layout === 'longstrip' ? 3 : 2) : 1);
+    if (scope === 'page') expect(downloaded).toEqual(['ch01-2.png']);
+  });
+
+  it.each(['all', 'page'])('JSON %s: lines, nested detection and box geometry use the original copy', async (scope) => {
+    loadProjectPages(editablePages());
+    app.pageIndex = 1;
+    const expected = buildTextJson(scope === 'all' ? app.pages : [app.pages[1]]);
+    let output;
+    URL.createObjectURL = (blob) => { output = blob; return 'blob:json'; };
+    const resume = pauseFonts();
+    const exporting = exportImages('JSON', scope);
+    edit();
+    resume();
+
+    expect(await exporting).toBe(true);
+    expect(await output.text()).toBe(expected);
+  });
+
+  it('resolves a copied page through live image residency without moving ownership to the copy', async () => {
+    loadProjectPages([{ id: 1, file: '001.png', w: 800, h: 1000, raw: null, cleaned: null, lines: [], boxes: [] }]);
+    naturalSizes = { 'blob:test': [800, 1000] };
+    vi.spyOn(fsx, 'join').mockImplementation(async (...parts) => parts.join('/'));
+    vi.spyOn(fsx, 'assetUrl').mockResolvedValue(null);
+    vi.spyOn(fsx, 'readFile').mockResolvedValue(new Uint8Array([1, 2, 3]));
+    setChapterImageDirs('/raw', null);
+    const resume = pauseFonts();
+    const exporting = exportImages('PNG', 'page');
+    await setResidentWindow(app.pages, 0, 0);
+    resume();
+
+    expect(await exporting).toBe(true);
+    expect(draws.some((d) => d.src === 'blob:test')).toBe(true);
+    expect(app.pages[0].raw).toBe('blob:test');
+    releasePageImages(1);
+    expect(app.pages[0].raw).toBeNull();
   });
 });
 

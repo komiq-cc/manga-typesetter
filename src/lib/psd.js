@@ -25,6 +25,7 @@ import { normalizeFit, normalizeAuto } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
 import { warpActive } from './warp.js';
 import { withPageImages } from './page-images.js';
+import { snapshotExportPages } from './export-pages.svelte.js';
 
 // Bumped when the embedded schema changes in a non-back-compatible way. Import
 // refuses newer majors it can't understand and falls back to layer mapping.
@@ -970,9 +971,16 @@ export function writePagePsd(doc) {
 // reaches over the seam. Its pages are measured first, as the strip export
 // measures them, and the fonts waited for are those of every page whose boxes
 // the file paints.
-export async function buildPagePsd(p) {
-  const chapter = chapterNow();
-  const column = stripColumn(p);
+export async function buildPagePsd(p, { chapter = chapterNow(), column } = {}) {
+  chapterHeld(chapter);
+  // A batch supplies its original copy, including strip neighbours. A direct
+  // single-page build takes its own copy before measurement/font/image awaits.
+  if (column === undefined) {
+    const liveColumn = stripColumn(p);
+    const pages = snapshotExportPages(liveColumn ?? [p], !!liveColumn);
+    p = pages[liveColumn ? liveColumn.indexOf(p) : 0];
+    column = liveColumn ? pages : null;
+  }
   // Where every page of the column is, which a page nobody has opened does
   // not say yet: one picture at a time, the strip export's own measure.
   if (column) await measureStrip(column, () => chapterHeld(chapter));

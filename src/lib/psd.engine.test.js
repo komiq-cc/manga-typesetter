@@ -316,11 +316,15 @@ describe('what a PSD waits for', () => {
   it('the engine taken away while it is built: no file, and it says why', async () => {
     await on();
     stubDocument();
-    // The page's art is read after the fonts are waited for and before the
-    // file is written: the switch goes off there.
-    const page = { ...bare, get raw() { return (useTextEngine('browser'), null); } };
+    // Canvas creation is after the font wait. Page fields are now copied
+    // before that wait, so a page getter would switch during capture instead.
+    const create = document.createElement;
+    document.createElement = (...args) => {
+      useTextEngine('browser');
+      return create(...args);
+    };
     setFontSource({ ready: () => true, nameFor: () => 'Helvetica Neue', missing: () => false, settle: async () => {} });
-    await expect(buildPagePsd(page)).rejects.toThrow('the text engine was switched');
+    await expect(buildPagePsd(bare)).rejects.toThrow('the text engine was switched');
     expect(engineDraws()).toBe(false);
   });
 

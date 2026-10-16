@@ -106,6 +106,7 @@ import { scaleStroke } from './brush.js';
 import { translateStrokes } from './brush-board.svelte.js';
 import { translateClipShapes } from './text-paint.js';
 import { stripPageExtent, stripDragYBounds } from './editor/strip.js';
+import { exportPageColumn } from './export-pages.svelte.js';
 
 export { PAGE_W, PAGE_H };
 
@@ -853,7 +854,11 @@ function minSizeFor(b, p) {
   return solveFloor(tagSize(sizeKeyFor(line)) ?? refSizeOf(b));
 }
 
-const stripOf = (p) => (isLongstrip() ? stripPageExtent(app.pages, p?.id) : null);
+const stripOf = (p) => {
+  const copied = exportPageColumn(p);
+  const pages = copied === undefined ? (isLongstrip() ? app.pages : null) : copied;
+  return pages ? stripPageExtent(pages, p?.id) : null;
+};
 
 // The ladder's answer, written back. Only the fields that moved are written,
 // so a box that already fits is not dirtied field by field.
