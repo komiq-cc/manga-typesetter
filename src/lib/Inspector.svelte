@@ -30,6 +30,9 @@
     WARP_MIN_GRID,
     WARP_MAX_GRID,
     WARP_MESH_DEFAULT,
+    LINE_HEIGHT_MIN,
+    LINE_HEIGHT_MAX,
+    letterSpacingRange,
   } from './data.js';
   import { gradientCss, patternTileCanvas, sampleStops } from './text-paint.js';
   import { insertPathAnchor } from './measure.js';
@@ -1725,11 +1728,11 @@
         <div class="row2">
           <div class="field">
             <label class="lbl" for="insp-lh">Line height</label>
-            <input id="insp-lh" type="number" min="0.6" max="3" step="0.05" value={s.lineHeight} title="Line height" oninput={(e) => setNum(s, 'lineHeight', e.target.value || 1, 0.6, 3)} />
+            <input id="insp-lh" type="number" min={LINE_HEIGHT_MIN} max={LINE_HEIGHT_MAX} step="0.05" value={s.lineHeight} title="Line height" oninput={(e) => setNum(s, 'lineHeight', e.target.value || 1, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX)} />
           </div>
           <div class="field">
             <label class="lbl" for="insp-ls">Letter spacing</label>
-            <input id="insp-ls" type="number" min="-5" max="40" step="0.5" value={s.letterSpacing} title="Extra space between letters, page px" onchange={(e) => commitNum(s, 'letterSpacing', e, -5, 40)} />
+            <input id="insp-ls" type="number" min={letterSpacingRange(s.size).min} max={letterSpacingRange(s.size).max} step="0.5" value={s.letterSpacing} title="Extra space between letters, page px" onchange={(e) => commitNum(s, 'letterSpacing', e, letterSpacingRange(s.size).min, letterSpacingRange(s.size).max)} />
           </div>
         </div>
 

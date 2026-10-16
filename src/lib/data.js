@@ -645,6 +645,18 @@ export const SFX_FLOWS = ['row', 'stack'];
 // More than this is a recipe nobody reads; the Inspector's list stops here too.
 export const SFX_MAX_MOVES = 8;
 
+// What the Layout tab (and the bulk panel) accept for line height and letter
+// spacing. Wide enough for SFX lettering, where letters overlap and rows
+// crowd: down to half an em of letter gap (page px, so it scales with the
+// size) and 0.4 line height. The old -5..40 px and 0.6..3 clamps snapped an
+// SFX preset's own values back the first time the field was touched.
+export const LINE_HEIGHT_MIN = 0.4;
+export const LINE_HEIGHT_MAX = 3;
+export function letterSpacingRange(size) {
+  const em = Number(size) > 0 ? Number(size) : 0;
+  return { min: Math.min(-5, -0.5 * em), max: Math.max(40, em) };
+}
+
 function sfxDefault() {
   return { on: false, amount: 1, seed: 1, flow: 'row', rowShift: 0, moves: [], before: null };
 }

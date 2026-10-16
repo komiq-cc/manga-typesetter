@@ -17,7 +17,7 @@ import {
   import { tagsInUse, boxesWithTag } from './tags.svelte.js';
   import { modKey } from './format.js';
   import { fontGroups, fontCaveat } from './font-menu.js';
-  import { PATTERN_KINDS, GRADIENT_MAX_STOPS } from './data.js';
+  import { PATTERN_KINDS, GRADIENT_MAX_STOPS, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX, letterSpacingRange } from './data.js';
   import ColorPicker from './ColorPicker.svelte';
   import { iconNoFill } from './tab-icons.js';
 
@@ -511,12 +511,12 @@ import {
             <div class="brow" class:off={!app.bulk.mask.lineHeight}>
               {@render tick('lineHeight')}
               <span class="lbl">Line</span>
-              <input type="number" aria-label="Line height" min="0.6" max="3" step="0.05" value={s.lineHeight} onchange={(e) => num('lineHeight', e.target.value || 1, 0.6, 3)} />
+              <input type="number" aria-label="Line height" min={LINE_HEIGHT_MIN} max={LINE_HEIGHT_MAX} step="0.05" value={s.lineHeight} onchange={(e) => num('lineHeight', e.target.value || 1, LINE_HEIGHT_MIN, LINE_HEIGHT_MAX)} />
             </div>
             <div class="brow" class:off={!app.bulk.mask.letterSpacing}>
               {@render tick('letterSpacing')}
               <span class="lbl">Letter</span>
-              <input type="number" aria-label="Letter spacing" min="-5" max="40" step="0.5" value={s.letterSpacing} onchange={(e) => num('letterSpacing', e.target.value, -5, 40)} />
+              <input type="number" aria-label="Letter spacing" min={letterSpacingRange(s.size).min} max={letterSpacingRange(s.size).max} step="0.5" value={s.letterSpacing} onchange={(e) => num('letterSpacing', e.target.value, letterSpacingRange(s.size).min, letterSpacingRange(s.size).max)} />
             </div>
           </div>
         </div>
