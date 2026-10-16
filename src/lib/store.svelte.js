@@ -1344,12 +1344,15 @@ class PageChecks {
 // chapter's. A derived made with no effect over it (here, inside the chapter's
 // list as it runs) is never told when what it read changes, and keeps its first
 // answer forever.
+//
+// Off the browser (the server build the unit tests load) an effect root never
+// runs its function and nothing is reactive anyway, so the thing is made bare.
 function rooted(make) {
   let made;
   $effect.root(() => {
     made = make();
   });
-  return made;
+  return made ?? make();
 }
 const pageChecks = new WeakMap();
 function checksOf(pg) {
