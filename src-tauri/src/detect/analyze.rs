@@ -6,7 +6,7 @@ use image::{DynamicImage, GenericImageView};
 use ort::session::Session;
 
 use super::crops::{gather_crops, Raster};
-use super::ocr::TextRecognizer;
+use super::ocr::{OcrReading, TextRecognizer};
 use super::panels;
 use super::sorting::{
     assign_types, sort_bubbles_by_reading_order, Block, LineType, ReadingDirection,
@@ -82,6 +82,60 @@ fn detect_panels_and_regions(
     }
 }
 
+/// Reject artwork reads using Komatose's CJK/Hangul and Latin SFX thresholds
+/// (`isMeaningfulSource` in its `src/lib/server/ocr.ts`), plus one rule of
+/// ours: a bubble that holds only an ellipsis or marks ("……", "！？") is real
+/// dialogue in manga, and its line has to survive even though it holds no
+/// letter of any script.
+fn is_meaningful_source(text: &str, score: f32) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.chars().any(|c| matches!(c,
+        '\u{1100}'..='\u{11ff}' | '\u{3040}'..='\u{30ff}' | '\u{3130}'..='\u{318f}'
+        | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}'
+        | '\u{f900}'..='\u{faff}' | '\u{ff66}'..='\u{ff9f}'
+    )) {
+        return text.chars().count() > 1 || score >= 0.5;
+    }
+    if text.chars().filter(|c| !c.is_whitespace()).all(|c| {
+        matches!(c, '…' | '‥' | '・' | '.' | '。' | '！' | '!' | '？' | '?' | '〜' | '～')
+    }) {
+        // A lone dot is what plain art reads as most often; two marks or more,
+        // or one confident one, is a bubble.
+        return text.chars().filter(|c| !c.is_whitespace()).count() > 1 || score >= 0.5;
+    }
+    if text.contains(['\\', '$']) {
+        return false;
+    }
+    let compact = text.chars().filter(|c| !c.is_whitespace()).count();
+    let letters = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    letters >= 3 && letters as f32 / compact as f32 >= 0.7 && score >= 0.55
+}
+
+/// Join a block's crops, filtering only when every crop was successfully read.
+fn stitch_readings(readings: &[Option<OcrReading>]) -> Option<String> {
+    let mut text = String::new();
+    let mut score = 1.0f32;
+    let mut complete = !readings.is_empty();
+    for reading in readings {
+        match reading {
+            Some(reading) => {
+                text.push_str(&reading.text);
+                // A confident crop must not hide a weak crop in the same block.
+                score = score.min(reading.confidence);
+            }
+            None => complete = false,
+        }
+    }
+    if complete && !is_meaningful_source(&text, score) {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// Detect, read, and order text and panels on one page.
 pub fn analyze(
     img: &DynamicImage,
@@ -113,7 +167,7 @@ pub fn analyze(
     let mask_raster = Raster::from_gray(&mask);
 
     // Pass 1: gather all crops flat with per-block counts.
-    let mut texts: Vec<String> = Vec::new();
+    let mut readings: Vec<Option<OcrReading>> = Vec::new();
     let mut counts: Vec<usize> = Vec::with_capacity(blk_list.len());
     if let Some(engine) = ocr {
         let lines_mode = engine.prefers_line_crops()
@@ -128,28 +182,29 @@ pub fn analyze(
         }
         // Pass 2: OCR each crop individually to match golden fixtures.
         for crop in &queue {
-            match engine.ocr(&crop.as_python_saw_it()) {
-                Ok(text) => texts.push(text),
+            match engine.ocr_with_confidence(&crop.as_python_saw_it()) {
+                Ok(reading) => readings.push(Some(reading)),
                 Err(e) => {
                     log::warn!("ocr failed for crop, degrading to empty text: {e}");
-                    texts.push(String::new());
+                    readings.push(None);
                 }
             }
         }
     }
 
-    // Pass 3: stitch recognized text back onto blocks.
+    // Pass 3: stitch recognized text back onto blocks and drop junk reads.
     let mut blocks: Vec<Block> = Vec::with_capacity(blk_list.len());
     let mut cursor = 0usize;
     for (i, blk) in blk_list.iter().enumerate() {
-        let jp = match counts.get(i) {
+        let crops = match counts.get(i) {
             Some(&count) => {
-                let joined = texts[cursor..cursor + count].concat();
+                let crops = &readings[cursor..cursor + count];
                 cursor += count;
-                joined
+                crops
             }
-            None => String::new(),
+            None => &[][..],
         };
+        let Some(jp) = stitch_readings(crops) else { continue };
         blocks.push(Block::new(blk.xyxy, blk.vertical, blk.font_size as f32, jp));
     }
 
@@ -188,6 +243,73 @@ pub fn order_and_type(
 mod tests {
     use super::*;
     use crate::detect::ocr::OcrEngine;
+
+    #[test]
+    fn meaningful_source_keeps_script_and_confident_latin_sfx() {
+        for (text, score, meaningful) in [
+            ("こんにちは", 0.0, true),
+            ("你好", 0.0, true),
+            ("한글", 0.0, true),
+            (" あ ", 0.49, false),
+            ("あ", 0.5, true),
+            ("한", 0.49, false),
+            ("한", 0.5, true),
+            ("\\frac", 0.9, false),
+            ("$BAM$", 0.9, false),
+            ("BAM", 0.9, true),
+            ("BAM", 0.3, false),
+            ("BAM", 0.55, true),
+            ("B A\tM!", 0.9, true),
+            ("BAM!!", 0.9, false),
+            ("1.", 0.9, false),
+            ("……", 0.2, true),
+            ("！？", 0.3, true),
+            ("…", 0.9, true),
+            (".", 0.3, false),
+            ("㐀", 0.9, true),
+            ("ｱｲ", 0.2, true),
+            ("", 0.9, false),
+            (" \n\t", 0.9, false),
+        ] {
+            assert_eq!(is_meaningful_source(text, score), meaningful, "{text:?} at {score}");
+        }
+    }
+
+    fn reading(text: &str, confidence: f32) -> Option<OcrReading> {
+        Some(OcrReading { text: text.into(), confidence })
+    }
+
+    #[test]
+    fn stitching_filters_only_complete_reads_using_the_weakest_crop() {
+        // No OCR or no crops, and failed crops, keep today's empty-text fallback.
+        assert_eq!(stitch_readings(&[]), Some(String::new()));
+        assert_eq!(stitch_readings(&[None]), Some(String::new()));
+        assert_eq!(stitch_readings(&[reading("1.", 0.9), None]), Some("1.".into()));
+        assert_eq!(stitch_readings(&[None, reading("BAM", 0.3)]), Some("BAM".into()));
+        assert_eq!(stitch_readings(&[reading("", 0.9)]), None);
+        assert_eq!(stitch_readings(&[reading("BA", 0.9), reading("M", 0.3)]), None);
+        assert_eq!(
+            stitch_readings(&[reading("BA", 0.9), reading("M", 0.8)]),
+            Some("BAM".into())
+        );
+    }
+
+    #[test]
+    fn junk_is_removed_before_reading_order_and_contiguous_numbering() {
+        let crops = [
+            vec![reading("BOOM", 0.9)],
+            vec![reading("1.", 0.9)],
+            vec![reading("BAM", 0.9)],
+        ];
+        let blocks: Vec<Block> = crops.iter().enumerate().filter_map(|(i, readings)| {
+            let text = stitch_readings(readings)?;
+            let x = (2 - i as i32) * 100;
+            Some(Block::new([x, 0, x + 50, 50], false, 20.0, text))
+        }).collect();
+        let lines = order_and_type(&blocks, &[], ReadingDirection::Ltr, "en");
+        assert_eq!(lines.iter().map(|line| (line.n, line.jp.as_str())).collect::<Vec<_>>(),
+            [(1, "BAM"), (2, "BOOM")]);
+    }
 
     // The picker offers every one of these, and the webview draws them all, so
     // a format missing from the `image` crate's feature list fails only here -

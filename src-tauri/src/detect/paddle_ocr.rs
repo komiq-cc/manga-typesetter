@@ -11,7 +11,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use super::cvops::resize_linear_u8;
-use super::ocr::TextRecognizer;
+use super::ocr::{OcrReading, TextRecognizer};
 
 const INPUT_HEIGHT: usize = 48;
 const MIN_INPUT_WIDTH: usize = 320;
@@ -81,7 +81,7 @@ impl PaddleOcrEngine {
         Ok((input_width, out))
     }
 
-    fn decode_ctc(characters: &[String], shape: &[i64], logits: &[f32]) -> ort::Result<String> {
+    fn decode_ctc(characters: &[String], shape: &[i64], logits: &[f32]) -> ort::Result<OcrReading> {
         if shape.len() != 3 || shape[0] != 1 {
             return Err(ort::Error::new(format!(
                 "unexpected PaddleOCR output shape {shape:?}"
@@ -97,6 +97,8 @@ impl PaddleOcrEngine {
         }
 
         let mut text = String::new();
+        let mut probability_sum = 0.0;
+        let mut emitted = 0usize;
         let mut previous = usize::MAX;
         for row in logits.chunks_exact(classes).take(steps) {
             let token = row
@@ -107,6 +109,19 @@ impl PaddleOcrEngine {
                 .map(|(i, _)| i)
                 .unwrap_or(BLANK_TOKEN);
             if token != previous && token != BLANK_TOKEN {
+                // RapidOCR graphs can include the final softmax. Only raw
+                // logits need normalising; applying it twice flattens confidence.
+                let sum: f32 = row.iter().sum();
+                let probability = if row.iter().all(|v| (0.0..=1.0).contains(v))
+                    && (sum - 1.0).abs() < 1e-4
+                {
+                    row[token]
+                } else {
+                    let max = row[token];
+                    1.0 / row.iter().map(|v| (*v - max).exp()).sum::<f32>()
+                };
+                probability_sum += probability;
+                emitted += 1;
                 if token == characters.len() + 1 {
                     text.push(' ');
                 } else if let Some(character) = characters.get(token - 1) {
@@ -115,12 +130,13 @@ impl PaddleOcrEngine {
             }
             previous = token;
         }
-        Ok(text)
+        let confidence = if emitted == 0 { 0.0 } else { probability_sum / emitted as f32 };
+        Ok(OcrReading { text, confidence })
     }
 }
 
 impl TextRecognizer for PaddleOcrEngine {
-    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String> {
+    fn ocr_with_confidence(&mut self, img: &DynamicImage) -> ort::Result<OcrReading> {
         let (width, pixels) = Self::preprocess(img)?;
         let input = Tensor::from_array(([1usize, 3, INPUT_HEIGHT, width], pixels))?;
         let characters = &self.characters;
@@ -164,9 +180,38 @@ mod tests {
         let logits = logits_for(&tokens);
         assert_eq!(
             PaddleOcrEngine::decode_ctc(&characters, &[1, tokens.len() as i64, 4], &logits)
-                .unwrap(),
+                .unwrap().text,
             "aab "
         );
+    }
+
+    #[test]
+    fn ctc_confidence_averages_only_emitted_steps() {
+        let characters = vec!["a".into(), "b".into()];
+        let tokens = [0, 1, 1, 0, 1, 2, 2, 3];
+        let maxima = [0.99, 0.8, 0.4, 0.3, 0.6, 0.7, 0.95, 0.9];
+        let mut probabilities = Vec::new();
+        for (token, max) in tokens.into_iter().zip(maxima) {
+            let mut row = [(1.0 - max) / 3.0; 4];
+            row[token] = max;
+            probabilities.extend(row);
+        }
+        let logits: Vec<f32> = probabilities.iter().map(|v: &f32| v.ln()).collect();
+        // Both exported softmax output and raw logits give the same score.
+        for values in [&probabilities, &logits] {
+            let reading = PaddleOcrEngine::decode_ctc(&characters, &[1, 8, 4], values).unwrap();
+            assert_eq!(reading.text, "aab ");
+            assert!((reading.confidence - 0.75).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn ctc_blank_only_read_has_zero_confidence() {
+        let characters = vec!["a".into(), "b".into()];
+        let reading = PaddleOcrEngine::decode_ctc(&characters, &[1, 1, 4], &[0.9, 0.05, 0.03, 0.02])
+            .unwrap();
+        assert!(reading.text.is_empty());
+        assert_eq!(reading.confidence, 0.0);
     }
 
     #[test]

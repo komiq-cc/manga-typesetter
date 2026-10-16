@@ -9,10 +9,20 @@ use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
 
+/// Recognised crop text and its probability in the range 0..=1.
+pub struct OcrReading {
+    pub text: String,
+    pub confidence: f32,
+}
+
 /// Common interface for the Japanese manga-ocr and language-specific PaddleOCR
 /// recognizers used by the page analysis pipeline.
 pub trait TextRecognizer {
-    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String>;
+    fn ocr_with_confidence(&mut self, img: &DynamicImage) -> ort::Result<OcrReading>;
+
+    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String> {
+        self.ocr_with_confidence(img).map(|reading| reading.text)
+    }
 
     /// Paddle recognition graphs are trained on a single text line. Manga OCR
     /// is instead a manga-crop recognizer and performs better on whole blocks.
@@ -265,7 +275,18 @@ pub fn post_process(text: &str) -> String {
 struct Hypothesis {
     /// `sum_logprobs / generated_len.powf(length_penalty)`.
     score: f64,
+    sum_logprobs: f64,
+    generated_len: usize,
     tokens: Vec<i64>,
+}
+
+impl Hypothesis {
+    fn confidence(&self) -> f32 {
+        if self.generated_len == 0 {
+            return 0.0;
+        }
+        (self.sum_logprobs / self.generated_len as f64).exp().clamp(0.0, 1.0) as f32
+    }
 }
 
 /// Pool of completed beams matching `transformers.generation.BeamHypotheses`.
@@ -283,7 +304,7 @@ impl BeamHypotheses {
     fn add(&mut self, tokens: Vec<i64>, sum_logprobs: f64, generated_len: usize) {
         let score = sum_logprobs / (generated_len as f64).powf(LENGTH_PENALTY);
         if self.beams.len() < NUM_BEAMS || score > self.worst_score {
-            self.beams.push(Hypothesis { score, tokens });
+            self.beams.push(Hypothesis { score, sum_logprobs, generated_len, tokens });
             if self.beams.len() > NUM_BEAMS {
                 let mut order: Vec<usize> = (0..self.beams.len()).collect();
                 order.sort_by(|&a, &b| {
@@ -375,6 +396,11 @@ impl OcrEngine {
 
     /// Runs OCR on an image crop.
     pub fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String> {
+        self.ocr_with_confidence(img).map(|reading| reading.text)
+    }
+
+    /// Runs OCR, retaining the winning beam's mean per-token probability.
+    pub fn ocr_with_confidence(&mut self, img: &DynamicImage) -> ort::Result<OcrReading> {
         let pixel_values = preprocess(img);
         let input = Tensor::from_array(([1usize, 3, INPUT_SIZE, INPUT_SIZE], pixel_values))?;
         let outputs = self.encoder.run(ort::inputs!["pixel_values" => input])?;
@@ -389,8 +415,8 @@ impl OcrEngine {
         }
         drop(outputs);
 
-        let tokens = self.search(&tiled, seq, width)?;
-        Ok(post_process(&self.decode(&tokens)))
+        let (tokens, confidence) = self.search(&tiled, seq, width)?;
+        Ok(OcrReading { text: post_process(&self.decode(&tokens)), confidence })
     }
 
     /// Detokenizes token ids to text matching `tokenizer.decode(ids, skip_special_tokens=True)`.
@@ -404,7 +430,7 @@ impl OcrEngine {
     }
 
     /// Four-beam search matching HuggingFace `_beam_search` with trigram blocking and early stopping.
-    fn search(&mut self, encoder_hidden: &[f32], enc_seq: usize, width: usize) -> ort::Result<Vec<i64>> {
+    fn search(&mut self, encoder_hidden: &[f32], enc_seq: usize, width: usize) -> ort::Result<(Vec<i64>, f32)> {
         let vocab_size = self.vocab.len();
         let mut beams: Vec<Vec<i64>> = vec![vec![CLS_TOKEN]; NUM_BEAMS];
         let mut beam_scores: Vec<f32> = vec![-1e9; NUM_BEAMS];
@@ -498,15 +524,15 @@ impl OcrEngine {
             .iter()
             .enumerate()
             .max_by(|(ai, a), (bi, b)| a.score.total_cmp(&b.score).then(ai.cmp(bi)))
-            .map(|(_, h)| h.tokens.clone())
+            .map(|(_, h)| (h.tokens.clone(), h.confidence()))
             .unwrap_or_default();
         Ok(best)
     }
 }
 
 impl TextRecognizer for OcrEngine {
-    fn ocr(&mut self, img: &DynamicImage) -> ort::Result<String> {
-        OcrEngine::ocr(self, img)
+    fn ocr_with_confidence(&mut self, img: &DynamicImage) -> ort::Result<OcrReading> {
+        OcrEngine::ocr_with_confidence(self, img)
     }
 }
 
@@ -642,6 +668,10 @@ mod tests {
         pool.add(vec![2, 10, 11, 12], -4.0, 4);
         assert!((pool.beams[0].score - (-1.0)).abs() < 1e-12);
         assert!((pool.beams[1].score - (-0.25)).abs() < 1e-12);
+        // Confidence uses the unpenalised sum and generated length, including
+        // EOS when present and excluding the initial CLS token.
+        assert!((pool.beams[0].confidence() - (-2.0f32).exp()).abs() < 1e-6);
+        assert!((pool.beams[1].confidence() - (-1.0f32).exp()).abs() < 1e-6);
         assert!(pool.beams[1].score > pool.beams[0].score);
         assert!(!pool.is_done());
 

@@ -14,7 +14,7 @@ use tauri::async_runtime::Mutex as AsyncMutex;
 
 use super::accel;
 use super::analyze::{analyze, decode_image, AnalyzeResponse};
-use super::ocr::{OcrEngine, TextRecognizer};
+use super::ocr::{OcrEngine, OcrReading, TextRecognizer};
 use super::paddle_ocr::PaddleOcrEngine;
 use super::panels;
 use super::sorting::ReadingDirection;
@@ -179,10 +179,10 @@ enum Recognizer {
 }
 
 impl TextRecognizer for Recognizer {
-    fn ocr(&mut self, img: &image::DynamicImage) -> ort::Result<String> {
+    fn ocr_with_confidence(&mut self, img: &image::DynamicImage) -> ort::Result<OcrReading> {
         match self {
-            Self::Japanese(engine) => engine.ocr(img),
-            Self::Paddle(engine) => engine.ocr(img),
+            Self::Japanese(engine) => engine.ocr_with_confidence(img),
+            Self::Paddle(engine) => engine.ocr_with_confidence(img),
         }
     }
 
