@@ -21,6 +21,7 @@ import {
   isLongstrip,
   isTranslateMode,
   openBulk,
+  nextPageWithWork,
   placeDetectedInChapter,
   saveSidebar,
 } from './store.svelte.js';
@@ -106,6 +107,7 @@ export const ACTIONS = [
   { id: 'detect.chapter', label: 'Detect text in whole chapter', group: 'Detect', keywords: 'ocr scan read find all pages', when: canDetect, run: () => detectAllPages() },
   { id: 'queue.placeChapter', label: 'Place detected bubbles in whole chapter', group: 'Text queue', keywords: 'place all pages', when: () => typeset() && app.pages.length > 0 && !app.chapterPlace, run: () => placeDetectedInChapter() },
   { id: 'jobs.retry', label: 'Retry failed pages', group: 'Detect', keywords: 'again failed errors jobs', when: () => !!retryable() && sidecarReady() && !app.detecting, run: () => retryable()?.retry() },
+  { id: 'page.nextWork', label: 'Next page with work', group: 'Pages', keywords: 'todo unfinished check unplaced go', when: () => typeset() && app.pages.length > 1, run: () => nextPageWithWork() },
   { id: 'chapter.export', label: 'Export…', group: 'Chapter', keywords: 'save png psd zip pages images', when: () => typeset() && !app.exporting, run: () => { app.exportOpen = true; } },
   { id: 'bulk.open', label: 'Bulk style', group: 'Text box', keywords: 'many boxes style all batch', when: () => typeset() && !app.bulk.active, run: () => openBulk() },
   { id: 'view.rawShow', label: 'Show raw page', group: 'View', keywords: 'compare raw original reference sidebar japanese', when: () => typeset() && app.sidebarHidden, run: toggleRaw },

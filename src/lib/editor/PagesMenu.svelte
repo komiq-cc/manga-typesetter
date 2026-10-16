@@ -6,7 +6,7 @@
   //
   // The statuses are `checks.pages`, the store's one pass over the shared check
   // list, so opening this costs a list of buttons and nothing more.
-  import { app, checks, gotoPage } from '../store.svelte.js';
+  import { app, checks, gotoPage, nextPageWithWork } from '../store.svelte.js';
 
   // `filter` is kept by the pager rather than here, so a filter picked once is
   // still picked the next time the menu opens.
@@ -72,6 +72,10 @@
     close({ restoreFocus: true });
     gotoPage(i);
   }
+
+  // Stays open: walking the chapter page by page is pressing this again, and
+  // the list shows each page's dot change as the work on it is finished.
+  const nextWork = () => nextPageWithWork();
 </script>
 
 <div class="pages-menu" role="dialog" aria-label="Pages" bind:this={menuEl} use:focusCurrent>
@@ -99,4 +103,7 @@
   {:else}
     <div class="pm-empty">No pages</div>
   {/if}
+  <div class="pm-foot">
+    <button onclick={nextWork}>Next page with work</button>
+  </div>
 </div>

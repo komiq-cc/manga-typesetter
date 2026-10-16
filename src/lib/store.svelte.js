@@ -1380,6 +1380,27 @@ export function goNextCheck(items = checkItems()) {
   return openCheck(it);
 }
 
+// Next page with work (FLOW-8): the first page after this one, wrapping, that
+// is not done (`checks.pages`) - unplaced lines or anything else to check. The
+// page-sized step beside Next's item-sized one, and with no "done" stamp to
+// set on the way out: the page is done when its list is empty.
+//
+// In a strip there is no page to turn to - the scroll leads the index - so the
+// page's first item is opened instead, which scrolls to it when it is a box.
+export function nextPageWithWork(statuses = checks.pages) {
+  const n = statuses.length;
+  for (let k = 1; k < n; k++) {
+    const i = (app.pageIndex + k) % n;
+    if (statuses[i] === 'done') continue;
+    if (isLongstrip()) return openCheck(checks.items.find((it) => it.pageIndex === i));
+    gotoPage(i);
+    return true;
+  }
+  const here = statuses[app.pageIndex];
+  toast(here && here !== 'done' ? 'Only this page has work left' : 'Every page is done');
+  return false;
+}
+
 // Every box on a page, for the moments a whole page's worth of text arrives at
 // once rather than being typed: a chapter opening from disk, a project imported
 // from a PSD. Both land boxes whose height was decided by an older build, or by

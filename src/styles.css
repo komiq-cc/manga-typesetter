@@ -403,6 +403,8 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
 }
 .pager .pm-grid button.cur{ background:var(--accent-soft); font-weight:600; }
 .pm-empty{ padding:14px 0; text-align:center; color:var(--t3); font-size:12px; }
+.pm-foot{ padding-top:6px; border-top:1px solid var(--line); }
+.pager .pm-foot button{ width:100%; height:28px; font-size:12.5px; }
 
 /* queue list - inside the floating "Text queue" panel */
 .qlist{ padding:6px; display:flex; flex-direction:column; gap:4px; }
