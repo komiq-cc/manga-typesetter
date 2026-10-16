@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use ort::session::Session;
+use sha2::{Digest, Sha256};
 use tauri::async_runtime::Mutex as AsyncMutex;
 
 use super::accel;
@@ -19,57 +20,69 @@ use super::panels;
 use super::sorting::ReadingDirection;
 use super::textdetector::TextDetector;
 
-/// Model file relative path and download URL.
+/// Model file relative path, pinned download URL and SHA-256.
 struct ModelFile {
     rel: &'static str,
     url: &'static str,
+    sha256: &'static str,
 }
 
 const PANEL_MODEL: ModelFile = ModelFile {
     rel: "manga109_yolo_l_yv11.onnx",
-    url: "https://huggingface.co/deepghs/manga109_yolo/resolve/main/v2023.12.07_l_yv11/model.onnx",
+    url: "https://huggingface.co/deepghs/manga109_yolo/resolve/6b5730a9f1f34581b87468f2c609e3269a9faccf/v2023.12.07_l_yv11/model.onnx",
+    sha256: "66f6fbf6435d26a6b93880ba52fdc0cecbf8634ab8e52a20f70c1625c6ae0723",
 };
 const TEXT_DETECTOR: ModelFile = ModelFile {
     rel: "comictextdetector.onnx",
     url: "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/comictextdetector.pt.onnx",
+    sha256: "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
 };
 const JAPANESE_OCR_FILES: [ModelFile; 3] = [
     ModelFile {
         rel: "manga-ocr/encoder_model.onnx",
-        url: "https://huggingface.co/onnx-community/manga-ocr-base-ONNX/resolve/main/onnx/encoder_model.onnx",
+        url: "https://huggingface.co/onnx-community/manga-ocr-base-ONNX/resolve/f9023406bb2f6b17df67bc4a327c56ecd20611f0/onnx/encoder_model.onnx",
+        sha256: "df35f64c2400ea860c70a2d06f2a1f99892374a78c89fcf35308076557a3863f",
     },
     ModelFile {
         rel: "manga-ocr/decoder_model.onnx",
-        url: "https://huggingface.co/onnx-community/manga-ocr-base-ONNX/resolve/main/onnx/decoder_model.onnx",
+        url: "https://huggingface.co/onnx-community/manga-ocr-base-ONNX/resolve/f9023406bb2f6b17df67bc4a327c56ecd20611f0/onnx/decoder_model.onnx",
+        sha256: "31ca14d6dee6b3966144e128d0481d5a91f5083cbced81fe7a9571713fa50cd4",
     },
     ModelFile {
         rel: "manga-ocr/vocab.txt",
-        url: "https://huggingface.co/kha-white/manga-ocr-base/resolve/main/vocab.txt",
+        url: "https://huggingface.co/kha-white/manga-ocr-base/resolve/aa6573bd10b0d446cbf622e29c3e084914df9741/vocab.txt",
+        sha256: "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d",
     },
 ];
 const CHINESE_OCR_V5_MOBILE: ModelFile = ModelFile {
     rel: "paddleocr/ch_PP-OCRv5_rec_mobile.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
+    sha256: "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
 };
 const CHINESE_OCR_V5_SERVER: ModelFile = ModelFile {
     rel: "paddleocr/ch_PP-OCRv5_rec_server.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx",
+    sha256: "e09385400eaaaef34ceff54aeb7c4f0f1fe014c27fa8b9905d4709b65746562a",
 };
 const KOREAN_OCR_V5_MOBILE: ModelFile = ModelFile {
     rel: "paddleocr/korean_PP-OCRv5_rec_mobile.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx",
+    sha256: "cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b",
 };
 const KOREAN_OCR_V4_MOBILE: ModelFile = ModelFile {
     rel: "paddleocr/korean_PP-OCRv4_rec_mobile.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv4/rec/korean_PP-OCRv4_rec_mobile.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv4/rec/korean_PP-OCRv4_rec_mobile.onnx",
+    sha256: "ab151ba9065eccd98f884cf4d927db091be86137276392072edd4f9d43ad7426",
 };
 const PADDLE_OCR_V6_SMALL: ModelFile = ModelFile {
     rel: "paddleocr/PP-OCRv6_rec_small.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+    sha256: "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
 };
 const PADDLE_OCR_V6_MEDIUM: ModelFile = ModelFile {
     rel: "paddleocr/PP-OCRv6_rec_medium.onnx",
-    url: "https://huggingface.co/DjB314/RapidOCR/resolve/main/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx",
+    url: "https://huggingface.co/DjB314/RapidOCR/resolve/04e88d0483f0bfcdd0f29429594244c10bfc2867/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx",
+    sha256: "eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b",
 };
 
 /// The source language selected on the project. Unknown/missing values retain
@@ -270,7 +283,7 @@ impl DetectEngine {
             if path.is_file() {
                 continue;
             }
-            download(f.url, &path).await?;
+            download(f.url, &path, f.sha256).await?;
         }
         Ok(())
     }
@@ -358,8 +371,15 @@ fn part_path(path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-/// Renames a finished download to its final path and cleans up scratch files.
-fn commit_download(tmp: &Path, path: &Path) -> Result<(), String> {
+/// Checks a streamed download's hash before renaming it and cleans up scratch files.
+fn commit_download(tmp: &Path, path: &Path, expected: &str, got: &str) -> Result<(), String> {
+    if got != expected {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!(
+            "{}: SHA-256 hash did not match (expected {expected:.12}, got {got:.12})",
+            path.display()
+        ));
+    }
     if path.is_file() {
         let _ = std::fs::remove_file(tmp);
         return Ok(());
@@ -374,13 +394,13 @@ fn commit_download(tmp: &Path, path: &Path) -> Result<(), String> {
 }
 
 /// Streams a model file to disk via a scratch file with backpressured async-to-disk channel.
-async fn download(url: &str, path: &Path) -> Result<(), String> {
-    download_within(url, path, download_deadline()).await
+async fn download(url: &str, path: &Path, sha256: &str) -> Result<(), String> {
+    download_within(url, path, sha256, download_deadline()).await
 }
 
 /// `download`, with the stall bound passed in - the seam the tests use, since
 /// no suite may wait the real five minutes out.
-async fn download_within(url: &str, path: &Path, stall: Duration) -> Result<(), String> {
+async fn download_within(url: &str, path: &Path, sha256: &str, stall: Duration) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -393,14 +413,17 @@ async fn download_within(url: &str, path: &Path, stall: Duration) -> Result<(), 
     let (tx, mut rx) = tauri::async_runtime::channel::<Vec<u8>>(8);
     let writer = {
         let tmp = tmp.clone();
-        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
             use std::io::Write;
             let mut file =
                 std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            let mut hash = Sha256::new();
             while let Some(chunk) = rx.blocking_recv() {
                 file.write_all(&chunk).map_err(|e| format!("{}: {e}", tmp.display()))?;
+                hash.update(&chunk);
             }
-            file.sync_all().map_err(|e| format!("{}: {e}", tmp.display()))
+            file.sync_all().map_err(|e| format!("{}: {e}", tmp.display()))?;
+            Ok(format!("{:x}", hash.finalize()))
         })
     };
 
@@ -462,7 +485,7 @@ async fn download_within(url: &str, path: &Path, stall: Duration) -> Result<(), 
         .and_then(|r| r);
 
     match streamed.and(written) {
-        Ok(()) => commit_download(&tmp, path),
+        Ok(got) => commit_download(&tmp, path, sha256, &got),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -751,6 +774,21 @@ mod tests {
     }
 
     #[test]
+    fn existing_model_files_still_count_as_present_without_hashing() {
+        let root = scratch("existing-model");
+        let engine = DetectEngine::new(root.clone());
+        let path = root.join(TEXT_DETECTOR.rel);
+        std::fs::write(&path, b"old cached weights").unwrap();
+
+        tauri::async_runtime::block_on(engine.ensure(&[&TEXT_DETECTOR])).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"old cached weights");
+        let info = cache_info(&root);
+        assert!(info.entries[0].exists);
+        assert_eq!(info.total_bytes, 18);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn cache_info_sums_a_tree_including_subdirectories() {
         let root = scratch("sizes");
         std::fs::write(root.join("a.onnx"), vec![0u8; 1000]).unwrap();
@@ -866,13 +904,26 @@ mod tests {
     }
 
     #[test]
-    fn committing_a_download_moves_it_and_leaves_no_scratch_file() {
+    fn committing_a_download_checks_its_hash_and_removes_mismatches() {
         let root = scratch("commit");
         let tmp = root.join("model.onnx.1.part");
         let dest = root.join("model.onnx");
-        std::fs::write(&tmp, b"weights").unwrap();
+        let expected = "9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c";
+        std::fs::write(&tmp, b"corrupt").unwrap();
+        let got = format!("{:x}", Sha256::digest(std::fs::read(&tmp).unwrap()));
 
-        assert!(commit_download(&tmp, &dest).is_ok());
+        let err = commit_download(&tmp, &dest, expected, &got).unwrap_err();
+        assert!(err.contains("model.onnx"), "{err}");
+        assert!(err.contains("hash did not match"), "{err}");
+        assert!(err.contains("expected 9a129038d9a0"), "{err}");
+        assert!(err.contains("got 11d510e067d2"), "{err}");
+        assert!(!tmp.exists(), "a hash mismatch must remove the scratch file");
+        assert!(!dest.exists(), "a hash mismatch must never be committed");
+
+        std::fs::write(&tmp, b"weights").unwrap();
+        let got = format!("{:x}", Sha256::digest(std::fs::read(&tmp).unwrap()));
+
+        assert!(commit_download(&tmp, &dest, expected, &got).is_ok());
         assert!(!tmp.exists(), "the scratch file must not survive");
         assert_eq!(std::fs::read(&dest).unwrap(), b"weights");
         let _ = std::fs::remove_dir_all(&root);
@@ -887,8 +938,9 @@ mod tests {
         let dest = root.join("model.onnx");
         std::fs::write(&tmp, b"mine").unwrap();
         std::fs::write(&dest, b"theirs").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"mine"));
 
-        assert!(commit_download(&tmp, &dest).is_ok());
+        assert!(commit_download(&tmp, &dest, &hash, &hash).is_ok());
         assert!(!tmp.exists());
         assert_eq!(std::fs::read(&dest).unwrap(), b"theirs");
         let _ = std::fs::remove_dir_all(&root);
@@ -904,8 +956,9 @@ mod tests {
         let dest = root.join("model.onnx");
         std::fs::write(&tmp, vec![0u8; 64]).unwrap();
         std::fs::create_dir_all(dest.join("occupied")).unwrap();
+        let hash = format!("{:x}", Sha256::digest([0u8; 64]));
 
-        assert!(commit_download(&tmp, &dest).is_err());
+        assert!(commit_download(&tmp, &dest, &hash, &hash).is_err());
         assert!(!tmp.exists(), "a failed rename must not leak the scratch file");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -945,7 +998,9 @@ mod tests {
     fn download_or_hang(url: String, dest: PathBuf, stall: Duration) -> Result<(), String> {
         let (done, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done.send(tauri::async_runtime::block_on(download_within(&url, &dest, stall)));
+            let _ = done.send(tauri::async_runtime::block_on(download_within(
+                &url, &dest, TEXT_DETECTOR.sha256, stall,
+            )));
         });
         rx.recv_timeout(Duration::from_secs(20))
             .expect("the download never ended: the stall bound did not interrupt the wait")
@@ -1026,6 +1081,13 @@ mod tests {
         for f in all {
             assert!(f.url.starts_with("https://"), "{}", f.url);
             assert!(!f.rel.starts_with('/') && !f.rel.contains(".."), "{}", f.rel);
+            assert_eq!(f.sha256.len(), 64, "{}", f.rel);
+            assert!(f.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "{}", f.rel);
+            if let Some((_, rest)) = f.url.split_once("/resolve/") {
+                let revision = rest.split('/').next().unwrap();
+                assert_eq!(revision.len(), 40, "{}", f.url);
+                assert!(revision.bytes().all(|b| b.is_ascii_hexdigit()), "{}", f.url);
+            }
         }
     }
 
