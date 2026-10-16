@@ -4,6 +4,7 @@ pub mod brush;
 // `pub` for examples/detect_pages.rs, the headless Detect scripts call.
 pub mod detect;
 mod durability;
+mod trash;
 mod font_coverage;
 mod font_decode;
 // Linux-only at runtime; compiled under `test` everywhere so its unit tests
@@ -50,7 +51,8 @@ pub fn run() {
       system_fonts::system_font_face,
       font_coverage::system_font_coverage,
       font_decode::font_to_sfnt,
-      durability::fsync_path
+      durability::fsync_path,
+      trash::trash_path
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

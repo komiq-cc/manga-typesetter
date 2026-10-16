@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('./fsx.js', () => {
-  const tree = { dirs: new Set(), files: new Map() };
+  const tree = { dirs: new Set(), files: new Map(), trashed: [] };
   // The atomic writes below mint these, exactly as the real fsx does.
   const live = new Set();
   let tmpSeq = 0;
@@ -104,6 +104,10 @@ vi.mock('./fsx.js', () => {
         for (const d of [...tree.dirs]) if (d === p || d.startsWith(p + '/')) tree.dirs.delete(d);
         for (const f of [...tree.files.keys()]) if (f === p || f.startsWith(p + '/')) tree.files.delete(f);
       },
+      async trash(p) {
+        await this.remove(p);
+        tree.trashed.push(p);
+      },
       async exists(p) {
         return tree.dirs.has(p) || tree.files.has(p);
       },
@@ -156,6 +160,7 @@ const CHAPTER = (id, number, pages) =>
 beforeEach(async () => {
   fsx._tree.dirs.clear();
   fsx._tree.files.clear();
+  fsx._tree.trashed.length = 0;
   fsx._tree.dirs.add('/lib');
   await setRoot('/lib');
 });
@@ -361,9 +366,10 @@ describe('createProject', () => {
 });
 
 describe('deleteProject', () => {
-  it('removes the directory and the catalogue entry', async () => {
+  it('trashes the directory and removes the catalogue entry', async () => {
     const p = await createProject('Gone');
     await deleteProject(p.id);
+    expect(fsx._tree.trashed).toEqual([p.dir]);
     expect(fsx._tree.dirs.has('/lib/gone')).toBe(false);
     expect(projectById(p.id)).toBeUndefined();
   });
@@ -406,13 +412,14 @@ describe('withinHome', () => {
 });
 
 describe('deleteChapter', () => {
-  it('removes the chapter directory and entry without touching the project', async () => {
+  it('trashes the chapter directory and removes its entry without touching the project', async () => {
     const p = await createProject('Keep');
     fsx._tree.dirs.add('/lib/keep/001');
     fsx._tree.files.set('/lib/keep/001/chapter.json', CHAPTER('c1', 1, []));
     await scanLibrary();
     const chapter = projectById(p.id).chapters[0];
     await deleteChapter(p.id, chapter.id);
+    expect(fsx._tree.trashed).toEqual([chapter.dir]);
     expect(fsx._tree.dirs.has('/lib/keep/001')).toBe(false);
     expect(projectById(p.id).chapters).toHaveLength(0);
     expect(fsx._tree.dirs.has('/lib/keep')).toBe(true);
@@ -892,6 +899,36 @@ async function seedOpenChapter() {
 }
 
 const chapterJson = (c) => JSON.parse(fsx._tree.files.get(`${c.dir}/chapter.json`));
+
+describe('chapter snapshots', () => {
+  it('restores an open snapshot and retains the replaced chapter', async () => {
+    const { listChapterSnapshots, restoreChapterSnapshot } = await import('./library.svelte.js');
+    const { p, c } = await seedOpenChapter();
+    closeChapter();
+    const [snapshot] = await listChapterSnapshots(p.id, c.id);
+    expect(snapshot.reason).toBe('open');
+    const snapshotText = fsx._tree.files.get(`${c.dir}/logs/snapshots/${snapshot.name}`);
+    const original = JSON.parse(snapshotText);
+    const changed = {
+      ...original,
+      updatedAt: new Date(Date.parse(original.updatedAt) + 60_000).toISOString(),
+      pages: [],
+      mode: 'translate',
+    };
+    const changedText = JSON.stringify(changed);
+    fsx._tree.files.set(`${c.dir}/chapter.json`, changedText);
+    fsx._tree.files.set(`${c.dir}/logs/history.json`, '{}');
+
+    const result = await restoreChapterSnapshot(p.id, c.id, snapshot.name);
+
+    expect(chapterJson(c).pages).toEqual(original.pages);
+    expect(chapterJson(c).mode).toBe(original.mode);
+    expect(chapterJson(c).typesetting).toEqual(original.typesetting);
+    expect(result).toEqual({ restored: snapshot.name, before: expect.stringContaining('--before-restore.json'), missingCleaned: 0 });
+    expect(fsx._tree.files.get(`${c.dir}/logs/snapshots/${result.before}`)).toBe(changedText);
+    expect(fsx._tree.files.has(`${c.dir}/logs/history.json`)).toBe(false);
+  });
+});
 
 const { tags, createTag, findTag, rememberTagSize, tagSize } = await import('./tags.svelte.js');
 

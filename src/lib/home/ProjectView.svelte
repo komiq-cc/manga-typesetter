@@ -5,7 +5,7 @@
   import { relativeTime, plural } from '../format.js';
   import { exportChapterPackage, stayingNote } from '../package-flow.js';
 
-  let { onNewChapter, onSources } = $props();
+  let { onNewChapter, onSources, onVersions } = $props();
 
   // Chapter progress state.
   function status(c) {
@@ -160,11 +160,17 @@
           disabled={c.unreadable}
           title="Cleaned pages and translations">Sources</button
         >
+        <button
+          class="chapter-act"
+          onclick={() => onVersions(project.id, c.id)}
+          disabled={c.unreadable}
+          title="Restore an earlier version of this chapter">Versions</button
+        >
         <button class="chapter-del" onclick={() => onDelete(c)} title="Delete chapter">Delete</button>
       </div>
       {#if confirmingId === c.id}
         <div class="confirm-note warn" role="alert">
-          Deletes this chapter's folder, including its {plural(c.pageCount, 'copied raw')}. No undo. Click Delete again to confirm.
+          Moves this chapter's folder to the trash, including its {plural(c.pageCount, 'copied raw')}. Click Delete again to confirm.
         </div>
       {/if}
     {:else}

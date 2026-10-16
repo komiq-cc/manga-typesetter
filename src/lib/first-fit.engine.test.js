@@ -254,24 +254,29 @@ describe('a version 1 chapter opened with the Rust engine on', () => {
     }
     expect(firstFitChanges()).toMatchObject({ grew: 3, kept: false });
     expect(app.saved).toBe(true);
-    expect(await digest()).toEqual(before);
+    // Opening now archives the original bytes. The source and derived files
+    // still must not change merely because the engine fitted them in memory.
+    const afterOpen = await digest();
+    const snapshots = Object.keys(afterOpen).filter((name) => name.startsWith('/logs/snapshots/'));
+    expect(snapshots).toHaveLength(1);
+    expect(afterOpen).toEqual({ ...before, [snapshots[0]]: before['/chapter.json'] });
 
     // Not after the debounce an edit would have armed.
     await wait(DOC_SAVE_MS + 200);
-    expect(await digest()).toEqual(before);
+    expect(await digest()).toEqual(afterOpen);
 
     // And not by leaving.
     expect(await flushBeforeLeaving('editor')).toBe(true);
     closeChapter();
-    expect(await digest()).toEqual(before);
+    expect(await digest()).toEqual(afterOpen);
   });
 
   it('is written by Keep: the grown heights, and the one integer', async () => {
     await useTextEngine('rust');
     const old = await record();
-    const before = await digest();
     await openChapter(p.id, c.id);
     await _engineSwitchSync().settled();
+    const before = await digest();
     const grown = boxes().map((b) => ({ id: b.id, x: b.x, y: b.y, w: b.w, h: b.h }));
     await keepFirstFit();
     // What every save writes, and no other file of the chapter's: the

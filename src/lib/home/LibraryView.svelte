@@ -99,8 +99,8 @@
       />
       {#if confirmingId === project.id}
         <div class="confirm-note warn" role="alert">
-          Deletes the folder and every chapter in it - {plural(pageCountOf(project), 'page')}. No
-          undo. Click Delete again to confirm.
+          Moves the folder and every chapter in it to the trash - {plural(pageCountOf(project), 'page')}.
+          Click Delete again to confirm.
         </div>
       {/if}
     {/each}

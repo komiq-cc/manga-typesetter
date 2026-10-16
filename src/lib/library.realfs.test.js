@@ -55,6 +55,8 @@ vi.mock('./fsx.js', async () => {
       writeFile: (p, bytes) => fs.writeFile(p, bytes),
       mkdir: (p) => fs.mkdir(p, { recursive: true }),
       remove: (p) => fs.rm(p, { recursive: true, force: true }),
+      trash: (p) => fs.rm(p, { recursive: true, force: true }),
+      rename: (from, to) => fs.rename(from, to),
       async exists(p) {
         try {
           await fs.access(p);

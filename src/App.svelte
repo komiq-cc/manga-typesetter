@@ -15,6 +15,7 @@
   import ProjectView from './lib/home/ProjectView.svelte';
   import NewChapterDialog from './lib/home/NewChapterDialog.svelte';
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
+  import ChapterVersionsSheet from './lib/home/ChapterVersionsSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
@@ -43,6 +44,9 @@
   let sourcesOpen = $state(false);
   let sourcesBusy = $state(false);
   let sourcesRef = $state({ projectId: null, chapterId: null });
+  let versionsOpen = $state(false);
+  let versionsBusy = $state(false);
+  let versionsRef = $state({ projectId: null, chapterId: null });
   // Library root resolves asynchronously before child views mount.
   let booted = $state(false);
   // Releases the beforeunload/pagehide fallback - see `armUnloadFlush`.
@@ -252,6 +256,11 @@
     newChapterOpen = true;
   }
 
+  function openVersions(projectId, chapterId) {
+    versionsRef = { projectId, chapterId };
+    versionsOpen = true;
+  }
+
   function openSources(projectId, chapterId) {
     sourcesRef = { projectId, chapterId };
     sourcesOpen = true;
@@ -419,6 +428,11 @@
         if (!sourcesBusy) sourcesOpen = false;
         return;
       }
+      if (versionsOpen) {
+        // Nor is a restore half-written.
+        if (!versionsBusy) versionsOpen = false;
+        return;
+      }
       if (app.exportOpen) return (app.exportOpen = false);
       if (app.bulk.active) return closeBulk();
       if (settingsOpen) return (settingsOpen = false);
@@ -506,6 +520,7 @@
       <ProjectView
         onNewChapter={(id) => openNewChapter(id)}
         onSources={openSources}
+        onVersions={openVersions}
       />
     {:else}
       <LibraryView
@@ -527,6 +542,12 @@
   bind:busy={sourcesBusy}
   projectId={sourcesRef.projectId}
   chapterId={sourcesRef.chapterId}
+/>
+<ChapterVersionsSheet
+  bind:open={versionsOpen}
+  bind:busy={versionsBusy}
+  projectId={versionsRef.projectId}
+  chapterId={versionsRef.chapterId}
 />
 <FontModal bind:open={fontModalOpen} />
 <BrushModal />

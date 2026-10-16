@@ -231,6 +231,14 @@ export const fsx = {
   async remove(p) {
     return (await fs()).remove(p, { recursive: true });
   },
+  async trash(p) {
+    if (!inTauri()) throw new Error('Moving to the trash needs the desktop app');
+    if (!coreMod) coreMod = await import('@tauri-apps/api/core');
+    return coreMod.invoke('trash_path', { path: p });
+  },
+  async rename(from, to) {
+    return (await fs()).rename(from, to);
+  },
   async exists(p) {
     return (await fs()).exists(p);
   },

@@ -10,6 +10,7 @@
 //   <root>/<project-slug>/<chapter-slug>/cleaned/   (only once a page has one)
 
 import { fsx } from './fsx.js';
+import { takeSnapshot, listSnapshots, isSnapshotName } from './snapshots.js';
 import { uniqueSlug, chapterSlug } from './paths.js';
 import {
   app,
@@ -56,6 +57,8 @@ import { forgetPagePixels } from './page-pixels.js';
 
 const ROOT_KEY = 'mt.libraryRoot';
 const SCHEMA = 1;
+const lastSnapshot = new Map();
+const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 
 // The Korean branch stored language as an installation preference. Adopt it
 // only for projects written before the language moved into project.json.
@@ -558,7 +561,7 @@ export const deleteProject = guarded(async function deleteProject(projectId) {
   // them into a directory this call is about to remove. The user is one Escape
   // from the library, and the message says so.
   assertProjectClosed(projectId);
-  await fsx.remove(p.dir);
+  await fsx.trash(p.dir);
   library.projects = library.projects.filter((x) => x.id !== projectId);
 });
 
@@ -647,7 +650,7 @@ export const deleteChapter = guarded(async function deleteChapter(projectId, cha
   // that no longer existed, its next autosave recreated chapter.json inside the
   // deleted tree, and the scan brought the ghost back.
   assertClosed(chapterId);
-  await fsx.remove(c.dir);
+  await fsx.trash(c.dir);
   const remaining = p.chapters.filter((x) => x.id !== chapterId);
   // The cover has to follow, and project.json has to hear about it. Left
   // standing, `coverChapterId` names a chapter that no longer exists - and
@@ -1171,6 +1174,62 @@ async function chapterFile(projectId, chapterId) {
   assertClosed(chapterId);
   return { c, path: await fsx.join(c.dir, 'chapter.json') };
 }
+
+export async function listChapterSnapshots(projectId, chapterId) {
+  const { c } = await chapterFile(projectId, chapterId);
+  return listSnapshots(c.dir);
+}
+
+// Restore is a closed-document mutation, just like replacing its sources.
+// The gate keeps an open from reading the old pages while this commits, and
+// commitPages makes the final closed check before either record is written.
+export const restoreChapterSnapshot = guarded(async function (projectId, chapterId, name) {
+  if (!isSnapshotName(name)) throw new Error('Invalid snapshot name');
+  const { c, path } = await chapterFile(projectId, chapterId);
+  const snapshotsDir = await fsx.join(c.dir, 'logs', 'snapshots');
+  const record = await readJson(await fsx.join(snapshotsDir, name));
+  if (!Array.isArray(record.pages)) throw new Error('Snapshot has no pages array');
+  const currentText = await fsx.readTextFile(path);
+  const current = JSON.parse(currentText);
+  // Not best-effort: a restore without the replaced bytes on the shelf cannot
+  // be undone. Dedupe may mean they are already there under another reason;
+  // verify those bytes rather than assuming a hand-edited updatedAt is unique.
+  let before = await takeSnapshot(c.dir, currentText, current, 'before-restore');
+  if (!before) {
+    for (const snapshot of await listSnapshots(c.dir)) {
+      if (await fsx.readTextFile(await fsx.join(snapshotsDir, snapshot.name)) === currentText) {
+        before = snapshot.name;
+        break;
+      }
+    }
+  }
+  if (!before || !(await fsx.exists(await fsx.join(snapshotsDir, before)))) {
+    throw new Error('The current chapter could not be retained before restore');
+  }
+  const cleanedDir = await fsx.join(c.dir, 'cleaned');
+  let missingCleaned = 0;
+  for (const pg of record.pages) {
+    if (pg.cleaned && (!isPlainFileName(pg.cleaned) ||
+      !(await fsx.exists(await fsx.join(cleanedDir, pg.cleaned))))) missingCleaned++;
+  }
+  // Pass the whole snapshot record: mode, typesetting and every other field
+  // belong to that moment too. Only commitPages' updatedAt is new - and the id,
+  // which is the catalogue's handle on this chapter and must not change under
+  // it whatever a file in the shelf says.
+  record.id = current.id ?? record.id;
+  await commitPages(c, path, record, record.pages);
+  c.number = record.number;
+  c.title = record.title ?? '';
+  c.createdAt = record.createdAt;
+  c.mode = normalizeChapterMode(record.mode);
+  const history = await fsx.join(c.dir, 'logs', 'history.json');
+  try {
+    await fsx.remove(history);
+  } catch (e) {
+    if (await fsx.exists(history)) throw e;
+  }
+  return { restored: name, before, missingCleaned };
+});
 
 // What the sources sheet renders: the record's pages plus, for each cleaned
 // page, whether the file is actually still there. A missing one falls back to
@@ -1824,7 +1883,21 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // chapter has already been flushed and nothing is queued for this one, so
   // anything of our shape down there is finished with. See `sweepTemps`.
   await sweepTemps(c.dir);
-  const record = await readJson(await fsx.join(c.dir, 'chapter.json'));
+  if (!mine()) return;
+  const path = await fsx.join(c.dir, 'chapter.json');
+  if (!mine()) return;
+  const chapterText = await fsx.readTextFile(path);
+  if (!mine()) return;
+  const record = JSON.parse(chapterText);
+  // Preserve exactly what was read, before open repairs or normalises it.
+  // An unavailable snapshot shelf must never cost the user an otherwise valid
+  // open. The ticket is checked again even when the snapshot write failed.
+  try {
+    await takeSnapshot(c.dir, chapterText, record, 'open');
+    lastSnapshot.set(c.dir, Date.now());
+  } catch {
+    /* best-effort: chapter.json remains the source of truth */
+  }
   if (!mine()) return;
   const rawsDir = await fsx.join(c.dir, 'raws');
   const cleanedDir = await fsx.join(c.dir, 'cleaned');
@@ -2062,8 +2135,21 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   if (!c) return;
   const path = await fsx.join(c.dir, 'chapter.json');
   if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
-  const record = await readJson(path);
+  const chapterText = await fsx.readTextFile(path);
   if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
+  const record = JSON.parse(chapterText);
+  // The outgoing disk version, not the editor's next version. The save queue
+  // serialises this with every other save; the ref and turn still have to be
+  // ours when it finishes, just as they must after the record read above.
+  if (Date.now() - (lastSnapshot.get(c.dir) ?? 0) >= SNAPSHOT_INTERVAL_MS) {
+    try {
+      await takeSnapshot(c.dir, chapterText, record, 'timed');
+      lastSnapshot.set(c.dir, Date.now());
+    } catch {
+      /* best-effort: a snapshot failure cannot refuse the actual save */
+    }
+    if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
+  }
 
   record.updatedAt = now();
   // The open chapter's mode is app state while it is open - that is how a switch
