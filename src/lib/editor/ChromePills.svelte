@@ -8,7 +8,7 @@
   // left of it, app drawers on the right.
   // Nothing here is laid out by a parent, every row pins itself to the window,
   // so the canvas underneath is never inset by chrome it does not know about.
-  import { app, openBulk, closeBulk, isTranslateMode, checks, goNextCheck } from '../store.svelte.js';
+  import { app, openBulk, closeBulk, isTranslateMode, checks, goNextCheck, chapterProgress } from '../store.svelte.js';
   import { goProject, goLibrary } from '../route.svelte.js';
   import { projectById, chapterById } from '../library.svelte.js';
   import { exportImages } from '../exporter.js';
@@ -107,6 +107,12 @@
   // The check list (FLOW-1): how much is left, and one press to the next of it.
   // Gone while nothing is left, and in a translate chapter, which has no boxes.
   const toCheck = $derived(translate ? 0 : checks.items.length);
+  // How far the whole chapter is through its lines, beside the project's name
+  // because it is a fact about the open chapter like the save dot. Not the "to
+  // check" count - that is the pill beside this one and says its own. A
+  // translate chapter has its own count in the queue, and a chapter with no
+  // lines has nothing to be through.
+  const progress = $derived(translate ? null : chapterProgress(app.pages));
   const nextKey = $derived(formatCombo(comboFor('review.next')));
   const regionsKey = $derived(formatCombo(comboFor('view.regions')));
   const regionsTip = $derived(
@@ -120,6 +126,9 @@
   </button>
   <div class="pill pill-proj">
     <span class="pill-label">{label}</span>
+    {#if progress?.total}
+      <span class="pill-prog" title="Lines with a text box, across the whole chapter">placed {progress.placed} / {progress.total}</span>
+    {/if}
     <span class="save-dot" class:saved={app.saved} class:failed={app.saveFailed} title={saveTitle}></span>
   </div>
   {#if toCheck}

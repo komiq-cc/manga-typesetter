@@ -1204,7 +1204,8 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .chapter-num{ width:72px; flex:none; font-size:13px; }
 .chapter-title{ flex:1; min-width:0; font-size:13px; }
 .chapter-sub{ font-size:11px; color:var(--t3); margin-top:4px; }
-.chapter-chip{ width:120px; flex:none; text-align:right; font-size:11px; color:var(--t2); }
+.chapter-chip{ width:150px; flex:none; text-align:right; font-size:11px; color:var(--t2); }
+.chapter-chip .chapter-sub{ font-variant-numeric:tabular-nums; }
 .chapter-pages{ width:130px; flex:none; text-align:right; font-size:11.5px; color:var(--t2); }
 .chapter-time{ width:104px; flex:none; text-align:right; font-size:11px; color:var(--t3); }
 .chapter-del,.chapter-act{ border:none; background:transparent; font-size:10.5px; color:var(--t3); cursor:pointer; padding:0 8px; }
@@ -1578,6 +1579,9 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .pill-proj{ cursor:default; font-weight:600; letter-spacing:.2px; overflow:hidden; }
 .pill-proj:hover{ border-color:var(--line2); }
 .pill-proj .pill-label{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* The chapter's progress (FLOW-10): quieter than the name it follows, and never
+   the part that gives way when the name is long. */
+.pill-prog{ flex:none; font-size:11px; font-weight:400; letter-spacing:0; color:var(--t2); font-variant-numeric:tabular-nums; }
 /* The check list's count (FLOW-1): a control, unlike the project pill beside
    it - a press walks to the next box or line that needs a look. */
 .pill-check{ flex:none; gap:5px; padding:0 8px 0 11px; }

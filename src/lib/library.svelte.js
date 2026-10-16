@@ -14,6 +14,8 @@ import { takeSnapshot, requireSnapshot, listSnapshots, isSnapshotName } from './
 import { uniqueSlug, chapterSlug } from './paths.js';
 import {
   app,
+  chapterProgress,
+  checks,
   loadProjectPages,
   hasPageSpace,
   rescalePageGeometry,
@@ -214,10 +216,30 @@ async function sweepTemps(dir, entries = null) {
 
 // ---------- scan ----------
 
-// Everything slice 1 knows about a chapter's state: it has pages, and it has
-// typesetting. There is no progress model here and none is invented - a box on
-// any page means work has started, and that is the whole claim.
+// Whether a chapter has typesetting at all: a box on any page means work has
+// started, and that is the whole claim. How far it has got is `chapterProgress`,
+// kept beside this on the entry - see below.
 export const isTypeset = (pages) => (pages ?? []).some((pg) => (pg.boxes ?? []).length > 0);
+
+// "placed X / Y" for the project screen (FLOW-10), carried on the catalogue
+// entry beside `typeset` and refreshed at every place `typeset` is. It costs no
+// extra read: each of those places already holds the chapter's pages, the scan
+// included (it parses all of chapter.json to learn `pageCount`). Memory only -
+// the entries are never written back, so chapter.json and project.json gain no
+// field and a stale number cannot outlive the session that computed it.
+
+// The last "N to check" of a chapter closed in this session. The check list is
+// worked out from the open document (fonts, layout stamps, the outline finder),
+// so unlike the placed count it cannot be rebuilt from chapter.json at scan
+// time; the closing editor is the one moment it is known. Keyed by chapter id,
+// stamped with the `updatedAt` it was true for: a closed-chapter edit, a save
+// that lands late or a rescan that finds the file changed all move that, and the
+// number is then not shown rather than shown wrong.
+const checkedAtClose = new Map();
+export function lastToCheck(c) {
+  const seen = c ? checkedAtClose.get(c.id) : null;
+  return seen && seen.at === c.updatedAt ? seen.n : null;
+}
 
 // The chapter's translations, as the same JSON document the export produces,
 // written beside chapter.json on every save. It is a derived file - chapter.json
@@ -245,6 +267,7 @@ async function readChapter(projectDir, slug) {
     updatedAt: raw.updatedAt,
     pageCount: pages.length,
     typeset: isTypeset(pages),
+    progress: chapterProgress(pages),
     // Absent reads as 'typeset', which is what every chapter written before this
     // field existed actually is - so no chapter on disk changes behaviour.
     mode: normalizeChapterMode(raw.mode),
@@ -887,6 +910,7 @@ async function buildChapter(p, number, title, copy, mode = 'typeset', typesettin
       // Fresh raws carry nothing placed; a chapter rebuilt from a PSD arrives
       // already typeset, and the catalogue has to say so.
       typeset: isTypeset(pages),
+      progress: chapterProgress(pages),
       mode: record.mode,
       unreadable: false,
     };
@@ -1353,6 +1377,7 @@ async function commitPages(c, path, record, pages) {
   c.updatedAt = record.updatedAt;
   c.pageCount = pages.length;
   c.typeset = isTypeset(pages);
+  c.progress = chapterProgress(pages);
 }
 
 // A page's art has been replaced, so the coordinate space everything on that
@@ -2334,10 +2359,12 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   live.updatedAt = record.updatedAt;
   live.pageCount = record.pages.length;
   live.typeset = isTypeset(record.pages);
+  live.progress = chapterProgress(record.pages);
   if (live !== c) {
     c.updatedAt = record.updatedAt;
     c.pageCount = record.pages.length;
     c.typeset = isTypeset(record.pages);
+    c.progress = live.progress;
   }
   // Only the chapter still on screen can be declared saved - and only when no
   // later save is already queued behind this one. A newer call bumped saveSeq
@@ -2424,6 +2451,16 @@ export function checkOutsideChange() {
   return done;
 }
 
+// Only a chapter that was really open counts (a failed open has already given up
+// its ref), and a translate chapter has no boxes to check, so it keeps nothing.
+function noteCheckedAtClose() {
+  const ref = app.chapterRef;
+  const c = ref ? chapterById(ref.projectId, ref.chapterId) : null;
+  if (!c) return;
+  if (!app.loaded || app.chapterMode === 'translate') checkedAtClose.delete(c.id);
+  else checkedAtClose.set(c.id, { n: checks.items.length, at: c.updatedAt });
+}
+
 export function closeChapter() {
   // Any open still in flight is now superseded. Without this, a load that was
   // mid-await when the user backed out of the editor resumed afterwards and
@@ -2435,6 +2472,10 @@ export function closeChapter() {
   openSeq++;
   // And async chapter work with it, before the images below are released.
   cancelChapterPlace();
+  // The check list is derived from the pages, so this has to run before they go:
+  // it is what the project screen shows beside this chapter until the chapter is
+  // next opened or edited.
+  noteCheckedAtClose();
   // Before the pages go, because the live page's stack is only in memory until
   // this runs - without it the last 800ms of records never reach disk. The id
   // comes off the page itself rather than `page()`, whose empty-document

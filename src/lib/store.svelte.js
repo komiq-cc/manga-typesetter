@@ -439,6 +439,34 @@ export function placedLineNs(p) {
 }
 export const lineByN = (p, n) => p.lines.find((l) => l.n === n);
 
+// How far through the lines a page is, and a chapter - the one place the
+// "x / y placed" figure is worked out, so the queue's header, the editor's
+// project pill and the project screen cannot disagree about what counts.
+//
+// Counted over the LINES, not taken as the set's size: a box can carry a `lineN`
+// no line answers to (a line deleted out from under it), and this reports
+// progress through the queue, which is a count of lines. Free lines are lines
+// like any other here (`placedLineNs` has them), so typing a box over empty
+// canvas moves both numbers by one. Derived on every call, never stored: a saved
+// count would be one more thing to keep in step with every edit, import and undo.
+export function pageProgress(p) {
+  const set = placedLineNs(p);
+  let placed = 0;
+  const lines = p?.lines ?? [];
+  for (const l of lines) if (set.has(l.n)) placed++;
+  return { placed, total: lines.length };
+}
+export function chapterProgress(pages) {
+  let placed = 0;
+  let total = 0;
+  for (const p of pages ?? []) {
+    const one = pageProgress(p);
+    placed += one.placed;
+    total += one.total;
+  }
+  return { placed, total };
+}
+
 // ---------- how far through a page's translation we are ----------
 // The translate workspace's answer to "N / M placed": a line is done when it has
 // English on it. Derived, never stored - a stored flag would be one more thing

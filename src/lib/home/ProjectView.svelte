@@ -1,5 +1,5 @@
 <script>
-  import { projectById, deleteChapter, setChapterMode, setProjectOcrLanguage } from '../library.svelte.js';
+  import { projectById, deleteChapter, setChapterMode, setProjectOcrLanguage, lastToCheck } from '../library.svelte.js';
   import { route, goLibrary, goEditor } from '../route.svelte.js';
   import { toast, toastError } from '../store.svelte.js';
   import { relativeTime, plural } from '../format.js';
@@ -12,6 +12,16 @@
     if (!c.pageCount) return { mark: '·', label: 'No pages', on: false };
     if (!c.typeset) return { mark: '○', label: 'Raws only', on: false };
     return { mark: '●', label: 'Typeset', on: true };
+  }
+
+  // "placed X / Y", and the last "N to check" when this session closed the
+  // chapter and nothing has touched it since - see `lastToCheck`. Nothing for a
+  // translate chapter (it has its own count, in the editor) or a chapter with no
+  // lines yet.
+  function progressNote(c) {
+    if (c.unreadable || c.mode === 'translate' || !c.progress?.total) return '';
+    const left = lastToCheck(c);
+    return `placed ${c.progress.placed} / ${c.progress.total}${left ? ` · ${left} to check` : ''}`;
   }
 
   const project = $derived(projectById(route.projectId));
@@ -133,7 +143,10 @@
               <div class="chapter-sub">{c.slug}</div>
             {/if}
           </div>
-          <div class="chapter-chip">{c.unreadable ? '' : status(c).label}</div>
+          <div class="chapter-chip">
+            {c.unreadable ? '' : status(c).label}
+            {#if progressNote(c)}<div class="chapter-sub">{progressNote(c)}</div>{/if}
+          </div>
           <div class="chapter-pages">{c.unreadable ? '' : plural(c.pageCount, 'page')}</div>
           <div class="chapter-time">{c.unreadable ? '' : relativeTime(c.updatedAt)}</div>
         </button>

@@ -21,7 +21,7 @@
   import Queue from '../Queue.svelte';
   import BulkStylePanel from '../BulkStylePanel.svelte';
   import BoxMenu from './BoxMenu.svelte';
-  import { app, page, placedLineNs, isTranslateMode, isLongstrip, translatedCount } from '../store.svelte.js';
+  import { app, page, pageProgress, isTranslateMode, isLongstrip, translatedCount } from '../store.svelte.js';
   import { brushArmed } from '../brush-tool.svelte.js';
   import { loadPanels, clampAll } from './panels.svelte.js';
   import { setResidentWindow } from '../page-images.js';
@@ -43,18 +43,11 @@
   // inset by, rather than leaving a column of nothing down the left.
   const canvasLeft = $derived((translate || app.sidebarHidden ? 0 : app.leftWidth) + RAIL_W);
 
-  // One pass over the boxes, then a lookup per line, rather than a scan of the
-  // boxes per line - see `placedLineNs`. Counted over the LINES, not taken as
-  // the set's size, because a box can carry a `lineN` no line answers to (a line
-  // deleted out from under it) and the panel is reporting progress through the
-  // queue, which is a count of lines.
-  const placed = $derived.by(() => {
-    const set = placedLineNs(page());
-    let n = 0;
-    for (const l of page().lines) if (set.has(l.n)) n++;
-    return n;
-  });
-  const total = $derived(page().lines.length);
+  // One pass over the boxes, then a lookup per line - see `pageProgress`, which
+  // is also what the project pill's whole-chapter figure is built from.
+  const progress = $derived(pageProgress(page()));
+  const placed = $derived(progress.placed);
+  const total = $derived(progress.total);
   // Translating counts a different thing finished. Derived from the lines
   // themselves - see `translatedCount` for why nothing stores it.
   const done = $derived(translatedCount(page().lines));
