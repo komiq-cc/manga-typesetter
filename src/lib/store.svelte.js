@@ -1282,9 +1282,26 @@ export function checkItems(pages = app.pages) {
   return out;
 }
 
+// Each page's status (FLOW-2), by page index, from a check list: 'todo' while
+// the page has detected lines with no box, else 'check' while it has anything
+// else to look at, else 'done'. Unplaced outranks the rest because a page with
+// text still to place is not typeset yet, whatever its placed boxes say. Never
+// stored, so there is no "done" stamp for a later edit to void: fixing the
+// last item is what makes a page done.
+export function pageStatuses(items, count = app.pages.length) {
+  const out = new Array(count).fill('done');
+  for (const it of items ?? []) {
+    const i = it.pageIndex;
+    if (i < 0 || i >= count || out[i] === 'todo') continue;
+    out[i] = it.reason === 'unplaced' ? 'todo' : 'check';
+  }
+  return out;
+}
+
 // The open chapter's list, worked out once and shared: the pill, the queue's
 // list, the page dots and the export all read `checks.items` rather than each
 // walking the chapter. Lazy: nothing is computed until something reads it.
+// `pages` is one pass over that same list, so the dots add no walk of their own.
 //
 // Held page by page, so a keystroke in one box works out that page's list
 // again and only joins the others: a whole chapter of fits and stamps is tens
@@ -1314,6 +1331,7 @@ function checksOf(pg) {
 }
 class ChapterChecks {
   items = $derived(isTranslateMode() ? [] : app.pages.flatMap(checksOf));
+  pages = $derived(pageStatuses(this.items, app.pages.length));
 }
 export const checks = rooted(() => new ChapterChecks());
 

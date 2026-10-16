@@ -366,6 +366,44 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
 .pager input.pnum:focus{ border-color:var(--t3); }
 .pager .pof{ color:var(--t2); padding:0 4px 0 2px; white-space:nowrap; }
 
+/* Page status dots (FLOW-2): the pager's dot for this page and the page list it
+   opens. Done and check take the Regions view's approved green and waiting
+   amber (RegionsLayer.svelte), so a colour means the same thing on the page and
+   in the dock; both read on either theme's panel. To do is a hollow ring - a
+   page with text still to place has nothing to colour yet. */
+.pager, .pages-menu{ --ps-done:#1f9d55; --ps-check:#e08a00; }
+.pstat{ display:inline-block; width:8px; height:8px; border-radius:50%; flex:none; }
+.pstat.done{ background:var(--ps-done); }
+.pstat.check{ background:var(--ps-check); }
+.pstat.todo{ box-shadow:inset 0 0 0 1.5px var(--t2); }
+.pager .pdot{ min-width:24px; padding:0 6px; }
+.pager .pdot.on{ background:var(--accent-soft); }
+/* Opens upwards: the dock sits on the window's floor. Same panel chrome as the
+   detect menu, so it reads as something the dock opened. */
+.pages-menu{
+  position:absolute; bottom:calc(100% + 10px); left:50%; transform:translateX(-50%); z-index:31;
+  width:268px; display:flex; flex-direction:column; gap:6px; padding:6px;
+  background:var(--panel); border:1px solid var(--line2); border-radius:9px;
+  box-shadow:var(--edge);
+}
+.pm-filters{ display:flex; gap:2px; padding-bottom:6px; border-bottom:1px solid var(--line); }
+.pager .pm-filters button{
+  flex:1; height:26px; min-width:0; padding:0 4px; font-size:12px; color:var(--t2);
+  display:flex; align-items:center; justify-content:center; gap:4px;
+}
+.pager .pm-filters button.on{ background:var(--accent-soft); color:var(--text); }
+.pm-n{ color:var(--t3); font-variant-numeric:tabular-nums; font-size:11px; }
+.pm-grid{
+  display:grid; grid-template-columns:repeat(5, 1fr); gap:2px;
+  max-height:220px; overflow-y:auto;
+}
+.pager .pm-grid button{
+  height:28px; min-width:0; padding:0 6px; font-size:12.5px; font-variant-numeric:tabular-nums;
+  display:flex; align-items:center; justify-content:flex-start; gap:6px;
+}
+.pager .pm-grid button.cur{ background:var(--accent-soft); font-weight:600; }
+.pm-empty{ padding:14px 0; text-align:center; color:var(--t3); font-size:12px; }
+
 /* queue list - inside the floating "Text queue" panel */
 .qlist{ padding:6px; display:flex; flex-direction:column; gap:4px; }
 .qrow{
