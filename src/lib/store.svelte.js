@@ -3659,11 +3659,53 @@ function firstFound(first, second) {
 // flood, dark bubble); then the old fill-and-fit, which still answers some
 // bubbles the ladder's solidity gate refuses, with a stored outline record
 // that says so; then no fit and an open outline.
-export function measureBalloon(p, block, pixels) {
+//
+// The page's other detected blocks go along as neighbours: a bubble joined to
+// the next one is split between their texts (Bubble B). `scale` maps page
+// coordinates into the pixels, for a caller holding the raster at another
+// size (`measureBlock`, whose block is already in pixel space).
+export function measureBalloon(p, block, pixels, scale = null) {
   if (!Array.isArray(block) || block.length !== 4) return null;
   const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
-  return outlineMeasure(findOutline(image, block)) ?? fillMeasure(detectBalloon(image, block)) ?? openMeasure();
+  const neighbors = neighbourBlocks(p, block, image, scale);
+  return outlineMeasure(findOutline(image, block, { neighbors })) ?? fillMeasure(detectBalloon(image, block)) ?? openMeasure();
+}
+
+// The other detected blocks near this one, in the pixels' space. Only those
+// whose centre is inside the finder's widest window: the finder grows its
+// window to hold every neighbour it is given (Komatose passes the whole page),
+// and a block across the page cannot share a bubble with this one anyway.
+//
+// A block that overlaps this one's centre, or whose centre this one covers, is
+// not a neighbour: it is this text measured another way - the line's own
+// detected block, asked about again through a refit's stored rectangle or a
+// click on the text - and splitting the bubble between the two would cut the
+// one bubble in half.
+function neighbourBlocks(p, block, image, scale) {
+  const sx = scale?.sx ?? 1;
+  const sy = scale?.sy ?? 1;
+  const [x1, y1, x2, y2] = block;
+  const reach = Math.min(
+    Math.max(400, 0.25 * Math.min(image.width, image.height)),
+    2.6 * Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1), 48),
+  );
+  const out = [];
+  for (const d of p?.detect?.boxes ?? []) {
+    if (!Array.isArray(d.box) || d.box.length !== 4) continue;
+    const b = [d.box[0] * sx, d.box[1] * sy, d.box[2] * sx, d.box[3] * sy];
+    const cx = (b[0] + b[2]) / 2;
+    const cy = (b[1] + b[3]) / 2;
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+    const covers = (r, x, y) =>
+      x >= Math.min(r[0], r[2]) && x <= Math.max(r[0], r[2]) && y >= Math.min(r[1], r[3]) && y <= Math.max(r[1], r[3]);
+    if (covers(b, mx, my) || covers(block, cx, cy)) continue;
+    if (cx < Math.min(x1, x2) - reach || cx > Math.max(x1, x2) + reach) continue;
+    if (cy < Math.min(y1, y2) - reach || cy > Math.max(y1, y2) + reach) continue;
+    out.push(b);
+  }
+  return out;
 }
 
 // The same answer, from a CLICK instead of a detected block.
@@ -3705,14 +3747,16 @@ const CLICK_PAD = 160;
 // asked first with the click as a two-pixel block; the click must be on a solid
 // light colour (`localUniformity`) before either looks, and inside what they
 // found after.
-export function measureBalloonAt(p, imgX, imgY, pixels) {
+export function measureBalloonAt(p, imgX, imgY, pixels, scale = null) {
   if (!Number.isFinite(+imgX) || !Number.isFinite(+imgY)) return null;
   const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
   const x = +imgX;
   const y = +imgY;
   if (!localUniformity(image, x, y)?.uniform) return openMeasure();
-  const found = outlineMeasure(findOutline(image, [x - 1, y - 1, x + 1, y + 1], { minPad: CLICK_PAD }));
+  const block = [x - 1, y - 1, x + 1, y + 1];
+  const neighbors = neighbourBlocks(p, block, image, scale);
+  const found = outlineMeasure(findOutline(image, block, { minPad: CLICK_PAD, neighbors }));
   if (found && shapeContainsPoint(found.fit, x, y)) return found;
   const filled = fillMeasure(detectBalloonAt(image, x, y));
   if (filled && shapeContainsPoint(filled.fit, x, y)) return filled;
@@ -4436,8 +4480,8 @@ function measureBlock(p, det, pixels) {
   const sx = p.w > 0 ? pixels.width / p.w : 1;
   const sy = p.h > 0 ? pixels.height / p.h : 1;
   const [x1, y1, x2, y2] = det.box;
-  const m = firstFound(measureBalloon(p, [x1 * sx, y1 * sy, x2 * sx, y2 * sy], pixels), () =>
-    measureBalloonAt(p, ((x1 + x2) / 2) * sx, ((y1 + y2) / 2) * sy, pixels),
+  const m = firstFound(measureBalloon(p, [x1 * sx, y1 * sy, x2 * sx, y2 * sy], pixels, { sx, sy }), () =>
+    measureBalloonAt(p, ((x1 + x2) / 2) * sx, ((y1 + y2) / 2) * sy, pixels, { sx, sy }),
   );
   if (!m || (sx === 1 && sy === 1)) return m;
   return { ...m, fit: scaleFit(m.fit, 1 / sx, 1 / sy) };
