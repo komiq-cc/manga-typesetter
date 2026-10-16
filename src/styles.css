@@ -483,6 +483,7 @@ button,input,select{ font:inherit; color:inherit; font-variant-numeric:tabular-n
 .qtop-btn svg{ flex:0 0 auto; width:13px; height:13px; opacity:.8; }
 .qtop-btn:hover:not(:disabled){ border-color:var(--accent); background:var(--accent-soft); }
 .qtop-btn:disabled{ opacity:.45; cursor:default; }
+.qorder{ display:flex; gap:6px; }
 
 /* "Add text", at the foot of the queue. Sticky rather than scrolled: the
    scroll container is `.fpanel-body` and this sits last in `.qlist` inside it,

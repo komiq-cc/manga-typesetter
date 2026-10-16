@@ -13,6 +13,7 @@
     page,
     placedLineNs,
     activateLine,
+    moveLine,
     lineText,
     toggleTagOnLine,
     toast,
@@ -26,7 +27,7 @@
     placeDetectedInChapter,
     cancelChapterPlace,
   } from './store.svelte.js';
-  import { untrack } from 'svelte';
+  import { untrack, flushSync } from 'svelte';
   import {
     knownTags,
     lineTags,
@@ -58,9 +59,21 @@
   // Which lines already have a box, in one pass over the page's boxes rather
   // than one pass per row - see `placedLineNs`.
   const placedNs = $derived(placedLineNs(p));
+  const imported = $derived(p.lines.filter((l) => !isFreeLine(l)));
+  const activeIndex = $derived(imported.findIndex((l) => l.n === p.activeLineN));
   // How many bubbles on THIS page still want a box. Drives the top button's
   // label and its disabled state.
   const pagePlaceable = $derived(placeableDetectedLines(p).length);
+
+  // Moving a keyed DOM row can drop its focused descendant even though the
+  // node survives. Finish that move before restoring focus, so repeated Enter
+  // presses keep moving this content. At an edge, stop on the row itself.
+  function move(e, line, position) {
+    const button = e.currentTarget;
+    const focused = document.activeElement === button;
+    flushSync(() => moveLine(line.n, position, p));
+    if (focused) (button.disabled ? button.closest('.qrow') : button)?.focus({ preventScroll: true });
+  }
 
   // Undo/redo for translation textarea.
   const fieldUndo = createFieldUndo();
@@ -68,7 +81,8 @@
 
   $effect(() => {
     const activeLine = p.lines.find((l) => l.n === p.activeLineN);
-    const key = activeLine ? `${p.id}:${activeLine.n}` : null;
+    // A reorder changes the number, not the owner of this typing history.
+    const key = activeLine ?? null;
     const v = activeLine?.en ?? '';
     if (key === fieldOwner && v === fieldUndo.stack[fieldUndo.i]) return;
     fieldOwner = key;
@@ -128,15 +142,15 @@
     if (restyled) toast(`Restyled ${restyled} box${restyled > 1 ? 'es' : ''} on this line · ${modKey()}Z`);
   }
 
-  function openCreate(n) {
+  function openCreate(line) {
     menuFor = null;
-    form = { n, name: '', edit: false, tools: false, existed: false, confirmDelete: false, ...tagFormFields(null) };
+    form = { line, name: '', edit: false, tools: false, existed: false, confirmDelete: false, ...tagFormFields(null) };
   }
 
 
-  function openEdit(n, name) {
+  function openEdit(line, name) {
     menuFor = null;
-    form = { n, name, edit: true, tools: true, existed: false, confirmDelete: false, ...tagFormFields(findTag(name)) };
+    form = { line, name, edit: true, tools: true, existed: false, confirmDelete: false, ...tagFormFields(findTag(name)) };
   }
 
   function submitForm(line) {
@@ -298,7 +312,9 @@
         : 'Import a JSON of numbered text to populate the queue, or add a text box below.'}
     </div>
   {/if}
-  {#each p.lines as line (line.n)}
+  <!-- The row follows its content through a renumber. Keying by n would reuse
+       another line's textarea and move keyboard focus to the wrong content. -->
+  {#each p.lines as line (line)}
     {@const placed = placedNs.has(line.n)}
     {@const tagged = lineTags(line)}
     {@const editing = line.n === p.activeLineN}
@@ -324,19 +340,25 @@
 
         <button class="badge" class:free title="Select this line's box" onclick={() => activateLine(line.n)}>{badge}</button>
         <span class="qcol">
+          {#if !free}
+            <span class="qorder" role="group" aria-label="Reading order">
+              <button class="qtop-btn" disabled={activeIndex <= 0} onclick={(e) => move(e, line, activeIndex)}>Move up</button>
+              <button class="qtop-btn" disabled={activeIndex >= imported.length - 1} onclick={(e) => move(e, line, activeIndex + 2)}>Move down</button>
+            </span>
+          {/if}
           <span class="qtags">
             {#each chips(line) as c (c.name)}
               <button class="qtag" class:on={c.on} title={c.on ? `Remove ${c.name}` : `Apply ${c.name}`} onclick={() => toggle(line, c.name)}>{c.name}</button>
             {/each}
-            <button class="qtag-ic" title="Create tag" onclick={() => (form?.n === line.n && !form.edit ? (form = null) : openCreate(line.n))}>
+            <button class="qtag-ic" title="Create tag" onclick={() => (form?.line === line && !form.edit ? (form = null) : openCreate(line))}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h8" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7.5 18.5 3 20l1.5-4.5z" /></svg>
             </button>
-            <button class="qtag-ic" title="All tags" onclick={() => (menuFor = menuFor === line.n ? null : line.n)}>
+            <button class="qtag-ic" title="All tags" onclick={() => (menuFor = menuFor === line ? null : line)}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" /></svg>
             </button>
           </span>
 
-          {#if menuFor === line.n}
+          {#if menuFor === line}
 
             <span class="qmenu">
               {#if known.length === 0}
@@ -348,7 +370,7 @@
                     <svg class="tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 12l5 5L20 6" /></svg>
                     <span class="nm">{t.name}</span>
                   </button>
-                  <button class="qtag-ic" title="Tag settings" onclick={() => openEdit(line.n, t.name)}>
+                  <button class="qtag-ic" title="Tag settings" onclick={() => openEdit(line, t.name)}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1" /></svg>
                   </button>
                 </span>
@@ -356,7 +378,7 @@
             </span>
           {/if}
 
-          {#if form?.n === line.n}
+          {#if form?.line === line}
             <span class="qtagform">
               <span class="qtf-top">
                 {#if form.edit}

@@ -112,6 +112,13 @@ which exposes all of them per box.
 **Text queue**: the list of translated lines waiting to be placed. Fill it from
 the translation JSON, or type lines as you go.
 
+Select an imported line and use **Move up** or **Move down** to fix its reading
+order. Tab to either button and press Enter or Space to move it with the
+keyboard. Lines are numbered again from one; their text, translations, boxes
+and detected bubbles stay together. Each move is one undo step. Free text rows
+keep their places. Export a fresh translation JSON after changing the order;
+future imports use the new line numbers.
+
 **Tags**: attach a tag (like `sfx` or `aside`) to a line while translating. A
 tag can carry its own default font. Restyle everything with a tag at once in
 Bulk mode.

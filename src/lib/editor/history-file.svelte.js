@@ -13,6 +13,7 @@ import { fsx } from '../fsx.js';
 import { normalizeStyle, plainStyle } from '../data.js';
 import { toast, toastError, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, rescaleAuto, scaleFit, lengthScale } from '../store.svelte.js';
 import { scaleStroke } from '../brush.js';
+import { remapLineStack } from '../reading-order.js';
 import {
   takeStack,
   peekStack,
@@ -60,7 +61,8 @@ export function mergeStack(doc, pageId, stack) {
 // A pure function over the document, like `mergeStack` beside it, because that
 // is what makes the one thing worth testing here testable without a disk.
 export function appendEntry(doc, pageId, entry) {
-  const cur = stackFrom(doc, pageId);
+  let cur = stackFrom(doc, pageId);
+  if (entry.t === 'order') cur = remapLineStack(cur, entry);
   return mergeStack(doc, pageId, { undo: [...cur.undo, entry].slice(-MAX_STEPS), redo: [] });
 }
 
@@ -78,6 +80,10 @@ export function stackFrom(doc, pageId) {
 // what every ordinary open does.
 export function graft(stored, live) {
   if (!live?.undo?.length && !live?.redo?.length) return stored;
+  // A reading-order edit made while the file was being read has already moved
+  // the page and the live entries. Move the older disk entries into that same
+  // numbering before joining the stacks. Undone transitions have no effect.
+  for (const e of live.undo) if (e.t === 'order') stored = remapLineStack(stored, e);
   return { undo: [...stored.undo, ...live.undo].slice(-MAX_STEPS), redo: live.redo };
 }
 

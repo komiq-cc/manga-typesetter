@@ -1,5 +1,6 @@
 // ===== Central reactive store (Svelte 5 runes) =====
 import { untrack } from 'svelte';
+import { applyLineOrder } from './reading-order.js';
 import {
   PAGE_W,
   PAGE_H,
@@ -465,6 +466,33 @@ export function chapterProgress(pages) {
     total += one.total;
   }
   return { placed, total };
+}
+
+// Move an imported row to a one-based position among the imported rows. Settle
+// typing first: its pending record still names the line by its old number.
+// Text, tags, placements and geometry stay on their existing objects; only the
+// order and the joins change. Nothing async can land halfway through this edit.
+export function moveLine(n, position, p = page()) {
+  const imported = p.lines.filter((l) => !isFreeLine(l));
+  const from = imported.findIndex((l) => l.n === n);
+  if (from < 0 || !Number.isInteger(position) || position < 1 || position > imported.length || from === position - 1) return false;
+  settleEdits();
+  const before = imported.map((l) => l.n);
+  const [moved] = imported.splice(from, 1);
+  imported.splice(position - 1, 0, moved);
+  const entry = $state.snapshot({
+    t: 'order', pageId: p.id, before,
+    numbers: imported.map((l, i) => [l.n, i + 1]),
+  });
+  try {
+    applyLineOrder(p, entry);
+  } catch (err) {
+    toastError(`Could not move that line: ${err.message}`);
+    return false;
+  }
+  recordEdit(entry);
+  markUnsaved();
+  return true;
 }
 
 // ---------- how far through a page's translation we are ----------

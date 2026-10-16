@@ -24,6 +24,7 @@ import {
   payHeldFit,
   setFitLander,
 } from '../store.svelte.js';
+import { applyLineOrder, remapLineStack } from '../reading-order.js';
 
 // About thirty steps a page (UND-1). Entries are deltas of tens of bytes, the
 // live stack is one page's, and the rest spill to `logs/history.json`, so the
@@ -156,6 +157,15 @@ const restoreLine = (p, e) => {
 };
 
 const KINDS = {
+  order: {
+    label: 'that reading order change',
+    apply(e, dir) {
+      const p = pageById(e.pageId);
+      if (!p) throw new Error('the page is gone');
+      applyLineOrder(p, e, dir);
+      remapOrder(e, dir);
+    },
+  },
   place: {
     label: 'that placement',
     apply(e, dir) {
@@ -625,6 +635,12 @@ export function setOffscreenAmender(fn) {
   };
 }
 
+function remapOrder(entry, dir = 'redo') {
+  const stack = remapLineStack({ undo: undoStack, redo: redoStack }, entry, dir);
+  undoStack = stack.undo;
+  redoStack = stack.redo;
+}
+
 export function record(entry) {
   if (applying) return;
   if (!KINDS[entry?.t]) return;
@@ -647,6 +663,7 @@ export function record(entry) {
   // this module alone - nothing routes and the live stack takes everything,
   // which is what it did before.
   if (flat.pageId != null && offscreen?.(flat.pageId, flat)) return;
+  if (flat.t === 'order') remapOrder(flat);
   undoStack.push(flat);
   if (undoStack.length > MAX_STEPS) undoStack.shift();
   redoStack = [];
@@ -655,7 +672,7 @@ export function record(entry) {
   sink?.(flat.pageId);
 }
 
-function step(from, to, dir) {
+function step(from, dir) {
   const entry = from.pop();
   if (!entry) return false;
   // The guard has to cover everything the step does, not just the apply:
@@ -665,7 +682,9 @@ function step(from, to, dir) {
   try {
     applying = true;
     KINDS[entry.t].apply(entry, dir);
-    to.push(entry);
+    // An order step replaces both lists while it remaps their entries. Push
+    // onto the current list, not the reference captured before that change.
+    (dir === 'undo' ? redoStack : undoStack).push(entry);
     // Show the user what just changed. `place` and `delete` name their box
     // inside the box itself, which is why this is not just `entry.boxId`. When
     // the step was the one that took the box away, the selection has to go with
@@ -734,11 +753,11 @@ function step(from, to, dir) {
 // from the keyboard handler, so every way of asking for a step gets it.
 export const undo = () => {
   settleEdits();
-  return step(undoStack, redoStack, 'undo');
+  return step(undoStack, 'undo');
 };
 export const redo = () => {
   settleEdits();
-  return step(redoStack, undoStack, 'redo');
+  return step(redoStack, 'redo');
 };
 
 // A copy of the live stack, for a write that must not disturb it.

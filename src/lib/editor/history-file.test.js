@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mergeStack, stackFrom, emptyDoc } from './history-file.svelte.js';
+import { mergeStack, stackFrom, emptyDoc, appendEntry, graft } from './history-file.svelte.js';
 
 vi.mock('../fsx.js', () => {
   const files = new Map();
@@ -19,6 +19,23 @@ vi.mock('../fsx.js', () => {
 });
 
 describe('the history document', () => {
+  const order = { t: 'order', pageId: 3, before: [10, 20], numbers: [[20, 1], [10, 2]] };
+  const line = { t: 'line', pageId: 3, lineN: 10, before: 'old', after: 'new' };
+
+  it('remaps an off-screen stack before appending a reading-order entry', () => {
+    const before = mergeStack(emptyDoc(), 3, { undo: [line], redo: [line] });
+    const after = appendEntry(before, 3, order);
+    expect(stackFrom(after, 3)).toEqual({ undo: [{ ...line, lineN: 2 }, order], redo: [] });
+    expect(stackFrom(before, 3)).toEqual({ undo: [line], redo: [line] });
+  });
+
+  it('remaps history read from disk through moves made while the read was pending', () => {
+    const stored = { undo: [line], redo: [] };
+    expect(graft(stored, { undo: [order], redo: [] })).toEqual({ undo: [{ ...line, lineN: 2 }, order], redo: [] });
+    expect(graft(stored, { undo: [], redo: [order] })).toEqual({ undo: [line], redo: [order] });
+    expect(stored.undo[0]).toBe(line);
+  });
+
   it('starts empty and versioned', () => {
     expect(emptyDoc()).toEqual({ version: 1, pages: {} });
   });
