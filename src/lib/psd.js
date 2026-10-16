@@ -804,7 +804,15 @@ export function textLayerFor(p, box, rendered) {
       },
       // The letters another family lent, each stretch in the font that drew it.
       ...(borrowed ? { styleRuns: borrowed } : null),
-      paragraphStyle: { justification: JUSTIFY[s.align] || 'center' },
+      // The lines are already broken - by our breaker, as hard returns - so
+      // Photoshop must not break them again. Left on, its own hyphenator and
+      // the every-line composer re-flow a line that fits by a hair, and the
+      // type layer stops matching the pixels cached under it.
+      paragraphStyle: {
+        justification: JUSTIFY[s.align] || 'center',
+        autoHyphenate: false,
+        everyLineComposer: false,
+      },
       // A flush line in a balloon starts at its row's edge, not the frame's
       // (`lineIndents`). Every line is its own paragraph here - the breaks go in
       // as hard returns - so each one carries its indent from the edge it is
@@ -817,7 +825,11 @@ export function textLayerFor(p, box, rendered) {
         ? {
             paragraphStyleRuns: place.lines.map((ln, i) => ({
               length: ln.length + 1,
-              style: { [s.align === 'right' ? 'endIndent' : 'startIndent']: place.indents[i] },
+              style: {
+                [s.align === 'right' ? 'endIndent' : 'startIndent']: place.indents[i],
+                autoHyphenate: false,
+                everyLineComposer: false,
+              },
             })),
           }
         : null),
