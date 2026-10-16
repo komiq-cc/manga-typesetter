@@ -4,7 +4,7 @@
   // version it replaces on the same shelf, so it is itself undoable.
   import { untrack } from 'svelte';
   import { chapterById, listChapterSnapshots, restoreChapterSnapshot } from '../library.svelte.js';
-  import { toast } from '../store.svelte.js';
+  import { toast, toastError } from '../store.svelte.js';
   import { plural, relativeTime } from '../format.js';
 
   let { open = $bindable(), busy = $bindable(false), projectId = null, chapterId = null } = $props();
@@ -71,7 +71,7 @@
         : '';
       toast(`Restored the version from ${relativeTime(v.at)}. The one it replaced is kept here.${missing}`);
     } catch (e) {
-      toast(`Could not restore: ${e?.message ?? e}`);
+      toastError(`Could not restore: ${e?.message ?? e}`);
     } finally {
       busy = false;
       if (pid === projectId && cid === chapterId) await reload(pid, cid);

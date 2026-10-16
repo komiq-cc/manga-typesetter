@@ -33,6 +33,17 @@ pub fn run() {
   #[cfg(target_os = "linux")]
   linux::prepare();
   tauri::Builder::default()
+    // First, as the plugin asks. Two copies of the app autosaving the same
+    // chapter.json would each write over the other's work (SAV-2), so a second
+    // launch only brings the window that is already open to the front.
+    .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+      use tauri::Manager;
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+      }
+    }))
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_updater::Builder::new().build())

@@ -930,6 +930,22 @@ describe('chapter snapshots', () => {
     expect(fsx._tree.files.get(`${c.dir}/logs/snapshots/${result.before}`)).toBe(changedText);
     expect(fsx._tree.files.has(`${c.dir}/logs/history.json`)).toBe(false);
   });
+
+  // SAV-2. A write from outside the app while the chapter is open would be
+  // silently replaced by the next autosave; it has to be on the shelf first.
+  it('keeps an outside change to chapter.json before the next save writes over it', async () => {
+    const { listChapterSnapshots } = await import('./library.svelte.js');
+    const { p, c } = await seedOpenChapter();
+    const outside = { ...chapterJson(c), updatedAt: '2030-01-01T00:00:00.000Z', title: 'Edited elsewhere' };
+    const outsideText = JSON.stringify(outside);
+    fsx._tree.files.set(`${c.dir}/chapter.json`, outsideText);
+    await saveOpenChapter();
+    closeChapter();
+    const kept = (await listChapterSnapshots(p.id, c.id)).find((s) => s.reason === 'outside-change');
+    expect(fsx._tree.files.get(`${c.dir}/logs/snapshots/${kept.name}`)).toBe(outsideText);
+    expect(chapterJson(c).updatedAt).not.toBe(outside.updatedAt);
+    expect(app.errors.at(-1)?.msg).toMatch(/changed outside the app/);
+  });
 });
 
 const { tags, createTag, findTag, rememberTagSize, tagSize } = await import('./tags.svelte.js');

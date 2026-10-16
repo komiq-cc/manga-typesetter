@@ -53,6 +53,7 @@ trash = "5.2.9"
 tauri = { version = "2.11.2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-fs = "2"
 # The only outbound requests this app makes are `detect::engine` streaming the
 # ONNX weights down, and every one of those URLs is https (huggingface.co,

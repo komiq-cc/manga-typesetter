@@ -59,6 +59,13 @@ import { forgetPagePixels } from './page-pixels.js';
 const ROOT_KEY = 'mt.libraryRoot';
 const SCHEMA = 1;
 const lastSnapshot = new Map();
+// The exact chapter.json text each open chapter had when this app last read
+// or wrote it (SAV-2). A save that finds other bytes on disk has found a change
+// it did not make - another tool, a sync client, a hand edit - and must not
+// write over it unkept. The text, not `updatedAt`: a script that edits the
+// file seldom touches the stamp. Keyed by chapter directory, like
+// `lastSnapshot`.
+const diskText = new Map();
 const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 const sourceUndos = new Map();
 
@@ -1962,6 +1969,7 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   const chapterText = await fsx.readTextFile(path);
   if (!mine()) return;
   const record = JSON.parse(chapterText);
+  diskText.set(c.dir, chapterText);
   // Preserve exactly what was read, before open repairs or normalises it.
   // An unavailable snapshot shelf must never cost the user an otherwise valid
   // open. The ticket is checked again even when the snapshot write failed.
@@ -2211,6 +2219,18 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   const chapterText = await fsx.readTextFile(path);
   if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
   const record = JSON.parse(chapterText);
+  // Changed on disk since this app last read or wrote it (SAV-2). The other
+  // version is kept on the snapshot shelf before ours goes over it, and the
+  // save is refused when it cannot be kept - the rejection reaches the save
+  // indicator like any failed write. Ours then wins on disk, so the editor
+  // keeps saving; the user is told, and Versions has the other one.
+  const known = diskText.get(c.dir);
+  let outside = false;
+  if (known !== undefined && chapterText !== known) {
+    await requireSnapshot(c.dir, chapterText, record, 'outside-change');
+    if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
+    outside = true;
+  }
   // The outgoing disk version, not the editor's next version. The save queue
   // serialises this with every other save; the ref and turn still have to be
   // ours when it finishes, just as they must after the record read above.
@@ -2261,7 +2281,17 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   // Read after the write below instead, it would be `app.pages` as it stands
   // once the disk has come back - which may by then be another chapter's.
   const text = buildTextJson(app.pages);
-  await writeJson(path, record);
+  // `writeJson`'s own serialisation, done here so the bytes remembered are the
+  // bytes written.
+  const written = JSON.stringify(record, null, 2);
+  await fsx.writeTextFileAtomic(path, written);
+  diskText.set(c.dir, written);
+  if (outside) {
+    toastError(
+      'chapter.json was changed outside the app while this chapter was open. Your version was saved. ' +
+        'The other one is kept under Versions as "Changed outside the app".',
+    );
+  }
   // …and the translations beside it, on the same debounce. Every route into the
   // document already ends in `markUnsaved()` - detection, a queue edit, a
   // placement - so this file is refreshed 800ms after the last keystroke rather

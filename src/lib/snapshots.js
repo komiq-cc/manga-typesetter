@@ -44,20 +44,41 @@ export async function takeSnapshot(chapterDir, text, record, reason) {
   if (typeof reason !== 'string' || !/^[a-z-]+(?![\s\S])/.test(reason)) {
     throw new Error('Invalid snapshot reason');
   }
-  const stamp = stampOf(record);
+  let stamp = stampOf(record);
   const dir = await folder(chapterDir);
   const names = await namesIn(dir);
-  if (names.some((name) => name.startsWith(`${stamp}--`))) return null;
+  const taken = (st) => names.find((name) => name.startsWith(`${st}--`));
+  const same = taken(stamp);
+  if (same) {
+    // The same `updatedAt` is the same version only when the bytes agree too.
+    // A tool that rewrites chapter.json and leaves the stamp alone produced a
+    // different document under an old name; refusing to keep it would make
+    // every later required snapshot fail on it. It is filed under the time it
+    // was seen instead (one millisecond on until the name is free).
+    let shelved = null;
+    try {
+      shelved = await fsx.readTextFile(await fsx.join(dir, same));
+    } catch {
+      /* unreadable: treat as different, and keep this copy */
+    }
+    if (shelved === text) return null;
+    let at = Date.now();
+    do stamp = stampOf({ updatedAt: new Date(at++).toISOString() });
+    while (taken(stamp));
+  }
   await fsx.mkdir(dir);
   const name = `${stamp}--${reason}.json`;
   await fsx.writeTextFileAtomic(await fsx.join(dir, name), text);
   // Only our own file names are pruned. A stray file in logs is still the
   // user's, and a failed prune must reach the caller just like a failed write:
   // restore and destructive source edits require a retained undo snapshot.
-  const newest = [...names, name].sort().reverse();
+  // The one just written always stays. Its stamp is the record's own time,
+  // which can be older than everything on the shelf - an outside edit that
+  // kept an old `updatedAt`, a clock set back - and pruning by stamp alone
+  // would delete the copy this call exists to keep. The others go oldest first.
   let pruned = false;
   try {
-    for (const old of newest.slice(20)) {
+    for (const old of names.slice(19)) {
       await fsx.remove(await fsx.join(dir, old));
       pruned = true;
     }
