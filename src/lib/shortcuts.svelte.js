@@ -505,3 +505,16 @@ export function dispatchShortcut(e, { typing = false } = {}) {
   e.preventDefault?.();
   return def.id;
 }
+
+// Run an action by id, as its key would: what the command palette and the
+// box's right-click menu do, so a menu item and its key can never disagree.
+// The handler gets no event. False when there is no handler or it declined.
+export function runShortcut(id) {
+  if (id === 'tool.brush' && !prefs.brushTool) return false;
+  const fn = handlers.get(id);
+  if (!fn) return false;
+  return fn(null) !== false;
+}
+
+// Whether an action has a handler right now (the palette hides the rest).
+export const hasShortcutHandler = (id) => handlers.has(id);
