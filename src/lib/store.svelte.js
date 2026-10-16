@@ -16,6 +16,7 @@ import {
   normalizeAuto,
   LAYOUT_VERSION,
   LAYOUT_VERSION_RUST,
+  plainStyle,
 } from './data.js';
 // The tag module reaches back for nothing - it takes the pages it works on as
 // arguments - so this stays a one-way edge and the two cannot cycle. What comes
@@ -175,7 +176,23 @@ const autoField = (a) => {
   return auto ? { auto } : null;
 };
 
-export function loadProjectPages(rawPages) {
+// A loaded box given the plain wrap, for a chapter laid out under the old
+// chapter-wide plain switch (`openTypesetting` in data.js). A solve that still
+// described the box is renewed for the plain one, which lays out the same:
+// left on the old fingerprint, a box still waiting for its face would read as
+// edited (`solvePending`) and never be solved.
+function givePlainWrap(b, p) {
+  const style = plainStyle(b.style);
+  if (style === b.style) return;
+  const text = b.auto?.stamp ? boxText(b, p) : null;
+  const stood = text != null && solveStands(b, text);
+  b.style = style;
+  if (stood) b.auto.stamp = solveStamp(b, text);
+}
+
+// `plain`: the chapter was laid out plain, and every box takes that wrap as its
+// own (`givePlainWrap`) before anything below measures it.
+export function loadProjectPages(rawPages, { plain = false } = {}) {
   const takenBoxes = new Set();
   const takenPages = new Set();
   let minted = 0;
@@ -296,6 +313,7 @@ export function loadProjectPages(rawPages) {
     cp.activeLineN = firstUnplaced(cp);
     return cp;
   });
+  if (plain) for (const p of app.pages) for (const b of p.boxes) givePlainWrap(b, p);
   // Boxes arriving from outside this session get the same treatment every other
   // path gets - see `autoFitBox`. A box on disk was sized by an older build, by a
   // hand-edited file, or against a user font that has since been replaced, and
@@ -1879,8 +1897,8 @@ export function noteFontsChanged() {
   return relayoutAll();
 }
 // The same re-measure, for anything else that changes how every line lays out
-// without touching any box - today, the open chapter's typesetting switch in
-// Settings (`setChapterTypesetMode`). Bumping `fontsVersion` is what wakes the
+// without touching any box - the chapter's breaker switched wholesale
+// (`setChapterTypesetMode`), or the text engine. Bumping `fontsVersion` is what wakes the
 // components; the name is historical, it is simply "every measurement is stale".
 export function relayoutAll() {
   // FIRST, before anything re-measures. `measure.js` remembers where a block of
@@ -1995,8 +2013,11 @@ export function useChapterTypesetting(raw) {
   resetFirstFit();
 }
 
-// Settings' switch for the open chapter. Saved with it, and every box
+// The open chapter's breaker switched wholesale, saved with it, and every box
 // re-measured under the new breaker the way a font arriving re-measures them.
+// The app has no control for it any more - the line breaking is each box's,
+// and a chapter opens 'smart' (`openTypesetting` in data.js) - so its callers
+// are the tests and the audit script that drive the breaker directly.
 export function setChapterTypesetMode(mode) {
   if (!app.chapterRef) return;
   const next = normalizeTypesetting({ ...app.typesetting, mode });
@@ -3012,10 +3033,12 @@ export function rescaleStyle(st, sx, sy) {
   if (st.roughen && typeof st.roughen === 'object') {
     // `amount` is a displacement in page px; `detail` is the noise's frequency,
     // which is cycles PER page px - so it moves the other way, or the same
-    // roughening comes back as a different grain on a rescaled page.
+    // roughening comes back as a different grain on a rescaled page. `grit`
+    // is a displacement too.
     out.roughen = {
       ...st.roughen,
       amount: len(st.roughen.amount),
+      ...(Number.isFinite(st.roughen.grit) ? { grit: len(st.roughen.grit) } : {}),
       detail: Number.isFinite(st.roughen.detail) ? st.roughen.detail / s : st.roughen.detail,
     };
   }
@@ -5286,6 +5309,7 @@ export const BULK_PROPS = [
   // stroke list, never one field of one stroke. Splitting a list by index
   // would name entries the target boxes do not have.
   'color',
+  'noFill',
   'opacity',
   'gradient',
   'pattern',
@@ -5300,6 +5324,7 @@ export const BULK_PROPS = [
   'roughen.amount',
   'roughen.detail',
   'roughen.seed',
+  'roughen.grit',
   'clip',
   // `path`, `ink` and `warp` are deliberately absent: anchors, hand-drawn
   // strokes and mesh control points are all box-local geometry in THIS box's
@@ -5332,9 +5357,9 @@ export const BULK_WHOLE_LEAVES = ['gradient', 'pattern', 'strokes', 'shadows', '
 // together. Every key appears in exactly one group.
 export const GROUPS = {
   font: ['font', 'size', 'bold', 'italic', 'uppercase', 'align', 'valign', 'lineHeight', 'letterSpacing'],
-  fill: ['color', 'opacity', 'blur', 'motionBlur', 'strokes', 'gradient', 'pattern'],
+  fill: ['color', 'noFill', 'opacity', 'blur', 'motionBlur', 'strokes', 'gradient', 'pattern'],
   shadow: ['shadows'],
-  warp: ['curve', 'circle', 'roughen.on', 'roughen.amount', 'roughen.detail', 'roughen.seed', 'clip'],
+  warp: ['curve', 'circle', 'roughen.on', 'roughen.amount', 'roughen.detail', 'roughen.seed', 'roughen.grit', 'clip'],
   typeset: ['shape', 'minOrphan', 'hyphenate', 'balloon'],
   transform: ['rotation', 'flipH', 'flipV', 'autoHeight'],
 };

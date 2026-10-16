@@ -38,6 +38,9 @@
   import { liquifyTool, setLiquifyMode, LIQUIFY_RADIUS_MIN, LIQUIFY_RADIUS_MAX } from './liquify-tool.svelte.js';
   import { LIQUIFY_MODES } from './liquify.js';
   import BrushPanel from './BrushPanel.svelte';
+  import SfxPanel from './SfxPanel.svelte';
+  import { clearSfx } from './sfx.js';
+  import { engineSwitch } from './engine-switch.svelte.js';
   import ColorPicker from './ColorPicker.svelte';
   import { brushArmed } from './brush-tool.svelte.js';
   // Which tab is open is session state shared with the keyboard - see
@@ -55,6 +58,7 @@
     iconRotate,
     iconGradientLinear,
     iconGradientRadial,
+    iconNoFill,
     iconArrowUp,
   } from './tab-icons.js';
   import {
@@ -67,6 +71,10 @@
     isAtomicInput,
   } from './editor/field-undo.svelte.js';
   import { onDestroy } from 'svelte';
+
+  // `onSettings` opens the Settings modal; the SFX pane offers it when the
+  // engine it needs is not the one running.
+  let { onSettings = null } = $props();
 
   const box = $derived(app.selectedId ? byId(app.selectedId) : null);
 
@@ -93,12 +101,16 @@
     else if (e.key === 'End') n = TABS.length - 1;
     if (n == null) return;
     e.preventDefault();
+    // The window's keydown handler reads a bare arrow as a nudge of the
+    // selected box; a tab press must not also move it.
+    e.stopPropagation();
     const next = TABS[n][0];
     setTab(next);
     document.getElementById(`insp-tab-${next}`)?.focus();
   }
 
   const EFFECTS_TABS = [
+    ['sfx', 'SFX'],
     ['stroke', 'Stroke'],
     ['shadow', 'Shadow'],
     ['warp', 'Warp'],
@@ -123,6 +135,7 @@
     else if (e.key === 'End') n = EFFECTS_TABS.length - 1;
     if (n == null) return;
     e.preventDefault();
+    e.stopPropagation();
     const next = EFFECTS_TABS[n][0];
     setEffectsSubTab(next);
     document.getElementById(`insp-subtab-${next}`)?.focus();
@@ -130,6 +143,14 @@
 
   function clamp(v, a, b) {
     return Math.max(a, Math.min(b, v));
+  }
+
+  // SFX is laid out before the path, the ring and the arc (`curvedStyle`), so a
+  // bend asked for while it is on would be ignored without a word. Asking for
+  // one switches SFX off, as switching SFX on switches them off (`enableSfx`),
+  // and the gaps the preset wrote go back to the box's own.
+  function sfxOff(st) {
+    if (st.sfx?.on) clearSfx(st, box, true);
   }
 
   // Percentages are what the panel shows for every 0..1 alpha; the style keeps
@@ -403,11 +424,14 @@
   }
 
   // ---- fill mode ----
-  // Three exclusive looks over two independent flags, because the renderer
-  // needs both (pattern beats gradient when both are on) and the user needs
-  // one choice.
-  const fillMode = $derived(box ? (box.style.pattern.on ? 'pattern' : box.style.gradient.on ? 'gradient' : 'solid') : 'solid');
+  // Four exclusive looks over three independent flags, because the renderer
+  // needs them all (no fill beats pattern beats gradient when more than one
+  // is on) and the user needs one choice.
+  const fillMode = $derived(
+    box ? (box.style.noFill ? 'none' : box.style.pattern.on ? 'pattern' : box.style.gradient.on ? 'gradient' : 'solid') : 'solid',
+  );
   function setFillMode(m) {
+    box.style.noFill = m === 'none';
     box.style.gradient.on = m === 'gradient';
     box.style.pattern.on = m === 'pattern';
     touch();
@@ -934,13 +958,16 @@
         <div class="grp">
           <span class="lbl">Fill</span>
           <div class="seg">
+            <button type="button" class="nofill" class:on={fillMode === 'none'} aria-pressed={fillMode === 'none'} title="No fill" aria-label="No fill" onclick={() => setFillMode('none')}>{@html iconNoFill}</button>
             {#each [['solid', 'Solid'], ['gradient', 'Gradient'], ['pattern', 'Pattern']] as [m, label] (m)}
               <button type="button" class:on={fillMode === m} aria-pressed={fillMode === m} onclick={() => setFillMode(m)}>{label}</button>
             {/each}
           </div>
         </div>
 
-        {#if fillMode === 'solid'}
+        {#if fillMode === 'none'}
+          <p class="nofill-note">{s.strokes.length ? 'The letters are see-through. Only the strokes show.' : 'No fill and no stroke: this box shows nothing. Add a stroke.'}</p>
+        {:else if fillMode === 'solid'}
           <div class="grp">
             <span class="lbl">Colour</span>
             {@render colorField(s, 'color', 'Fill colour')}
@@ -1178,6 +1205,13 @@
           {/each}
         </div>
 
+        {#if effectsSubTab.id === 'sfx'}
+          <!-- Inside this element, so the capture-phase pointerdown/keydown on
+               `.insp` (armSnap) takes the undo snapshot before any control in the
+               panel writes. -->
+          <SfxPanel {box} pg={page()} {touch} {onSettings} />
+        {/if}
+
         {#if effectsSubTab.id === 'stroke'}
           <!-- Strokes: innermost first, which is also the order they are listed. -->
           {@render secHead('Strokes · inner to outer')}
@@ -1233,8 +1267,8 @@
           <div class="grp">
             <span class="lbl" title="Bend the baseline upward/downward">Arc</span>
             <div class="slider-row">
-              <input type="range" min="-100" max="100" step="1" value={s.curve} disabled={s.path.on || s.circle.on} title={s.path.on || s.circle.on ? 'Curve path or Circle is on; they override Arc' : undefined} aria-label="Arc" oninput={(e) => setNum(s, 'curve', e.target.value, -100, 100)} />
-              <input class="num-s" type="number" min="-100" max="100" step="1" value={s.curve} disabled={s.path.on || s.circle.on} title={s.path.on || s.circle.on ? 'Curve path or Circle is on; they override Arc' : 'Bend the baseline upward/downward'} aria-label="Arc, amount" onchange={(e) => commitNum(s, 'curve', e, -100, 100)} />
+              <input type="range" min="-100" max="100" step="1" value={s.curve} disabled={s.path.on || s.circle.on} title={s.path.on || s.circle.on ? 'Curve path or Circle is on; they override Arc' : undefined} aria-label="Arc" oninput={(e) => { if (+e.target.value) sfxOff(s); setNum(s, 'curve', e.target.value, -100, 100); }} />
+              <input class="num-s" type="number" min="-100" max="100" step="1" value={s.curve} disabled={s.path.on || s.circle.on} title={s.path.on || s.circle.on ? 'Curve path or Circle is on; they override Arc' : 'Bend the baseline upward/downward'} aria-label="Arc, amount" onchange={(e) => { if (+e.target.value) sfxOff(s); commitNum(s, 'curve', e, -100, 100); }} />
             </div>
           </div>
           <div class="insp-rule"></div>
@@ -1248,7 +1282,10 @@
               aria-label="Circle"
               onclick={() => {
                 s.circle.on = !s.circle.on;
-                if (s.circle.on) s.path.on = false;
+                if (s.circle.on) {
+                  s.path.on = false;
+                  sfxOff(s);
+                }
                 touch();
               }}
             ><span class="knob"></span></button>
@@ -1297,7 +1334,10 @@
               aria-label="Curve path"
               onclick={() => {
                 s.path.on = !s.path.on;
-                if (s.path.on) s.circle.on = false;
+                if (s.path.on) {
+                  s.circle.on = false;
+                  sfxOff(s);
+                }
                 if (s.path.on && s.path.pts.length < 2) s.path.pts = defaultPathPts(box.w, box.h);
                 touch();
               }}
@@ -1528,6 +1568,15 @@
               <span class="lbl">Grain</span>
               <div class="slider-row"><input type="range" min="0.01" max="0.2" step="0.005" value={s.roughen.detail} disabled={!s.roughen.on} aria-label="Roughen grain" oninput={(e) => setNum(s.roughen, 'detail', e.target.value, 0.01, 0.2)} /><input class="num-s" type="number" min="0.01" max="0.2" step="0.005" value={s.roughen.detail} disabled={!s.roughen.on} title="Grain density, 0.01–0.2" aria-label="Roughen grain" onchange={(e) => commitNum(s.roughen, 'detail', e, 0.01, 0.2)} /></div>
             </div>
+            {#if engineSwitch.painting}
+              <!-- The Rust engine roughens the outline, which leaves a smooth
+                   edge; grit is the fine tear the old moved pixels left. The
+                   browser engine still moves pixels and has no use for it. -->
+              <div class="grp">
+                <span class="lbl">Grit</span>
+                <div class="slider-row"><input type="range" min="0" max="6" step="0.25" value={s.roughen.grit ?? 0} disabled={!s.roughen.on} aria-label="Roughen grit" oninput={(e) => setNum(s.roughen, 'grit', e.target.value, 0, 6)} /><input class="num-s" type="number" min="0" max="6" step="0.25" value={s.roughen.grit ?? 0} disabled={!s.roughen.on} title="Fine torn edge over the wobble, 0–6" aria-label="Roughen grit" onchange={(e) => commitNum(s.roughen, 'grit', e, 0, 6)} /></div>
+              </div>
+            {/if}
             <div class="grp">
               <label class="lbl" for="insp-seed">Seed</label>
               <input id="insp-seed" type="number" min="0" max="999" value={s.roughen.seed} disabled={!s.roughen.on} title="Varies the distortion pattern; same seed = same result" oninput={(e) => setNum(s.roughen, 'seed', e.target.value, 0, 999, true)} />
@@ -1715,28 +1764,23 @@
           <div class="insp-none">Replaces colour, effects and type settings</div>
         </div>
 
-        <!-- ===== Typeset (beta) =====
-             Only exists while the beta is switched on in Settings. With it off
-             the layout engine ignores this box's fit anyway.
-
-             What is left here is the one contextual thing: which balloon THIS
-             box was measured against, and the verb that measures it again. The
-             switches that used to sit above it - shaped breaks, hyphenation,
-             balloon layout, the orphan threshold - are defaults now, set once in
-             Settings › Typesetting, and overridable per box from the Bulk style
-             panel. None of them said anything about the box you had selected. -->
-        {#if app.typesetting.mode === 'smart'}
-          <div class="insp-rule"></div>
-          {@render secHead('Typeset · beta')}
-          <div class="grp">
-            <span class="lbl">{box.fit ? (box.fit.kind === 'ellipse' ? 'Fitted · oval balloon' : box.fit.kind === 'rows' ? 'Fitted · balloon outline' : 'Fitted · rectangular panel') : 'Not fitted · rectangular layout'}</span>
-            <!-- A verb, not a segment: it sat alone in a shell that implies
-                 mutually exclusive choices it has none of. -->
-            <button type="button" class="rbtn" title="Measure the balloon under this box again, from where the box is now, and typeset the text in it" onclick={() => refitBalloon(box.id)}>
-              {box.fit ? 'Re-fit to balloon' : 'Fit to balloon'}
-            </button>
-          </div>
-        {/if}
+        <!-- ===== Typeset =====
+             The one contextual thing about this box's line breaking: which
+             balloon it was measured against, and the verb that measures it
+             again. The switches - shaped breaks, hyphenation, balloon layout,
+             the orphan threshold - are defaults, set once in Settings ›
+             Typesetting, and overridable per box from the Bulk style panel.
+             None of them said anything about the box you had selected. -->
+        <div class="insp-rule"></div>
+        {@render secHead('Typeset')}
+        <div class="grp">
+          <span class="lbl">{box.fit ? (box.fit.kind === 'ellipse' ? 'Fitted · oval balloon' : box.fit.kind === 'rows' ? 'Fitted · balloon outline' : 'Fitted · rectangular panel') : 'Not fitted · rectangular layout'}</span>
+          <!-- A verb, not a segment: it sat alone in a shell that implies
+               mutually exclusive choices it has none of. -->
+          <button type="button" class="rbtn" title="Measure the balloon under this box again, from where the box is now, and typeset the text in it" onclick={() => refitBalloon(box.id)}>
+            {box.fit ? 'Re-fit to balloon' : 'Fit to balloon'}
+          </button>
+        </div>
       </div>
     {/if}
 
@@ -1843,6 +1887,17 @@
   }
   .row-size > * {
     min-width: 0;
+  }
+
+  /* No fill: the struck-through swatch, as wide as it is tall. */
+  .seg .nofill {
+    flex: 0 0 34px;
+  }
+  .nofill-note {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--t3);
   }
 
   /* Gradient type: an icon over its name, two up. */
@@ -2095,7 +2150,9 @@
 
   .sub-tabs {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* Nine tabs in one row: at the panel's default width each is about 30px,
+       and the glyph is 15px. Six per row left a row of three. */
+    grid-template-columns: repeat(9, minmax(0, 1fr));
     gap: 3px;
   }
   .sub-tab {

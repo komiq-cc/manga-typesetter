@@ -1,26 +1,32 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../../test/rust-engine.js';
-import { createRustGlyphPainter, SCRATCH_KEEP_PX } from './rust-painter.js';
+import { createRustGlyphPainter } from './rust-painter.js';
 
 // ===========================================================================
-// What the Rust painter holds between two paints
+// What the Rust painter holds between two paints: nothing
 // ===========================================================================
-// The painter copies each raster the engine hands back through one scratch
-// canvas, kept from paint to paint. What it keeps is what this file is about:
-// every canvas the painter asks the document for is a double that records the
-// size it was given, so "still holding" is read off the record and not off a
-// canvas that reports a released size as something else. Every size is
-// recorded, not only the last: a canvas given its new width before its new
-// height is, between the two, a canvas of the new width and the OLD height,
-// and that one is allocated too.
+// The painter copies each raster the engine hands back through a canvas of
+// the raster's own and gives it back once drawn. A canvas kept from paint to
+// paint is what broke exports in the system WebKit: there a `drawImage` from
+// a canvas can be played after the next `putImageData` into it, and the box
+// drawn first showed the next box's letters (rust-painter.js, `blit`). Every
+// canvas the painter asks the document for is a double that records the size
+// it was given and what was done to it, so "still holding" and "written after
+// it was drawn from" are read off the record.
 
 const hadDocument = 'document' in globalThis;
 const oldDocument = globalThis.document;
 let made = [];
 function recorded() {
   const c = createCanvas(300, 150);
-  const rec = { c, w: 300, h: 150, took: [[300, 150]] };
+  const rec = { c, w: 300, h: 150, took: [[300, 150]], ops: [] };
+  const ctx = c.getContext('2d');
+  const put = ctx.putImageData.bind(ctx);
+  ctx.putImageData = (...a) => {
+    rec.ops.push(rec.w * rec.h > 0 ? 'put' : 'put into a released canvas');
+    return put(...a);
+  };
   for (const side of ['width', 'height']) {
     const own = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(c), side);
     Object.defineProperty(c, side, {
@@ -29,6 +35,7 @@ function recorded() {
       set: (v) => {
         rec[side === 'width' ? 'w' : 'h'] = v;
         rec.took.push([rec.w, rec.h]);
+        if (rec.w * rec.h === 0 && rec.ops.at(-1) !== 'released') rec.ops.push('released');
         own.set.call(c, v);
       },
     });
@@ -38,8 +45,6 @@ function recorded() {
 }
 const held = () => made.filter((r) => r.w * r.h > 0);
 const heldPx = () => held().reduce((n, r) => n + r.w * r.h, 0);
-// The most pixels any one canvas held at any moment, and the size it had then.
-const peak = () => made.flatMap((r) => r.took).reduce((m, [w, h]) => (w * h > m.px ? { px: w * h, w, h } : m), { px: 0, w: 0, h: 0 });
 
 let rust;
 beforeAll(async () => {
@@ -65,9 +70,15 @@ const job = (runs, size = 12) => ({
   fill: { kind: 'solid', color: '#000000' },
   runs,
 });
-// A destination nobody counts: only the painter's own canvases are recorded.
+// A destination nobody counts: only the painter's own canvases are recorded,
+// and each draw from one of them onto it.
 function target(scale) {
   const ctx = createCanvas(64, 64).getContext('2d');
+  const draw = ctx.drawImage.bind(ctx);
+  ctx.drawImage = (src, ...a) => {
+    made.find((r) => r.c === src)?.ops.push('drawn');
+    return draw(src, ...a);
+  };
   ctx.scale(scale, scale);
   return ctx;
 }
@@ -77,100 +88,50 @@ const WIDE = job([{ text: 'W'.repeat(140), x: 2, y: 14 }]);
 const TALL = job(Array.from({ length: 80 }, (_, i) => ({ text: 'WWW', x: 2, y: 14 + i * 13 })));
 const SMALL = job([{ text: 'W', x: 2, y: 14 }]);
 
-describe('the scratch canvas the Rust painter keeps', () => {
-  it('each of the two rasters is small enough to keep, and wide or tall enough to matter', () => {
-    const seen = [];
-    for (const j of [WIDE, TALL]) {
-      made = [];
-      createRustGlyphPainter(rust).paint(target(6), j);
-      seen.push([made[0].w, made[0].h]);
-    }
-    const [[ww, wh], [tw, th]] = seen;
-    expect(ww * wh).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-    expect(tw * th).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-    // Raised side by side they are the review's 200 MB and more.
-    expect(ww * th).toBeGreaterThan(SCRATCH_KEEP_PX * 10);
-  });
-
-  it('a very wide raster and then a very tall one leave a scratch within the bound', () => {
-    const painter = createRustGlyphPainter(rust);
-    const ctx = target(6);
-    painter.paint(ctx, WIDE);
-    expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-    painter.paint(ctx, TALL);
-    expect(held().length).toBeLessThanOrEqual(1);
-    expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-    // And a small one afterwards does not bring anything back.
-    painter.paint(ctx, SMALL);
-    expect(held().length).toBeLessThanOrEqual(1);
-    expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-  });
-
-  it('in the other order too', () => {
-    const painter = createRustGlyphPainter(rust);
-    const ctx = target(6);
-    painter.paint(ctx, TALL);
-    painter.paint(ctx, WIDE);
-    expect(held().length).toBeLessThanOrEqual(1);
-    expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
-  });
-
-  // The outside review's sequence: cut from the tall raster to the wide one,
-  // width first, the canvas was 8738 x 6212 on the way - the very canvas the
-  // bound is there to prevent, for as long as it takes to set a height.
+describe('the canvases the Rust painter makes', () => {
   for (const [name, jobs] of [
+    ['one raster', [SMALL]],
     ['tall then wide', [TALL, WIDE]],
     ['wide then tall', [WIDE, TALL]],
     ['back and forth, with small ones between', [TALL, SMALL, WIDE, SMALL, TALL, WIDE, TALL]],
   ]) {
-    it(`at no moment is any canvas over the bound: ${name}`, () => {
+    it(`each is written once, drawn from once, then given back: ${name}`, () => {
       const painter = createRustGlyphPainter(rust);
       const ctx = target(6);
       for (const j of jobs) painter.paint(ctx, j);
-      const most = peak();
-      expect(most.px, `${most.w} x ${most.h}`).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+      // One canvas per raster, none kept.
+      expect(made).toHaveLength(jobs.length);
+      expect(heldPx()).toBe(0);
+      // Nothing written into a canvas a draw was already made from.
+      for (const r of made) expect(r.ops).toEqual(['put', 'drawn', 'released']);
     });
   }
 
-  it('a raster over the bound by itself is the most its own canvas ever holds', () => {
+  it('the whole box in one job goes the same way', () => {
     const painter = createRustGlyphPainter(rust);
-    painter.paint(target(6), job([{ text: 'W'.repeat(60), x: 2, y: 60 }, { text: 'W', x: 2, y: 260 }], 40));
-    const [w, h] = made[0].took.reduce((m, t) => (t[0] * t[1] > m[0] * m[1] ? t : m));
-    // Its own size, taken once: not that width with some other height.
-    expect(made[0].took.filter((t) => t[0] * t[1] === w * h)).toHaveLength(1);
-    expect(made[0].took.filter((t) => t[0] * t[1] > SCRATCH_KEEP_PX)).toHaveLength(1);
+    expect(painter.paintBox).toBeTypeOf('function');
+    const ctx = target(2);
+    for (const j of [SMALL, WIDE, SMALL]) {
+      painter.paintBox(ctx, { job: j, rect: { x: 0, y: 0, w: 2000, h: 40 }, shadows: [], blur: 0, taps: [], clip: null });
+    }
+    expect(made).toHaveLength(3);
+    expect(heldPx()).toBe(0);
+    for (const r of made) expect(r.ops).toEqual(['put', 'drawn', 'released']);
   });
 
-  it('is one canvas for a run of ordinary rasters: nothing is made per paint', () => {
-    const painter = createRustGlyphPainter(rust);
-    const ctx = target(6);
-    for (let i = 0; i < 20; i++) painter.paint(ctx, job([{ text: 'WAIT FOR ME', x: 2, y: 30 }], 20 + i));
-    expect(made).toHaveLength(1);
-  });
-
-  it('stays useful after one very wide raster: ordinary rasters are not each given a canvas of their own', () => {
+  it('no canvas is ever much more than its raster', () => {
     const painter = createRustGlyphPainter(rust);
     const ctx = target(6);
-    painter.paint(ctx, WIDE);
-    // A balloon's worth of lines, taller than the wide line's scratch can
-    // grow to inside the bound.
-    const balloon = job(Array.from({ length: 6 }, (_, i) => ({ text: 'WAIT FOR ME', x: 2, y: 30 + i * 32 })), 30);
-    for (let i = 0; i < 20; i++) painter.paint(ctx, balloon);
-    expect(made.length).toBeLessThanOrEqual(2);
-    expect(heldPx()).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
+    for (const j of [TALL, WIDE, TALL]) painter.paint(ctx, j);
+    for (const r of made) {
+      const [w, h] = r.took.at(-3);
+      // The size it was given, by way of the default 300 x 150 it was made at.
+      const most = r.took.reduce((m, t) => Math.max(m, t[0] * t[1]), 0);
+      expect(most).toBeLessThanOrEqual(Math.max(w * h, w * 150, 300 * h, 300 * 150));
+    }
   });
 
-  it('a raster over the bound by itself is copied through a canvas that is given back', () => {
-    const painter = createRustGlyphPainter(rust);
-    // 60 W at size 40, 6 device px to the page px: about 14,000 x 300.
-    painter.paint(target(6), job([{ text: 'W'.repeat(60), x: 2, y: 60 }, { text: 'W', x: 2, y: 260 }], 40));
-    expect(made).toHaveLength(1);
-    expect(made[0].w * made[0].h).toBe(0);
-  });
-
-  it('what lands on the destination is the same whichever canvas carried it', () => {
-    // The scratch is cut to a raster, grown, or passed over; the pixels copied
-    // out of it are the raster's either way.
+  it('what lands on the destination is the same whatever was painted before', () => {
     const paintTo = (painter, j) => {
       const c = createCanvas(700, 260);
       const ctx = c.getContext('2d');

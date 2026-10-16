@@ -91,13 +91,16 @@ export function fontCss(name, userFonts = USER_FONTS) {
 }
 
 // ===== the chapter's typesetting =====
-// Which line breaker lays a chapter out is a property of the chapter, stored in
-// its chapter.json as `typesetting: { mode, version }`, not a preference of the
-// machine that opens it (DET-3). Every render, fit and export of the open
-// chapter uses it, so the same file breaks its lines the same way everywhere.
+// Stored in its chapter.json as `typesetting: { mode, version }` (DET-3).
 //
-//   mode      'smart' - the shaped breaker, hyphenation and balloon layout, the
-//             beta in Settings - or 'plain', the wrap every build has.
+//   mode      'smart' or 'plain'. It was once a switch for the whole chapter -
+//             the shaped breaker, hyphenation and balloon layout, or the plain
+//             wrap every build has - and the line breaking is each box's own
+//             now (`style.shape`, `hyphenate`, `balloon`; the defaults are
+//             "Hyphenate long words" in Settings). A chapter is created
+//             'smart', and one saved 'plain' is opened as 'smart' with every
+//             box set to the plain wrap it was drawn with
+//             (`openTypesetting`), so nothing on its pages moves.
 //   version   which engine last fitted the chapter's boxes: 1, the browser
 //             (`LAYOUT_VERSION`, and what a file without the number means), or
 //             2, the Rust text engine (`LAYOUT_VERSION_RUST`). The two measure
@@ -112,19 +115,6 @@ export function fontCss(name, userFonts = USER_FONTS) {
 //             2 with the browser measuring, and the number the file had in
 //             every other case (`stampTypesetting`).
 //
-// The preference is only the NEW-chapter default, mirrored here by
-// prefs.svelte.js the way the box defaults below are, so a later change to it
-// (BRK-1) can never re-break a chapter that already exists.
-//
-// A chapter written before the field existed was laid out with whatever this
-// machine's beta switch said then, and `legacyTypesetting()` is that answer:
-// 'smart' only if the switch was saved on when this build first ran, frozen
-// there by prefs.svelte.js so turning it on or off afterwards - or a new build
-// changing its default - cannot re-break the chapters made before. The library
-// hands it to the open path for a record with no field; the first save stamps
-// the field and it is never consulted for that chapter again.
-// `normalizeTypesetting` itself stays a pure reading of what it is given:
-// anything that is not an explicit 'smart' is plain.
 export const LAYOUT_VERSION = 1;
 export const LAYOUT_VERSION_RUST = 2;
 
@@ -135,12 +125,8 @@ export function normalizeTypesetting(raw) {
   };
 }
 
-let smartByDefault = false;
-export function setTypesetDefault(on) {
-  smartByDefault = !!on;
-}
 // What a chapter created now is stamped with.
-export const newTypesetting = () => ({ mode: smartByDefault ? 'smart' : 'plain', version: LAYOUT_VERSION });
+export const newTypesetting = () => ({ mode: 'smart', version: LAYOUT_VERSION });
 
 let legacyMode = 'plain';
 export function setLegacyTypeset(mode) {
@@ -149,13 +135,43 @@ export function setLegacyTypeset(mode) {
 // What a chapter with no `typesetting` field was laid out with on this machine.
 export const legacyTypesetting = () => ({ mode: legacyMode, version: LAYOUT_VERSION });
 
+// A box's style for the plain wrap: what the 'plain' chapter switch drew, as
+// the box's own fields. `shape: 'off'` is the plain wrap (`layoutLines`), and
+// hyphenation is read only by the shaped breaker, so it is turned off too and
+// the box reads as plain in Bulk style. `balloon` stays as it was: besides the
+// rows shaped lines are laid on, it is the limit a solved box grows to inside
+// its balloon (`fitLimit`), which the chapter switch never turned off.
+export const PLAIN_BREAKS = Object.freeze({ shape: 'off', hyphenate: false });
+
+// A style given the plain wrap. The very object handed in when it already has
+// it, or is not a style at all, so a caller can tell by identity whether
+// anything changed.
+export function plainStyle(s) {
+  if (!s || typeof s !== 'object') return s;
+  if ((s.shape ?? 'auto') === 'off' && s.hyphenate === false) return s;
+  return { ...s, ...PLAIN_BREAKS };
+}
+
+// A chapter's typesetting as it is opened, and whether its boxes were laid out
+// plain. A chapter saved 'plain' (or, with no field, laid out plain on this
+// machine) opens 'smart' with every box given the plain wrap it was drawn with
+// - by the load (`loadProjectPages`' `plain`), which owns the solver's records
+// a box carries, and by the undo history (`openHistory`) - so the line
+// breaking is each box's and nothing on the page moves. The file keeps what it
+// had until a save writes the document, and an open writes nothing.
+export function openTypesetting(raw) {
+  const t = normalizeTypesetting(raw);
+  if (t.mode === 'smart') return { typesetting: t, plain: false };
+  return { typesetting: { ...t, mode: 'smart' }, plain: true };
+}
+
 // ===== typesetting defaults for a NEW box =====
 // Five of the style properties below are not really styling at all - they are
 // how the layout engine behaves - and they are set once, for the whole app, in
 // Settings › Typesetting rather than per box in the Inspector. `prefs.svelte.js`
-// owns the preference and mirrors it here with `setBoxDefaults` (the same way it
-// mirrors the beta switch into measure.js), because this module is a leaf: it
-// imports nothing, which is what lets everyone else import it.
+// owns the preference and mirrors it here with `setBoxDefaults`, because this
+// module is a leaf: it imports nothing, which is what lets everyone else
+// import it.
 //
 // The starting values are `defaultStyle()`'s own, so a build with nothing stored
 // - and every style ever saved to disk - behaves exactly as it did before this
@@ -210,6 +226,9 @@ export function applyBoxDefaults(style) {
   style.clip = { on: false, mode: 'exclude', brushSize: style.clip?.brushSize ?? 20, shapes: [] };
   style.warp = { on: false, cols: WARP_MESH_DEFAULT, rows: WARP_MESH_DEFAULT, pts: [] };
   style.ink = { on: false, strokes: [] };
+  // The SFX recipe is the same kind of thing: moves tuned against one box's
+  // text and font. A newborn box is plain text until the user asks for one.
+  style.sfx = sfxDefault();
   return style;
 }
 
@@ -261,6 +280,11 @@ export function defaultStyle() {
     // `size * 0.3 * scale` page px square, so it scales with the font. Pattern
     // wins over gradient when both are on.
     pattern: { on: false, kind: 'dots', fg: '#000000', bg: '#ffffff', scale: 1 },
+    // No fill at all: the letters are cut out of their own strokes, so what
+    // shows is each stroke's visible width and the page through the letter.
+    // It wins over the pattern and the gradient, and a box with no stroke
+    // either shows nothing. A shadow is then the strokes' shadow.
+    noFill: false,
     // ---- strokes ----
     // Ordered innermost first: strokes[0] sits right against the glyph,
     // strokes[1] goes around strokes[0], and so on. Rendered outermost first so
@@ -330,6 +354,18 @@ export function defaultStyle() {
     // one; 0 means auto (the closed ring). With a radius set the text need not
     // reach round - it is an arc centred on `angle`.
     circle: { on: false, angle: 0, inside: false, r: 0 },
+    // SFX lettering: every letter placed on its own (offset, tilt, size, lean)
+    // by the Rust engine from a short recipe, `moves`. It is a fourth glyph-by-
+    // glyph layout and takes precedence over path, circle and arc, but it
+    // exists only while the Rust engine is the text engine: under the browser
+    // engine the recipe is kept and ignored, and the box is plain text (see
+    // `sfxActive`, sfx.js). `amount` (0..2) scales every move at once, `seed`
+    // picks the arrangement of the random ones, `flow: 'stack'` sets one
+    // letter per row, `rowShift` (ems) moves each row sideways from the one
+    // above. A move is `{ kind, a, b }`: the engine's kind name and its two
+    // numbers (`sfxInfo` says what each means). Letter gap and line height are
+    // the box's own `letterSpacing` and `lineHeight`, not repeated here.
+    sfx: sfxDefault(),
     uppercase: false,
     lineHeight: 1.1,
     letterSpacing: 0,
@@ -337,8 +373,10 @@ export function defaultStyle() {
     // mirror flip (applied around the box centre, inside rotation)
     flipH: false, // horizontal mirror (left↔right)
     flipV: false, // vertical mirror (top↔bottom)
-    // rough / distressed edges (SVG feDisplacementMap)
-    roughen: { on: false, amount: 4, detail: 0.05, seed: 7 },
+    // rough / distressed edges (SVG feDisplacementMap). `grit` is a fine tear
+    // over the crumple, page px, drawn only by a painter that roughens the
+    // outlines (the Rust engine's): moved pixels tear on their own.
+    roughen: { on: false, amount: 4, detail: 0.05, seed: 7, grit: 0 },
     // warp: per-character circular arc, -100..100 (negative = frown, positive = smile)
     curve: 0,
     // ---- typesetting (see typeset.js) ----
@@ -603,6 +641,52 @@ function normalizeStop(st) {
   };
 }
 
+export const SFX_FLOWS = ['row', 'stack'];
+// More than this is a recipe nobody reads; the Inspector's list stops here too.
+export const SFX_MAX_MOVES = 8;
+
+function sfxDefault() {
+  return { on: false, amount: 1, seed: 1, flow: 'row', rowShift: 0, moves: [], before: null };
+}
+
+// What a preset wrote over on the box, as it stood before SFX went on: the two
+// gaps, the bends SFX switches off, and the mesh. Remove SFX puts it back
+// (`clearSfx`, sfx.js). Null while SFX is off, and for a recipe that has none.
+function normalizeSfxBefore(b) {
+  if (!b || typeof b !== 'object') return null;
+  return {
+    letterSpacing: num(b.letterSpacing, 0),
+    lineHeight: num(b.lineHeight, 1.1),
+    curve: num(b.curve, 0),
+    circle: b.circle === true,
+    path: b.path === true,
+    warp: normalizeWarp(b.warp),
+  };
+}
+
+// The SFX recipe, gated field by field. Kinds are the engine's to know, so a
+// name is only checked to be a name; a move whose numbers are not finite
+// numbers is dropped rather than repaired.
+export function normalizeSfx(x) {
+  const d = sfxDefault();
+  const moves = [];
+  for (const m of Array.isArray(x?.moves) ? x.moves : []) {
+    if (moves.length >= SFX_MAX_MOVES) break;
+    if (typeof m?.kind !== 'string' || !m.kind || typeof m.a !== 'number' || typeof m.b !== 'number') continue;
+    if (!Number.isFinite(m.a) || !Number.isFinite(m.b)) continue;
+    moves.push({ kind: m.kind, a: m.a, b: m.b });
+  }
+  return {
+    on: x?.on === true,
+    amount: Math.min(2, Math.max(0, num(x?.amount, d.amount))),
+    seed: Math.min(9999, Math.max(1, Math.round(num(x?.seed, d.seed)))),
+    flow: SFX_FLOWS.includes(x?.flow) ? x.flow : d.flow,
+    rowShift: Math.min(2, Math.max(-2, num(x?.rowShift, d.rowShift))),
+    moves,
+    before: normalizeSfxBefore(x?.before),
+  };
+}
+
 export function normalizeStyle(s) {
   const d = defaultStyle();
   const src = s || {};
@@ -736,8 +820,10 @@ export function normalizeStyle(s) {
     ink,
     warp: normalizeWarp(src.warp),
     circle: circ,
+    sfx: normalizeSfx(src.sfx),
     gradient: g,
     pattern: pat,
+    noFill: src.noFill === true,
     strokes,
     shadows,
     roughen: { ...d.roughen, ...(src.roughen || {}) },

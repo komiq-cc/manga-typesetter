@@ -3,6 +3,7 @@ import {
   warpPlan,
   warpBoxCanvas,
   expandTriangle,
+  meshFolds,
   subdivisionFor,
   WARP_PAD,
   WARP_SUB,
@@ -11,7 +12,14 @@ import {
   MAX_DEVICE,
   MAX_DEVICE_AREA,
 } from './warp-paint.js';
-import { identityMesh, warpPoint, affineWarpPoint, solveHomography, applyHomography } from './warp.js';
+import {
+  identityMesh,
+  warpPoint,
+  affineWarpPoint,
+  solveHomography,
+  applyHomography,
+  affineFromTriangle,
+} from './warp.js';
 import { renderPageCanvas, paintWarpedBox } from './exporter.js';
 import { loadProjectPages, app } from './store.svelte.js';
 import { normalizeStyle } from './data.js';
@@ -315,6 +323,14 @@ function canvasOf(w0, h0) {
           if (a <= 0) continue;
           const sa = (a / n) * this.globalAlpha;
           const i = (py * cnv.width + pxi) * 4;
+          if (this.globalCompositeOperation === 'lighter') {
+            // Porter-Duff plus: the premultiplied sum, clamped.
+            cnv.px[i] = Math.min(1, (r / n) * this.globalAlpha + cnv.px[i]);
+            cnv.px[i + 1] = Math.min(1, (g / n) * this.globalAlpha + cnv.px[i + 1]);
+            cnv.px[i + 2] = Math.min(1, (b / n) * this.globalAlpha + cnv.px[i + 2]);
+            cnv.px[i + 3] = Math.min(1, sa + cnv.px[i + 3]);
+            continue;
+          }
           const keep = 1 - sa;
           cnv.px[i] = (r / n) * this.globalAlpha + cnv.px[i] * keep;
           cnv.px[i + 1] = (g / n) * this.globalAlpha + cnv.px[i + 1] * keep;
@@ -839,6 +855,62 @@ describe('warpBoxCanvas', () => {
   });
 }, HEAVY_MS);
 
+// The other way to put the triangles down, kept as the control: each one over
+// the ones before it (source-over), its clip grown by `grow` page px. This is
+// what the painter did for every mesh before joins were added, and what it
+// still does for a folded one.
+function layered(src, args, grow) {
+  const plan = warpPlan(args.warp, args.w, args.h, { x: -args.ox, y: -args.oy, w: args.cw, h: args.ch });
+  const ref = warpBoxCanvas(src, args);
+  const canvas = canvasOf(ref.cw, ref.ch);
+  const ctx = canvas.getContext('2d');
+  ctx.translate(ref.ox, ref.oy);
+  for (const tri of plan.tris) {
+    const m = affineFromTriangle(tri.src, tri.dst);
+    if (!m) continue;
+    const e = expandTriangle(tri.dst, grow);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(e[0][0], e[0][1]);
+    ctx.lineTo(e[1][0], e[1][1]);
+    ctx.lineTo(e[2][0], e[2][1]);
+    ctx.closePath();
+    ctx.clip();
+    ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    ctx.drawImage(src, -args.ox, -args.oy, args.cw, args.ch);
+    ctx.restore();
+  }
+  return { canvas, ox: ref.ox, oy: ref.oy };
+}
+
+// Alpha over every interior pixel of a warped bitmap: a pixel whose four
+// corners, pushed out by a margin, are all inside the deformed outline `ring`.
+// The margin keeps the box's own antialiased edge - which is not a join - out
+// of the scan. `bytes` is the same alpha as the 8-bit value a canvas holds.
+function interior(out, ring, m = 2.5) {
+  const img = out.canvas.getContext('2d').getImageData(0, 0, out.canvas.width, out.canvas.height);
+  const r = { min: Infinity, max: -Infinity, minByte: 255, maxByte: 0, holes: 0, n: 0 };
+  for (let y = 0; y < out.canvas.height; y++) {
+    for (let x = 0; x < out.canvas.width; x++) {
+      const cx = x + 0.5 - out.ox;
+      const cy = y + 0.5 - out.oy;
+      const inside = [[-m, -m], [m, -m], [m, m], [-m, m]].every(([dx, dy]) => inPoly(ring, cx + dx, cy + dy));
+      if (!inside) continue;
+      const a = alphaAt(out.canvas, x, y);
+      const byte = img.data[(y * out.canvas.width + x) * 4 + 3];
+      r.n++;
+      r.min = Math.min(r.min, a);
+      r.max = Math.max(r.max, a);
+      r.minByte = Math.min(r.minByte, byte);
+      r.maxByte = Math.max(r.maxByte, byte);
+      if (a < 0.999) r.holes++;
+    }
+  }
+  return r;
+}
+
+const HALF = 'rgba(0,0,0,0.5)';
+
 describe('the seams between cells', () => {
   // A mesh with every interior handle pulled somewhere different, which is the
   // worst case for the joins: nine cells, twelve interior edges, and four
@@ -849,9 +921,6 @@ describe('the seams between cells', () => {
   ]);
   const warp = { on: true, cols: 3, rows: 3, pts };
 
-  // Which pixels are interior: a pixel whose four corners, pushed out by a
-  // margin, are all inside the deformed outline. The margin keeps the box's own
-  // antialiased edge - which is not a seam - out of the scan.
   const outline = () => {
     const n = 4;
     const ring = [];
@@ -862,41 +931,148 @@ describe('the seams between cells', () => {
     return ring;
   };
 
-  const scan = (overdraw) => {
-    const out = warpBoxCanvas(flatTexture(1, '#000000'), warpArgs(warp, { overdraw }));
-    const ring = outline();
-    const m = 2.5;
-    let worst = 1;
-    let holes = 0;
-    for (let y = 0; y < out.canvas.height; y++) {
-      for (let x = 0; x < out.canvas.width; x++) {
-        const cx = x + 0.5 - out.ox;
-        const cy = y + 0.5 - out.oy;
-        const inside = [[-m, -m], [m, -m], [m, m], [-m, m]].every(([dx, dy]) =>
-          inPoly(ring, cx + dx, cy + dy),
-        );
-        if (!inside) continue;
-        const a = alphaAt(out.canvas, x, y);
-        if (a < worst) worst = a;
-        if (a < 0.999) holes++;
-      }
-    }
-    return { worst, holes };
-  };
-
   it('leaves no pinhole anywhere inside a warped flat-colour box', () => {
-    const { worst, holes } = scan(SEAM_OVERDRAW);
-    expect(holes).toBe(0);
-    expect(worst).toBe(1);
+    const out = warpBoxCanvas(flatTexture(1, '#000000'), warpArgs(warp));
+    const r = interior(out, outline());
+    expect(r.n).toBeGreaterThan(5000);
+    expect(r.holes).toBe(0);
+    expect(r.min).toBe(1);
   });
 
-  it('is the overdraw guard that does it - without one the joins show', () => {
-    // The control case, and the reason the guard is not cargo cult: with the
-    // clips drawn exactly on their triangles, the shared edges composite to
-    // about three quarters and the background reads through.
-    const { worst, holes } = scan(0);
-    expect(holes).toBeGreaterThan(20);
-    expect(worst).toBeLessThan(0.85);
+  it('keeps a half-opaque box half opaque along every join', () => {
+    // A shadow, an outline at half alpha, the soft edge of ink: drawn twice
+    // over a join, half over half is three quarters. Added, the two sides'
+    // coverage sums to one and the pixel is the texture's own.
+    const out = warpBoxCanvas(flatTexture(1, HALF), warpArgs(warp));
+    const r = interior(out, outline());
+    expect(r.min).toBeGreaterThan(0.5 - 1e-9);
+    expect(r.max).toBeLessThan(0.5 + 1e-9);
+  });
+
+  it('is the adding that does it - laid one over another, the joins show', () => {
+    // The control, and the reason for both rules. Exact clips laid over each
+    // other let the background through every join...
+    const exact = interior(layered(flatTexture(1, '#000000'), warpArgs(warp), 0), outline());
+    expect(exact.holes).toBeGreaterThan(20);
+    expect(exact.min).toBeLessThan(0.85);
+    // ...and grown ones close that, but draw a translucent join twice.
+    const grown = interior(layered(flatTexture(1, HALF), warpArgs(warp), SEAM_OVERDRAW), outline());
+    expect(grown.max).toBeGreaterThan(0.7);
+  });
+
+  it('draws a sheared box\'s diagonal at the alpha the texture has', () => {
+    // One cell sheared into a parallelogram: two triangles and one join, the
+    // diagonal, right across the middle. In canvas bytes: 127 or 128, not 191.
+    const shear = { on: true, cols: 1, rows: 1, pts: [[0, 0], [100, 0], [30, 100], [130, 100]] };
+    const ring = [[0, 0], [100, 0], [130, 100], [30, 100]];
+    const now = interior(warpBoxCanvas(flatTexture(1, HALF), warpArgs(shear)), ring);
+    expect(now.n).toBeGreaterThan(5000);
+    expect(now.minByte).toBeGreaterThanOrEqual(127);
+    expect(now.maxByte).toBeLessThanOrEqual(128);
+    const before = interior(layered(flatTexture(1, HALF), warpArgs(shear), SEAM_OVERDRAW), ring);
+    expect(before.maxByte).toBeGreaterThan(185);
+  });
+}, HEAVY_MS);
+
+describe('a mesh folded over itself', () => {
+  // The bottom-left corner dragged past the diagonal: the cell's second half
+  // turns over and lies across the first.
+  const CROSSED = { on: true, cols: 1, rows: 1, pts: [[0, 0], [100, 0], [140, 60], [120, 140]] };
+  const turnedOver = (plan) =>
+    plan.tris.some(({ dst: [a, b, c] }) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0);
+
+  it('is told apart from one that lies flat', () => {
+    const rect = { x: -PAD, y: -PAD, w: W + PAD * 2, h: H + PAD * 2 };
+    const jitter = identityMesh(3, 3, W, H).map(([x, y], i) => [x + (i % 3) * 4 - 4, y + ((i * 7) % 5) * 3 - 6]);
+    expect(meshFolds(warpPlan(DRAG, W, H, rect))).toBe(false);
+    expect(meshFolds(warpPlan({ on: true, cols: 3, rows: 3, pts: jitter }, W, H, rect))).toBe(false);
+    expect(meshFolds(warpPlan({ on: true, cols: 1, rows: 1, pts: [[0, 0], [100, 0], [30, 100], [130, 100]] }, W, H, rect))).toBe(false);
+    expect(meshFolds(warpPlan(CROSSED, W, H, rect))).toBe(true);
+  });
+
+  it('catches a twist that wraps round past itself with nothing turned over', () => {
+    // A strip bent into a ring of 450 degrees: every triangle still winds the
+    // right way, and the last quarter lies over the first. Only the outline
+    // says so.
+    const cols = 12;
+    const pts = [];
+    for (const rad of [150, 100]) {
+      for (let i = 0; i <= cols; i++) {
+        const t = ((i / cols) * 450 * Math.PI) / 180;
+        pts.push([200 + rad * Math.cos(t), 200 + rad * Math.sin(t)]);
+      }
+    }
+    const plan = warpPlan({ on: true, cols, rows: 1, pts }, W, H);
+    expect(turnedOver(plan)).toBe(false);
+    expect(meshFolds(plan)).toBe(true);
+    // The same strip at 300 degrees does not reach itself.
+    const short = pts.map((_, k) => {
+      const i = k % (cols + 1);
+      const rad = k <= cols ? 150 : 100;
+      const t = ((i / cols) * 300 * Math.PI) / 180;
+      return [200 + rad * Math.cos(t), 200 + rad * Math.sin(t)];
+    });
+    expect(meshFolds(warpPlan({ on: true, cols, rows: 1, pts: short }, W, H))).toBe(false);
+  });
+
+  it('lays the fold over the sheet instead of adding the two, so nothing brightens', () => {
+    const args = warpArgs(CROSSED);
+    const out = warpBoxCanvas(quadTexture(), args);
+    const plan = warpPlan(CROSSED, W, H, { x: -PAD, y: -PAD, w: W + PAD * 2, h: H + PAD * 2 });
+    // How far a point is inside a triangle, the least of its edge distances.
+    const depth = (tri, x, y) => {
+      let d = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const [a, b, c] = [tri[i], tri[(i + 1) % 3], tri[(i + 2) % 3]];
+        const ex = b[0] - a[0];
+        const ey = b[1] - a[1];
+        const side = (px, py) => (ex * (py - a[1]) - ey * (px - a[0])) / Math.hypot(ex, ey);
+        d = Math.min(d, side(x, y) * Math.sign(side(c[0], c[1])));
+      }
+      return d;
+    };
+    // The quadrant colour under a source point, well clear of every boundary;
+    // 'clear' for none (outside the box), undefined when too close to call.
+    const colourAt = (sx, sy) => {
+      const near = (v, edge) => Math.abs(v - edge) < 2;
+      if ([0, 50, 100].some((e) => near(sx, e) || near(sy, e))) return undefined;
+      if (sx < 0 || sy < 0 || sx > W || sy > H) return 'clear';
+      return sx < 50 ? (sy < 50 ? RED : BLUE) : sy < 50 ? GREEN : YELLOW;
+    };
+    let checked = 0;
+    for (let py = 0; py < out.canvas.height; py++) {
+      for (let pxi = 0; pxi < out.canvas.width; pxi++) {
+        const x = pxi + 0.5 - out.ox;
+        const y = py + 0.5 - out.oy;
+        const under = [];
+        let unsure = false;
+        for (const t of plan.tris) {
+          const d = depth(t.dst, x, y);
+          if (d < -2) continue;
+          if (d < 2) {
+            unsure = true;
+            break;
+          }
+          const [sx, sy] = apply(
+            ((m) => ({ a: m[0], b: m[1], c: m[2], d: m[3], e: m[4], f: m[5] }))(affineFromTriangle(t.dst, t.src)),
+            x,
+            y,
+          );
+          const c = colourAt(sx, sy);
+          if (c === undefined) {
+            unsure = true;
+            break;
+          }
+          if (c !== 'clear') under.push(c);
+        }
+        // Only pixels two different colours of the sheet lie over, which is
+        // where adding would show: red over blue would come out magenta.
+        if (unsure || new Set(under.map(String)).size < 2) continue;
+        expect(at(out.canvas, pxi, py)).toEqual([...under.at(-1), 1]);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(200);
   });
 }, HEAVY_MS);
 

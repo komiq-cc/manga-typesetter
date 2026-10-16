@@ -10,7 +10,7 @@
 // a save or a page turn: every disk error is reported once and swallowed, and
 // nothing on the document's own save path ever waits on this one.
 import { fsx } from '../fsx.js';
-import { normalizeStyle } from '../data.js';
+import { normalizeStyle, plainStyle } from '../data.js';
 import { toast, DOC_SAVE_MS, rescalePageGeometry, rescaleStyle, rescaleAuto, scaleFit, lengthScale } from '../store.svelte.js';
 import { scaleStroke } from '../brush.js';
 import {
@@ -130,38 +130,58 @@ const isCurrentStyle = (s) =>
 // would inflate into a whole style and then apply field by field onto the box.
 const stale = (s) => !!s && typeof s === 'object' && !isCurrentStyle(s);
 
-export function migrateEntry(e) {
+// `plain`: the chapter was laid out under the old chapter-wide plain switch, and
+// its boxes open with the plain wrap as their own (`openTypesetting` in
+// data.js). So does every box and box style its stacks put back - a style
+// recorded then holds the shaped breaker's fields the switch kept from acting,
+// and an undo of an unrelated colour change would otherwise re-break the
+// box's lines. `lastStyle` is not a box's, and is left as recorded.
+export function migrateEntry(e, plain = false) {
   if (!e || typeof e !== 'object') return e;
   let out = e;
   const put = (k, v) => {
     if (out === e) out = { ...e };
     out[k] = v;
   };
+  // A box's style moved forward: to this build's schema, and to the plain wrap
+  // when the chapter's was. The very object when neither applies.
+  const forward = (s) => {
+    const cur = stale(s) ? normalizeStyle(s) : s;
+    return plain ? plainStyle(cur) : cur;
+  };
+  const forwardBox = (b) => {
+    if (!b || typeof b !== 'object') return b;
+    const style = forward(b.style);
+    return style === b.style ? b : { ...b, style };
+  };
 
   // `place` / `delete`: a whole box, restored verbatim. The one that crashed.
-  if (e.box && typeof e.box === 'object' && stale(e.box.style)) {
-    put('box', { ...e.box, style: normalizeStyle(e.box.style) });
-  }
+  const box = forwardBox(e.box);
+  if (box !== e.box) put('box', box);
   // `style`: the pair IS a pair of styles. Only for this kind - see `stale`.
   if (e.t === 'style') {
-    if (stale(e.before)) put('before', normalizeStyle(e.before));
-    if (stale(e.after)) put('after', normalizeStyle(e.after));
+    const before = forward(e.before);
+    const after = forward(e.after);
+    if (before !== e.before) put('before', before);
+    if (after !== e.after) put('after', after);
   }
   // `bulk`: one style pair per box it touched, plus the `lastStyle` pair that
   // rides along with a template apply (absent on every entry written before it
-  // existed, which is exactly what `apply` already checks for).
+  // existed, which is exactly what `apply` already checks for). `placeMany`:
+  // one whole box per item, as `place`.
   if (stale(e.lastStyleBefore)) put('lastStyleBefore', normalizeStyle(e.lastStyleBefore));
   if (stale(e.lastStyleAfter)) put('lastStyleAfter', normalizeStyle(e.lastStyleAfter));
   if (Array.isArray(e.items)) {
     let moved = false;
     const items = e.items.map((it) => {
-      if (!it || typeof it !== 'object' || !(stale(it.before) || stale(it.after))) return it;
+      if (!it || typeof it !== 'object') return it;
+      const next =
+        e.t === 'bulk'
+          ? { before: forward(it.before), after: forward(it.after) }
+          : { box: forwardBox(it.box) };
+      if (Object.keys(next).every((k) => next[k] === it[k])) return it;
       moved = true;
-      return {
-        ...it,
-        before: stale(it.before) ? normalizeStyle(it.before) : it.before,
-        after: stale(it.after) ? normalizeStyle(it.after) : it.after,
-      };
+      return { ...it, ...next };
     });
     if (moved) put('items', items);
   }
@@ -170,13 +190,13 @@ export function migrateEntry(e) {
 
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-export function migrateDoc(doc) {
+export function migrateDoc(doc, plain = false) {
   if (!doc || doc.version !== 1 || !doc.pages) return doc;
   const pages = {};
   let touched = false;
   for (const [key, stack] of Object.entries(doc.pages)) {
-    const undo = (stack?.undo ?? []).map(migrateEntry);
-    const redo = (stack?.redo ?? []).map(migrateEntry);
+    const undo = (stack?.undo ?? []).map((e) => migrateEntry(e, plain));
+    const redo = (stack?.redo ?? []).map((e) => migrateEntry(e, plain));
     if (sameList(undo, stack?.undo ?? []) && sameList(redo, stack?.redo ?? [])) {
       pages[key] = stack;
       continue;
@@ -449,7 +469,8 @@ function complainOnce(e) {
   toast(`Undo history is not being saved - ${e?.message ?? e}`);
 }
 
-export async function openHistory(chapterDir, pageId) {
+// `plain`: the chapter was laid out plain - see `migrateEntry`.
+export async function openHistory(chapterDir, pageId, { plain = false } = {}) {
   // Whatever chapter is open has a document nobody else will write, and
   // everything below resets it. Flushed first, so a chapter left inside the
   // debounce window does not lose its records - a page turn is not the only
@@ -488,7 +509,7 @@ export async function openHistory(chapterDir, pageId) {
       // entries are moved forward to this build's style schema - see
       // `migrateEntry`. Before the graft below, because what is grafted onto it
       // is this session's own records, which are current by construction.
-      if (parsed && parsed.version === 1 && parsed.pages) loaded = migrateDoc(parsed);
+      if (parsed && parsed.version === 1 && parsed.pages) loaded = migrateDoc(parsed, plain);
     }
   } catch {
     // A corrupt or unreadable history file costs undo and nothing else. It is

@@ -78,6 +78,23 @@ pub(crate) fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> R {
     with(|s| f(&mut s.engine))
 }
 
+/// Runs `f` with the engine, the first `len` bytes of the text buffer and the
+/// out buffer, for exports that live in another file (`abi_sfx.rs`). A failed
+/// call leaves the out buffer empty, as `with_text` does.
+#[cfg(feature = "paint")]
+pub(crate) fn with_engine_text<R>(
+    len: usize,
+    f: impl FnOnce(&mut Engine, &str, &mut Vec<u8>) -> Result<R, Error>,
+) -> Result<R, Error> {
+    with_text(len, |engine, text, st| f(engine, text, st.out))
+}
+
+/// Runs `f` with the out buffer alone.
+#[cfg(feature = "paint")]
+pub(crate) fn with_out<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    with(|s| f(&mut s.out))
+}
+
 /// Runs `f` with the engine and the first `len` bytes of the text buffer.
 /// A rejected query leaves no previous or partial answer in either buffer.
 fn with_text<R>(
@@ -122,7 +139,7 @@ fn code<T: Into<i32>>(r: Result<T, Error>) -> i32 {
 /// fallback chain's handle (zero for none). Every nonzero handle must still
 /// be held, including for a font-box or empty-text query: otherwise the
 /// answer is `UnknownFont` (NaN for `mt_advance`).
-fn face(font: u32, size: f64, flags: u32) -> Face {
+pub(crate) fn face(font: u32, size: f64, flags: u32) -> Face {
     Face {
         font,
         size,

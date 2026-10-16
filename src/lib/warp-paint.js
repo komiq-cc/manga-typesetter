@@ -4,9 +4,9 @@
 // canvas - type, ink, shadows, blur, smear, mask, all of it - and this carries
 // that texture through the mesh onto a new one. `warp.js` owns the geometry and
 // knows nothing about canvases; this file owns the canvas and works out no
-// geometry of its own beyond the two things a rasteriser needs and pure maths
-// does not: how far past the mesh the destination has to reach, and how much
-// each triangle has to overdraw so the joins between them do not show.
+// geometry of its own beyond the things a rasteriser needs and pure maths does
+// not: how far past the mesh the destination has to reach, and how the
+// triangles go down so the joins between them do not show.
 //
 // The texture is the whole box FOOTPRINT, not the box rect: a glyph can hang
 // out of its box and ink is routinely drawn over the edge, and warping a box
@@ -20,8 +20,8 @@ import { isIdentityMesh, affineFromTriangle, affineWarpPoint, meshMap } from './
 
 // How far past the deformed mesh the destination canvas reaches, page px. Two
 // is the antialiasing bleed: a triangle whose edge lands on the last pixel of
-// the canvas has half its coverage cut off, and the overdraw guard below pushes
-// each edge out by a fraction of a pixel more.
+// the canvas has half its coverage cut off, and on a folded mesh the overdraw
+// guard below pushes each edge out by a fraction of a pixel more.
 export const WARP_PAD = 2;
 
 // How finely a curved map is subdivided before it is drawn, at the floor and at
@@ -69,14 +69,19 @@ export const MAX_DEVICE = 16384;
 export const MAX_DEVICE_AREA = 64e6;
 export const MIN_DEVICE_SCALE = 0.25;
 
-// How far each destination triangle's clip is grown, page px. Canvas antialiases
-// a clip edge, so two triangles meeting along a shared edge each cover about
-// half of the pixels on it and composite to about three quarters - a hairline
-// of background showing through every join. Growing both clips past the join
-// makes each one cover it fully, and the second draw lands on pixels the first
-// already filled. Three quarters of a pixel is enough for the AA ramp and small
-// enough that the texture it pulls in from over the edge is the neighbouring
-// cell's own content.
+// How far each destination triangle's clip is grown on a FOLDED mesh, page px.
+// Canvas antialiases a clip edge, so two triangles meeting along a shared edge
+// each cover about half of the pixels on it, and laid one over the other they
+// composite to about three quarters - a hairline of background showing through
+// every join. Growing both clips past the join makes each one cover it fully,
+// and the second draw lands on pixels the first already filled. Three quarters
+// of a pixel is enough for the AA ramp and small enough that the texture it
+// pulls in from over the edge is the neighbouring cell's own content.
+//
+// It has a price, and it is why a mesh that lies flat is not drawn this way: a
+// join is drawn twice, so a translucent pixel on it composites with itself - a
+// half-opaque shadow comes out three quarters opaque along every join. A flat
+// mesh adds its triangles instead (see `warpBoxCanvas`), which is exact.
 export const SEAM_OVERDRAW = 0.75;
 
 // A refusal to draw: the map has sent the footprint somewhere no raster can
@@ -221,7 +226,71 @@ function planFor(xs, ys, map, span) {
   }
   if (!Number.isFinite(minX)) return null;
   if (maxX - minX > span * SPAN_LIMIT || maxY - minY > span * SPAN_LIMIT) return null;
-  return { tris: gridTriangles(xs, ys, dst), bounds: { minX, minY, maxX, maxY } };
+  return { tris: gridTriangles(xs, ys, dst), bounds: { minX, minY, maxX, maxY }, outline: outlineOf(xs.length, ys.length, dst) };
+}
+
+// The grid's outer edge in the destination, once round: along the top, down
+// the right, back along the bottom, up the left.
+function outlineOf(w, h, dst) {
+  const ring = [];
+  for (let i = 0; i < w; i++) ring.push(dst[i]);
+  for (let j = 1; j < h; j++) ring.push(dst[j * w + w - 1]);
+  for (let i = w - 2; i >= 0; i--) ring.push(dst[(h - 1) * w + i]);
+  for (let j = h - 2; j >= 1; j--) ring.push(dst[j * w]);
+  return ring;
+}
+
+const turn = (a, b, c) => Math.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+const within = (a, b, c) =>
+  Math.min(a[0], b[0]) <= c[0] &&
+  c[0] <= Math.max(a[0], b[0]) &&
+  Math.min(a[1], b[1]) <= c[1] &&
+  c[1] <= Math.max(a[1], b[1]);
+
+// Whether two segments share any point at all, ends included.
+function segmentsMeet(p, q, r, s) {
+  const d1 = turn(r, s, p);
+  const d2 = turn(r, s, q);
+  const d3 = turn(p, q, r);
+  const d4 = turn(p, q, s);
+  if (d1 * d2 < 0 && d3 * d4 < 0) return true;
+  return (
+    (d1 === 0 && within(r, s, p)) ||
+    (d2 === 0 && within(r, s, q)) ||
+    (d3 === 0 && within(p, q, r)) ||
+    (d4 === 0 && within(p, q, s))
+  );
+}
+
+// Whether a plan's mesh lies over itself anywhere: a handle dragged past its
+// neighbour folds part of the sheet back over the rest, and a hard enough twist
+// wraps the edge round past where it started. The painter has to know, because
+// the additive draw that makes a flat mesh's joins exact would ADD the two
+// layers of a fold together rather than lay one over the other.
+//
+// Two checks, and together they are a proof rather than a guess. Every source
+// triangle winds the same way, so a destination triangle that winds the other
+// way has been turned over. And when none has, the number of triangles over any
+// point is the winding number of the outline around it - every inner edge is
+// walked once each way and cancels - which an outline that never touches itself
+// holds to one. So: nothing turned over, and a simple outline, means no point
+// is covered twice. A triangle squashed to no area covers nothing and counts
+// as neither.
+export function meshFolds(plan) {
+  for (const { dst } of plan.tris) {
+    const [a, b, c] = dst;
+    if ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < -1e-9) return true;
+  }
+  const ring = plan.outline;
+  const n = ring.length;
+  for (let i = 0; i < n; i++) {
+    // Each edge against every later one that does not share an end with it.
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue;
+      if (segmentsMeet(ring[i], ring[(i + 1) % n], ring[j], ring[(j + 1) % n])) return true;
+    }
+  }
+  return false;
 }
 
 // What the painter draws: `{ tris, bounds, projective }` in box-local page px,
@@ -371,10 +440,25 @@ export function warpBoxCanvas(src, opts = {}) {
   ctx.setTransform(rs, 0, 0, rs, 0, 0);
   ctx.translate(-left, -top);
 
+  // How the triangles go down. Where the mesh lies flat they tile the
+  // destination edge to edge, so each is clipped to exactly itself and ADDED
+  // ('lighter') onto this empty canvas. A clip edge is antialiased, and the two
+  // triangles either side of a join cover complementary parts of every pixel on
+  // it - their coverages sum to one, so their sum is the texture's own pixel:
+  // opaque stays opaque, and a half-opaque shadow, outline or ink edge stays
+  // half opaque rather than compositing with itself.
+  //
+  // A fold is where adding is wrong - two layers of the mesh over the same
+  // pixels, and a white outline plus a black fill is white. A folded mesh is
+  // laid down the way paper is instead, each triangle over the ones before it,
+  // with every clip grown by `SEAM_OVERDRAW` so the joins are covered.
+  const additive = !meshFolds(plan);
+  if (additive) ctx.globalCompositeOperation = 'lighter';
+
   for (const tri of plan.tris) {
     const m = affineFromTriangle(tri.src, tri.dst);
     if (!m) continue; // a cell with no area covers no pixels either
-    const e = expandTriangle(tri.dst, overdraw);
+    const e = additive ? tri.dst : expandTriangle(tri.dst, overdraw);
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(e[0][0], e[0][1]);

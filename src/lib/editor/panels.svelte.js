@@ -30,15 +30,6 @@ const DEF_OPTIONS_H = 420;
 // needs the reset button.
 const KEEP_X = 120;
 const KEEP_Y = 32;
-// A hidden panel is not drawn as a panel - it is a 34px square icon, and 34px
-// is its whole footprint. Clamped against KEEP_X the stub could not be parked
-// in the right ~86px of the window at all: drag the icon into the top-right
-// corner, let go, and the clamp yanked it 120px in from an edge it was only
-// 34px from. Keeping the whole stub on screen is both the strictest and the
-// most permissive rule for it - nothing is ever half off, and every corner is
-// reachable. Mirrored by `.panel-stub`'s width/height in src/styles.css.
-const KEEP_STUB = 34;
-
 const KEY = 'mt.panels';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -57,20 +48,15 @@ export function defaultGeometry(vw) {
 export function clampPanel(g, vw, vh) {
   const w = clamp(num(g.w) ?? DEF_W, MIN_W, Math.max(MIN_W, vw - GAP));
   const h = clamp(num(g.h) ?? MIN_H, MIN_H, Math.max(MIN_H, vh - GAP));
-  // What has to stay on screen is whatever is actually drawn there, which for
-  // a hidden panel is the stub and not the panel - see KEEP_STUB. The stored
-  // w/h are still clamped either way: they are the size the panel comes back
-  // at, and a stub restored to a geometry that no longer fits is the same
-  // unreachable window by a slower route.
-  const hidden = g.hidden === true;
-  const keepX = hidden ? KEEP_STUB : KEEP_X;
-  const keepY = hidden ? KEEP_STUB : KEEP_Y;
+  // A hidden panel is clamped as the panel it comes back as: its tab lives
+  // under the tool strip (RailTools.svelte) and has no place of its own, so
+  // the geometry stored is only ever the panel's.
   return {
-    x: clamp(num(g.x) ?? 0, 0, Math.max(0, vw - keepX)),
-    y: clamp(num(g.y) ?? 0, 0, Math.max(0, vh - keepY)),
+    x: clamp(num(g.x) ?? 0, 0, Math.max(0, vw - KEEP_X)),
+    y: clamp(num(g.y) ?? 0, 0, Math.max(0, vh - KEEP_Y)),
     w,
     h,
-    hidden,
+    hidden: g.hidden === true,
     z: num(g.z) ?? 1,
   };
 }

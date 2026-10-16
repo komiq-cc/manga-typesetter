@@ -9,16 +9,25 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // see that the sync lands BETWEEN the write and the rename.
 // `fsync`: 'ok' - the command answers; 'hang' - it never does, the way a wedged
 // cloud-sync volume behaves.
+// `scope`: null - every path is allowed; otherwise the set of paths the
+// filesystem scope grants, refused the way the plugin refuses them.
 const h = vi.hoisted(() => ({
   disk: new Map(),
   writes: [],
   ops: [],
   mode: 'ok',
   fsync: 'ok',
+  scope: null,
+  enospc: false,
 }));
+
+const guard = (p) => {
+  if (h.scope && !h.scope.has(p)) throw new Error(`forbidden path: ${p}`);
+};
 
 vi.mock('@tauri-apps/plugin-fs', () => ({
   async writeTextFile(p, contents) {
+    guard(p);
     h.writes.push(p);
     h.ops.push('write');
     if (h.mode === 'truncate') {
@@ -28,11 +37,15 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     h.disk.set(p, contents);
   },
   async writeFile(p, bytes) {
+    guard(p);
     h.writes.push(p);
     h.ops.push('write');
+    if (h.enospc) throw new Error('No space left on device (os error 28)');
     h.disk.set(p, bytes);
   },
   async rename(from, to) {
+    guard(from);
+    guard(to);
     h.ops.push('rename');
     if (h.mode === 'rename') throw new Error('rename failed');
     if (!h.disk.has(from)) throw new Error('ENOENT ' + from);
@@ -40,6 +53,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     h.disk.delete(from);
   },
   async remove(p) {
+    guard(p);
     h.disk.delete(p);
   },
 }));
@@ -67,6 +81,8 @@ beforeEach(() => {
   h.ops.length = 0;
   h.mode = 'ok';
   h.fsync = 'ok';
+  h.scope = null;
+  h.enospc = false;
   h.disk.set(TARGET, GOOD);
 });
 
@@ -143,6 +159,45 @@ describe('writeTextFileAtomic', () => {
       expect(fsx.liveTemps().size).toBe(1);
       await write;
     });
+  });
+});
+
+// An export goes to wherever the save dialog was pointed, and the dialog grants
+// the scope that one file and nothing beside it. Outside the home directory
+// that is the only grant there is, so the temp sibling is refused.
+describe('writeFileAtomic to a dialog-picked file outside the scope', () => {
+  const PICKED = '/Volumes/Work/page.png';
+  const BYTES = new Uint8Array([137, 80, 78, 71]);
+
+  it('writes the picked file when only the file itself is granted', async () => {
+    h.scope = new Set([PICKED]);
+    await fsx.writeFileAtomic(PICKED, BYTES);
+    expect(h.disk.get(PICKED)).toEqual(BYTES);
+    expect([...h.disk.keys()].filter((p) => p.startsWith(PICKED + '.'))).toEqual([]);
+    expect(fsx.liveTemps().size).toBe(0);
+  });
+
+  it('still refuses a target the scope does not grant either', async () => {
+    h.scope = new Set();
+    await expect(fsx.writeFileAtomic(PICKED, BYTES)).rejects.toThrow(`forbidden path: ${PICKED}`);
+    expect(h.disk.has(PICKED)).toBe(false);
+    expect(fsx.liveTemps().size).toBe(0);
+  });
+
+  it('never writes in place over a disk error: the target keeps its old bytes', async () => {
+    // Not a scope refusal, so not the dialog case - the atomic write's whole
+    // promise stands, and the file that was there is still there.
+    h.enospc = true;
+    await expect(fsx.writeFileAtomic(TARGET, new Uint8Array([1]))).rejects.toThrow('No space');
+    expect(h.disk.get(TARGET)).toBe(GOOD);
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]).not.toBe(TARGET);
+  });
+
+  it('leaves library records atomic: a text record never falls back to an in-place write', async () => {
+    h.scope = new Set([TARGET]);
+    await expect(fsx.writeTextFileAtomic(TARGET, NEXT)).rejects.toThrow('forbidden path');
+    expect(h.disk.get(TARGET)).toBe(GOOD);
   });
 });
 

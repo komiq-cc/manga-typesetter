@@ -62,6 +62,7 @@
   import { warpActive, meshMap, unwarpPoint } from './warp.js';
   import { paintWarpedBox, renderBoxTexture, paintWarpedTexture, boxNoiseOrigin, boxFootprint } from './exporter.js';
   import { boxCandidate, placeBlock, blockReach } from './contain.js';
+  import { sfxActive, sfxLayout } from './sfx.js';
   import { engineSwitch } from './engine-switch.svelte.js';
   import { isMacKeyboard } from './shortcuts.svelte.js';
   import { PICTURE_MAX_PX, PICTURE_DRAG_PX, PICTURE_OFF, pictureScale, pictureKey, pictureCss, pageCorner, paintBoxPicture, paintPictureTexture, pictureTexture } from './editor/box-picture.js';
@@ -79,7 +80,7 @@
   import { inkOverhang } from './paint-reach.js';
   import { screenPoint, flipPoint, flipDelta, mirrorTransform, mirrorCss } from './box-frame.js';
   import { editLines, drawEditLines, rawOffset, domPoint, rawEdit, stepChar } from './edit-lines.js';
-  import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
+  import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt, glyphReach } from './curve-caret.js';
   import { typeModel } from './type-rows.js';
   import { caretAt as rowCaret, selectionRects, rowExtent, offsetAt, wordPress, linePress, moveCaret, lineDeleteSpan, rawAtDrawn, boundKey, editStops } from './flat-caret.js';
 
@@ -173,9 +174,9 @@
   // losing the focus (a pointer let go over another window is never heard
   // of), the handle losing the pointer's capture, and the handles going away
   // under the drag (`handlesOn`: the box deselected, which is what Escape
-  // does, another box selected, the box typed into). A drag whose handles
-  // are gone can still move the box, as it always could, and is then painted
-  // in full: the flag is only ever set while there is a handle to end it.
+  // does, another box selected, the box typed into). Each of those ends the
+  // drag as well (`transformEnd`): a drag whose handles are gone is over, and
+  // the box is painted in full.
   let resizing = $state(false);
   let dragSoft = false;
   function settleResize() {
@@ -291,6 +292,7 @@
 
   const roughId = `rough-${box.id}`;
   const mbId = `mb-${box.id}`;
+  const hollowId = `hollow-${box.id}`;
 
   // The directional smear's tap list: here each tap becomes an feOffset plus
   // an arithmetic accumulate. Offsets are page px, the filter runs in zoomed
@@ -740,8 +742,12 @@
   const warpPainter = {
     begin() {
       releaseWarpTex();
+      // Unbent, even where the painter bends the letters itself: a frame of
+      // the drag is then one texture warp (a few ms) and not a repaint of
+      // every glyph and band. The bent letters are painted once, when the
+      // drag ends (`end` forgets what was drawn).
       warpTex = engineShown
-        ? pictureTexture(box, pg, warpTips, pictureRes)
+        ? pictureTexture(box, pg, warpTips, pictureRes, undefined, true)
         : renderBoxTexture(box, pg, warpTips);
       warpDragging = true;
     },
@@ -884,8 +890,14 @@
   // nothing else has its controls. A resize whose handles go away has had its
   // last frame as far as the picture is concerned (`settleResize`).
   const handlesOn = $derived(selected && !editing && !bulkOn && !warpGizmoOn);
+  // The end of the handle gesture in flight (`startTransform`), or null.
+  let transformEnd = null;
   $effect(() => {
-    if (!handlesOn) settleResize();
+    if (handlesOn) return;
+    untrack(() => {
+      transformEnd?.();
+      settleResize();
+    });
   });
 
   // Padded by the content box's inset - the padding plus the outline's reach
@@ -940,6 +952,7 @@
   const layers = $derived.by(() => {
     const out = [];
     const bands = strokeBands(s.strokes);
+    const cut = !!s.noFill;
     // shadows[0] paints on top of shadows[1], so the list is walked backwards.
     for (let i = (s.shadows?.length ?? 0) - 1; i >= 0; i--) {
       const sh = s.shadows[i];
@@ -947,21 +960,52 @@
       // what this layer draws: the outermost stroke and the fill, both in the
       // shadow's colour. A CSS blur radius is the gaussian sigma while the
       // canvas takes twice it, hence the halving - see paintShadows.
-      let css = `color:${sh.color};`;
-      if (bands.length) css += `-webkit-text-stroke:${bands[0].line * z}px ${sh.color};`;
+      //
+      // With no fill it is the outermost stroke's outer half alone, and a box
+      // with no stroke either casts nothing.
+      if (cut && !bands.length) continue;
+      let css = cut ? hollowMatte(bands[0].line) : `color:${sh.color};`;
+      if (bands.length && !cut) css += `-webkit-text-stroke:${bands[0].line * z}px ${sh.color};`;
       css += `opacity:${sh.opacity};transform:translate(${sh.x * z}px, ${sh.y * z}px);`;
-      if (sh.blur > 0) css += `filter:blur(${(sh.blur / 2) * z}px);`;
+      const f = [];
+      if (cut) f.push(`url(#${hollowId}-s${i})`);
+      if (sh.blur > 0) f.push(`blur(${(sh.blur / 2) * z}px)`);
+      if (f.length) css += `filter:${f.join(' ')};`;
       out.push({ css, arc: css, line: '', bg: '' });
     }
-    for (const band of bands) {
+    bands.forEach((band, i) => {
       // Transparent fill, so what shows of this layer is its stroke alone - and
       // the layers stacked after it (the next stroke in, then the fill) cover
-      // the half of it that falls inside the glyph.
-      const css = `color:transparent;-webkit-text-stroke:${band.line * z}px ${rgba(band.color, band.opacity)};`;
+      // the half of it that falls inside the glyph. With no fill nothing would
+      // cover the innermost one's, so every stroke is cut to its outer half.
+      const css = cut
+        ? `${hollowMatte(band.line)}filter:url(#${hollowId}-b${i});`
+        : `color:transparent;-webkit-text-stroke:${band.line * z}px ${rgba(band.color, band.opacity)};`;
       out.push({ css, arc: css, line: '', bg: '' });
-    }
+    });
     out.push(fillLayer());
     return out;
+  });
+
+  // ---- no fill ----
+  //
+  // CSS cannot cut a letter out of its own stroke: `-webkit-text-stroke`
+  // straddles the outline, and nothing in CSS erases. So a layer of a box with
+  // no fill is drawn as a matte - its stroke in white and the letters in black
+  // over it - and an SVG filter (in the markup below) makes the matte's red
+  // channel the layer's alpha and floods it with the colour the layer was to
+  // have. What is left is the stroke's outer half, which is what the exporter
+  // leaves when it takes the letters out of the bands with `destination-out`.
+  // One filter per layer, because the colour is in the filter.
+  const hollowMatte = (line) => `color:#000;-webkit-text-stroke:${line * z}px #fff;paint-order:stroke fill;`;
+  const hollowDefs = $derived.by(() => {
+    if (!s.noFill || engineShown) return [];
+    const bands = strokeBands(s.strokes);
+    if (!bands.length) return [];
+    return [
+      ...bands.map((b, i) => ({ id: `${hollowId}-b${i}`, color: b.color, opacity: b.opacity })),
+      ...(s.shadows ?? []).map((sh, i) => ({ id: `${hollowId}-s${i}`, color: sh.color, opacity: 1 })),
+    ];
   });
 
   // The topmost layer: the fill. A gradient or a pattern is painted as the
@@ -995,6 +1039,9 @@
   }
 
   function fillLayer() {
+    // No fill wins over both. The layer stays, because the first layer of the
+    // stack is the one that gives the block its size.
+    if (s.noFill) return { css: 'color:transparent;', arc: 'color:transparent;', line: '', bg: '' };
     if (s.pattern.on) {
       const tile = patternTileUrl();
       if (tile) {
@@ -1027,8 +1074,13 @@
   // editor shows the outermost stroke and the shadows as CSS can state them on a
   // single element and the full paint comes back the moment the edit ends.
   const editStyle = $derived.by(() => {
-    let css = `${textStyle}color:${s.color};`;
     const bands = strokeBands(s.strokes);
+    // No fill is typed as its outermost stroke with nothing in it, and the
+    // caret, which takes the text's colour, is given the one the fill had.
+    // With no stroke either there would be nothing to see of what is typed,
+    // so that box is typed in its colour.
+    const ink = s.noFill && bands.length ? `transparent;caret-color:${s.color}` : s.color;
+    let css = `${textStyle}color:${ink};`;
     if (bands.length)
       css += `-webkit-text-stroke:${bands[0].line * z}px ${bands[0].color};paint-order:stroke fill;`;
     // `text-shadow`'s blur radius is TWICE the gaussian's sigma (CSS states it
@@ -1053,7 +1105,15 @@
   // drawn on them, and the text itself in an editable nobody sees. Not when
   // uppercasing changes the number of characters, so that a glyph is no longer
   // a character of the text: that box is typed into flat, as it always was.
-  const curved = $derived(!!((s.path?.on && (s.path.pts?.length ?? 0) >= 2) || s.circle?.on || s.curve));
+  //
+  // SFX lettering comes before all three (`placeBlock`'s precedence) and exists
+  // only while the Rust engine is installed. The engine is module state, so
+  // `enginePaints` is read to make a switch of engines re-derive this.
+  const sfxCurve = $derived.by(() => {
+    enginePaints;
+    return sfxActive(s);
+  });
+  const curved = $derived(!!(sfxCurve || (s.path?.on && (s.path.pts?.length ?? 0) >= 2) || s.circle?.on || s.curve));
   const curveEdit = $derived(editing && curved && glyphsMatch(text, applyCase(text, s)));
   // An IME's text is not the box's until the composition ends, but it is on
   // the curve while it is being composed: the editable holds it by then.
@@ -1062,6 +1122,8 @@
     if ((editing && !curveEdit) || !curved) return null;
     const t = applyCase(editing ? (composeText ?? text) : text, s);
     if (t === '') return null;
+    const sfxGlyphs = sfxCurve ? sfxLayout(t, s, effSize) : null;
+    if (sfxGlyphs?.length) return sfxGlyphs;
     if (s.path?.on && (s.path.pts?.length ?? 0) >= 2) return pathLayout(t, s, effSize, box.w, box.h);
     if (s.circle?.on) return circleLayout(t, s, effSize);
     return arcLayout(t, s, effSize);
@@ -1380,10 +1442,14 @@
     };
 
     const ac = new AbortController();
-    const end = (ev) => {
-      if (ev.pointerId !== pid) return;
+    // Every ending of the gesture, once, committed as it stands: the pointer
+    // let go or cancelled (`end`), and the ways the moves stop without either
+    // (below).
+    const finish = () => {
+      if (ac.signal.aborted) return;
       live.delete(ac);
       ac.abort();
+      if (transformEnd === finish) transformEnd = null;
       settleResize();
       // Both gestures on this handle CHANGE THE STYLE - the rotation handle
       // writes `rotation`, a corner writes `size` - and the next box placed is
@@ -1419,16 +1485,30 @@
         record({ t: 'resize', pageId, boxId: box.id, before, after });
       }
     };
+    const end = (ev) => {
+      if (ev.pointerId === pid) finish();
+    };
+    // The capture lost: on the handle, or - once the handle has left the
+    // document, which is where the event then goes - on the document itself.
+    const lost = (ev) => {
+      if (ev.pointerId === pid && (ev.target === handle || !handle.isConnected)) finish();
+    };
 
+    transformEnd?.();
+    transformEnd = finish;
     live.add(ac);
     document.addEventListener('pointermove', move, { signal: ac.signal });
     document.addEventListener('pointerup', end, { signal: ac.signal });
     document.addEventListener('pointercancel', end, { signal: ac.signal });
-    // The ways the moves stop without either of those (`settleResize`). They
-    // settle the picture and leave the gesture as it is: if the moves do come
-    // again it goes on, and its end is still `end`.
-    window.addEventListener('blur', settleResize, { signal: ac.signal });
-    handle.addEventListener('lostpointercapture', settleResize, { signal: ac.signal });
+    // The ways the moves stop without either of those, and each of them ends
+    // the gesture: the window losing the focus (a pointer let go over another
+    // window is never heard of), the handle losing the pointer's capture, and
+    // the handles going away under the drag (`handlesOn`: Escape deselecting,
+    // another box selected, the box typed into - it calls `transformEnd`).
+    // Left open, the gesture had no button behind it any more, and the next
+    // moves over the page went on turning or sizing the box on hover.
+    window.addEventListener('blur', finish, { signal: ac.signal });
+    document.addEventListener('lostpointercapture', lost, { signal: ac.signal });
   }
 
   // Drag one bezier-path anchor or handle. `which` is 'a' (the anchor itself),
@@ -2095,20 +2175,26 @@
     endEdit(e.currentTarget.textContent);
   }
   function onEditKey(e) {
+    // A key the IME is composing with is the IME's, whatever it is: keyCode
+    // 229 is how WebKit marks one it took (the Enter that commits a conversion
+    // arrives as one, with `isComposing` already false).
+    if (e.isComposing || e.keyCode === 229) return;
     // No key the picture answers moves the caret or cuts text while a
     // composition is open; and a key can arrive in the middle of one without
     // `isComposing`, so the composition's own start and end are asked too.
     // With the switch off a curve's keys are what they were.
-    const open = pictureEdit && (composing || e.isComposing);
+    const open = pictureEdit && composing;
     if (!open && typeFlat && typeKey(e)) return;
-    if (!open && (curveEdit || typeCurve) && !e.isComposing && curveKey(e)) return;
+    if (!open && (curveEdit || typeCurve) && curveKey(e)) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-      if (composing || e.isComposing) return;
+      if (composing) return;
       e.preventDefault();
       stepField(e.currentTarget, e.shiftKey);
       return;
     }
-    if (e.key === 'Escape') {
+    // Escape inside a composition cancels the conversion. Taken here it
+    // would end the edit, and the blur would commit the half-composed text.
+    if (e.key === 'Escape' && !composing) {
       e.preventDefault();
       e.currentTarget.blur();
     }
@@ -2712,6 +2798,23 @@
     </svg>
   {/if}
 
+  {#if hollowDefs.length}
+    <svg class="rough-def" width="0" height="0" aria-hidden="true">
+      <!-- A matte to a cut-out stroke (see `hollowMatte`). The colour matrix
+           works on colour that is not premultiplied, so at the stroke's soft
+           outer edge red is still 1: the second step multiplies the source's
+           own alpha back in. sRGB, so the flood is the colour as written. -->
+      {#each hollowDefs as h (h.id)}
+        <filter id={h.id} x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB">
+          <feColorMatrix in="SourceGraphic" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 0 0 0 0" result="m" />
+          <feComposite in="m" in2="SourceAlpha" operator="in" result="ring" />
+          <feFlood flood-color={h.color} flood-opacity={h.opacity} />
+          <feComposite in2="ring" operator="in" />
+        </filter>
+      {/each}
+    </svg>
+  {/if}
+
   {#if selected && jp}
     <div class="jp-pill" class:sfx={isSfx} contenteditable="false">{jp}</div>
   {/if}
@@ -2789,7 +2892,7 @@
            tool makes deaf. -->
       {#if layout}
         {#each layout as g, i (i)}
-          <span class="hit" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+          <span class="hit" style="left:50%;top:50%;width:{glyphReach(g)}px;height:{hitLine * (Number.isFinite(g.sy) ? Math.abs(g.sy) : 1)}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
         {/each}
       {:else if hitBlock}
         <span class="hit" style="left:{hitBlock.x0 * z}px;top:{hitBlock.y0 * z}px;width:{(hitBlock.x1 - hitBlock.x0) * z}px;height:{(hitBlock.y1 - hitBlock.y0) * z}px"></span>
@@ -2807,7 +2910,7 @@
                 class="arc-ch"
                 style="{textStyle}{ly.bg
                   ? `${ly.bg}background-size:${ly.tile ? `${ly.tile}px ${ly.tile}px` : `${box.w * z}px ${box.h * z}px`};background-position:${-((box.w * z) / 2 + g.x - g.w / 2)}px ${-((box.h * z) / 2 + g.y - effSize / 2)}px;`
-                  : ''}transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"
+                  : ''}transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad){g.sx != null ? ` scale(${g.sx}, ${g.sy ?? 1}) skewX(${g.skew ?? 0}rad)` : ''}"
               >{g.ch}</span>
             {/each}
           </div>
@@ -2856,7 +2959,7 @@
                  target a glyph, where the glyph is, as the picture at rest
                  has (`hitsOn`). -->
             {#each typeGlyphs as g, i (i)}
-              <span class="tpad" style="left:50%;top:50%;width:{g.w}px;height:{hitLine}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
+              <span class="tpad" style="left:50%;top:50%;width:{glyphReach(g)}px;height:{hitLine * (Number.isFinite(g.sy) ? Math.abs(g.sy) : 1)}px;transform:translate(calc(-50% + {g.x}px), calc(-50% + {g.y}px)) rotate({g.rot}rad)"></span>
             {/each}
           {/if}
           {#if curveMarks}

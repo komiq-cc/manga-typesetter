@@ -376,7 +376,10 @@ fn painter_validates_chains_before_every_no_paint_return_and_recovers() {
                 letter_spacing: 0.,
                 bands: vec![],
                 silhouette: None,
+                no_fill: false,
                 fill: fill.then_some(Fill::Solid(Rgba([0, 0, 0, 255]))),
+                mesh: None,
+                roughen: None,
                 runs: texts
                     .into_iter()
                     .map(|text| Run {
@@ -384,6 +387,10 @@ fn painter_validates_chains_before_every_no_paint_return_and_recovers() {
                         x: 10.,
                         y: 50.,
                         rot: 0.,
+                        sx: 1.,
+                        sy: 1.,
+                        skew: 0.,
+                        drip: 0.0,
                         fill: None,
                     })
                     .collect(),

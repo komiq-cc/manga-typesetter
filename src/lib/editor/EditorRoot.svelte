@@ -189,7 +189,7 @@
     <!-- The title follows the body: the panel says what it is showing, and while
          the brush is armed it is not showing a text box's options. -->
     <FloatingPanel id="options" title={brushArmed() ? 'Brush' : 'Text box options'}>
-      <Inspector />
+      <Inspector {onSettings} />
     </FloatingPanel>
   {/if}
   <FloatingPanel

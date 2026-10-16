@@ -1,8 +1,7 @@
 // ===== App preferences =====
 // Preferences that belong to the person, not to a document: they survive a
-// chapter close and are never written into a saved file - the typesetting a new
-// chapter starts with, the defaults a new text box is born with, and the
-// keyboard rebindings. The
+// chapter close and are never written into a saved file - the defaults a new
+// text box is born with, and the keyboard rebindings. The
 // shape is one `$state` object, one localStorage key holding all of it, and a
 // single setter, so a preference can never be changed without being persisted
 // and applied in the same breath.
@@ -14,7 +13,7 @@
 // Both consumers are leaves or near-leaves and neither imports this module back,
 // which is what keeps that import-time apply safe: nothing here can run before
 // the module it is writing into has finished evaluating.
-import { setBoxDefaults, setTypesetDefault, setLegacyTypeset } from './data.js';
+import { setBoxDefaults, setLegacyTypeset } from './data.js';
 import { app, setTool, setBrushToolAllowed, setMinFontSize, setInheritBoxStyle } from './store.svelte.js';
 import { normalizeOcrModels } from './ocr-models.js';
 import { useTextEngine } from './engine-switch.svelte.js';
@@ -24,18 +23,12 @@ const KEY = 'mt.prefs';
 // Not a preference: what this machine laid chapters out with before a chapter
 // carried its own line breaker (DET-3), for the chapters that still do not.
 // 'smart' only when the stored blob said `typeset: true` - the user turned the
-// beta on - the first time a build with the field ran; a default never counts,
-// because the default is what BRK-1 will change. Frozen from then on and saved
-// in the same blob, so switching the new-chapter preference afterwards cannot
-// re-break an old chapter that has not been opened (and stamped) since.
+// beta on - the first time a build with the field ran. Frozen from then on and
+// saved in the same blob. The `typeset` key itself (the old new-chapter
+// switch) is only ever read for this; nothing sets it any more.
 let legacyTypeset = 'plain';
 
 export const prefs = $state({
-  // The shaped line breaking / hyphenation / balloon fitting engine, for NEW
-  // chapters. On by default - see the TYPESETTING section in Settings. A chapter
-  // carries its own answer once it exists (`typesetting` in chapter.json, see
-  // data.js), so this never re-breaks one.
-  typeset: true,
   // The brush drawing tool (work in progress). Off by default until ready.
   brushTool: false,
   // Place and Text tools can start from defaults instead of the last box's style.
@@ -52,12 +45,13 @@ export const prefs = $state({
   // Their starting values are exactly `defaultStyle()`'s, which is what makes
   // an absent key in storage indistinguishable from a fresh install.
   defaultAutoHeight: true,
-  // Boolean here - shaped or plain - and the shape a shaped block aims for
-  // beside it (BRK-3): `style.shape` is 'off' or one of these three, and
-  // `applyBoxDefaults` does the translation.
-  defaultShape: true,
-  defaultBlockShape: 'auto',
+  // Smart line breaking, under its one switch: "Hyphenate long words". On, a
+  // box is born with the shaped breaker (`style.shape` is the block shape
+  // beside it, BRK-3), hyphenation, and the balloon fit and orphan threshold
+  // below; off, with the plain wrap (`shape: 'off'`), no hyphenation and no
+  // balloon layout. `applyBoxDefaults` does the translation.
   defaultHyphenate: true,
+  defaultBlockShape: 'auto',
   defaultBalloon: true,
   defaultMinOrphan: 3,
   // The smallest size, in page px, the fit ladder may shrink a box's text to
@@ -106,24 +100,24 @@ const cleanNames = (v) =>
 
 // The box defaults, split by what a value of theirs may be. Named once so the
 // setter's validation and the loader's validation cannot drift apart.
-const BOOL_KEYS = ['typeset', 'defaultAutoHeight', 'defaultShape', 'defaultHyphenate', 'defaultBalloon', 'brushTool', 'inheritBoxStyle'];
+const BOOL_KEYS = ['defaultAutoHeight', 'defaultHyphenate', 'defaultBalloon', 'brushTool', 'inheritBoxStyle'];
 const NUM_KEYS = { defaultMinOrphan: [1, 8], minFontSize: [4, 48] };
 const ENUM_KEYS = { defaultBlockShape: ['auto', 'oval', 'rect'], textEngine: ['browser', 'rust'] };
 
 // Push the box defaults to where a box is actually born. The store seeds a new
 // box's style through `applyBoxDefaults` in data.js, and data.js is a leaf - it
-// imports nothing - so it cannot read `prefs` itself. The new-chapter
-// typesetting goes the same way (`setTypesetDefault`): the preference is stored
+// imports nothing - so it cannot read `prefs` itself. The preference is stored
 // here and MIRRORED into the module that consumes it, by the one function that
 // is allowed to write a preference, so the copy can never be a version behind.
 function applyBoxDefaults() {
+  // One switch for the line breaking, translated once, at the edge, so nothing
+  // downstream has to know: off is the plain wrap whatever the rest say.
+  const smart = prefs.defaultHyphenate;
   setBoxDefaults({
     autoHeight: prefs.defaultAutoHeight,
-    // Two preferences here, one `style.shape` - the translation happens once,
-    // at the edge, so nothing downstream has to know they are two.
-    shape: prefs.defaultShape ? prefs.defaultBlockShape : 'off',
-    hyphenate: prefs.defaultHyphenate,
-    balloon: prefs.defaultBalloon,
+    shape: smart ? prefs.defaultBlockShape : 'off',
+    hyphenate: smart,
+    balloon: smart && prefs.defaultBalloon,
     minOrphan: prefs.defaultMinOrphan,
   });
 }
@@ -133,9 +127,7 @@ function persist() {
     localStorage.setItem(
       KEY,
       JSON.stringify({
-        typeset: prefs.typeset,
         defaultAutoHeight: prefs.defaultAutoHeight,
-        defaultShape: prefs.defaultShape,
         defaultBlockShape: prefs.defaultBlockShape,
         defaultHyphenate: prefs.defaultHyphenate,
         defaultBalloon: prefs.defaultBalloon,
@@ -183,9 +175,6 @@ export function setPref(key, value) {
   prefs[key] = value;
   // Applying is part of setting. Nothing else in the app watches `prefs`, so a
   // caller that only wrote the field would leave the engine on the old answer.
-  // No relayout: it is what the NEXT chapter is created with. The open one has
-  // its own switch (`setChapterTypesetMode` in the store).
-  if (key === 'typeset') setTypesetDefault(!!value);
   // Turning the brush tool off falls back to pan so brush mode disarms cleanly.
   if (key === 'brushTool') {
     setBrushToolAllowed(!!value);
@@ -225,6 +214,9 @@ function load() {
   for (const k of BOOL_KEYS) {
     if (saved && typeof saved[k] === 'boolean') prefs[k] = saved[k];
   }
+  // A blob from before the line breaking had one switch: "Shaped line breaks"
+  // off was the plain wrap, which is that switch off now.
+  if (saved?.defaultShape === false) prefs.defaultHyphenate = false;
   for (const [k, [lo, hi]] of Object.entries(NUM_KEYS)) {
     const n = saved && typeof saved[k] === 'number' ? Math.round(saved[k]) : NaN;
     if (Number.isFinite(n)) prefs[k] = Math.min(hi, Math.max(lo, n));
@@ -265,7 +257,6 @@ function load() {
         ? 'smart'
         : 'plain';
   setLegacyTypeset(legacyTypeset);
-  setTypesetDefault(prefs.typeset);
   applyBoxDefaults();
   setMinFontSize(prefs.minFontSize);
   setBrushToolAllowed(prefs.brushTool);

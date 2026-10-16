@@ -452,8 +452,11 @@ describe('a slice 1 chapter on a real disk', () => {
     const { p, c } = await sixAndFour();
     const litter = join(c.dir, 'chapter.json.9.tmp');
     const theirs = join(c.dir, 'notes.tmp');
+    // Our shape of name, but not one of our records: another tool's temp file.
+    const tools = join(c.dir, 'translation-draft.1.tmp');
     await writeFile(litter, '{ half a record');
     await writeFile(theirs, 'the letterer’s own file');
+    await writeFile(tools, 'another tool’s file');
     const before = await readFile(join(c.dir, 'chapter.json'), 'utf8');
 
     await openChapter(p.id, c.id);
@@ -464,6 +467,7 @@ describe('a slice 1 chapter on a real disk', () => {
     }
     await expect(readFile(litter, 'utf8')).rejects.toThrow();
     expect(await readFile(theirs, 'utf8')).toBe('the letterer’s own file');
+    expect(await readFile(tools, 'utf8')).toBe('another tool’s file');
     // The record the sweep walked past is byte-identical.
     expect(await readFile(join(c.dir, 'chapter.json'), 'utf8')).toBe(before);
   });

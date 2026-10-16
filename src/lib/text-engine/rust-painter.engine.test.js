@@ -6,7 +6,7 @@ import { createRustGlyphPainter } from './rust-painter.js';
 import { paintJob } from '../../../text-engine/js/paint.mjs';
 import { createBrowserGlyphPainter } from './browser-painter.js';
 
-// The painter makes its scratch canvas, and text-paint.js its pattern tiles,
+// The painter makes its canvases, and text-paint.js its pattern tiles,
 // from `document`; the engine lane has none, so it gets Skia's for this file.
 const hadDocument = 'document' in globalThis;
 const oldDocument = globalThis.document;
@@ -116,16 +116,23 @@ describe('the Rust engine behind the glyph-painter seam', () => {
     expect(right).toBeGreaterThan(100);
   });
 
-  it('reuses one scratch canvas, and one drawing of a pattern tile for every line and job', () => {
-    const painter = createRustGlyphPainter(rust);
+  it('draws a pattern tile once for every line and job', () => {
+    // The tile is the engine's own drawing; its export, counted.
+    let tiles = 0;
+    const tile = rust.low.exports.mt_paint_pattern_tile;
+    const exports = { ...rust.low.exports, mt_paint_pattern_tile: (...a) => (tiles++, tile(...a)) };
+    const counted = Object.create(rust, { low: { value: Object.create(rust.low, { exports: { value: exports } }) } });
+    const painter = createRustGlyphPainter(counted);
     const style = { size: 40, color: '#000000', pattern: { kind: 'checker', fg: '#ff0000', bg: '#0000ff', scale: 1 } };
     const fill = { kind: 'pattern', style, px: 12, ax: 0, ay: 0 };
     const lines = job({ fill: null, runs: [{ text: 'WAIT', x: 20, y: 40, fill }, { text: 'WHAT', x: 20, y: 85, fill }] });
     made = 0;
     const first = drawn(painter, lines).canvas;
     drawn(painter, lines);
-    // The scratch and the tile, once each.
+    // A canvas per raster (rust-painter-scratch.engine.test.js), and the
+    // tile drawn once for both.
     expect(made).toBe(2);
+    expect(tiles).toBe(1);
     const data = first.getContext('2d').getImageData(0, 0, first.width, first.height).data;
     let red = 0, blue = 0;
     for (let i = 0; i < data.length; i += 4) {
@@ -139,8 +146,8 @@ describe('the Rust engine behind the glyph-painter seam', () => {
 
   it('lands pixel for pixel on a canvas that smooths, with nothing of an earlier job beside it', () => {
     // The exporter's canvases set the smoothing quality to high. A wide job
-    // with a band first, so the kept scratch holds ink to the right of where
-    // the narrow job's raster ends.
+    // with a band first, painted before: nothing of it may show beside the
+    // narrow job's raster.
     const wide = job({ bands: [{ color: '#ffffff', opacity: 1, line: 6 }], runs: [{ text: 'WAIT WHAT', x: 20, y: 60 }] });
     // Black survives the canvas's premultiplied storage byte for byte,
     // even at the lowest edge alpha. Compare with the engine, at its origin.
@@ -244,5 +251,27 @@ describe('the Rust engine behind the glyph-painter seam', () => {
 
   it('refuses a job whose font the engine does not have', () => {
     expect(() => drawn(createRustGlyphPainter(rust), job({ face: face('Nobody Sans', 40) }))).toThrow(/not registered/);
+  });
+
+  it('paints a box with as many shadows as its style has', () => {
+    // The app counts no shadows, and the canvas passes paint every one: the
+    // box job once refused a 17th, and the box was not painted at all.
+    const painter = createRustGlyphPainter(rust);
+    expect(painter.box).toBe(true);
+    const box = (n) => {
+      const canvas = createCanvas(400, 200);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(2, 2);
+      const shadows = Array.from({ length: n }, (_, i) => ({ x: 2 + (i % 4), y: 2, blur: 1, color: '#ff0000', opacity: 0.5 }));
+      painter.paintBox(ctx, { job: job(), rect: { x: 0, y: 0, w: 200, h: 100 }, shadows, blur: 0, taps: [], clip: null });
+      return ink(canvas);
+    };
+    const one = box(1);
+    for (const n of [16, 17, 40]) {
+      const got = box(n);
+      expect(got, `${n}`).not.toBe(null);
+      // The glyphs on top, the shadows thrown under them to the right.
+      expect(got.x1, `${n}`).toBeGreaterThanOrEqual(one.x1);
+    }
   });
 });

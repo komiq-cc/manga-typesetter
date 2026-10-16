@@ -449,6 +449,26 @@ export function registerShortcutHandlers(map) {
 }
 export const clearShortcutHandlers = () => handlers.clear();
 
+// Would this combo, pressed in a text field, be typing? `whenTyping` vouches
+// for the DEFAULT combo of an action, and every default it vouches for holds
+// Mod; a rebind can swap that for a bare `t` and keep the flag. So the combo
+// actually bound is asked too. Typing is a character key (Shift is still a
+// character: 'T'), or one of the keys a field edits or moves its caret with,
+// pressed without the command modifier or the other one (Ctrl on a Mac, Meta
+// elsewhere). Alt holds characters back only off a Mac: on one, Option+E is
+// the accent and Option+T is '†'. AltGr never gets here as Mod+Alt
+// (`eventCombo`).
+const FIELD_KEYS = new Set(['Space', 'Enter', 'Backspace', 'Delete', 'Home', 'End', 'PageUp', 'PageDown']);
+export function comboTypes(combo) {
+  const c = normalizeCombo(combo);
+  if (!c) return false;
+  const bits = c.split('+');
+  const key = bits.pop();
+  if (bits.includes('Mod') || bits.includes(MAC ? 'Ctrl' : 'Meta')) return false;
+  if (bits.includes('Alt') && !MAC) return false;
+  return key.length === 1 || /^Numpad/.test(key) || FIELD_KEYS.has(key);
+}
+
 // The shortcut a keypress means, or null.
 export function lookupShortcut(e) {
   const c = eventCombo(e);
@@ -467,7 +487,9 @@ export function lookupShortcut(e) {
 export function dispatchShortcut(e, { typing = false } = {}) {
   const def = lookupShortcut(e);
   if (!def) return null;
-  if (typing && !def.whenTyping) return null;
+  // The binding the press matched, not the action's default, is what decides:
+  // a rebind onto a character key gives that character back to the field.
+  if (typing && (!def.whenTyping || comboTypes(comboFor(def.id)))) return null;
   const fn = handlers.get(def.id);
   if (!fn) return null;
   // A handler returning exactly false declines the press - the action did not

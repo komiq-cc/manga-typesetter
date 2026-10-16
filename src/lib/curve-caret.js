@@ -1,9 +1,9 @@
 // ===== the caret on curved text (UX-4) =====
 //
-// Curved text - an arc, a circle, a bezier path - is placed glyph by glyph
-// (`arcLayout`, `circleLayout`, `pathLayout`), one glyph per code point of the
-// cased text, each with its centre, its advance width and the angle it is
-// turned to. While it is typed into, the box draws those same glyphs, so what
+// Curved text - an arc, a circle, a bezier path, SFX lettering - is placed
+// glyph by glyph (`arcLayout`, `circleLayout`, `pathLayout`, `sfxLayout`), one
+// glyph per code point of the cased text, each with its centre, its advance
+// width and the angle it is turned to, and an SFX glyph its own scale. While it is typed into, the box draws those same glyphs, so what
 // is typed is the result; the text itself sits in an editable nobody sees, and
 // the caret and the selection are drawn here, on the glyphs.
 //
@@ -45,8 +45,19 @@ export function glyphsMatch(text, cased) {
   return [...String(text ?? '')].length === [...String(cased ?? '')].length;
 }
 
+// How far along its turn a glyph reaches: its advance, times its own scale
+// where it has one. An SFX glyph (sfx.js) is painted scaled about its centre,
+// `sx` along the way it is turned, so a letter grown to half as wide again
+// stands that much past its advance on both sides, and its caret, its
+// highlight and what a click on it finds go out to where it is painted. The
+// other curves have no `sx`, and are their advance.
+export function glyphReach(g) {
+  const sx = Math.abs(g.sx);
+  return Number.isFinite(sx) ? g.w * sx : g.w;
+}
+
 function edge(g, side) {
-  const h = (side * g.w) / 2;
+  const h = (side * glyphReach(g)) / 2;
   return { x: g.x + h * Math.cos(g.rot), y: g.y + h * Math.sin(g.rot), rot: g.rot };
 }
 
@@ -84,7 +95,7 @@ export function glyphNearest(glyphs, x, y) {
     const dy = y - g.y;
     const along = dx * c + dy * sn;
     const across = -dx * sn + dy * c;
-    const off = Math.max(0, Math.abs(along) - g.w / 2);
+    const off = Math.max(0, Math.abs(along) - glyphReach(g) / 2);
     const d = Math.hypot(off, across);
     if (d < bestD) {
       bestD = d;

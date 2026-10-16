@@ -8,7 +8,9 @@
 //! little-endian buffer per job.
 
 use super::geom::{Affine, Pt};
+use super::roughen::Roughen;
 use super::shade::Premul;
+use super::warp::{Mesh, MAX_MESH_SIDE};
 use super::BoldDraw;
 use crate::engine::{Face, Synth};
 use crate::Error;
@@ -86,6 +88,20 @@ pub struct Run {
     pub y: f64,
     /// Curved text only: the glyph's rotation about `(x, y)`, radians.
     pub rot: f64,
+    /// Curved text only: the glyph's own scale, about its centre and before
+    /// the skew and the turn. Negative mirrors. The run's fill is not scaled
+    /// with it: a gradient or a pattern is stated in the frame `x, y, rot`
+    /// make, so it is not stretched from letter to letter.
+    pub sx: f64,
+    pub sy: f64,
+    /// Curved text only: the glyph leans, radians, after it is scaled and
+    /// before it is turned. Positive leans the top of the letter to the right.
+    pub skew: f64,
+    /// Curved text only: the lower half of the glyph is pulled down by this
+    /// many job units while its top stays where it is; 0 for none. Down is
+    /// the job's, whichever way the glyph is turned. A band is pulled with
+    /// the outline it is a stroke of.
+    pub drip: f64,
     /// This run's own fill; `None` means the job's.
     pub fill: Option<Fill>,
 }
@@ -102,7 +118,24 @@ pub struct Job {
     /// Paint the glyphs and their widest band as one flat shape in this
     /// colour, instead of bands and fills.
     pub silhouette: Option<Rgba>,
+    /// No fill at all: no run's fill and not the job's is painted, and the
+    /// glyphs as they would have been filled are cut out of the bands under
+    /// them, so what is left of a band is its outer half. With a silhouette
+    /// it is cut the same way: the widest band's outer half in one colour.
+    /// A job with no band then paints nothing.
+    pub no_fill: bool,
     pub fill: Option<Fill>,
+    /// The box's mesh warp: every outline, grown by its band or its bold
+    /// first, is carried through it before the transform. `None`, or a mesh
+    /// that moves nothing, paints the job as it is. A gradient or a pattern
+    /// is carried with each glyph it fills, by the mesh's tangent at that
+    /// glyph, so a letter keeps the part of the fill it had.
+    pub mesh: Option<Mesh>,
+    /// The box's roughening: every outline, grown by its band or its bold
+    /// first, is carried through a field of noise before the mesh. `None`
+    /// paints the job as it is. A fill is not moved with it: only the shape
+    /// of a letter is roughened, not what it is filled with.
+    pub roughen: Option<Roughen>,
     pub runs: Vec<Run>,
 }
 
@@ -171,11 +204,23 @@ pub struct Request {
 /// First four bytes of the wire form: "MTPJ".
 pub const MAGIC: u32 = 0x4a50_544d;
 /// Bumped when the wire form changes; `paint.mjs` writes the same number.
-pub const WIRE_VERSION: u32 = 3;
+pub const WIRE_VERSION: u32 = 7;
 
 /// Largest extra weight accepted, in device pixels. A guard, not a design
 /// limit: the weight that was measured against the browsers is under one.
 pub const MAX_WEIGHT: f64 = 64.0;
+
+/// A run's scale must be at least this far from zero and at most this big
+/// (in absolute value): a guard against a glyph collapsed to nothing or
+/// grown to fill a surface, not a design limit.
+const SCALE_RANGE: core::ops::RangeInclusive<f64> = 0.01..=100.0;
+
+/// Largest skew accepted, radians (about 80 degrees; the tangent is 5.8).
+const MAX_SKEW: f64 = 1.4;
+
+/// Largest drip accepted, job units. A guard: a drip is a share of the
+/// letter's size.
+const MAX_DRIP: f64 = 4096.0;
 
 /// Largest tile side accepted, a guard like the surface's.
 const MAX_TILE_SIDE: u32 = 4096;
@@ -241,6 +286,55 @@ impl<'a> Reader<'a> {
         }))
     }
 
+    fn mesh(&mut self) -> Result<Option<Mesh>, Error> {
+        let cols = self.u32()?;
+        if cols == 0 {
+            return Ok(None);
+        }
+        let rows = self.u32()?;
+        if cols > MAX_MESH_SIDE || !(1..=MAX_MESH_SIDE).contains(&rows) {
+            return Err(Error::BadSpec);
+        }
+        let (x, y, w, h) = (self.f64()?, self.f64()?, self.f64()?, self.f64()?);
+        if w <= 0.0 || h <= 0.0 {
+            return Err(Error::BadSpec);
+        }
+        // Within the guard the product is small; the bytes left bound it
+        // before anything is allocated.
+        let n = (cols as usize + 1) * (rows as usize + 1);
+        if n * 16 > self.bytes.len() - self.at {
+            return Err(Error::BadSpec);
+        }
+        let pts = super::budget::collect((0..n).map(|_| self.pt()))?;
+        Ok(Some(Mesh {
+            cols,
+            rows,
+            pts,
+            x,
+            y,
+            w,
+            h,
+        }))
+    }
+
+    fn roughen(&mut self) -> Result<Option<Roughen>, Error> {
+        if self.u32()? == 0 {
+            return Ok(None);
+        }
+        let r = Roughen {
+            amount: self.f64()?,
+            detail: self.f64()?,
+            seed: self.f64()?,
+            origin: self.pt()?,
+            grit: self.f64()?,
+        };
+        if r.sound() {
+            Ok(Some(r))
+        } else {
+            Err(Error::BadSpec)
+        }
+    }
+
     fn fill(&mut self) -> Result<Option<Fill>, Error> {
         Ok(Some(match self.u32()? {
             0 => return Ok(None),
@@ -276,12 +370,14 @@ impl<'a> Reader<'a> {
 /// f64 size
 /// f64 x 6 transform (a, b, c, d, e, f)
 /// f64 weight (device pixels, 0 to 64)
-/// u32 flags (1 curved, 2 silhouette), u32 align (0 left, 1 centre, 2 right)
+/// u32 flags (1 curved, 2 silhouette, 4 no fill), u32 align (0 left, 1 centre, 2 right)
 /// f64 letter spacing
 /// rgba silhouette
 /// u32 band count, then per band: rgba colour, f64 opacity, f64 line
 /// fill (the job's)
-/// u32 run count, then per run: f64 x, f64 y, f64 rot, fill,
+/// mesh
+/// roughen
+/// u32 run count, then per run: f64 x, y, rot, sx, sy, skew, drip, fill,
 ///                              u32 byte length, UTF-8 text
 /// u32 tile count, then per tile: u32 width, u32 height, RGBA8 pixels
 ///
@@ -291,9 +387,23 @@ impl<'a> Reader<'a> {
 ///   2 linear:  f64 x0, y0, x1, y1, stops
 ///   3 radial:  f64 cx, cy, r, stops
 ///   4 pattern: u32 tile, f64 pitch, f64 ax, ay, rgba fallback
+/// mesh: u32 cols, 0 for a job with no mesh; else
+///   u32 rows, f64 x, y, w, h (the rectangle the mesh is defined on),
+///   then (cols + 1) * (rows + 1) points, row by row from the top left:
+///   f64 x, y, relative to the rectangle's corner
+/// roughen: u32 0 for a job that is not roughened; else u32 1, then
+///   f64 amount, detail, seed, f64 x, y (the field's origin in job space),
+///   f64 grit
 /// stops: u32 count, then per stop: f64 position, rgba
 /// rgba: four bytes, straight alpha
 /// ```
+///
+/// A run's `sx` and `sy` are 0.01 to 100 in absolute value and its `skew` is
+/// within 1.4 radians, its `drip` is 0 to 4096, or the job is refused. A
+/// straight job's runs write 1, 1, 0, 0: only a curved job reads them. A mesh
+/// has 1 to 64 cells each way and a rectangle with a size. A roughening's
+/// amount is within 4096 either way, its detail is 0 to 8 and its grit is 0
+/// to 4096.
 pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
     let mut r = Reader { bytes, at: 0 };
     if r.u32()? != MAGIC || r.u32()? != WIRE_VERSION {
@@ -334,8 +444,19 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
         })
     }))?;
     let fill = r.fill()?;
-    let runs = super::budget::collect((0..r.count(32)?).map(|_| {
+    let mesh = r.mesh()?;
+    let roughen = r.roughen()?;
+    let runs = super::budget::collect((0..r.count(64)?).map(|_| {
         let (x, y, rot) = (r.f64()?, r.f64()?, r.f64()?);
+        let (sx, sy, skew) = (r.f64()?, r.f64()?, r.f64()?);
+        let drip = r.f64()?;
+        if !SCALE_RANGE.contains(&sx.abs())
+            || !SCALE_RANGE.contains(&sy.abs())
+            || skew.abs() > MAX_SKEW
+            || !(0.0..=MAX_DRIP).contains(&drip)
+        {
+            return Err(Error::BadSpec);
+        }
         let fill = r.fill()?;
         let len = r.u32()? as usize;
         if len > super::budget::MAX_RUN_BYTES {
@@ -352,6 +473,10 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
             x,
             y,
             rot,
+            sx,
+            sy,
+            skew,
+            drip,
             fill,
         })
     }))?;
@@ -373,7 +498,10 @@ pub fn decode(bytes: &[u8]) -> Result<Request, Error> {
             letter_spacing,
             bands,
             silhouette: (flags & 2 != 0).then_some(silhouette),
+            no_fill: flags & 4 != 0,
             fill,
+            mesh,
+            roughen,
             runs,
         },
         face: Face {

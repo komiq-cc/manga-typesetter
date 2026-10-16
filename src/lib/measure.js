@@ -192,14 +192,15 @@ export function blockInk(lines, style, sizePx) {
   return { inks, shift: (list.length * lineH) / 2 - (top + bottom) / 2 };
 }
 
-// ---- typesetting engine switch (beta) ----
+// ---- typesetting engine switch ----
 // The shaped line breaking, hyphenation and balloon fitting in typeset.js /
-// balloon.js are a beta feature, off unless the user turns it on in Settings.
-// This is the one switch every layout path reads: `layoutLines` falls back to
-// plain CSS-equivalent wrapping and `balloonWidthsFor` answers null when it is
-// off, so the editor, the exporter, the PSD writer and auto-height all agree
-// without each of them knowing about the preference. Set from the prefs
-// module at boot and on toggle; default off so a cold test run is plain.
+// balloon.js, for the whole open chapter. This is the one switch every layout
+// path reads: `layoutLines` falls back to plain CSS-equivalent wrapping and
+// `balloonWidthsFor` answers null when it is off, so the editor, the exporter,
+// the PSD writer and auto-height all agree. The store sets it from the
+// chapter (`useChapterTypesetting`), and a chapter the app opens is always
+// 'smart' (`openTypesetting` in data.js): which breaker a box gets is its own
+// `style.shape`. Default off so a cold test run is plain.
 let _typeset = false;
 export function setTypesetEnabled(on) {
   _typeset = !!on;

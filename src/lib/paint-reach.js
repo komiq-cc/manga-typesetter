@@ -42,7 +42,7 @@ function filterReach(style) {
       my = Math.max(my, Math.abs(t.dy));
     }
   }
-  const rough = style.roughen?.on ? Math.abs(Number(style.roughen.amount) || 0) / 2 : 0;
+  const rough = style.roughen?.on ? (Math.abs(Number(style.roughen.amount) || 0) + Math.max(0, Number(style.roughen.grit) || 0)) / 2 : 0;
   return { x: blur + mx + rough, y: blur + my + rough };
 }
 

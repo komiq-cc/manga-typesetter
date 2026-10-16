@@ -17,6 +17,20 @@ import { arcLayout, layoutLines, BOX_PAD, textInset, balloonWidthsFor, setTypese
 import { patternTilePx, TILE_SS } from './text-paint.js';
 import { neededHeight } from './typeset.js';
 
+// Which boxes each render asked the brush tips of (`settleBoxTips`), by id.
+// The real settle still runs: nothing here names an imported brush.
+const tipAsks = vi.hoisted(() => []);
+vi.mock('./brush-tips.js', async (original) => {
+  const real = await original();
+  return {
+    ...real,
+    settleBoxTips: (boxes) => {
+      tipAsks.push((boxes ?? []).map((b) => b?.id));
+      return real.settleBoxTips(boxes);
+    },
+  };
+});
+
 // exportTextJson is the single writer of the detection JSON - the detect menu
 // and the export dialog both go through it - so what its two scopes select is
 // worth pinning down. Everything under test here is scope arithmetic: which
@@ -821,6 +835,25 @@ describe('renderStripSliceCanvas', () => {
     expect(draws.some((d) => d.src === 'blob:test')).toBe(true);
   });
 
+  // A strip export renders slice after slice, and each one decoded the brush
+  // tips of every box in the chapter before it painted a thing: a distinct
+  // imported tip per page is gigabytes held for the first slice alone. A slice
+  // asks for the tips of the lettering it paints.
+  it('settles the brush tips of the boxes it paints, and of no others', async () => {
+    const at = (id, y) => ({ id, lineN: null, text: id.toUpperCase(), x: 100, y, w: 200, h: 50, style: normalizeStyle({ size: 20 }) });
+    const pages = [
+      { id: 1, w: 800, h: 1000, raw: null, lines: [], boxes: [at('above', 100)] },
+      { id: 2, w: 800, h: 1000, raw: null, lines: [], boxes: [at('here', 300)] },
+      { id: 3, w: 800, h: 1000, raw: null, lines: [], boxes: [at('below', 500)] },
+    ];
+    tipAsks.length = 0;
+
+    await renderStripSliceCanvas(pages, [0, 1000, 2000], 1000, 2000);
+
+    expect(tipAsks).toEqual([['here']]);
+    expect(painted).toEqual(['HERE']);
+  });
+
   it('includes a box whose shadow reaches the slice across a source seam', async () => {
     naturalSizes = { 'blob:b': [800, 1000] };
     const pages = [
@@ -1395,6 +1428,83 @@ describe('a box with every effect on at once', () => {
     expect(composited).toHaveLength(2);
     expect(displaced).toHaveLength(1);
     expect(order.indexOf('blur')).toBeLessThan(order.indexOf('displace'));
+  });
+});
+
+// The export dialog closes as Export All starts, and the way back to the
+// project - and into another chapter - stays live under it. The export walks
+// the page objects it started with, but their pictures are minted by file
+// name from whichever chapter `page-images.js` is pointed at, so two chapters
+// whose raws are both `001.png` put the old chapter's lettering over the new
+// chapter's art. What "another chapter is opened" does to the modules
+// here is what `closeChapter` and `loadChapter` do to them.
+describe('an export is of the chapter it began on', () => {
+  const chapterPages = () => [1, 2, 3].map((n) => ({ id: n, file: `00${n}.png`, raw: null, cleaned: null, w: 800, h: 1200, lines: [], boxes: [] }));
+  let reads;
+  beforeEach(() => {
+    naturalSizes = { 'blob:test': [800, 1200] };
+    reads = [];
+    vi.spyOn(fsx, 'join').mockImplementation(async (...parts) => parts.join('/'));
+    vi.spyOn(fsx, 'assetUrl').mockResolvedValue(null);
+    vi.spyOn(fsx, 'readFile').mockImplementation(async (path) => {
+      reads.push(path);
+      return new Uint8Array([1, 2, 3]);
+    });
+    setChapterImageDirs('/a/raws', null);
+    loadProjectPages(chapterPages());
+  });
+  const openAnother = () => {
+    releaseAllPageImages();
+    loadProjectPages(chapterPages());
+    setChapterImageDirs('/b/raws', null);
+  };
+
+  it('stops before a page of it is drawn from the next chapter\'s art', async () => {
+    // The first file out is the moment the user goes back and opens another.
+    const make = globalThis.document.createElement;
+    globalThis.document.createElement = (tag) => {
+      const el = make(tag);
+      if (tag !== 'canvas') {
+        const click = el.click;
+        el.click = function () {
+          click.call(this);
+          if (downloaded.length === 1) openAnother();
+        };
+      }
+      return el;
+    };
+
+    expect(await exportImages('PNG', 'all')).toBe(false);
+
+    expect(downloaded).toEqual(['ch01-1.png']);
+    expect(reads.filter((r) => r.startsWith('/b/'))).toEqual([]);
+  });
+
+  it('does not write the page that was being drawn when the chapter went', async () => {
+    const make = globalThis.document.createElement;
+    let blobs = 0;
+    globalThis.document.createElement = (tag) => {
+      const el = make(tag);
+      if (tag === 'canvas') {
+        const toBlob = el.toBlob;
+        el.toBlob = function (cb, ...rest) {
+          // Page two's pixels are finished; its chapter is closed under it.
+          if (++blobs === 2) openAnother();
+          return toBlob.call(this, cb, ...rest);
+        };
+      }
+      return el;
+    };
+
+    expect(await exportImages('PNG', 'all')).toBe(false);
+
+    expect(downloaded).toEqual(['ch01-1.png']);
+  });
+
+  it('is all of it when nothing is opened under it', async () => {
+    expect(await exportImages('PNG', 'all')).toBe(true);
+    expect(downloaded).toEqual(['ch01-1.png', 'ch01-2.png', 'ch01-3.png']);
+    expect(reads).toEqual(['/a/raws/001.png', '/a/raws/002.png', '/a/raws/003.png']);
   });
 });
 

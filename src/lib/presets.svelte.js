@@ -14,6 +14,7 @@ import {
 } from './store.svelte.js';
 import { record } from './editor/history.svelte.js';
 import { isAutoBox, boxCandidate } from './contain.js';
+import { rebaseSfx } from './sfx.js';
 
 const KEY = 'mt.presets';
 
@@ -136,8 +137,10 @@ const EXCLUDED_KEYS = ['rotation', 'flipH', 'flipV', 'ink', 'clip', 'path', 'war
 // And what a paste leaves alone on a MANUAL box (`isAutoBox`): the switches that
 // made it manual. Pasted over, a box the user sized by hand or bent onto an arc
 // would turn auto and be re-sized by the paste's own fit. Onto an auto box they
-// paste like the rest of the look, and at worst make it manual.
-const MANUAL_KEYS = ['autoHeight', 'curve', 'circle'];
+// paste like the rest of the look, and at worst make it manual. (SFX lettering
+// is one of them: a box set in it is manual, and a plain look pasted over it
+// would switch it off and hand it to the fit.)
+const MANUAL_KEYS = ['autoHeight', 'curve', 'circle', 'sfx'];
 
 // What remembering the paste declines to carry into `lastStyle`, which is a
 // SHORTER list than the one above - see `pasteStyle`.
@@ -155,6 +158,10 @@ export function pasteStyle(box) {
       box.style[k] = v && typeof v === 'object' ? structuredClone($state.snapshot(v)) : v;
     }
   }
+  // A pasted SFX recipe remembers what it wrote over on the box it was copied
+  // from, mesh included; this box kept its own mesh and path (EXCLUDED_KEYS),
+  // so those are what it remembers.
+  if (!keep.includes('sfx')) rebaseSfx(box.style);
 
   // The pasted size is a size the user chose for this box, whichever box is
   // selected: its reference size, locked, as any explicit size edit is. Even

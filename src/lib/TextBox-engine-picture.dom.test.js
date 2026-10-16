@@ -504,14 +504,19 @@ describe('while a handle is resizing the box', () => {
     await tick();
     expect(m.paints()).toBe(before);
   });
-  it('and a drag that goes on after the window came back is lowered again, and settles when the pointer comes up', async () => {
+  // A pointer let go over another window is never heard of, so the focus
+  // going ends the drag where it stands: moves after the window comes back
+  // are a hover, and neither size the box nor lower its picture again.
+  it('and a drag the window lost the focus in is over: the moves after it change nothing', async () => {
     const m = await dragging();
     window.dispatchEvent(new Event('blur'));
     await tick();
     expect(px(m)).toBe(full(m));
+    const w = m.box.w;
     document.dispatchEvent(ev('pointermove', 540));
     await tick();
-    expect(px(m)).toBeLessThan(PICTURE_DRAG_PX * 1.05);
+    expect(m.box.w).toBe(w);
+    expect(px(m)).toBe(full(m));
     document.dispatchEvent(ev('pointerup', 540));
     await tick();
     expect(px(m)).toBe(full(m));

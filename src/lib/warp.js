@@ -109,7 +109,7 @@ export function isIdentityMesh(pts, cols, rows, w, h, eps = 0.01) {
 // open along a cell's own diagonal, and no diagonal is ever drawn twice at two
 // slightly different places. (Seams BETWEEN neighbouring cells are the
 // painter's problem, not this module's - the cells share their edge points the
-// same way, but a rasteriser still needs its overdraw guard.)
+// same way, but a rasteriser still has to draw a join so that it closes.)
 //
 // A `pts` that does not match the grid is treated as identity, so a caller that
 // hands over junk gets an undeformed draw rather than nothing.

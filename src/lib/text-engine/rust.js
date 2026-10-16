@@ -324,6 +324,23 @@ export async function createRustTextEngine(source, options = {}) {
     lineCarets: low.hasLineCarets
       ? (face, text, letterSpacing = 0) => low.lineCarets(resolve(face), text, Number(letterSpacing) || 0)
       : undefined,
+    /**
+     * SFX lettering (sfx.js): `sfxLayout(face, rows, params)` places every
+     * letter of `rows` (strings, one per row) on its own, `[{ ch, x, y, rot,
+     * sx, sy, skew, w }]` in px from the block's centre, and `sfxInfo()` is the
+     * engine's own table of move kinds and built-in presets. Only the Rust
+     * engine has them, and only a wasm built with them: the methods are absent
+     * otherwise, which is how `sfxAvailable` tells the browser engine and a
+     * stale wasm from this one.
+     */
+    ...(typeof low.sfxLayout === 'function' && low.hasSfx !== false
+      ? {
+          sfxLayout: (face, rows, params) => low.sfxLayout(resolve(face), rows, params),
+          sfxInfo: () => low.sfxInfo(),
+        }
+      : null),
+    // An envelope's mesh over a box (`style.warp.pts`), from a wasm that has it.
+    ...(typeof low.sfxEnvelope === 'function' && low.hasSfxEnvelope ? { sfxEnvelope: (...args) => low.sfxEnvelope(...args) } : null),
     loading() {
       return false;
     },

@@ -20,6 +20,8 @@
     isTranslateMode,
   } from '../store.svelte.js';
   import { prefs } from '../prefs.svelte.js';
+  import { brushArmed } from '../brush-tool.svelte.js';
+  import { panels, setHidden, raisePanel } from './panels.svelte.js';
 
   // A translate chapter has no reference sidebar - the canvas is already showing
   // the raw - so the rail keeps only the hand, and the caret that would offer to
@@ -106,6 +108,23 @@
 
 
   const keepClick = (e) => e.stopPropagation();
+
+  // A hidden floating panel is a tab here, under the tools, and nowhere else:
+  // one tab per panel, apart from the tool strip and from each other, in the
+  // inverse of the chrome's colour so it reads against both the dark art and
+  // the strip. Shown again, the panel comes back where it was and its tab
+  // goes. The names are the panels' own titles (EditorRoot.svelte). A
+  // translate chapter has no options panel, so no tab for it either.
+  const docked = $derived(
+    [
+      !translate && panels.options.hidden && { id: 'options', title: brushArmed() ? 'Brush' : 'Text box options' },
+      panels.queue.hidden && { id: 'queue', title: translate ? 'Translation' : 'Text queue' },
+    ].filter(Boolean),
+  );
+  function showPanel(id) {
+    setHidden(id, false);
+    raisePanel(id);
+  }
 </script>
 
 <svelte:window onresize={() => (viewportW = window.innerWidth)} />
@@ -142,7 +161,8 @@
     onkeydown={onRailKeyDown}
   ></div>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="ed-rail-tools" onpointerdown={keepClick}>
+  <div class="ed-rail-stack" onpointerdown={keepClick}>
+  <div class="ed-rail-tools">
     <!-- All three go together in a translate chapter, and what is left is one
          button: the hand. The caret is not merely redundant there - pressing it
          would advertise a sidebar showing the same raw the canvas already is. -->
@@ -167,15 +187,15 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l7 18 2.5-7.5L20 11z" /></svg>
       </button>
       <!-- The Text tool keeps its incidental pan: past 4px of travel the press
-           becomes a scroll and adds nothing, which is what stops a slipped click
-           from leaving a stray empty box on the page. The hand below is the tool
+           becomes a scroll and adds nothing, and a box takes a double click, so
+           neither a slipped press nor a lone click leaves a stray empty box. The hand below is the tool
            for moving around deliberately - with it, no press can ever add a box -
            and it is what the double-click-for-bulk shortcut vacated. -->
       <button
         class:on={app.tool === 'text'}
         onclick={() => setTool('text')}
         aria-label="Text tool"
-        data-tip="Text tool - click to add a box, drag to pan"
+        data-tip="Text tool - double-click to add a box, drag to pan"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7V5h16v2" /><path d="M12 5v14" /><path d="M9 19h6" /></svg>
       </button>
@@ -202,5 +222,29 @@
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0" /><path d="M14 10V4a2 2 0 0 0-4 0v2" /><path d="M10 10.5V6a2 2 0 0 0-4 0v8" /><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-6-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" /></svg>
     </button>
+  </div>
+  {#if docked.length}
+    <div class="ed-rail-dock">
+      {#each docked as d (d.id)}
+        <!-- The button is the hit target and never moves or scales; the span is
+             everything you can see, and it is what grows in. -->
+        <button class="panel-stub" onclick={() => showPanel(d.id)} aria-label={'Show ' + d.title} data-tip={'Show ' + d.title}>
+          <span class="stub-ink">
+            {#if d.id === 'queue'}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M8 6h12" /><path d="M8 12h12" /><path d="M8 18h12" />
+                <circle cx="4" cy="6" r="1.3" /><circle cx="4" cy="12" r="1.3" /><circle cx="4" cy="18" r="1.3" />
+              </svg>
+            {:else}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M4 7h6" /><path d="M14 7h6" /><circle cx="11" cy="7" r="2.2" />
+                <path d="M4 17h10" /><path d="M18 17h2" /><circle cx="16" cy="17" r="2.2" />
+              </svg>
+            {/if}
+          </span>
+        </button>
+      {/each}
+    </div>
+  {/if}
   </div>
 </div>

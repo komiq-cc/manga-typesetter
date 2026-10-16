@@ -228,18 +228,22 @@
 
 <!-- Hairlines and ghost first, handles last: the dots are the pointer targets
      and must be the topmost thing in the overlay. `overflow: visible` because a
-     dragged handle is routinely outside the box rect - that is the feature. -->
+     dragged handle is routinely outside the box rect - that is the feature.
+     Only the drawing is hidden from assistive technology: the handles are
+     focusable controls, and `aria-hidden` on an ancestor hides them however
+     they are marked themselves. -->
 <svg
   class="warp-gizmo"
   width={box.w * z}
   height={box.h * z}
   style={mirror}
-  aria-hidden="true"
+  role="group"
+  aria-label="Transform mesh"
   data-warp-gizmo={box.id}
 >
-  <polygon class="ghost" points={ghost.map(([x, y]) => `${x * z},${y * z}`).join(' ')} />
+  <polygon class="ghost" aria-hidden="true" points={ghost.map(([x, y]) => `${x * z},${y * z}`).join(' ')} />
   {#each lines as line, i (i)}
-    <polyline class="mesh" points={line.map(([x, y]) => `${x * z},${y * z}`).join(' ')} />
+    <polyline class="mesh" aria-hidden="true" points={line.map(([x, y]) => `${x * z},${y * z}`).join(' ')} />
   {/each}
   {#each pts as p (p.i)}
     <circle
@@ -251,7 +255,6 @@
       r={HANDLE_R}
       role="button"
       tabindex="0"
-      aria-hidden="false"
       aria-label="Mesh handle column {p.col + 1}, row {p.row + 1}. Arrow keys nudge, Shift for ten."
       onpointerdown={(e) => onHandleDown(e, p.i)}
       onkeydown={(e) => onHandleKey(e, p.i)}

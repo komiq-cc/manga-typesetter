@@ -37,7 +37,7 @@ import {
   stampTypesetting,
   noteTypesettingSaved,
 } from './store.svelte.js';
-import { normalizeTypesetting, newTypesetting, legacyTypesetting } from './data.js';
+import { normalizeTypesetting, newTypesetting, legacyTypesetting, openTypesetting } from './data.js';
 import { buildTextJson } from './text-json.js';
 import { carryTagsForward, bindTags, unbindTags, sanitizeTags, sanitizeTagSizes } from './tags.svelte.js';
 import {
@@ -162,12 +162,14 @@ async function subdirs(dir) {
 // rewrites every 800ms while someone is typing.
 //
 // Swept where the directory is already being read, so it costs no extra call.
-// Only names of this module's own shape (`.<digits>.tmp`), so a `notes.tmp` a
-// user put there is not ours to delete - and never a directory, and never a temp
-// file a write still holds: `fsx.liveTemps()` is the only thing that can tell a
-// leftover from a rename that has not happened YET, and deleting the latter
-// would destroy the write it belongs to.
-const TEMP_LITTER = /\.\d+\.tmp$/;
+// Only the temp names of the records this module writes into these directories
+// (`project.json`, `chapter.json`, `translations.json`, then `.<digits>.tmp`),
+// so a `notes.tmp` or another tool's `draft.1.tmp` a user put there is not ours
+// to delete - and never a directory, and never a temp file a write still holds:
+// `fsx.liveTemps()` is the only thing that can tell a leftover from a rename
+// that has not happened YET, and deleting the latter would destroy the write it
+// belongs to.
+const TEMP_LITTER = /^(?:project|chapter|translations)\.json\.\d+\.tmp$/;
 
 async function sweepTemps(dir, entries = null) {
   try {
@@ -801,8 +803,8 @@ async function copyInto(dir, name, bytes, used) {
 // nominates the project's thumbnail; the first offer wins and a failure to
 // write one is cosmetic.
 // `typesetting` is the record's field for a chapter that already had one - an
-// imported package - and undefined for a new chapter, which starts with the
-// preference (`newTypesetting`).
+// imported package - and undefined for a new chapter, which starts 'smart'
+// (`newTypesetting`).
 async function buildChapter(p, number, title, copy, mode = 'typeset', typesetting) {
   // Same hole as createProject, and here it fires on the FAILURE path: the
   // rollback below is a recursive remove, and it must never be pointed at a
@@ -1661,12 +1663,11 @@ export const applyTranslations = guarded(async function applyTranslations(
 // ---------- a chapter's workflow mode ----------
 
 // Switch a chapter between 'typeset' and 'translate' from the project screen,
-// without opening it. Deliberately NOT routed through `chapterFile` and its
-// `assertClosed`: that refusal exists because rewriting a chapter's *pages*
-// under the open document would be overwritten by the next autosave, and a mode
-// is one field the open document itself owns. So the chapter on screen takes the
-// other branch - the state changes and the debounce writes it, which is the same
-// path every other edit to an open chapter takes.
+// without opening it. The chapter on screen is not refused, as a closed-chapter
+// rewrite of its pages would be: a mode is one field the open document itself
+// owns, so the state changes and the debounce writes it, which is the same path
+// every other edit to an open chapter takes. Any other chapter's record is
+// rewritten in the mutation gate (`writeChapterMode`).
 export async function setChapterMode(projectId, chapterId, mode) {
   const c = chapterById(projectId, chapterId);
   if (!c) throw new Error('No such chapter');
@@ -1690,8 +1691,16 @@ export async function setChapterMode(projectId, chapterId, mode) {
     markUnsaved();
     return next;
   }
+  return writeChapterMode(projectId, chapterId, next);
+}
 
-  const path = await fsx.join(c.dir, 'chapter.json');
+// The closed chapter's record, rewritten inside the mutation gate like every
+// other closed-chapter write. Outside it, this read-modify-write of the whole
+// record overlapped the others: a slow mode write that landed after a Sources
+// import put the old translations back. And `chapterFile`'s check, made once
+// the gate is ours, refuses a chapter an open has started on meanwhile.
+const writeChapterMode = guarded(async function writeChapterMode(projectId, chapterId, next) {
+  const { c, path } = await chapterFile(projectId, chapterId);
   const record = await readJson(path);
   record.mode = next;
   record.updatedAt = now();
@@ -1700,7 +1709,7 @@ export async function setChapterMode(projectId, chapterId, mode) {
   c.mode = next;
   c.updatedAt = record.updatedAt;
   return next;
-}
+});
 
 // ---------- open / save the editor's chapter ----------
 
@@ -1920,8 +1929,11 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // And its line breaker from the chapter's own record, for the same reason:
   // the load's refit measures under it (DET-3). A record from before the field
   // opens with what this machine laid it out with; the first save stamps it.
-  useChapterTypesetting(record.typesetting ?? legacyTypesetting());
-  const minted = loadProjectPages(pages);
+  // A 'plain' chapter opens as 'smart' with its boxes given the plain wrap
+  // they were drawn with (`openTypesetting`): the breaking is each box's.
+  const opened = openTypesetting(record.typesetting ?? legacyTypesetting());
+  useChapterTypesetting(opened.typesetting);
+  const minted = loadProjectPages(pages, { plain: opened.plain });
   // After the swap, not before. Pointing the module at the new chapter releases
   // the old one's images, and releasing an image nulls the `raw`/`cleaned` of
   // the page object that held it - done a moment earlier, those page objects
@@ -1989,7 +2001,9 @@ async function loadChapter(p, c, projectId, chapterId, mine) {
   // are on the same disk, and both are already awaited. One more read changes
   // nothing about that and closes the race. Still caught: history is a
   // convenience and may never fail an open.
-  await openHistory(c.dir, app.pages[0]?.id ?? null).catch(() => {});
+  // A chapter laid out plain has its stacks' boxes and styles given the plain
+  // wrap too, or an undo would put back the shaped breaker it never drew with.
+  await openHistory(c.dir, app.pages[0]?.id ?? null, { plain: opened.plain }).catch(() => {});
 }
 
 // Saves are serialised, the same way the history file's writes are and for the

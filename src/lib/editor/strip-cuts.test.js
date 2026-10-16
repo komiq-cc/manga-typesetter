@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { planStripCuts, forbiddenBands, boxSpanY, CUT_PAD } from './strip-cuts.js';
+import { planStripCuts, forbiddenBands, boxSpanY, boxCutSpan, CUT_PAD } from './strip-cuts.js';
+import { identityMesh } from '../warp.js';
 
 // One page tall enough to hold several slices, so strip coordinates and page
 // coordinates are the same numbers here and the arithmetic can be read off by
@@ -48,6 +49,51 @@ describe('forbiddenBands', () => {
       { top: 190, bottom: 430 },
       { top: 690, bottom: 760 },
     ]);
+  });
+});
+
+// What a box paints is not always inside its frame and the pad. A mesh can
+// carry the whole picture off the frame, and so can a long shadow; the cut
+// has to clear what is painted, as the slices pick their boxes by it.
+describe('the band a box keeps a cut out of', () => {
+  // The box's mesh moved bodily down by `dy`: the letters are painted that far
+  // below the frame.
+  const bent = (y, h, dy, style = {}) => {
+    const pts = identityMesh(1, 1, 200, h).map(([x, y]) => [x, y + dy]);
+    return box(y, h, { style: { rotation: 0, warp: { on: true, cols: 1, rows: 1, pts }, ...style } });
+  };
+
+  it('is the frame and the pad for a box that paints inside them', () => {
+    expect(boxCutSpan(box(200, 100), 48)).toEqual({ top: 152, bottom: 348 });
+  });
+
+  it('holds a mesh that carries the letters off the frame, with the pad around them', () => {
+    const s = boxCutSpan(bent(7800, 100, 100), CUT_PAD);
+    expect(s.top).toBe(7800 - CUT_PAD);
+    expect(s.bottom).toBeGreaterThanOrEqual(8000 + CUT_PAD);
+  });
+
+  it('turns over with the box: a mesh bent down on a box flipped upside down paints above it', () => {
+    const s = boxCutSpan(bent(7800, 100, 100, { flipV: true }), CUT_PAD);
+    expect(s.top).toBeLessThanOrEqual(7700 - CUT_PAD);
+    expect(s.bottom).toBe(7900 + CUT_PAD);
+  });
+
+  it('holds a shadow thrown further than the pad', () => {
+    const s = boxCutSpan(box(200, 100, { style: { rotation: 0, shadows: [{ x: 0, y: 120, blur: 0, opacity: 1 }] } }), 48);
+    expect(s.top).toBe(152);
+    expect(s.bottom).toBeGreaterThanOrEqual(300 + 120);
+  });
+
+  it('keeps the cut out of letters the mesh moved over the ideal cut', () => {
+    // At 7800, 100 tall, the frame and its pad end at 7948: the ideal cut at
+    // 8000 looked clear, and ran through the letters the mesh had moved to
+    // 7900..8000.
+    const pages = [page(20000, [bent(7800, 100, 100)])];
+    const { cuts, warnings } = planStripCuts(pages, 8000);
+    expect(warnings).toEqual([]);
+    expect(cuts[1]).toBeLessThanOrEqual(7800 - CUT_PAD);
+    expect(clearsEveryBand(cuts, forbiddenBands(pages))).toBe(true);
   });
 });
 

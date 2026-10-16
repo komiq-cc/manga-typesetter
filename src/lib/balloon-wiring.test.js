@@ -2116,6 +2116,31 @@ describe('placement chooses the size (FIT-1)', () => {
       expect(geomOf(b)).toEqual({ x: solved.x, y: solved.y, w: solved.w, h: solved.h, size: solved.size });
     });
 
+    // A chapter laid out under the old plain switch opens with the plain wrap as
+    // each box's own. The solve a waiting box was placed for is that same
+    // layout, so the box is still waiting - not one somebody has edited since.
+    it('is still solved when it opens in a plain chapter and the face arrives', () => {
+      // The plain wrap reads the browser's own breaks off a DOM node; this
+      // environment has none to lay out, so every paragraph is one line.
+      vi.stubGlobal('document', {
+        fonts: { check: () => ready, load: () => Promise.resolve([]) },
+        body: { appendChild: () => {} },
+        createElement: () => ({ style: {}, remove: () => {} }),
+        createRange: () => ({ setStart: () => {}, setEnd: () => {}, getClientRects: () => [] }),
+      });
+      const placed = placeAt(32);
+      expect(placed.auto.status).toBe('pending');
+      expect(placed.style.shape).not.toBe('off');
+      loadProjectPages(JSON.parse(JSON.stringify(app.pages)), { plain: true });
+      const b = page().boxes[0];
+      expect(b.style.shape).toBe('off');
+      expect(b.auto.status).toBe('pending');
+      ready = true;
+      expect(noteFontsChanged()).toBeGreaterThan(0);
+      expect(b.auto.status).toBeTruthy();
+      expect(b.auto.status).not.toBe('pending');
+    });
+
     it('stays pending while its face is still loading', () => {
       const b = placeAt(32);
       const before = geomOf(b);

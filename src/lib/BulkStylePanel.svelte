@@ -19,6 +19,7 @@ import {
   import { fontGroups, fontCaveat } from './font-menu.js';
   import { PATTERN_KINDS, GRADIENT_MAX_STOPS } from './data.js';
   import ColorPicker from './ColorPicker.svelte';
+  import { iconNoFill } from './tab-icons.js';
 
   // app.bulk.style is the editable template; null when closed.
   const s = $derived(app.bulk.style);
@@ -80,6 +81,34 @@ import {
     }
   });
 
+  // Where the drag would have put the panel, kept to the same bounds: at least
+  // 40px of it across, its head on screen.
+  function clampPos(p, pw, ph) {
+    const w = panelEl?.offsetWidth || 0;
+    return { x: clamp(p.x, 40 - w, pw - 40), y: clamp(p.y, 0, Math.max(0, ph - 40)) };
+  }
+
+  // The frame it is confined to shrinks under it too - the window made
+  // smaller, the reference sidebar widened - and the drag's clamp never hears
+  // of that, so a panel left low on a tall window went under the bottom edge
+  // with its head. Watched for as long as the panel is up.
+  $effect(() => {
+    const parent = panelEl?.offsetParent || panelEl?.parentElement;
+    if (!parent) return;
+    const reclamp = () => {
+      const { w: pw, h: ph } = parentBox();
+      const next = clampPos(pos, pw, ph);
+      if (next.x !== pos.x || next.y !== pos.y) pos = next;
+    };
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', reclamp);
+      return () => window.removeEventListener('resize', reclamp);
+    }
+    const ro = new ResizeObserver(reclamp);
+    ro.observe(parent);
+    return () => ro.disconnect();
+  });
+
   // Track active gesture AbortControllers.
   const live = new Set();
   $effect(() => () => {
@@ -103,13 +132,8 @@ import {
     const move = (ev) => {
       if (ev.pointerId !== pid) return;
       const { w: pw, h: ph } = parentBox();
-      const w = panelEl?.offsetWidth || 0;
-      let nx = baseX + (ev.clientX - startX);
-      let ny = baseY + (ev.clientY - startY);
       // Keep at least 40px on screen.
-      nx = clamp(nx, 40 - w, pw - 40);
-      ny = clamp(ny, 0, Math.max(0, ph - 40));
-      pos = { x: nx, y: ny };
+      pos = clampPos({ x: baseX + (ev.clientX - startX), y: baseY + (ev.clientY - startY) }, pw, ph);
     };
 
     const ac = new AbortController();
@@ -389,7 +413,7 @@ import {
       <div class="bulk-tag">
         <div class="trow">
           <span class="lbl">Scope</span>
-          <div class="seg">
+          <div class="seg" role="group" aria-label="Scope">
             <button class:on={scope === 'chapter'} onclick={() => setBulkScope('chapter')}>Chapter</button>
             <button class:on={scope === 'page'} onclick={() => setBulkScope('page')}>This page</button>
           </div>
@@ -398,6 +422,7 @@ import {
         <div class="trow">
           <span class="lbl">By tag</span>
           <select
+            aria-label="By tag"
             value={tag}
             onchange={(e) => setBulkTag(e.target.value)}
             disabled={!tagList.length}
@@ -436,7 +461,7 @@ import {
             <div class="brow" class:off={!app.bulk.mask.font}>
               {@render tick('font')}
               <span class="lbl">Font</span>
-              <select value={s.font} onchange={(e) => set('font', e.target.value)}>
+              <select aria-label="Font" value={s.font} onchange={(e) => set('font', e.target.value)}>
                 {#if fontCaveat(s.font)}
                   <option value={s.font}>{s.font} ({fontCaveat(s.font)})</option>
                 {/if}
@@ -450,21 +475,21 @@ import {
             <div class="brow" class:off={!app.bulk.mask.size}>
               {@render tick('size')}
               <span class="lbl">Size</span>
-              <input type="number" min="6" max="200" value={s.size} onchange={(e) => num('size', e.target.value || 6, 6, 200)} />
+              <input type="number" aria-label="Size" min="6" max="200" value={s.size} onchange={(e) => num('size', e.target.value || 6, 6, 200)} />
             </div>
             {#each [['bold', 'Bold', 'B'], ['italic', 'Italic', 'I'], ['uppercase', 'Caps', 'AA']] as [key, label, glyph] (key)}
               <div class="brow" class:off={!app.bulk.mask[key]}>
                 {@render tick(key)}
                 <span class="lbl">{label}</span>
                 <div class="seg">
-                  <button class:on={get(key)} onclick={() => set(key, !get(key))}>{glyph}</button>
+                  <button class:on={get(key)} aria-label={label} onclick={() => set(key, !get(key))}>{glyph}</button>
                 </div>
               </div>
             {/each}
             <div class="brow" class:off={!app.bulk.mask.align}>
               {@render tick('align')}
               <span class="lbl">Align</span>
-              <div class="seg">
+              <div class="seg" role="group" aria-label="Align">
                 {#each ['left', 'center', 'right'] as al (al)}
                   <button class:on={s.align === al} title={al} onclick={() => set('align', al)}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">{#each alignIcons[al] as d}<path {d} />{/each}</svg>
@@ -475,7 +500,7 @@ import {
             <div class="brow" class:off={!app.bulk.mask.valign}>
               {@render tick('valign')}
               <span class="lbl">Vertical</span>
-              <div class="seg">
+              <div class="seg" role="group" aria-label="Vertical">
                 {#each ['top', 'middle', 'bottom'] as va (va)}
                   <button class:on={s.valign === va} title={va} onclick={() => set('valign', va)}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">{#each valignIcons[va] as d}<path {d} />{/each}</svg>
@@ -486,12 +511,12 @@ import {
             <div class="brow" class:off={!app.bulk.mask.lineHeight}>
               {@render tick('lineHeight')}
               <span class="lbl">Line</span>
-              <input type="number" min="0.6" max="3" step="0.05" value={s.lineHeight} onchange={(e) => num('lineHeight', e.target.value || 1, 0.6, 3)} />
+              <input type="number" aria-label="Line height" min="0.6" max="3" step="0.05" value={s.lineHeight} onchange={(e) => num('lineHeight', e.target.value || 1, 0.6, 3)} />
             </div>
             <div class="brow" class:off={!app.bulk.mask.letterSpacing}>
               {@render tick('letterSpacing')}
               <span class="lbl">Letter</span>
-              <input type="number" min="-5" max="40" step="0.5" value={s.letterSpacing} onchange={(e) => num('letterSpacing', e.target.value, -5, 40)} />
+              <input type="number" aria-label="Letter spacing" min="-5" max="40" step="0.5" value={s.letterSpacing} onchange={(e) => num('letterSpacing', e.target.value, -5, 40)} />
             </div>
           </div>
         </div>
@@ -504,14 +529,21 @@ import {
               <span class="lbl">Color</span>
               <div class="color-field">
                 <ColorPicker value={s.color} label="Text colour" size={30} unclipped onchange={(hex) => set('color', hex)} />
-                <input type="text" class="hex" value={s.color} onchange={(e) => setHex('color', e.currentTarget.value, e.currentTarget)} />
+                <input type="text" class="hex" value={s.color} aria-label="Color hex" onchange={(e) => setHex('color', e.currentTarget.value, e.currentTarget)} />
+              </div>
+            </div>
+            <div class="brow" class:off={!app.bulk.mask.noFill}>
+              {@render tick('noFill')}
+              <span class="lbl">No fill</span>
+              <div class="seg">
+                <button class:on={s.noFill} aria-pressed={s.noFill} title="No fill: the letters are see-through and only the strokes show" onclick={() => set('noFill', !s.noFill)}>{@html iconNoFill}</button>
               </div>
             </div>
             <div class="brow" class:off={!app.bulk.mask.opacity}>
               {@render tick('opacity')}
               <span class="lbl">Opacity</span>
               <div class="slider-row">
-                <input type="range" min="0" max="1" step="0.01" value={s.opacity} oninput={(e) => set('opacity', +e.target.value)} />
+                <input type="range" aria-label="Opacity" min="0" max="1" step="0.01" value={s.opacity} oninput={(e) => set('opacity', +e.target.value)} />
                 <span class="val">{Math.round(s.opacity * 100)}%</span>
               </div>
             </div>
@@ -519,7 +551,7 @@ import {
               {@render tick('blur')}
               <span class="lbl">Blur</span>
               <div class="slider-row">
-                <input type="range" min="0" max="20" step="0.5" value={s.blur} oninput={(e) => num('blur', e.target.value, 0, 20)} />
+                <input type="range" aria-label="Blur" min="0" max="20" step="0.5" value={s.blur} oninput={(e) => num('blur', e.target.value, 0, 20)} />
                 <span class="val">{s.blur}px</span>
               </div>
             </div>
@@ -528,21 +560,21 @@ import {
               <span class="lbl">Motion blur</span>
               <div class="sub-list-block">
                 <div class="sub-list-head">
-                  <div class="switch" class:on={s.motionBlur.on} role="switch" aria-checked={s.motionBlur.on} tabindex="0" onclick={() => { s.motionBlur.on = !s.motionBlur.on; tickBulkProp('motionBlur'); }} onkeydown={(e) => e.key === 'Enter' && ((s.motionBlur.on = !s.motionBlur.on), tickBulkProp('motionBlur'))}><span class="knob"></span></div>
+                  <div class="switch" class:on={s.motionBlur.on} role="switch" aria-checked={s.motionBlur.on} aria-label="Motion blur" tabindex="0" onclick={() => { s.motionBlur.on = !s.motionBlur.on; tickBulkProp('motionBlur'); }} onkeydown={(e) => e.key === 'Enter' && ((s.motionBlur.on = !s.motionBlur.on), tickBulkProp('motionBlur'))}><span class="knob"></span></div>
                   <span class="sub-count">{s.motionBlur.on ? 'On' : 'Off'}</span>
                 </div>
                 <div class="sub-row3">
                   <div class="field">
                     <span class="sub-lbl">X</span>
-                    <input type="number" min="-10" max="10" step="0.1" value={s.motionBlur.x} onchange={(e) => { s.motionBlur.x = clamp(+e.target.value || 0, -10, 10); tickBulkProp('motionBlur'); }} />
+                    <input type="number" aria-label="Motion blur X" min="-10" max="10" step="0.1" value={s.motionBlur.x} onchange={(e) => { s.motionBlur.x = clamp(+e.target.value || 0, -10, 10); tickBulkProp('motionBlur'); }} />
                   </div>
                   <div class="field">
                     <span class="sub-lbl">Y</span>
-                    <input type="number" min="-10" max="10" step="0.1" value={s.motionBlur.y} onchange={(e) => { s.motionBlur.y = clamp(+e.target.value || 0, -10, 10); tickBulkProp('motionBlur'); }} />
+                    <input type="number" aria-label="Motion blur Y" min="-10" max="10" step="0.1" value={s.motionBlur.y} onchange={(e) => { s.motionBlur.y = clamp(+e.target.value || 0, -10, 10); tickBulkProp('motionBlur'); }} />
                   </div>
                   <div class="field">
                     <span class="sub-lbl">Amount</span>
-                    <input type="number" min="1" max="32" step="1" value={s.motionBlur.amount} onchange={(e) => { s.motionBlur.amount = Math.round(clamp(+e.target.value || 1, 1, 32)); tickBulkProp('motionBlur'); }} />
+                    <input type="number" aria-label="Motion blur amount" min="1" max="32" step="1" value={s.motionBlur.amount} onchange={(e) => { s.motionBlur.amount = Math.round(clamp(+e.target.value || 1, 1, 32)); tickBulkProp('motionBlur'); }} />
                   </div>
                 </div>
               </div>
@@ -561,7 +593,7 @@ import {
                       <div class="sub-row">
                         <div class="color-field">
                           <ColorPicker value={st.color} label="Stroke colour" size={30} unclipped onchange={(hex) => { st.color = hex; tickBulkProp('strokes'); }} />
-                          <input type="text" class="hex" value={st.color} onchange={(e) => setStrokeHex(i, e.currentTarget.value, e.currentTarget)} />
+                          <input type="text" class="hex" value={st.color} aria-label="Stroke {i + 1} hex colour" onchange={(e) => setStrokeHex(i, e.currentTarget.value, e.currentTarget)} />
                         </div>
                         <!-- Width floors at 0.5, not 0: the schema drops a
                              zero-width stroke on normalise, so a 0 typed here
@@ -582,21 +614,21 @@ import {
               <span class="lbl">Gradient</span>
               <div class="sub-list-block">
                 <div class="sub-list-head">
-                  <div class="switch" class:on={s.gradient.on} role="switch" aria-checked={s.gradient.on} tabindex="0" onclick={() => { s.gradient.on = !s.gradient.on; tickBulkProp('gradient'); }} onkeydown={(e) => e.key === 'Enter' && ((s.gradient.on = !s.gradient.on), tickBulkProp('gradient'))}><span class="knob"></span></div>
+                  <div class="switch" class:on={s.gradient.on} role="switch" aria-checked={s.gradient.on} aria-label="Gradient" tabindex="0" onclick={() => { s.gradient.on = !s.gradient.on; tickBulkProp('gradient'); }} onkeydown={(e) => e.key === 'Enter' && ((s.gradient.on = !s.gradient.on), tickBulkProp('gradient'))}><span class="knob"></span></div>
                   <span class="sub-count">{s.gradient.on ? 'On' : 'Off'}</span>
                   <button class="btn btn-sm" disabled={(s.gradient.stops?.length ?? 0) >= GRADIENT_MAX_STOPS} onclick={addGradientStop}>+ Stop</button>
                 </div>
                 <div class="sub-row2">
                   <div class="field">
                     <span class="sub-lbl">Shape</span>
-                    <div class="seg">
+                    <div class="seg" role="group" aria-label="Gradient shape">
                       <button type="button" class:on={s.gradient.kind !== 'radial'} title="Linear gradient" onclick={() => setGradKind('linear')}>Linear</button>
                       <button type="button" class:on={s.gradient.kind === 'radial'} title="Radial gradient" onclick={() => setGradKind('radial')}>Radial</button>
                     </div>
                   </div>
                   <div class="field">
                     <span class="sub-lbl">Scope</span>
-                    <div class="seg">
+                    <div class="seg" role="group" aria-label="Gradient scope">
                       <button class:on={s.gradient.scope === 'box'} onclick={() => { s.gradient.scope = 'box'; tickBulkProp('gradient'); }}>Box</button>
                       <button class:on={s.gradient.scope === 'line'} onclick={() => { s.gradient.scope = 'line'; tickBulkProp('gradient'); }}>Line</button>
                     </div>
@@ -609,20 +641,20 @@ import {
                   <div class="sub-row2">
                     <div class="field">
                       <span class="sub-lbl">Centre</span>
-                      <select value={`${s.gradient.cx},${s.gradient.cy}`} onchange={(e) => { const [cx, cy] = e.target.value.split(',').map(Number); setGradientCentre({ cx, cy }); }}>
+                      <select aria-label="Gradient centre" value={`${s.gradient.cx},${s.gradient.cy}`} onchange={(e) => { const [cx, cy] = e.target.value.split(',').map(Number); setGradientCentre({ cx, cy }); }}>
                         {#each GRAD_CENTRES as c (c.n)}<option value={`${c.cx},${c.cy}`}>{c.n}</option>{/each}
                       </select>
                     </div>
                     <div class="field">
                       <span class="sub-lbl">Radius · {Math.round(rad * 100)}%</span>
-                      <input type="number" min="0.1" max="4" step="0.05" value={rad} title="How far the last stop is from the centre, as a multiple of the distance to the far corner" onchange={(e) => { s.gradient.radius = clamp(+e.target.value || 1, 0.1, 4); tickBulkProp('gradient'); }} />
+                      <input type="number" aria-label="Gradient radius" min="0.1" max="4" step="0.05" value={rad} title="How far the last stop is from the centre, as a multiple of the distance to the far corner" onchange={(e) => { s.gradient.radius = clamp(+e.target.value || 1, 0.1, 4); tickBulkProp('gradient'); }} />
                     </div>
                   </div>
                 {:else}
                   <div class="sub-row2">
                     <div class="field">
                       <span class="sub-lbl">Angle</span>
-                      <input type="number" min="0" max="360" step="1" value={s.gradient.angle} onchange={(e) => { s.gradient.angle = ((+e.target.value || 0) % 360 + 360) % 360; tickBulkProp('gradient'); }} />
+                      <input type="number" aria-label="Gradient angle" min="0" max="360" step="1" value={s.gradient.angle} onchange={(e) => { s.gradient.angle = ((+e.target.value || 0) % 360 + 360) % 360; tickBulkProp('gradient'); }} />
                     </div>
                   </div>
                 {/if}
@@ -631,11 +663,11 @@ import {
                     <!-- Keyed by the stop itself, not its index: a re-sort moves
                          each row's DOM with it instead of swapping contents under
                          a cursor that is still typing into one. -->
-                    {#each s.gradient.stops as st (st)}
+                    {#each s.gradient.stops as st, j (st)}
                       <div class="sub-row">
                         <div class="color-field">
                           <ColorPicker value={st.color} label="Stop colour" size={30} unclipped onchange={(hex) => { st.color = hex; tickBulkProp('gradient'); }} />
-                          <input type="text" class="hex" value={st.color} onchange={(e) => setStopHex(s.gradient.stops.indexOf(st), e.currentTarget.value, e.currentTarget)} />
+                          <input type="text" class="hex" value={st.color} aria-label="Stop {j + 1} hex colour" onchange={(e) => setStopHex(s.gradient.stops.indexOf(st), e.currentTarget.value, e.currentTarget)} />
                         </div>
                         <input type="number" min="0" max="1" step="0.05" value={st.pos} title="Position 0..1" placeholder="Pos" oninput={(e) => { st.pos = clamp(+e.target.value || 0, 0, 1); tickBulkProp('gradient'); }} onchange={() => sortStops()} />
                         <button class="sub-del" title="Remove stop" disabled={s.gradient.stops.length <= 2} onclick={() => removeGradientStop(s.gradient.stops.indexOf(st))}>×</button>
@@ -650,9 +682,9 @@ import {
               <span class="lbl">Pattern</span>
               <div class="sub-list-block">
                 <div class="sub-list-head">
-                  <div class="switch" class:on={s.pattern.on} role="switch" aria-checked={s.pattern.on} tabindex="0" onclick={() => { s.pattern.on = !s.pattern.on; tickBulkProp('pattern'); }} onkeydown={(e) => e.key === 'Enter' && ((s.pattern.on = !s.pattern.on), tickBulkProp('pattern'))}><span class="knob"></span></div>
+                  <div class="switch" class:on={s.pattern.on} role="switch" aria-checked={s.pattern.on} aria-label="Pattern" tabindex="0" onclick={() => { s.pattern.on = !s.pattern.on; tickBulkProp('pattern'); }} onkeydown={(e) => e.key === 'Enter' && ((s.pattern.on = !s.pattern.on), tickBulkProp('pattern'))}><span class="knob"></span></div>
                   <span class="sub-count">{s.pattern.on ? 'On' : 'Off'}</span>
-                  <select value={s.pattern.kind} onchange={(e) => { s.pattern.kind = e.target.value; tickBulkProp('pattern'); }} style="flex:1 1 auto; height:26px">
+                  <select aria-label="Pattern kind" value={s.pattern.kind} onchange={(e) => { s.pattern.kind = e.target.value; tickBulkProp('pattern'); }} style="flex:1 1 auto; height:26px">
                     {#each PATTERN_KINDS as k}<option value={k}>{k}</option>{/each}
                   </select>
                 </div>
@@ -661,20 +693,20 @@ import {
                     <span class="sub-lbl">FG</span>
                     <div class="color-field">
                       <ColorPicker value={s.pattern.fg} label="Pattern foreground colour" size={30} unclipped onchange={(hex) => { s.pattern.fg = hex; tickBulkProp('pattern'); }} />
-                      <input type="text" class="hex" value={s.pattern.fg} onchange={(e) => setPatternHex('fg', e.currentTarget.value, e.currentTarget)} />
+                      <input type="text" class="hex" value={s.pattern.fg} aria-label="Pattern foreground hex" onchange={(e) => setPatternHex('fg', e.currentTarget.value, e.currentTarget)} />
                     </div>
                   </div>
                   <div class="field">
                     <span class="sub-lbl">BG</span>
                     <div class="color-field">
                       <ColorPicker value={s.pattern.bg} label="Pattern background colour" size={30} unclipped onchange={(hex) => { s.pattern.bg = hex; tickBulkProp('pattern'); }} />
-                      <input type="text" class="hex" value={s.pattern.bg} onchange={(e) => setPatternHex('bg', e.currentTarget.value, e.currentTarget)} />
+                      <input type="text" class="hex" value={s.pattern.bg} aria-label="Pattern background hex" onchange={(e) => setPatternHex('bg', e.currentTarget.value, e.currentTarget)} />
                     </div>
                   </div>
                 </div>
                 <div class="sub-row">
                   <span class="sub-lbl" style="width:36px">Scale</span>
-                  <input type="number" min="0.25" max="4" step="0.25" value={s.pattern.scale} onchange={(e) => { s.pattern.scale = clamp(+e.target.value || 1, 0.25, 4); tickBulkProp('pattern'); }} />
+                  <input type="number" aria-label="Pattern scale" min="0.25" max="4" step="0.25" value={s.pattern.scale} onchange={(e) => { s.pattern.scale = clamp(+e.target.value || 1, 0.25, 4); tickBulkProp('pattern'); }} />
                 </div>
               </div>
             </div>
@@ -699,26 +731,26 @@ import {
                         <div class="sub-row">
                           <div class="color-field">
                             <ColorPicker value={sh.color} label="Shadow colour" size={30} unclipped onchange={(hex) => { sh.color = hex; tickBulkProp('shadows'); }} />
-                            <input type="text" class="hex" value={sh.color} onchange={(e) => setShadowHex(i, e.currentTarget.value, e.currentTarget)} />
+                            <input type="text" class="hex" value={sh.color} aria-label="Shadow {i + 1} hex colour" onchange={(e) => setShadowHex(i, e.currentTarget.value, e.currentTarget)} />
                           </div>
                           <button class="sub-del" title="Remove shadow" onclick={() => removeShadow(i)}>×</button>
                         </div>
                         <div class="sub-row3">
                           <div class="field">
                             <span class="sub-lbl">X</span>
-                            <input type="number" value={sh.x} onchange={(e) => { sh.x = +e.target.value || 0; tickBulkProp('shadows'); }} />
+                            <input type="number" aria-label="Shadow {i + 1} X" value={sh.x} onchange={(e) => { sh.x = +e.target.value || 0; tickBulkProp('shadows'); }} />
                           </div>
                           <div class="field">
                             <span class="sub-lbl">Y</span>
-                            <input type="number" value={sh.y} onchange={(e) => { sh.y = +e.target.value || 0; tickBulkProp('shadows'); }} />
+                            <input type="number" aria-label="Shadow {i + 1} Y" value={sh.y} onchange={(e) => { sh.y = +e.target.value || 0; tickBulkProp('shadows'); }} />
                           </div>
                           <div class="field">
                             <span class="sub-lbl">Blur</span>
-                            <input type="number" min="0" max="50" value={sh.blur} onchange={(e) => { sh.blur = Math.max(0, +e.target.value || 0); tickBulkProp('shadows'); }} />
+                            <input type="number" aria-label="Shadow {i + 1} blur" min="0" max="50" value={sh.blur} onchange={(e) => { sh.blur = Math.max(0, +e.target.value || 0); tickBulkProp('shadows'); }} />
                           </div>
                         </div>
                         <div class="slider-row">
-                          <input type="range" min="0" max="1" step="0.01" value={sh.opacity} oninput={(e) => { sh.opacity = clamp(+e.target.value || 0, 0, 1); tickBulkProp('shadows'); }} />
+                          <input type="range" aria-label="Shadow {i + 1} opacity" min="0" max="1" step="0.01" value={sh.opacity} oninput={(e) => { sh.opacity = clamp(+e.target.value || 0, 0, 1); tickBulkProp('shadows'); }} />
                           <span class="val">{Math.round(sh.opacity * 100)}%</span>
                         </div>
                       </div>
@@ -737,7 +769,7 @@ import {
               {@render tick('curve')}
               <span class="lbl">Curve</span>
               <div class="slider-row">
-                <input type="range" min="-100" max="100" step="1" value={s.curve} oninput={(e) => set('curve', +e.target.value)} />
+                <input type="range" aria-label="Curve" min="-100" max="100" step="1" value={s.curve} oninput={(e) => set('curve', +e.target.value)} />
                 <span class="val">{s.curve}</span>
               </div>
             </div>
@@ -746,21 +778,21 @@ import {
               <span class="lbl">Circle</span>
               <div class="sub-list-block">
                 <div class="sub-list-head">
-                  <div class="switch" class:on={s.circle.on} role="switch" aria-checked={s.circle.on} tabindex="0" onclick={() => { s.circle.on = !s.circle.on; tickBulkProp('circle'); }} onkeydown={(e) => e.key === 'Enter' && ((s.circle.on = !s.circle.on), tickBulkProp('circle'))}><span class="knob"></span></div>
+                  <div class="switch" class:on={s.circle.on} role="switch" aria-checked={s.circle.on} aria-label="Circle" tabindex="0" onclick={() => { s.circle.on = !s.circle.on; tickBulkProp('circle'); }} onkeydown={(e) => e.key === 'Enter' && ((s.circle.on = !s.circle.on), tickBulkProp('circle'))}><span class="knob"></span></div>
                   <span class="sub-count">{s.circle.on ? 'On' : 'Off'}</span>
                 </div>
                 <div class="sub-row2">
                   <div class="field">
                     <span class="sub-lbl">Angle</span>
-                    <input type="number" min="0" max="359" step="1" value={s.circle.angle} onchange={(e) => { s.circle.angle = ((+e.target.value || 0) % 360 + 360) % 360; tickBulkProp('circle'); }} />
+                    <input type="number" aria-label="Circle angle" min="0" max="359" step="1" value={s.circle.angle} onchange={(e) => { s.circle.angle = ((+e.target.value || 0) % 360 + 360) % 360; tickBulkProp('circle'); }} />
                   </div>
                   <div class="field">
                     <span class="sub-lbl">Radius</span>
-                    <input type="number" min="0" max="4000" step="1" value={s.circle.r} title="0 = auto (fit the ring to the text)" onchange={(e) => { s.circle.r = clamp(+e.target.value || 0, 0, 4000); tickBulkProp('circle'); }} />
+                    <input type="number" aria-label="Circle radius" min="0" max="4000" step="1" value={s.circle.r} title="0 = auto (fit the ring to the text)" onchange={(e) => { s.circle.r = clamp(+e.target.value || 0, 0, 4000); tickBulkProp('circle'); }} />
                   </div>
                   <div class="field">
                     <span class="sub-lbl">Inside</span>
-                    <div class="switch" class:on={s.circle.inside} role="switch" aria-checked={s.circle.inside} tabindex="0" onclick={() => { s.circle.inside = !s.circle.inside; tickBulkProp('circle'); }} onkeydown={(e) => e.key === 'Enter' && ((s.circle.inside = !s.circle.inside), tickBulkProp('circle'))}><span class="knob"></span></div>
+                    <div class="switch" class:on={s.circle.inside} role="switch" aria-checked={s.circle.inside} aria-label="Circle inside" tabindex="0" onclick={() => { s.circle.inside = !s.circle.inside; tickBulkProp('circle'); }} onkeydown={(e) => e.key === 'Enter' && ((s.circle.inside = !s.circle.inside), tickBulkProp('circle'))}><span class="knob"></span></div>
                   </div>
                 </div>
               </div>
@@ -768,13 +800,13 @@ import {
             <div class="brow" class:off={!app.bulk.mask['roughen.on']}>
               {@render tick('roughen.on')}
               <span class="lbl">Roughen</span>
-              <div class="switch" class:on={s.roughen.on} role="switch" aria-checked={s.roughen.on} tabindex="0" onclick={() => set('roughen.on', !s.roughen.on)} onkeydown={(e) => e.key === 'Enter' && set('roughen.on', !s.roughen.on)}><span class="knob"></span></div>
+              <div class="switch" class:on={s.roughen.on} role="switch" aria-checked={s.roughen.on} aria-label="Roughen" tabindex="0" onclick={() => set('roughen.on', !s.roughen.on)} onkeydown={(e) => e.key === 'Enter' && set('roughen.on', !s.roughen.on)}><span class="knob"></span></div>
             </div>
             <div class="brow" class:off={!app.bulk.mask['roughen.amount']}>
               {@render tick('roughen.amount')}
               <span class="lbl">Amount</span>
               <div class="slider-row">
-                <input type="range" min="0" max="20" step="0.5" value={s.roughen.amount} oninput={(e) => set('roughen.amount', +e.target.value)} />
+                <input type="range" aria-label="Roughen amount" min="0" max="20" step="0.5" value={s.roughen.amount} oninput={(e) => set('roughen.amount', +e.target.value)} />
                 <span class="val">{s.roughen.amount}</span>
               </div>
             </div>
@@ -782,22 +814,31 @@ import {
               {@render tick('roughen.detail')}
               <span class="lbl">Grain</span>
               <div class="slider-row">
-                <input type="range" min="0.01" max="0.2" step="0.005" value={s.roughen.detail} oninput={(e) => set('roughen.detail', +e.target.value)} />
+                <input type="range" aria-label="Roughen grain" min="0.01" max="0.2" step="0.005" value={s.roughen.detail} oninput={(e) => set('roughen.detail', +e.target.value)} />
                 <span class="val">{s.roughen.detail.toFixed(3)}</span>
+              </div>
+            </div>
+            <!-- Drawn by the Rust engine only: see the Inspector's own row. -->
+            <div class="brow" class:off={!app.bulk.mask['roughen.grit']}>
+              {@render tick('roughen.grit')}
+              <span class="lbl">Grit</span>
+              <div class="slider-row">
+                <input type="range" aria-label="Roughen grit" min="0" max="6" step="0.25" value={s.roughen.grit ?? 0} oninput={(e) => set('roughen.grit', +e.target.value)} />
+                <span class="val">{s.roughen.grit ?? 0}</span>
               </div>
             </div>
             <div class="brow" class:off={!app.bulk.mask['roughen.seed']}>
               {@render tick('roughen.seed')}
               <span class="lbl">Seed</span>
-              <input type="number" min="0" max="999" value={s.roughen.seed} onchange={(e) => set('roughen.seed', Math.round(clamp(+e.target.value || 0, 0, 999)))} />
+              <input type="number" aria-label="Roughen seed" min="0" max="999" value={s.roughen.seed} onchange={(e) => set('roughen.seed', Math.round(clamp(+e.target.value || 0, 0, 999)))} />
             </div>
             <!-- Shapes and brushSize are box-local geometry, not surfaced in the bulk panel. -->
             <div class="brow" class:off={!app.bulk.mask.clip}>
               {@render tick('clip')}
               <span class="lbl">Mask</span>
               <div class="sub-row">
-                <div class="switch" class:on={s.clip.on} role="switch" aria-checked={s.clip.on} tabindex="0" onclick={() => { s.clip.on = !s.clip.on; tickBulkProp('clip'); }} onkeydown={(e) => e.key === 'Enter' && ((s.clip.on = !s.clip.on), tickBulkProp('clip'))}><span class="knob"></span></div>
-                <select value={s.clip.mode} onchange={(e) => { s.clip.mode = e.target.value; tickBulkProp('clip'); }} style="flex:1 1 auto; height:24px; min-width:0">
+                <div class="switch" class:on={s.clip.on} role="switch" aria-checked={s.clip.on} aria-label="Mask" tabindex="0" onclick={() => { s.clip.on = !s.clip.on; tickBulkProp('clip'); }} onkeydown={(e) => e.key === 'Enter' && ((s.clip.on = !s.clip.on), tickBulkProp('clip'))}><span class="knob"></span></div>
+                <select aria-label="Mask mode" value={s.clip.mode} onchange={(e) => { s.clip.mode = e.target.value; tickBulkProp('clip'); }} style="flex:1 1 auto; height:24px; min-width:0">
                   <option value="exclude">Exclude</option>
                   <option value="include">Include</option>
                 </select>
@@ -806,40 +847,38 @@ import {
           </div>
         </div>
 
-        {#if app.typesetting.mode === 'smart'}
-          <div class="insp-sub" class:closed={!open.typeset}>
-            {@render head('typeset', 'Typeset')}
-            <div class="insp-sub-body">
-              <div class="brow" class:off={!app.bulk.mask.shape}>
-                {@render tick('shape')}
-                <span class="lbl">Line breaks</span>
-                <!-- Plain wraps like the browser; the other three are the
-                     shaped breaker and the silhouette it aims for (BRK-3). -->
-                <div class="seg">
-                  {#each [['off', 'Plain'], ['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rect']] as [v, label] (v)}
-                    <button class:on={(s.shape ?? 'auto') === v} onclick={() => set('shape', v)}>{label}</button>
-                  {/each}
-                </div>
-              </div>
-              <div class="brow" class:off={!app.bulk.mask.minOrphan}>
-                {@render tick('minOrphan')}
-                <span class="lbl">Min alone</span>
-                <input type="number" min="1" max="8" value={s.minOrphan} onchange={(e) => set('minOrphan', Math.round(clamp(+e.target.value || 1, 1, 8)))} />
-              </div>
-              <div class="brow" class:off={!app.bulk.mask.hyphenate}>
-                {@render tick('hyphenate')}
-                <span class="lbl">Hyphenate</span>
-                <div class="switch" class:on={s.hyphenate} role="switch" aria-checked={s.hyphenate} tabindex="0" onclick={() => set('hyphenate', !s.hyphenate)} onkeydown={(e) => e.key === 'Enter' && set('hyphenate', !s.hyphenate)}><span class="knob"></span></div>
-              </div>
-
-              <div class="brow" class:off={!app.bulk.mask.balloon}>
-                {@render tick('balloon')}
-                <span class="lbl">Balloon fit</span>
-                <div class="switch" class:on={s.balloon} role="switch" aria-checked={s.balloon} tabindex="0" onclick={() => set('balloon', !s.balloon)} onkeydown={(e) => e.key === 'Enter' && set('balloon', !s.balloon)}><span class="knob"></span></div>
+        <div class="insp-sub" class:closed={!open.typeset}>
+          {@render head('typeset', 'Typeset')}
+          <div class="insp-sub-body">
+            <div class="brow" class:off={!app.bulk.mask.shape}>
+              {@render tick('shape')}
+              <span class="lbl">Line breaks</span>
+              <!-- Plain wraps like the browser; the other three are the
+                   shaped breaker and the silhouette it aims for (BRK-3). -->
+              <div class="seg" role="group" aria-label="Line breaks">
+                {#each [['off', 'Plain'], ['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rect']] as [v, label] (v)}
+                  <button class:on={(s.shape ?? 'auto') === v} onclick={() => set('shape', v)}>{label}</button>
+                {/each}
               </div>
             </div>
+            <div class="brow" class:off={!app.bulk.mask.minOrphan}>
+              {@render tick('minOrphan')}
+              <span class="lbl">Min alone</span>
+              <input type="number" aria-label="Min alone" min="1" max="8" value={s.minOrphan} onchange={(e) => set('minOrphan', Math.round(clamp(+e.target.value || 1, 1, 8)))} />
+            </div>
+            <div class="brow" class:off={!app.bulk.mask.hyphenate}>
+              {@render tick('hyphenate')}
+              <span class="lbl">Hyphenate</span>
+              <div class="switch" class:on={s.hyphenate} role="switch" aria-checked={s.hyphenate} aria-label="Hyphenate" tabindex="0" onclick={() => set('hyphenate', !s.hyphenate)} onkeydown={(e) => e.key === 'Enter' && set('hyphenate', !s.hyphenate)}><span class="knob"></span></div>
+            </div>
+
+            <div class="brow" class:off={!app.bulk.mask.balloon}>
+              {@render tick('balloon')}
+              <span class="lbl">Balloon fit</span>
+              <div class="switch" class:on={s.balloon} role="switch" aria-checked={s.balloon} aria-label="Balloon fit" tabindex="0" onclick={() => set('balloon', !s.balloon)} onkeydown={(e) => e.key === 'Enter' && set('balloon', !s.balloon)}><span class="knob"></span></div>
+            </div>
           </div>
-        {/if}
+        </div>
 
         <div class="insp-sub" class:closed={!open.transform}>
           {@render head('transform', 'Transform')}
@@ -847,7 +886,7 @@ import {
             <div class="brow" class:off={!app.bulk.mask.rotation}>
               {@render tick('rotation')}
               <span class="lbl">Rotation</span>
-              <input type="number" min="-180" max="180" value={Math.round(s.rotation)} onchange={(e) => num('rotation', e.target.value, -180, 180)} />
+              <input type="number" aria-label="Rotation" min="-180" max="180" value={Math.round(s.rotation)} onchange={(e) => num('rotation', e.target.value, -180, 180)} />
             </div>
             <div class="brow" class:off={!app.bulk.mask.flipH}>
               {@render tick('flipH')}
@@ -870,7 +909,7 @@ import {
             <div class="brow" class:off={!app.bulk.mask.autoHeight}>
               {@render tick('autoHeight')}
               <span class="lbl">Auto height</span>
-              <div class="switch" class:on={s.autoHeight} role="switch" aria-checked={s.autoHeight} tabindex="0" onclick={() => set('autoHeight', !s.autoHeight)} onkeydown={(e) => e.key === 'Enter' && set('autoHeight', !s.autoHeight)}><span class="knob"></span></div>
+              <div class="switch" class:on={s.autoHeight} role="switch" aria-checked={s.autoHeight} aria-label="Auto height" tabindex="0" onclick={() => set('autoHeight', !s.autoHeight)} onkeydown={(e) => e.key === 'Enter' && set('autoHeight', !s.autoHeight)}><span class="knob"></span></div>
             </div>
           </div>
         </div>

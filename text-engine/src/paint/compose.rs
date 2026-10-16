@@ -20,6 +20,9 @@ pub struct Layer<'a> {
     pub shader: Shader<'a>,
     /// Canvas `globalAlpha` for this layer.
     pub alpha: f32,
+    /// Canvas `destination-out`: the layer paints nothing, and takes what is
+    /// under it away by its coverage. Its shader is not read.
+    pub erase: bool,
 }
 
 /// Paints `layers`, bottom first, over a transparent surface covering
@@ -76,6 +79,15 @@ pub fn compose(layers: &mut [Layer<'_>], surface: IBox) -> Result<Vec<u8>, Error
                 let cov_from = (xa - layer.bx.x0) as usize;
                 let pixels = line[from * 4..to * 4].chunks_exact_mut(4);
                 let covers = &cov_row[cov_from..cov_from + (to - from)];
+                if layer.erase {
+                    for (px, &c) in pixels.zip(covers) {
+                        if c > 0.0 {
+                            let keep = 1.0 - c * layer.alpha;
+                            px.iter_mut().for_each(|v| *v *= keep);
+                        }
+                    }
+                    continue;
+                }
                 match solid {
                     Some(src) => {
                         for (px, &c) in pixels.zip(covers) {
@@ -168,6 +180,7 @@ mod tests {
             cov: Exact.prepare(&[Part::plain(polys.clone())], bx).unwrap(),
             shader: Shader::Solid(rgba),
             alpha,
+            erase: false,
         }
     }
 
@@ -231,6 +244,28 @@ mod tests {
         // Straight colour is unchanged where a premultiplied 8-bit surface
         // would have had only 19 levels left to state it in.
         assert_eq!(&px[8..12], &[51, 102, 153, 19]);
+    }
+
+    #[test]
+    fn an_erasing_layer_takes_away_what_is_under_it() {
+        let surface = IBox {
+            x0: 0,
+            y0: 0,
+            x1: 3,
+            y1: 1,
+        };
+        // Opaque red, then the middle pixel and half of the last cut out.
+        let mut cut = layer(&rect(1.0, 0.0, 2.5, 1.0), surface, [1.0; 4], 1.0);
+        cut.erase = true;
+        let mut layers = vec![
+            layer(&rect(0.0, 0.0, 3.0, 1.0), surface, [1.0, 0.0, 0.0, 1.0], 1.0),
+            cut,
+        ];
+        let px = compose(&mut layers, surface).unwrap();
+        assert_eq!(&px[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&px[4..8], &[0, 0, 0, 0]);
+        // Half gone, and what is left is still red.
+        assert_eq!(&px[8..12], &[255, 0, 0, 128]);
     }
 
     #[test]

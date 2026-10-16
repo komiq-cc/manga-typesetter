@@ -71,41 +71,31 @@ describe('clampPanel', () => {
     expect(clampPanel(g, 1000, 800)).toEqual(g);
   });
 
-  // A hidden panel is drawn as a 34px icon, so 34px is the whole of what has to
-  // stay on screen. Clamped against the panel's 120px strip instead, the stub
-  // could not be put in the right ~86px of the window at all - dropped in the
-  // top-right corner it was yanked back inward, and the drag the user just made
-  // was undone in front of them.
-  it('keeps a hidden panel reachable by its stub, not by the panel it is not showing', () => {
+  // A hidden panel is not drawn where it was: its tab lives under the tool
+  // strip (RailTools.svelte). Its geometry is the panel it comes back as, so it
+  // is held to the panel's rule, hidden or not - a panel shown again is never
+  // mostly off screen.
+  it('holds a hidden panel to the panel rule, the one it comes back as', () => {
     const c = clampPanel({ x: 5000, y: 5000, w: 320, h: 400, hidden: true }, 1000, 800);
-    expect(c.x).toBe(1000 - 34);
-    expect(c.y).toBe(800 - 34);
+    expect(c.x).toBe(1000 - 120);
+    expect(c.y).toBe(800 - 32);
     expect(c.hidden).toBe(true);
   });
 
-  it('leaves a stub parked in the top-right corner alone', () => {
-    const g = { x: 1000 - 34, y: 8, w: 320, h: 400, hidden: true, z: 1 };
-    expect(clampPanel(g, 1000, 800)).toEqual(g);
+  it('clamps the same coordinates the same way, hidden or shown', () => {
+    const at = { x: 1000 - 34, y: 8, w: 320, h: 400, z: 1 };
+    expect(clampPanel({ ...at, hidden: true }, 1000, 800).x).toBe(1000 - 120);
+    expect(clampPanel({ ...at, hidden: false }, 1000, 800).x).toBe(1000 - 120);
   });
 
-  // The distinction is the `hidden` flag and nothing else: the same coordinates
-  // that are legal for a stub are still pulled back in for a visible panel.
-  it('still holds a visible panel to the wider strip at the same coordinates', () => {
-    const at = { x: 1000 - 34, y: 8, w: 320, h: 400, hidden: false, z: 1 };
-    expect(clampPanel(at, 1000, 800).x).toBe(1000 - 120);
-  });
-
-  // Hiding is not a drag, so nothing re-clamps between the two. The next
-  // clampAll - a window resize, or the drag that follows - is what has to hold
-  // the stub to the stub's rule, and the geometry it is handed is whatever the
-  // panel was last at.
-  it('re-clamps a panel to the stub rule once it is hidden', () => {
+  it('a hidden panel shown again is where it was', () => {
     resetPanels(1400, 900);
-    movePanel('queue', 1360, 860);
+    movePanel('queue', 300, 400);
     setHidden('queue', true);
     clampAll(1400, 900);
-    expect(panels.queue.x).toBe(1360); // 1400 - 34, and would have been 1280 before
-    expect(panels.queue.y).toBe(860);
+    setHidden('queue', false);
+    expect(panels.queue.x).toBe(300);
+    expect(panels.queue.y).toBe(400);
   });
 });
 

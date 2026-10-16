@@ -488,8 +488,8 @@
     if (translate) return;
     if (e.target.closest?.('.tbox')) return;
     if (!strip && !e.target.classList.contains('boxlayer')) return;
-    // The Text tool drags the empty page to pan too, and turns a press that
-    // never travelled into a new box.
+    // The Text tool drags the empty page to pan too, and turns a double click
+    // (two presses that never travelled) into a new box.
     if (app.tool === 'text') {
       const hit = frameCoords(e);
       if (hit) startPanPointer(e, true);
@@ -503,6 +503,39 @@
     // onto it - see `focusPage`.
     if (pg.activeLineN != null && lineByN(pg, pg.activeLineN)) placeActiveAt(hit.x, hit.y, pg);
     else deselect();
+  }
+
+  // The Text tool adds a box on the SECOND of two clicks, not the first: one
+  // click on the page is too easy to make by accident (to drop a selection, to
+  // land focus) and each one left an empty box behind. A click is a press that
+  // never travelled; the two have to land on the same page, close together and
+  // close in time, the way the system's own double click does. The first one
+  // only drops the selection, as a click on the empty page does in the Place
+  // tool.
+  //
+  // And nothing else may come between them. Every press in the window is
+  // counted before anything handles it (`countPress`, in the capture phase,
+  // so a box or a panel that keeps its press to itself is counted too): a
+  // click on a box, a pan with the hand, a press in a panel - any of them in
+  // between and the two clicks are not a pair.
+  const DOUBLE_MS = 500;
+  const DOUBLE_PX = 6;
+  let firstClick = null;
+  let presses = 0;
+  const countPress = () => presses++;
+  function secondClick(ev, hit) {
+    const prev = firstClick;
+    firstClick = null;
+    if (
+      prev &&
+      prev.press === presses - 1 &&
+      prev.page === hit.pg.id &&
+      ev.timeStamp - prev.t <= DOUBLE_MS &&
+      Math.hypot(ev.clientX - prev.x, ev.clientY - prev.y) <= DOUBLE_PX
+    )
+      return true;
+    firstClick = { press: presses, t: ev.timeStamp, x: ev.clientX, y: ev.clientY, page: hit.pg.id };
+    return false;
   }
 
   // `addsBox` is read once, here, rather than at the end of the gesture: the
@@ -570,6 +603,8 @@
       live.delete(ac);
       ac.abort();
       setLive(false);
+      // A press that panned or was taken away is not half of a double click.
+      if (addsBox && (panning || ev.type !== 'pointerup')) firstClick = null;
       if (addsBox && !panning && ev.type === 'pointerup') {
         // Resolved from the RELEASE, which is where the box goes. A press that
         // never travelled cannot have left the frame it started in, so this is
@@ -577,6 +612,14 @@
         // box lands on the page the pointer is over - with no second copy of
         // the press's answer to keep in step.
         const hit = frameCoords(ev);
+        if (!hit) {
+          firstClick = null;
+          return;
+        }
+        if (!secondClick(ev, hit)) {
+          deselect();
+          return;
+        }
         // A page whose art has not decoded yet is `w:0,h:0`, and it has no
         // coordinate space to put a box in: `addEmptyBox` clamps the box
         // against `p.w - w`, which on such a page is a clamp to zero, so every
@@ -584,8 +627,8 @@
         // once the real size arrives. Refused rather than placed wrongly - the
         // press is worth a word, because the page it landed on looks like a
         // page and the box would simply not appear where the user put it.
-        if (hit && !measured(hit.pg)) toast('This page is still loading - try again in a moment');
-        else if (hit) addEmptyBox(hit.x, hit.y, hit.pg);
+        if (!measured(hit.pg)) toast('This page is still loading - try again in a moment');
+        else addEmptyBox(hit.x, hit.y, hit.pg);
       }
     };
     live.add(ac);
@@ -893,6 +936,8 @@
     };
   });
 </script>
+
+<svelte:document onpointerdowncapture={countPress} />
 
 <div class="editor-scroll" bind:this={scrollEl}>
   <!-- One cursor per tool, because the two that both pan are otherwise

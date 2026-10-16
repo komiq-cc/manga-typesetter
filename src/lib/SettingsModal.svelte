@@ -1,7 +1,7 @@
 <script>
 
   import { onDestroy } from 'svelte';
-  import { app, saveExportPrefs, toast, setChapterTypesetMode } from './store.svelte.js';
+  import { app, saveExportPrefs, toast } from './store.svelte.js';
   import { checkSidecar, modelsCacheInfo, clearModelsCache } from './sidecar.js';
   import { theme, setTheme } from './theme.svelte.js';
   import { library, setRoot, scanLibrary, withinHome } from './library.svelte.js';
@@ -37,12 +37,6 @@
     { id: 'system', label: 'System', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>' },
   ];
   let tab = $state('general');
-  // The open chapter's line breaker.
-  const smartHere = $derived(app.typesetting.mode === 'smart');
-  // Whether the box defaults below reach any box: they are born into every
-  // chapter, so they stay editable, and are only dimmed when neither the open
-  // chapter nor a new one would lay them out with the smart breaker.
-  const defaultsUsed = $derived(prefs.typeset || (!!app.chapterRef && smartHere));
 
   // The registry shortcut groups follow preferences like the brush tool toggle,
   // while each row combo comes from comboFor reading preferences.
@@ -351,7 +345,7 @@
     <div class="modal-head">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
       <h3>Settings</h3>
-      <button class="x" onclick={() => (open = false)}>
+      <button class="x" aria-label="Close" onclick={() => (open = false)}>
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
       </button>
     </div>
@@ -471,45 +465,15 @@
 
       {#if tab === 'typesetting'}
       <div class="set-pane" role="tabpanel" id="set-pane-typesetting" aria-labelledby="set-tab-typesetting">
-      <!-- The typesetting engine used to hang off every text box as its own
-           Inspector sub-menu, which put a half-finished feature in front of
-           everyone editing a line of dialogue. It lives here now - off, and
-           labelled. The switch is the open chapter's, saved in its file so it
-           opens the same on every machine (DET-3); the preference is only what
-           a new chapter starts with. -->
+      <!-- The defaults a new box is born with. The line breaking used to be a
+           switch per chapter, on here for new chapters and off for the ones
+           made before, so every old chapter needed turning on by hand. It is
+           each box's now, under one switch: "Hyphenate long words" is the
+           smart breaker, and what it does is set under it. A chapter saved
+           with the old switch off opens with its boxes plain, as they were
+           drawn (`openTypesetting` in data.js); Bulk style changes them. -->
       <div class="settings-section ts-section">
-        <div class="settings-title">TYPESETTING <span class="beta-badge">Beta · work in progress</span></div>
-        {#if app.chapterRef}
-          <div class="field">
-            <span>Smart line breaking · this chapter</span>
-            {@render toggle(
-              'typeset',
-              'Smart line breaking for this chapter (beta)',
-              smartHere,
-              false,
-              (on) => setChapterTypesetMode(on ? 'smart' : 'plain'),
-            )}
-          </div>
-        {/if}
-        <div class="field">
-          <span>Smart line breaking · new chapters</span>
-          {@render toggle('typeset', 'Smart line breaking for new chapters', prefs.typeset)}
-        </div>
-        <div class="qhint">
-          Breaks lines to the shape of the balloon, hyphenates words that fit
-          nowhere, and lays text out to a fitted balloon instead of its box.
-          On by default for new chapters. With it off, boxes wrap plainly.
-          Each chapter keeps its own setting, so it opens the same on any
-          machine. A chapter made before this setting existed opens the way
-          this computer had it then, and keeps that once saved.
-        </div>
-
-        <!-- The defaults a new box is born with. Auto height stands outside the
-             beta gate because it is not part of it: it is on in every build and
-             it is what makes a box grow with its text. The other four only mean
-             anything while the engine above is on, so they are dimmed with it
-             rather than hidden - a switch that vanishes is a switch nobody finds
-             again. -->
+        <div class="settings-title">TYPESETTING</div>
         <div class="group-label">Defaults for new text boxes</div>
         <div class="field">
           <span>Auto height</span>
@@ -521,11 +485,16 @@
           flagged. A box you drew yourself only grows, and never shrinks a box
           you made roomier.
         </div>
-        <div class="ts-defaults" class:dim={!defaultsUsed}>
-          <div class="field">
-            <span>Shaped line breaks</span>
-            {@render toggle('defaultShape', 'Shaped line breaks', prefs.defaultShape)}
-          </div>
+        <div class="field">
+          <span>Hyphenate long words</span>
+          {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate)}
+        </div>
+        <div class="qhint">
+          Smart line breaking: lines break to the shape of the balloon, a word
+          that fits nowhere is hyphenated, and the text is laid out to the
+          fitted balloon. Off, lines wrap plainly at the box's edge.
+        </div>
+        <div class="ts-defaults ts-sub" class:dim={!prefs.defaultHyphenate}>
           <!-- The silhouette a shaped block aims for (BRK-3). Auto picks an oval
                in a balloon and a rectangle in a caption. -->
           <div class="field">
@@ -534,19 +503,15 @@
               {#each [['auto', 'Auto'], ['oval', 'Oval'], ['rect', 'Rectangle']] as [v, label]}
                 <button
                   class:on={prefs.defaultBlockShape === v}
-                  disabled={!prefs.defaultShape}
+                  disabled={!prefs.defaultHyphenate}
                   onclick={() => setPref('defaultBlockShape', v)}
                 >{label}</button>
               {/each}
             </div>
           </div>
           <div class="field">
-            <span>Hyphenate long words</span>
-            {@render toggle('defaultHyphenate', 'Hyphenate long words', prefs.defaultHyphenate)}
-          </div>
-          <div class="field">
             <span>Fit text to balloon</span>
-            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon)}
+            {@render toggle('defaultBalloon', 'Fit text to balloon', prefs.defaultBalloon, !prefs.defaultHyphenate)}
           </div>
           <div class="field">
             <label for="ts-orphan">Shortest word left alone on a line</label>
@@ -557,6 +522,7 @@
               min="1"
               max="8"
               step="1"
+              disabled={!prefs.defaultHyphenate}
               value={prefs.defaultMinOrphan}
               title="A word shorter than this is never left alone at the end of a line"
               onchange={(e) => { setPref('defaultMinOrphan', e.target.value); e.target.value = prefs.defaultMinOrphan; }}
@@ -564,8 +530,8 @@
           </div>
         </div>
         <div class="qhint">
-          Applies to new text boxes · per-box via Bulk style. Boxes already on a
-          page keep whatever they were given.
+          Applies to new text boxes, in every chapter · per-box via Bulk style.
+          Boxes already on a page keep whatever they were given.
         </div>
       </div>
 
@@ -1313,9 +1279,14 @@
     font-size: 11.5px;
     color: var(--t2);
   }
-  /* The four beta defaults mean nothing while the engine above them is off, so
-     they dim with it rather than vanishing: a control that disappears is one
-     nobody finds again when they turn the beta on. */
+  /* The settings under "Hyphenate long words" mean nothing while it is off,
+     so they dim with it rather than vanishing: a control that disappears is
+     one nobody finds again. Set in from it, as its own. */
+  .ts-sub {
+    margin-left: 14px;
+    padding-left: 10px;
+    border-left: 1px solid var(--line2);
+  }
   .ts-defaults.dim {
     opacity: 0.5;
   }

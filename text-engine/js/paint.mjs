@@ -34,7 +34,7 @@
 
 import { CHAIN_SHIFT, SYNTH_BOLD, SYNTH_OBLIQUE } from './engine.mjs'
 
-export const WIRE_VERSION = 3
+export const WIRE_VERSION = 7
 const MAGIC = 0x4a50544d // "MTPJ"
 
 const STATUS = {
@@ -172,6 +172,46 @@ function fill(f, tileIndex) {
   }
 }
 
+/**
+ * Writes the box's mesh warp, `{ cols, rows, pts, x, y, w, h }`: `pts` are
+ * `style.warp.pts`, `(cols + 1) * (rows + 1)` pairs relative to the corner of
+ * the rectangle `x, y, w, h` the mesh is laid over, which is in job space. No
+ * mesh, or one whose points do not match its grid, is written as none: the
+ * job paints unbent, as every reader of a mesh draws one it cannot read.
+ */
+function mesh(m) {
+  const cols = m?.cols | 0
+  const rows = m?.rows | 0
+  if (!m || cols < 1 || rows < 1 || !Array.isArray(m.pts) || m.pts.length !== (cols + 1) * (rows + 1)) return u32(0)
+  u32(cols)
+  u32(rows)
+  f64(m.x)
+  f64(m.y)
+  f64(m.w)
+  f64(m.h)
+  for (const p of m.pts) {
+    f64(p[0])
+    f64(p[1])
+  }
+}
+
+/**
+ * Writes the box's roughening, `{ amount, detail, seed, x, y }`: the style's
+ * own three numbers and the field's origin in job space. None, or one that
+ * moves nothing, is written as none.
+ */
+function roughen(r) {
+  const grit = r?.grit > 0 ? r.grit : 0
+  if (!r || !((r.amount !== 0 && r.detail > 0) || grit > 0)) return u32(0)
+  u32(1)
+  f64(r.amount || 0)
+  f64(r.detail > 0 ? r.detail : 0)
+  f64(r.seed || 0)
+  f64(r.x || 0)
+  f64(r.y || 0)
+  f64(grit)
+}
+
 /** Synthetic styles and fallback chain as an engine face's `flags`. */
 function faceFlags(synth) {
   if (typeof synth === 'number') return synth
@@ -204,8 +244,14 @@ function faceFlags(synth) {
  *   returned twice is sent once.
  * @returns {Uint8Array} a view of a buffer that the next call overwrites
  */
-export function encodeJob({ job, font, size, synth, chain, boldDraw = 'rule', weight = 0, transform, tiles }) {
+export function encodeJob(request) {
   at = 0
+  writeJob(request)
+  return u8.subarray(0, at)
+}
+
+// The job's bytes, appended where the buffer stands.
+function writeJob({ job, font, size, synth, chain, boldDraw = 'rule', weight = 0, transform, tiles }) {
   const sent = []
   const tileIndex = (f) => {
     const tile = tiles ? tiles(f) : null
@@ -229,7 +275,9 @@ export function encodeJob({ job, font, size, synth, chain, boldDraw = 'rule', we
   f64(size ?? job.face?.size)
   for (let i = 0; i < 6; i++) f64(m[i])
   f64(weight)
-  u32((job.curved ? 1 : 0) | (job.silhouette ? 2 : 0))
+  // 4: no fill. The letters are cut out of the bands (or, with 2, out of the
+  // silhouette, which is then the widest band's outer half alone).
+  u32((job.curved ? 1 : 0) | (job.silhouette ? 2 : 0) | (job.noFill ? 4 : 0))
   // An alignment the canvas does not know leaves its `textAlign` at "start".
   u32(ALIGN[job.align] ?? 0)
   f64(job.letterSpacing || 0)
@@ -241,11 +289,20 @@ export function encodeJob({ job, font, size, synth, chain, boldDraw = 'rule', we
     f64(band.line)
   }
   fill(job.fill, tileIndex)
+  mesh(job.mesh)
+  roughen(job.roughen)
   u32(job.runs.length)
   for (const run of job.runs) {
     f64(run.x)
     f64(run.y)
     f64(run.rot ?? 0)
+    // Curved text only: the glyph's own scale and lean (radians, positive
+    // leans the top to the right), and its drip (job units its lower half is
+    // pulled down by). A straight run is written 1, 1, 0, 0.
+    f64(run.sx ?? 1)
+    f64(run.sy ?? 1)
+    f64(run.skew ?? 0)
+    f64(run.drip ?? 0)
     fill(run.fill, tileIndex)
     const text = String(run.text)
     // A UTF-16 unit is at most 3 UTF-8 bytes.
@@ -262,7 +319,186 @@ export function encodeJob({ job, font, size, synth, chain, boldDraw = 'rule', we
     u8.set(tile.data, at)
     at += tile.data.length
   }
+}
+
+export const BOX_WIRE_VERSION = 1
+const BOX_MAGIC = 0x4250544d // "MTPB"
+const CLIP_MODE = { include: 1, exclude: 2 }
+
+// One mask shape, as `style.clip.shapes` holds it. A shape of a kind this
+// does not know, or with nothing to draw, is not written (`drawClipShapes`
+// draws nothing for it either).
+function clipShape(sh) {
+  if (sh?.kind === 'ellipse') {
+    u32(1)
+    f64(sh.cx)
+    f64(sh.cy)
+    f64(sh.rx)
+    f64(sh.ry)
+    return true
+  }
+  const pts = Array.isArray(sh?.pts) ? sh.pts : []
+  if (!pts.length || (sh.kind !== 'poly' && sh.kind !== 'stroke')) return false
+  if (sh.kind === 'poly') u32(2)
+  else {
+    u32(3)
+    f64(sh.size || 0)
+  }
+  u32(pts.length)
+  for (const q of pts) {
+    f64(q[0])
+    f64(q[1])
+  }
+  return true
+}
+
+/**
+ * A finished box, as the bytes the engine reads: its glyph job and what is
+ * laid over and under it. The layout is documented at `decode_box` in
+ * text-engine/src/paint/ and in docs/text-port/FULL_RUST_PAINT.md.
+ *
+ * Every length here is in the job's own units, and the job's `transform`
+ * carries it to device pixels with the glyphs: a shadow's offset turns with a
+ * turned box, and a blur grows with the scale.
+ *
+ * @param {object} request everything `encodeJob` takes for the glyph job, and
+ * @param {number} request.width the surface, device pixels; its corner is (0, 0)
+ * @param {number} request.height
+ * @param {{color: string, opacity: number, x: number, y: number, blur: number}[]} [request.shadows]
+ *   `style.shadows`, first on top
+ * @param {number} [request.blur] the whole-box blur, a gaussian's sigma
+ * @param {{dx: number, dy: number, w: number}[]} [request.taps] `motionBlurTaps`
+ * @param {{mode: 'include' | 'exclude', x: number, y: number, shapes: object[]} | null} [request.clip]
+ *   the visibility mask: `style.clip.shapes`, which are box-local, and the
+ *   box's corner in job space
+ * @returns {Uint8Array} a view of a buffer that the next call overwrites
+ */
+export function encodeBox(request) {
+  const { width, height, shadows = [], blur = 0, taps = [], clip = null } = request
+  at = 0
+  u32(BOX_MAGIC)
+  u32(BOX_WIRE_VERSION)
+  u32(width)
+  u32(height)
+  u32(shadows.length)
+  for (const sh of shadows) {
+    rgba(sh.color)
+    f64(sh.opacity)
+    f64(sh.x)
+    f64(sh.y)
+    f64(sh.blur)
+  }
+  f64(blur)
+  u32(taps.length)
+  for (const t of taps) {
+    f64(t.dx)
+    f64(t.dy)
+    f64(t.w)
+  }
+  const mode = clip ? CLIP_MODE[clip.mode] : 0
+  if (clip && !mode) throw new Error(`mt-text: unknown clip mode ${JSON.stringify(clip.mode)}`)
+  u32(mode || 0)
+  if (mode) {
+    f64(clip.x)
+    f64(clip.y)
+    // The count is written once the shapes are, less the ones not drawn.
+    const countAt = at
+    u32(0)
+    let n = 0
+    for (const sh of clip.shapes ?? []) if (clipShape(sh)) n++
+    view.setUint32(countAt, n, true)
+  }
+  const lenAt = at
+  u32(0)
+  writeJob(request)
+  view.setUint32(lenAt, at - lenAt - 4, true)
   return u8.subarray(0, at)
+}
+
+// What the engine left in its result: where the raster goes and its pixels.
+function rasterOf(ex, asView) {
+  const [x, y, width, height] = new Float64Array(ex.memory.buffer, ex.mt_paint_job_result(), 4)
+  const pixels = ex.mt_paint_job_pixels()
+  const len = width * height * 4
+  const data = asView
+    ? new Uint8ClampedArray(ex.memory.buffer, pixels, len)
+    : new Uint8ClampedArray(ex.memory.buffer.slice(pixels, pixels + len))
+  return { x, y, width, height, data }
+}
+
+// The patterns, numbered as `Kind` in text-engine/src/paint/pattern.rs.
+const PATTERN_KIND = {
+  dots: 0,
+  halftone: 1,
+  stripes: 2,
+  hstripes: 3,
+  diagonal: 4,
+  'diagonal-alt': 5,
+  crosshatch: 6,
+  checker: 7,
+  grid: 8,
+  vlines: 9,
+  hlines: 10,
+}
+
+/** Whether this wasm draws pattern tiles itself. */
+export function drawsPatternTiles(engine) {
+  return typeof engine?.exports?.mt_paint_pattern_tile === 'function'
+}
+
+/**
+ * One tile of a pattern fill, drawn by the engine.
+ *
+ * @param {object} engine from `createEngine`
+ * @param {{kind?: string, fg?: string, bg?: string}} pattern as `style.pattern` holds it
+ * @param {number} side the tile's side in pixels
+ * @param {number} line the width of a hairline (grid, vlines, hlines) as a share of the tile
+ * @returns {{width: number, height: number, data: Uint8ClampedArray} | null} straight
+ *   RGBA8, a copy; null for a kind the engine does not know
+ */
+export function patternTile(engine, pattern, side, line) {
+  const ex = engine.exports
+  const kind = PATTERN_KIND[pattern?.kind ?? 'dots']
+  if (kind === undefined) return null
+  const word = (css) => {
+    const c = parseColor(css)
+    return ((c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3]) >>> 0
+  }
+  const code = ex.mt_paint_pattern_tile(kind, side, word(pattern?.fg ?? '#000000'), word(pattern?.bg ?? '#ffffff'), line)
+  if (code < 0) throw new Error(`mt-text: patternTile: ${STATUS[code] ?? `error ${code}`}`)
+  const raster = rasterOf(ex, false)
+  return { width: raster.width, height: raster.height, data: raster.data }
+}
+
+/** Whether this wasm paints box jobs of the version this loader writes. */
+export function paintsBoxes(engine) {
+  const ex = engine?.exports
+  return typeof ex?.mt_paint_box === 'function' && ex.mt_paint_box_wire_version?.() === BOX_WIRE_VERSION
+}
+
+/**
+ * Paints one finished box.
+ *
+ * @param {object} engine from `createEngine`
+ * @param {object} request see `encodeBox`; also `view`, as for `paintJob`
+ * @returns {{x: number, y: number, width: number, height: number, data: Uint8ClampedArray} | null}
+ *   straight-alpha RGBA8 and the device pixel of its top-left corner, cut to
+ *   what the box inks and to the surface; null when it draws nothing.
+ */
+export function paintBox(engine, request) {
+  const ex = engine.exports
+  if (!paintsBoxes(engine)) throw new Error('mt-text: this wasm does not paint box jobs of this version')
+  if (ex.mt_paint_wire_version() !== WIRE_VERSION) {
+    throw new Error(`mt-text: wasm reads paint jobs v${ex.mt_paint_wire_version()}, loader writes v${WIRE_VERSION}`)
+  }
+  const bytes = encodeBox(request)
+  const ptr = ex.mt_paint_job_reserve(bytes.length)
+  if (!ptr) throw new Error(`mt-text: paintBox: the engine refused a job of ${bytes.length} bytes`)
+  new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes)
+  const code = ex.mt_paint_box(bytes.length)
+  if (code < 0) throw new Error(`mt-text: paintBox: ${STATUS[code] ?? `error ${code}`}`)
+  if (code === 0) return null
+  return rasterOf(ex, request.view)
 }
 
 /**
@@ -291,13 +527,7 @@ export function paintJob(engine, request) {
   const code = ex.mt_paint_job(bytes.length)
   if (code < 0) throw new Error(`mt-text: paintJob: ${STATUS[code] ?? `error ${code}`}`)
   if (code === 0) return null
-  const [x, y, width, height] = new Float64Array(ex.memory.buffer, ex.mt_paint_job_result(), 4)
-  const pixels = ex.mt_paint_job_pixels()
-  const len = width * height * 4
-  const data = request.view
-    ? new Uint8ClampedArray(ex.memory.buffer, pixels, len)
-    : new Uint8ClampedArray(ex.memory.buffer.slice(pixels, pixels + len))
-  return { x, y, width, height, data }
+  return rasterOf(ex, request.view)
 }
 
 /** Frees the engine's copy of the last raster. The next job would replace it anyway. */

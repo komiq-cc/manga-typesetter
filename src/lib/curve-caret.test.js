@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt } from './curve-caret.js';
+import { glyphIndex, rawIndex, glyphsMatch, caretAt, caretNearest, glyphNearest, selectionBoxes, caretKey, wordAt, glyphReach } from './curve-caret.js';
 import { arcLayout, circleLayout, pathLayout } from './measure.js';
 import { defaultStyle, normalizeStyle } from './data.js';
 
@@ -114,6 +114,41 @@ describe('selectionBoxes: the highlight follows the curve', () => {
     });
     expect(selectionBoxes(g, 2, 2)).toEqual([]);
     expect(selectionBoxes(g, 0, 99)).toHaveLength(6);
+  });
+});
+
+describe('an SFX glyph scaled about its centre', () => {
+  // As `sfxLayout` gives them: the advance as the font has it, and the scale
+  // the painter lays on it about the glyph's centre (Grow on "WWW").
+  const W = 30;
+  const grown = [
+    { ch: 'W', x: -35, y: 0, rot: 0, sx: 1, sy: 1, skew: 0, w: W },
+    { ch: 'W', x: 0, y: 0, rot: 0, sx: 1.25, sy: 1.25, skew: 0, w: W },
+    { ch: 'W', x: 40, y: 0, rot: 0.2, sx: 1.5, sy: 1.5, skew: 0, w: W },
+  ];
+
+  it('reaches as far as it is painted, and a glyph with no scale is its advance', () => {
+    expect(grown.map(glyphReach)).toEqual([30, 37.5, 45]);
+    expect(glyphReach({ x: 0, y: 0, rot: 0, w: 11 })).toBe(11);
+    // Mirrored is as wide.
+    expect(glyphReach({ x: 0, y: 0, rot: 0, sx: -2, w: 11 })).toBe(22);
+  });
+
+  it('has its end caret on its painted edge, along its turn', () => {
+    const last = grown[2];
+    near(caretAt(grown, 3), { x: last.x + 22.5 * Math.cos(last.rot), y: last.y + 22.5 * Math.sin(last.rot) });
+    near(caretAt(grown, 0), { x: -50, y: 0 });
+    // Between two, halfway across what each one's painted edge leaves.
+    expect(caretAt(grown, 1).x).toBeCloseTo((-20 + -18.75) / 2, 9);
+  });
+
+  it('is found by a click on the part the scale added, and highlighted out to it', () => {
+    // 18 px left of the middle glyph's centre: its ink (it reaches 18.75), and
+    // nearer the first glyph's advance than its own unscaled one.
+    expect(glyphNearest(grown, -18, 0)).toEqual({ i: 1, after: false });
+    // The last glyph's highlight runs from caret to caret over all 45 px of it.
+    const [box] = selectionBoxes(grown, 2, 3);
+    expect(box.w).toBeGreaterThan(43);
   });
 });
 

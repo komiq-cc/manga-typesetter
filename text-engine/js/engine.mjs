@@ -67,6 +67,9 @@ function wrap(instance) {
 
   let textPtr = 0
   let textCap = 0
+  // `sfxInfo` fills both: the table, and each kind's number on the wire.
+  let sfxInfoCache = null
+  let sfxKindIds = null
 
   /** Writes `text` as UTF-8 into the engine's text buffer, returns its byte length. */
   function putText(text) {
@@ -300,6 +303,116 @@ function wrap(instance) {
         x[i] = view.getFloat64(i * 16 + 8, true)
       }
       return { at, x, length: view.getFloat64(n * 16, true), advance: view.getFloat64(n * 16 + 8, true) }
+    },
+
+    /** Whether this wasm has `sfxLayout` and `sfxInfo` (it is newer than the ABI number). */
+    hasSfx: typeof ex.mt_sfx_layout === 'function' && typeof ex.mt_sfx_info === 'function',
+
+    /** Whether this wasm has `sfxEnvelope`. */
+    hasSfxEnvelope: typeof ex.mt_sfx_envelope === 'function',
+
+    /**
+     * The kinds of SFX move and the built-in presets, as the engine's table
+     * has them (text-engine/src/sfx/table.rs): one JSON document, parsed once
+     * and the same object every time, so read it and do not change it.
+     * @returns {{ kinds: Array<{ kind: string, label: string, unit: 'em' | 'deg' | 'x',
+     *     min: number, max: number, step: number,
+     *     b: null | { label: string, min: number, max: number, step: number, default: number } }>,
+     *   presets: Array<{ id: string, name: string, group: string, flow: 'row' | 'stack',
+     *     rowShift: number, gap: number, lineHeight: number | null,
+     *     envelope: null | { kind: 'arch' | 'valley' | 'flag' | 'rise', bend: number, cols: number, rows: number },
+     *     moves: Array<{ kind: string, a: number, b: number }> }>,
+     *   envelopes: string[] }} `envelopes` are the warp ids; `sfxEnvelope` takes one
+     */
+    sfxInfo() {
+      if (sfxInfoCache) return sfxInfoCache
+      if (!engine.hasSfx) throw new Error('mt-text: this wasm has no mt_sfx_info; run npm run build:engine')
+      check(ex.mt_sfx_info(), 'sfxInfo')
+      sfxInfoCache = JSON.parse(decoder.decode(outBytes()))
+      sfxKindIds = new Map(sfxInfoCache.kinds.map((k, i) => [k.kind, i]))
+      return sfxInfoCache
+    },
+
+    /**
+     * Where each letter of an SFX word goes. The engine measures every code
+     * point in `face` (as `advance` measures that one code point) and places it:
+     * its centre, turn, scale and lean, relative to the centre of the whole
+     * block (text-engine/src/sfx/mod.rs says how, move by move).
+     *
+     * @param {{ font: number, size: number, flags: number }} face from `engine.face`
+     * @param {string[]} rows the lines of the text; a `\n` inside one starts another row
+     * @param {{ lineHeight: number, letterSpacing?: number, amount?: number, seed?: number,
+     *   flow?: 'row' | 'stack', rowShift?: number,
+     *   moves?: Array<{ kind: string, a: number, b?: number }> }} params
+     *   pixels for `lineHeight` and `letterSpacing`; `amount` scales every move (default 1);
+     *   `rowShift` in ems; at most eight moves count, and a kind the engine does not know is skipped
+     * @returns {Array<{ ch: string, x: number, y: number, rot: number, sx: number, sy: number,
+     *   skew: number, w: number, drip: number }>} one per code point, in order, newlines left out.
+     *   `x`, `y` in pixels; `rot` and `skew` in radians (rot clockwise; a positive skew leans the
+     *   top right); `w` the letter's advance before scaling; `drip` pixels (never negative) the
+     *   painter pulls the lower half of the letter's outline down while its top stays put. Feed
+     *   `x, y, rot, sx, sy, skew` to a curved paint job's run (`paint.mjs`).
+     */
+    sfxLayout(face, rows, params) {
+      if (!engine.hasSfx) throw new Error('mt-text: this wasm has no mt_sfx_layout; run npm run build:engine')
+      engine.sfxInfo()
+      const lines = rows.flatMap((row) => String(row).split('\n'))
+      const chars = lines.flatMap((line) => Array.from(line))
+      const moves = (params.moves ?? []).filter((m) => sfxKindIds.has(m.kind))
+      const flow = params.flow ?? 'row'
+      if (flow !== 'row' && flow !== 'stack') throw new Error(`mt-text: unknown sfx flow ${JSON.stringify(flow)}`)
+      // The recipe: see text-engine/src/sfx/wire.rs. The size is the face's.
+      const wire = new DataView(new ArrayBuffer(44 + moves.length * 20))
+      const nums = [params.lineHeight, params.letterSpacing ?? 0, params.amount ?? 1, params.rowShift ?? 0]
+      nums.forEach((v, i) => wire.setFloat64(i * 8, +v, true))
+      wire.setUint32(32, (params.seed ?? 1) >>> 0, true)
+      wire.setUint32(36, flow === 'stack' ? 1 : 0, true)
+      wire.setUint32(40, moves.length, true)
+      moves.forEach((m, i) => {
+        const at = 44 + i * 20
+        wire.setUint32(at, sfxKindIds.get(m.kind), true)
+        wire.setFloat64(at + 4, +m.a, true)
+        wire.setFloat64(at + 12, +(m.b ?? 0), true)
+      })
+      const textLen = putText(lines.join('\n'))
+      const ptr = ex.mt_sfx_params_reserve(wire.byteLength)
+      if (!ptr) throw new Error('mt-text: sfxLayout: the engine refused the recipe buffer')
+      new Uint8Array(memory.buffer, ptr, wire.byteLength).set(new Uint8Array(wire.buffer))
+      const n = check(ex.mt_sfx_layout(face.font, face.size, face.flags, textLen, wire.byteLength), 'sfxLayout')
+      if (n !== chars.length) throw new Error(`mt-text: sfxLayout: ${n} records for ${chars.length} letters`)
+      // Read through a view of its own: the out buffer is bytes and need not
+      // sit on an 8-byte boundary.
+      const view = new DataView(memory.buffer, ex.mt_out_ptr(), n * 64)
+      return chars.map((ch, i) => {
+        const f = (k) => view.getFloat64(i * 64 + k * 8, true)
+        return { ch, x: f(0), y: f(1), rot: f(2), sx: f(3), sy: f(4), skew: f(5), w: f(6), drip: f(7) }
+      })
+    },
+
+    /**
+     * Where the nodes of a warp grid go (text-engine/src/sfx/envelope.rs): the
+     * identity grid of `cols` by `rows` cells over a box `w` by `h`, bent into
+     * the envelope by `bend` (a fraction of `h`, held to -2..2). This is the
+     * app's `style.warp.pts`.
+     *
+     * @param {'arch' | 'valley' | 'flag' | 'rise'} kind one of `sfxInfo().envelopes`
+     * @param {number} bend
+     * @param {number} cols 1 to 64
+     * @param {number} rows 1 to 64
+     * @param {number} w pixels, above 0
+     * @param {number} h pixels, above 0
+     * @returns {Array<[number, number]>} `(cols + 1) * (rows + 1)` points, row-major, top-left first
+     */
+    sfxEnvelope(kind, bend, cols, rows, w, h) {
+      if (!engine.hasSfxEnvelope) throw new Error('mt-text: this wasm has no mt_sfx_envelope; run npm run build:engine')
+      const id = engine.sfxInfo().envelopes.indexOf(kind)
+      if (id < 0) throw new Error(`mt-text: unknown sfx envelope ${JSON.stringify(kind)}`)
+      const n = check(ex.mt_sfx_envelope(id, +bend, cols >>> 0, rows >>> 0, +w, +h), 'sfxEnvelope')
+      // Read through a view of its own: the out buffer need not sit on an 8-byte boundary.
+      const view = new DataView(memory.buffer, ex.mt_out_ptr(), n * 16)
+      const pts = new Array(n)
+      for (let i = 0; i < n; i++) pts[i] = [view.getFloat64(i * 16, true), view.getFloat64(i * 16 + 8, true)]
+      return pts
     },
 
     /**

@@ -91,6 +91,11 @@ export function setFsyncTimeout(ms) {
 
 const FSYNC_TIMED_OUT = Symbol('fsync-timeout');
 
+// The filesystem plugin's refusal of a path outside its scope, as opposed to
+// anything the disk itself said. "forbidden path: <path>" in release builds and
+// the same words with a hint after them in debug ones.
+const scopeRefused = (e) => /forbidden path/i.test(String(e?.message ?? e));
+
 async function fsync(p) {
   if (!p || !inTauri()) return;
   let timer;
@@ -177,13 +182,34 @@ export const fsx = {
   async writeFile(p, bytes) {
     return (await fs()).writeFile(p, bytes);
   },
+  // The binary twin, which is also what exports go through - and an export's
+  // destination is one the user picked in a save dialog, which can be anywhere.
+  // The dialog grants the scope that ONE file and nothing beside it, so outside
+  // the home directory (an external volume, a network share) the temp sibling
+  // is refused while the file itself is allowed, and the atomic write failed
+  // every time with nothing saved. In that one case, and only that one, the
+  // file is written in place - not atomically, which for a file the user just
+  // chose to replace costs a re-export at worst. The case is a scope refusal of
+  // the temp name, and the write that follows can only succeed when the target
+  // carries a grant of its own. Library records never get here - they live
+  // inside the scope, so their temp siblings are allowed, and a target the
+  // scope refuses is refused again below. A disk error on the temp file is not
+  // a scope refusal and still fails the write with the target untouched.
   async writeFileAtomic(p, bytes) {
     // Claimed before the first await - same reasoning as writeTextFileAtomic.
     const tmp = `${p}.${++tmpSeq}.tmp`;
     liveTemps.add(tmp);
     try {
       const m = await fs();
-      await m.writeFile(tmp, bytes);
+      try {
+        await m.writeFile(tmp, bytes);
+      } catch (e) {
+        if (!scopeRefused(e)) throw e;
+        liveTemps.delete(tmp);
+        await m.writeFile(p, bytes);
+        await fsync(p);
+        return;
+      }
       await fsync(tmp);
       await m.rename(tmp, p);
       liveTemps.delete(tmp);

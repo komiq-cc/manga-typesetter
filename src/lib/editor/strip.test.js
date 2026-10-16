@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { identityMesh } from '../warp.js';
 import {
   stripOffsets,
   stripPageExtent,
@@ -126,6 +127,21 @@ describe('boxPaintedStripSpan and effect reach', () => {
     const inked = { y: 900, w: 200, h: 80, style: { ink: { on: true, strokes: [inkLine([[100, 50], [100, 130]])] } } };
     expect(isBoxInStripWindow(inked, 0, 1000, 2000)).toBe(true);
     expect(isBoxInStripWindow({ ...inked, style: {} }, 0, 1000, 2000)).toBe(false);
+  });
+
+  // The check's overflow sees a mesh only once it has measured ink outside the
+  // box; a box it has not checked still paints where the mesh carries it.
+  it('keeps a box whose mesh carries the letters over the seam, with no overflow recorded', () => {
+    const pts = identityMesh(1, 1, 200, 80).map(([x, y]) => [x, y + 100]);
+    const b = { y: 900, w: 200, h: 80, style: { warp: { on: true, cols: 1, rows: 1, pts } } };
+    expect(boxPaintReach(b).b).toBeGreaterThanOrEqual(100);
+    expect(isBoxInStripWindow(b, 0, 1000, 2000)).toBe(true);
+    // Mirrored with the flip: the letters are carried up instead.
+    const flipped = { ...b, y: 1100, style: { ...b.style, flipV: true } };
+    expect(boxPaintReach(flipped).t).toBeGreaterThanOrEqual(100);
+    expect(isBoxInStripWindow(flipped, 0, 0, 1000)).toBe(true);
+    // The same box with no mesh stays out of a window it does not reach.
+    expect(isBoxInStripWindow({ ...b, style: {} }, 0, 1000, 2000)).toBe(false);
   });
 
   it('computes painted strip span taking rotation and effects into account', () => {

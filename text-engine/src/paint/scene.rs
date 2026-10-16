@@ -83,6 +83,7 @@ impl Scene {
             &run,
             &Affine::translate(x, y),
             BoldDraw::Outset,
+            0.0,
             tol,
         );
         if result.is_err() {
@@ -146,14 +147,21 @@ impl Scene {
                 let shader = |color| Shader::new(&Fill::Solid(color), &self.transform, &[]);
                 let p = match *op {
                     Op::Stroke(n, line, color) if line > 0.0 => {
-                        let parts =
-                            self.glyphs
-                                .parts(0..n, line / 2.0, true, &self.transform, tol)?;
+                        let parts = self.glyphs.parts(
+                            0..n,
+                            line / 2.0,
+                            true,
+                            super::Bends::default(),
+                            &self.transform,
+                            tol,
+                        )?;
                         shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                     Op::Stroke(..) => None,
                     Op::Fill(n, color) => {
-                        let parts = self.glyphs.parts(0..n, 0.0, false, &self.transform, tol)?;
+                        let parts =
+                            self.glyphs
+                                .parts(0..n, 0.0, false, super::Bends::default(), &self.transform, tol)?;
                         shader(color).and_then(|s| plan(parts, s, 1.0))
                     }
                 };

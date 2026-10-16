@@ -108,6 +108,82 @@ pub extern "C" fn mt_paint_job(byte_len: usize) -> i32 {
     })
 }
 
+/// Paints the box job in the first `byte_len` bytes of the job buffer: a
+/// glyph job and the shadows, the blur, the smear and the mask that go with
+/// it (`paint::decode_box`).
+///
+/// The result is read as a glyph job's is: 1 when something was drawn, with
+/// `mt_paint_job_result` and `mt_paint_job_pixels` holding it; 0 when the
+/// box draws nothing; or a negative [`Status`].
+#[no_mangle]
+pub extern "C" fn mt_paint_box(byte_len: usize) -> i32 {
+    with(|s| {
+        s.pixels = Vec::new();
+        *s.result = [0.0; 4];
+        let painted = (|| -> Result<Option<Raster>, Error> {
+            let _budget = paint::budget::Scope::new();
+            let mut request = paint::decode_box(s.job.get(..byte_len).ok_or(Error::BadSpec)?)?;
+            with_engine(|engine| paint::paint_box(engine, &mut request))
+        })();
+        match painted {
+            Ok(Some(raster)) => {
+                *s.result = [
+                    f64::from(raster.x),
+                    f64::from(raster.y),
+                    f64::from(raster.width),
+                    f64::from(raster.height),
+                ];
+                s.pixels = raster.data;
+                1
+            }
+            Ok(None) => 0,
+            Err(e) => Status::from(e) as i32,
+        }
+    })
+}
+
+/// The version of the box job wire form this build reads.
+#[no_mangle]
+pub extern "C" fn mt_paint_box_wire_version() -> u32 {
+    paint::BOX_WIRE_VERSION
+}
+
+/// Draws one tile of a pattern fill: `kind` as [`paint::PatternKind`]
+/// numbers them, `side` pixels square, `fg` over `bg` (both `0xRRGGBBAA`),
+/// a hairline `line` of the tile wide.
+///
+/// Returns 1 with the tile in `mt_paint_job_pixels` as straight RGBA8 and
+/// `mt_paint_job_result` holding `[0, 0, side, side]`, or a negative
+/// [`Status`]. The tile is a raster like any other: the next job replaces
+/// it.
+#[no_mangle]
+pub extern "C" fn mt_paint_pattern_tile(kind: u32, side: u32, fg: u32, bg: u32, line: f64) -> i32 {
+    with(|s| {
+        s.pixels = Vec::new();
+        *s.result = [0.0; 4];
+        let drawn = (|| -> Result<Vec<u8>, Error> {
+            let _budget = paint::budget::Scope::new();
+            let kind = paint::PatternKind::from_id(kind).ok_or(Error::BadSpec)?;
+            paint::pattern_tile(
+                kind,
+                paint::Rgba::from_u32(fg),
+                paint::Rgba::from_u32(bg),
+                side,
+                line,
+                &paint::Exact,
+            )
+        })();
+        match drawn {
+            Ok(pixels) => {
+                *s.result = [0.0, 0.0, f64::from(side), f64::from(side)];
+                s.pixels = pixels;
+                1
+            }
+            Err(e) => Status::from(e) as i32,
+        }
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn mt_paint_job_result() -> *const f64 {
     with(|s| s.result.as_ptr())

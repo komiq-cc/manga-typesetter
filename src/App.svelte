@@ -440,8 +440,10 @@
     if (dispatchShortcut(e, { typing })) return;
     // Past here is the contextual half of the keyboard: keys whose meaning
     // depends on what has focus and what is selected, which is exactly what a
-    // rebindable shortcut cannot be. None of it runs while typing.
-    if (typing) return;
+    // rebindable shortcut cannot be. None of it runs while typing, nor for a
+    // press a focused control already answered (a tab strip's arrows, a
+    // widget's own keys): that control has said what the key meant there.
+    if (typing || e.defaultPrevented) return;
     const mod = e.metaKey || e.ctrlKey;
     // Tab / Shift+Tab: cycle box selection in document order, but only when
     // focus is not on a focusable UI control (e.g. sidebar inputs or inspector buttons).

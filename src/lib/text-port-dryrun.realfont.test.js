@@ -166,8 +166,9 @@ if (process.env.TP_DRYRUN !== '1') {
       const pages = (record.pages ?? []).map((pg) => ({ ...pg, file: pg.file ?? null, cleanedFile: pg.cleaned ?? null, raw: null, cleaned: null }));
       app.chapterRef = null;
       app.projectLayout = layout;
-      store.useChapterTypesetting(record.typesetting ?? dataJs.legacyTypesetting());
-      const minted = store.loadProjectPages(pages);
+      const opened = dataJs.openTypesetting(record.typesetting ?? dataJs.legacyTypesetting());
+      store.useChapterTypesetting(opened.typesetting);
+      const minted = store.loadProjectPages(pages, { plain: opened.plain });
       assertPartners(stem, record.pages, app.pages, `the open (${layout}, ${seam.textEngine()?.id ?? 'nothing'} measuring)`);
       app.chapterRef = { projectId: 'dry-run', chapterId: stem };
       if (minted) store.markUnsaved();

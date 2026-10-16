@@ -42,8 +42,14 @@ export const PICTURE_MAX_PX = 8 * 1024 * 1024;
  * and within the longest side the installed painter will paint. Every picture
  * the editor shows is made here, so the two limits are applied in one place.
  */
-export function pictureTexture(box, p, tips, scale, maxPx = PICTURE_MAX_PX) {
-  return renderBoxTexture(box, p, tips, scale, maxPx, glyphPainter().maxSide ?? Infinity);
+//
+// `flat` asks for the box unbent whatever the painter can do with its mesh
+// (`renderBoxTexture`): the gizmo's drag, which holds one texture and re-runs
+// the mesh over it every frame.
+export function pictureTexture(box, p, tips, scale, maxPx = PICTURE_MAX_PX, flat = false) {
+  // The editor's smear is the coarse one (`paintBoxJob`): this picture is
+  // painted again at every edit.
+  return renderBoxTexture(box, p, tips, scale, maxPx, glyphPainter().maxSide ?? Infinity, flat, true);
 }
 
 // A turned box is painted finer than the screen. Its turn is CSS's, so the

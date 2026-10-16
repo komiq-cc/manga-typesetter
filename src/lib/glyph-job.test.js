@@ -117,9 +117,9 @@ it('hands renderBoxTexture to the installed painter even with no measuring engin
 
 // Include property assignments in the trace: the painter has to preserve the
 // context state as well as the sequence and timing of its draw calls.
-function recordingContext(spacing = true) {
+function recordingContext(spacing = true, extra = {}) {
   const calls = [];
-  const base = spacing ? { letterSpacing: '' } : {};
+  const base = spacing ? { letterSpacing: '', ...extra } : { ...extra };
   for (const name of ['save', 'restore', 'translate', 'rotate', 'fillText', 'strokeText']) {
     base[name] = (...args) => calls.push([name, ...args]);
   }
@@ -163,6 +163,71 @@ it('creates a curved gradient inside each glyph save/translate/rotate and restor
     ['createLinearGradient', -5, 38, -5, -42], ['addColorStop', 0, '#123456'], ['addColorStop', 1, 'rgba(171,205,239,0.5)'],
     ['fillStyle', 'gradient'], ['fillText', 'A', 0, 0], ['restore'],
   ]);
+});
+
+it('states no fill on the job and on no run, whatever fill the style has switched on', () => {
+  const s = { ...style(), noFill: true, gradient: gradient({ scope: 'line' }), pattern: { on: true, kind: 'dots', scale: 2, fg: '#123456', bg: '#fff' } };
+  const job = glyphJob(box, layout(s));
+  expect(job.noFill).toBe(true);
+  expect(job.fill).toBeNull();
+  expect(job.runs).toEqual(straightRuns);
+  const curved = glyphJob(box, layout(s, { isCurve: true, layout: [{ ch: 'A', x: 5, y: 2, rot: 0.3 }] }));
+  expect(curved.noFill).toBe(true);
+  expect(curved.runs).toEqual([{ text: 'A', x: 65, y: 62, rot: 0.3 }]);
+  // The silhouette a shadow is cast from says so too.
+  expect(glyphJob(box, layout(s, { silhouette: '#777' })).noFill).toBe(true);
+  expect('noFill' in glyphJob(box, layout(style()))).toBe(false);
+});
+
+it('with no fill, paints the bands on a canvas of its own and cuts the letters out of them', () => {
+  const s = { ...style(), noFill: true, strokes: [{ color: '#fff', opacity: 1, width: 2 }], gradient: gradient() };
+  const job = glyphJob(box, layout(s));
+  const own = recordingContext(true, { setTransform: (m) => own.calls.push(['setTransform', m]) });
+  const cnv = { width: 0, height: 0, getContext: () => own.ctx };
+  vi.stubGlobal('document', { createElement: () => cnv });
+  const page = recordingContext(true, {
+    canvas: { width: 50, height: 40 },
+    getTransform: () => 'M',
+    setTransform: (...m) => page.calls.push(['setTransform', ...m]),
+    drawImage: (...a) => page.calls.push(['drawImage', ...a, [a[0].width, a[0].height]]),
+  });
+  createBrowserGlyphPainter().paint(page.ctx, job);
+  expect(own.calls).toEqual([
+    ['setTransform', 'M'],
+    ['font', job.face.key], ['textBaseline', 'alphabetic'], ['lineJoin', 'round'], ['miterLimit', 2],
+    ['letterSpacing', '2px'], ['textAlign', s.align],
+    ['save'], ['globalAlpha', 1], ['strokeStyle', '#fff'], ['lineWidth', 4],
+    ['strokeText', 'AB', 12, 43], ['strokeText', 'CD', 18, 67], ['restore'],
+    ['save'], ['globalCompositeOperation', 'destination-out'], ['fillStyle', '#000'],
+    ['fillText', 'AB', 12, 43], ['fillText', 'CD', 18, 67], ['restore'],
+  ]);
+  // Laid down whole, pixel for pixel, and the scratch handed back.
+  expect(page.calls).toEqual([
+    ['save'], ['setTransform', 1, 0, 0, 1, 0, 0], ['imageSmoothingEnabled', false],
+    ['drawImage', cnv, 0, 0, [50, 40]], ['restore'],
+  ]);
+  expect([cnv.width, cnv.height]).toEqual([0, 0]);
+
+  // The shadow's silhouette is cut the same way, in the shadow's colour.
+  own.calls.length = 0;
+  createBrowserGlyphPainter().paint(page.ctx, glyphJob(box, layout(s, { silhouette: '#777' })));
+  expect(own.calls.slice(-11)).toEqual([
+    ['strokeStyle', '#777'], ['lineWidth', 4], ['strokeText', 'AB', 12, 43], ['strokeText', 'CD', 18, 67],
+    ['fillStyle', '#777'],
+    ['save'], ['globalCompositeOperation', 'destination-out'], ['fillStyle', '#000'],
+    ['fillText', 'AB', 12, 43], ['fillText', 'CD', 18, 67], ['restore'],
+  ]);
+});
+
+it('with no fill and no stroke, paints nothing and makes no canvas', () => {
+  const s = { ...style(), noFill: true };
+  const made = vi.fn();
+  vi.stubGlobal('document', { createElement: made });
+  const page = recordingContext();
+  createBrowserGlyphPainter().paint(page.ctx, glyphJob(box, layout(s)));
+  createBrowserGlyphPainter().paint(page.ctx, glyphJob(box, layout(s, { silhouette: '#777' })));
+  expect(page.calls).toEqual([]);
+  expect(made).not.toHaveBeenCalled();
 });
 
 it('checks for letterSpacing support and paints a silhouette without save/restore or gradients', () => {

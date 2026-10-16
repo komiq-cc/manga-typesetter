@@ -9,9 +9,10 @@
 // ag-psd auto-initializes its canvas backend when `document` is present (the
 // Tauri webview / vite browser), so no explicit initializeCanvas call is needed.
 import { writePsd, readPsd } from 'ag-psd';
-import { app, PAGE_W, PAGE_H } from './store.svelte.js';
+import { app, PAGE_W, PAGE_H, isLongstrip } from './store.svelte.js';
 import { isTauri, pickFilesTauri } from './importer.js';
-import { renderBoxLayer, pageSpace, settleNoise, enginesSettled, enginesHeld } from './exporter.js';
+import { renderBoxLayer, pageSpace, settleNoise, enginesSettled, enginesHeld, measureStrip, chapterNow, chapterHeld } from './exporter.js';
+import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
 import { settleBoxTips } from './brush-tips.js';
 import { fontCssFor, fontNameFor, reviewOf, fontsSettling, fontMissing } from './store.svelte.js';
 import { resolveFace, postScriptNameFor } from './fonts.js';
@@ -19,6 +20,7 @@ import { applyCase, canMeasure, textInset, contentWidth, blockYFor, faceFor } fr
 import { textEngine, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
 import { drawnFace, drawnRuns } from './text-engine/drawn-face.js';
 import { boxCandidate, placeBlock } from './contain.js';
+import { sfxActive } from './sfx.js';
 import { normalizeFit, normalizeAuto } from './data.js';
 import { strokeBands, clipActive, inkActive } from './text-paint.js';
 import { warpActive } from './warp.js';
@@ -428,6 +430,9 @@ export function isRasterOnly(style) {
     s.curve ||
     (s.path?.on && (s.path.pts?.length ?? 0) >= 2) ||
     s.circle?.on ||
+    // SFX lettering is placed letter by letter, scaled and leaned: not a type
+    // layer's one run of text. Only while the Rust engine lays it out.
+    sfxActive(s) ||
     s.flipH ||
     s.flipV ||
     // The mesh warp. A type layer's transform is a rotation and a translation;
@@ -445,7 +450,10 @@ export function isRasterOnly(style) {
     (s.blur ?? 0) > 0 ||
     (mb?.on && ((mb.x ?? 0) !== 0 || (mb.y ?? 0) !== 0)) ||
     s.pattern?.on ||
-    (s.gradient?.on && !gradientOverlayable(s.gradient))
+    (s.gradient?.on && !gradientOverlayable(s.gradient)) ||
+    // No fill: a type layer always has a fill colour, and its own see-through
+    // setting (the layer's fill opacity) is not one this writer states.
+    s.noFill
   );
 }
 
@@ -956,21 +964,35 @@ export function writePagePsd(doc) {
 // One file, one engine (`enginesSettled`, exporter.js): the type layers'
 // breaks, the pixels behind them and the font names are all of the engine
 // these waits ended on, or the file is not built.
+//
+// A STRIP PAGE'S FILE HOLDS WHAT THE STRIP SHOWS ON IT (`pageLayerBoxes`):
+// its own boxes, and the lettering of the pages either side of it that
+// reaches over the seam. Its pages are measured first, as the strip export
+// measures them, and the fonts waited for are those of every page whose boxes
+// the file paints.
 export async function buildPagePsd(p) {
+  const chapter = chapterNow();
+  const column = stripColumn(p);
+  // Where every page of the column is, which a page nobody has opened does
+  // not say yet: one picture at a time, the strip export's own measure.
+  if (column) await measureStrip(column, () => chapterHeld(chapter));
+  const entries = pageLayerBoxes(p, column);
+  const owners = [...new Set([p, ...entries.map((e) => e.owner)])];
   let held = enginesNow();
-  const settling = fontsSettling([p]);
+  const settling = fontsSettling(owners);
   if (settling) await settling;
   if (!engineDraws()) await document.fonts.ready;
-  if (!enginesAre(held)) held = await enginesSettled([p]);
+  if (!enginesAre(held)) held = await enginesSettled(owners);
   const { w: W, h: H } = await pageSpace(p);
+  const boxes = entries.map((e) => e.box);
   // A roughened box's pixels are displaced against a phase measured from the
   // running browser, and measuring it is a rasterisation - so it is settled
   // before any box is rendered, exactly as the raster export settles it.
-  await settleNoise(p?.boxes);
+  await settleNoise(boxes);
   // An inked box ships as a flat raster layer rendered by `renderBoxLayer`, so
   // the PSD needs the same decoded tips the raster export does, prefetched the
   // same way and for the same reason: the painter is synchronous.
-  const tips = await settleBoxTips(p?.boxes);
+  const tips = await settleBoxTips(boxes);
 
   // Text layers - one editable type layer per box, each backed by the box's
   // exact pixels, trimmed by renderBoxLayer to the glyphs it actually painted
@@ -978,9 +1000,7 @@ export async function buildPagePsd(p) {
   // Boxes with raster-only styling that paint nothing return null from textLayerFor
   // and are filtered out so ag-psd does not receive an image layer missing image data.
   const scratch = document.createElement('canvas');
-  const textLayers = (p.boxes ?? [])
-    .map((b) => textLayerFor(p, b, renderBoxLayer(b, W, H, scratch, p, 1, tips)))
-    .filter(Boolean);
+  const textLayers = pageTextLayers(p, entries, W, H, scratch, tips).map((e) => e.layer);
 
   // Base layers - Cleaned over Raw (bottom), both forced to the document's (=
   // the page's) size, which is a resample rather than a copy whenever the two
@@ -1022,11 +1042,91 @@ export async function buildPagePsd(p) {
     }
   }
 
-  // Embedded lossless project state - ORIGINAL page coordinates.
-  const project = { key: PROJECT_KEY, schema: SCHEMA, page: serializePage(p) };
+  // Embedded lossless project state - ORIGINAL page coordinates. In the
+  // document's own space: an unmeasured page (`w:0,h:0`) was resolved to its
+  // art's size above, and `serializePage` would state the defaults for it -
+  // a 123x234 file saying its page is 850x1200, which the import believes and
+  // the next measure of the art rescales every box out of.
+  const project = { key: PROJECT_KEY, schema: SCHEMA, page: { ...serializePage(p), w: W, h: H } };
 
   enginesHeld(held);
+  // And of the one chapter (`chapterNow`, exporter.js): a chapter closed
+  // while this was built took its pictures, and its neighbours, with it.
+  chapterHeld(chapter);
   return writePagePsd(pagePsdDocument({ w: W, h: H, textLayers, baseLayers, project }));
+}
+
+// The pages a strip page's lettering is laid out among: the open chapter's,
+// when it is a longstrip and this page is one of them. Null otherwise - a
+// page of a paged chapter, or a page from nowhere (the self-test's) - and
+// then a page's file is its own boxes and nothing else, as it always was.
+function stripColumn(p) {
+  return isLongstrip() && app.pages?.includes(p) ? app.pages : null;
+}
+
+// The boxes a page's document paints, in the order the strip stacks them, as
+// `{ box, owner, dx, dy }`: the box, the page it belongs to, and how far it is
+// moved, page px, from its owner's space into this page's.
+//
+// A longstrip box belongs to one page and paints wherever its lettering goes,
+// over the seam into the next page or up into the one above, and the strip
+// export draws it there. A PSD per source page that held only its own boxes
+// cut that lettering at its owner's edge and left the page it reached into
+// without it: a hollow, outlined balloon across two 200 px pages kept its
+// first line in one file and was in neither as a whole. So every box of
+// another page whose painted span (`boxPaintedStripSpan`, what a strip slice
+// picks its boxes by) reaches this page is laid in too, moved by the two
+// pages' strip offsets and centred as the strip centres a narrower page. A
+// box of a page above sits under this page's own, one of a page below over
+// them, as in the column. Only its pixels and its type layer: the embedded
+// project is this page's boxes alone, so a re-import has each box once, on
+// the page it belongs to.
+function pageLayerBoxes(p, column) {
+  const own = (p?.boxes ?? []).map((box) => ({ box, owner: p, dx: 0, dy: 0 }));
+  if (!column) return own;
+  const at = column.indexOf(p);
+  // Unmeasured, the offsets are not where the pages are.
+  if (at < 0 || column.some((pg) => !(pg?.h > 0))) return own;
+  const { tops } = stripOffsets(column);
+  const W = maxPageWidth(column);
+  const left = (pg) => Math.round((W - (pg?.w || W)) / 2);
+  const top = tops[at];
+  const bottom = top + p.h;
+  const out = [];
+  column.forEach((pg, i) => {
+    if (i === at) {
+      out.push(...own);
+      return;
+    }
+    for (const box of pg?.boxes ?? []) {
+      const span = boxPaintedStripSpan(box, tops[i]);
+      if (span.bottom > top && span.top < bottom) out.push({ box, owner: pg, dx: left(pg) - left(p), dy: tops[i] - top });
+    }
+  });
+  return out;
+}
+
+// The entries of `pageLayerBoxes` that become layers, each with the raster
+// `renderBoxLayer` made of it on this page and its layer: the one list the
+// file is written from and the self-test reads back. A page's own box is what
+// it always was (`textLayerFor` drops only a raster-only box that painted
+// nothing). A neighbour's box is a layer only where some of it lands on this
+// page, and its type layer is set where its pixels were drawn - moved by the
+// same offset, since everything else in it is stated from that origin.
+function pageTextLayers(p, entries, W, H, scratch, tips) {
+  const out = [];
+  for (const e of entries) {
+    const rendered = renderBoxLayer(e.box, W, H, scratch, e.owner, 1, tips, e.dx, e.dy);
+    if (e.owner !== p && !rendered) continue;
+    const layer = textLayerFor(e.owner, e.box, rendered);
+    if (!layer) continue;
+    if (layer.text && (e.dx || e.dy)) {
+      const t = layer.text.transform;
+      layer.text.transform = [t[0], t[1], t[2], t[3], t[4] + e.dx, t[5] + e.dy];
+    }
+    out.push({ ...e, rendered, layer });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1486,13 +1586,13 @@ export async function psdSelfTest(p) {
       // for it and the list is filtered), so the nth box is not the nth layer -
       // and every check below that walked `src.boxes` by index was comparing a
       // layer against some other box's render the moment a page held one. The
-      // filter is repeated here rather than guessed at, so the two lists are the
-      // one list by construction.
+      // list is made here by the function the file was written from
+      // (`pageTextLayers`), so the two are the one list by construction - a
+      // strip page's neighbours' lettering included.
       const scratch = document.createElement('canvas');
-      const selfTips = await settleBoxTips(src.boxes);
-      const layerBoxes = (src.boxes ?? [])
-        .map((box) => ({ box, rendered: renderBoxLayer(box, W, H, scratch, src, 1, selfTips) }))
-        .filter(({ box, rendered }) => !(isRasterOnly(box.style) && !rendered?.imageData));
+      const entries = pageLayerBoxes(src, stripColumn(src));
+      const selfTips = await settleBoxTips(entries.map((e) => e.box));
+      const layerBoxes = pageTextLayers(src, entries, W, H, scratch, selfTips);
       layerBoxes.forEach(({ rendered }, i) => {
         // A box that paints nothing (empty text) gets a layer with no pixels at
         // all, so there is nothing to compare and no failure to report.
@@ -1551,9 +1651,9 @@ export async function psdSelfTest(p) {
       report.checks.shapedBreaksInText =
         !!textGroup &&
         textGroup.children.every((l, i) => {
-          const box = layerBoxes[i]?.box;
+          const { box, owner } = layerBoxes[i] ?? {};
           if (!l.text || !box) return true; // raster-only layers carry no text
-          const want = placeBlock(boxCandidate(box, boxTextFor(src, box))).lines;
+          const want = placeBlock(boxCandidate(box, boxTextFor(owner, box))).lines;
           return l.text.text === want.join('\n');
         });
       if (!report.checks.shapedBreaksInText) report.ok = false;

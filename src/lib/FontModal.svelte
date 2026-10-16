@@ -88,7 +88,7 @@
     <div class="modal-head">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2" /><path d="M12 4v16" /><path d="M9 20h6" /></svg>
       <h3>Font Library</h3>
-      <button class="x" onclick={() => (open = false)}>
+      <button class="x" aria-label="Close" onclick={() => (open = false)}>
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
       </button>
     </div>

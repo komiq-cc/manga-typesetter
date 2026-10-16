@@ -1,8 +1,8 @@
 // Native-resolution raster export via canvas 2D. PNG is lossless.
 import { app, page, toast, boxText, saveExportPrefs, isLongstrip, fontsSettling, fontsGated, PAGE_W, PAGE_H } from './store.svelte.js';
-import { faceFor, textInset, contentWidth } from './measure.js';
+import { faceFor, textInset, contentWidth, glyphInk } from './measure.js';
 import { glyphPainter, engineDraws, enginesNow, enginesAre } from './text-engine/index.js';
-import { boxCandidate, placeBlock, blockRect, linesInkRect } from './contain.js';
+import { boxCandidate, placeBlock, blockRect, linesInkRect, turnedInk } from './contain.js';
 import {
   strokeBands,
   strokeExtent,
@@ -13,6 +13,8 @@ import {
   stopColor,
   ensureNoisePhase,
   motionBlurExtent,
+  motionBlurTaps,
+  motionBlurPreviewTaps,
   applyTextFilters,
   drawClipShapes,
   clipActive,
@@ -22,8 +24,8 @@ import {
   shadowExtent,
   drawInk,
 } from './text-paint.js';
-import { warpActive } from './warp.js';
-import { warpBoxCanvas, warpExtent } from './warp-paint.js';
+import { warpActive, meshMap } from './warp.js';
+import { warpBoxCanvas, warpExtent, warpPlan, MAX_DEVICE_AREA } from './warp-paint.js';
 import { settleBoxTips } from './brush-tips.js';
 import { withPageImages } from './page-images.js';
 import { stripOffsets, maxPageWidth, boxPaintedStripSpan } from './editor/strip.js';
@@ -195,7 +197,7 @@ function layoutBox(box, p) {
     Math.max(
       strokeOut,
       shadowOut > 0 ? strokeOut + shadowOut : 0,
-      s.roughen.on ? s.roughen.amount + 2 : 0,
+      s.roughen.on ? s.roughen.amount + roughenGrit(s) + 2 : 0,
       // Ink is drawn in box-local px and may be drawn right over the box edge,
       // so its overhang has to be padded for like any other thing that paints
       // outside the letters - and the strokes and shadows wrap the ink too,
@@ -233,15 +235,54 @@ function layoutBox(box, p) {
       maxY = 0;
     const half = s.size * 0.75; // generous half-glyph margin around each anchor
     for (const g of layout) {
-      minX = Math.min(minX, g.x - half);
-      maxX = Math.max(maxX, g.x + half);
-      minY = Math.min(minY, g.y - half);
-      maxY = Math.max(maxY, g.y + half);
+      // An SFX glyph is scaled and leaned about its anchor: its margin grows
+      // with the larger scale, and a lean slides its top and bottom sideways by
+      // tan(skew) times that. A glyph without the fields has `half`, to the bit.
+      const big = half * Math.max(1, Math.abs(g.sx) || 1, Math.abs(g.sy) || 1);
+      const reachX = big + (Number.isFinite(g.skew) ? Math.min(Math.abs(Math.tan(g.skew)), 6) * big : 0);
+      // And it is turned after it is leaned (paint/mod.rs), so a lean's reach
+      // turns with it: a leaned letter tilted onto its side reaches up and
+      // down, not across. A square margin turns into itself; only a leaned
+      // one is turned here, so every other glyph keeps `half`, to the bit.
+      let hx = reachX;
+      let hy = big;
+      const rot = Number(g.rot) || 0;
+      if (rot && reachX !== big) {
+        const c = Math.abs(Math.cos(rot));
+        const sn = Math.abs(Math.sin(rot));
+        hx = c * reachX + sn * big;
+        hy = sn * reachX + c * big;
+      }
+      minX = Math.min(minX, g.x - hx);
+      maxX = Math.max(maxX, g.x + hx);
+      minY = Math.min(minY, g.y - hy);
+      // A dripping glyph's foot is pulled that much lower.
+      maxY = Math.max(maxY, g.y + hy + (g.drip > 0 ? g.drip : 0));
     }
     leftExtra = Math.max(0, -minX - box.w / 2);
     rightExtra = Math.max(0, maxX - box.w / 2);
     topExtra = Math.max(0, -minY - box.h / 2);
     bottomExtra = Math.max(0, maxY - box.h / 2);
+    // The margin is em arithmetic, and ink is not: an accent over a capital
+    // at 200 px, shaken up off its anchor, stood past it and was cut, in the
+    // file and in the editor's picture alike. Where one engine measures and
+    // paints, each glyph's own ink is known - the containment check's
+    // (`boxInkRect`): measured, scaled, leaned and turned in the engine's
+    // order (`turnedInk`), its drip pulled straight down - and the footprint
+    // grows until that ink is inside, as the straight path's does below.
+    if (engineDraws()) {
+      const cx = box.w / 2;
+      const cy = box.h / 2;
+      for (const g of layout) {
+        const k = glyphInk(g.ch, s, s.size);
+        if (!k) continue;
+        const [x0, y0, x1, y1] = turnedInk(k, g.rot, cx + g.x, cy + g.y, g.sx, g.sy, g.skew);
+        leftExtra = Math.max(leftExtra, -x0 - PAD_SPARE);
+        topExtra = Math.max(topExtra, -y0 - PAD_SPARE);
+        rightExtra = Math.max(rightExtra, x1 - box.w - PAD_SPARE);
+        bottomExtra = Math.max(bottomExtra, y1 + (g.drip > 0 ? g.drip : 0) - box.h - PAD_SPARE);
+      }
+    }
   } else {
     // The lines are `placeBlock`'s, which breaks them through `layoutLines` at
     // the content width (`contentWidth`: the box less its padding and its
@@ -421,6 +462,23 @@ export function glyphJob(box, L) {
     fill: null,
     runs: [],
   };
+  // No fill: no run and no job carries one, and the painter cuts the letters
+  // out of the bands instead of filling them. Every job of the box says so,
+  // the silhouette a shadow is cast from included, so a hollow letter throws
+  // a hollow shadow.
+  const hollow = !!s.noFill;
+  if (hollow) job.noFill = true;
+  // The box's mesh, for a painter that bends the outlines itself (`meshInJob`).
+  if (L.mesh) job.mesh = L.mesh;
+  // And its roughening, for a painter that roughens them (`roughenInJob`):
+  // the style's own numbers, and the field's origin where the editor's filter
+  // had it, so a box roughened before keeps its crumple on the same letters.
+  // Every job of the box carries it, the silhouette a shadow is cast from
+  // included, so a roughened letter throws a roughened shadow.
+  if (roughenInJob({ style: s })) {
+    const o = noiseOrigin(L);
+    job.roughen = { amount: s.roughen.amount, detail: s.roughen.detail, seed: s.roughen.seed, x: o.x, y: o.y, grit: roughenGrit(s) };
+  }
   if (L.isCurve) {
     const cx = L.ox + box.w / 2;
     const cy = L.oy + box.h / 2;
@@ -431,6 +489,12 @@ export function glyphJob(box, L) {
       const x = cx + g.x;
       const y = cy + g.y;
       const run = { text: g.ch, x, y, rot: g.rot };
+      // SFX glyphs are also scaled and leaned about their anchor.
+      if (g.sx != null) run.sx = g.sx;
+      if (g.sy != null) run.sy = g.sy;
+      if (g.skew != null) run.skew = g.skew;
+      // And an SFX drip pulls its lower half down.
+      if (g.drip > 0) run.drip = g.drip;
       // Move the fill's frame onto this glyph - and only move it. The editor
       // paints the fill as the glyph span's own background, and a background
       // is laid out in the element's own box and then carried through its
@@ -440,7 +504,7 @@ export function glyphJob(box, L) {
       // fixed in box space - a different picture from the one the canvas
       // shows, and most visible on the letters furthest around the arc.
       // The silhouette pass wants one flat colour, not the real fill.
-      if (!L.silhouette) run.fill = runFill(s, rect, (px, py) => [px - x, py - y]);
+      if (!L.silhouette && !hollow) run.fill = runFill(s, rect, (px, py) => [px - x, py - y]);
       return run;
     });
   } else {
@@ -454,8 +518,8 @@ export function glyphJob(box, L) {
     const startY = L.oy + L.blockY;
     // Gradient scope 'line' restarts the gradient on every wrapped line, so the
     // fill style is chosen per line rather than once for the block.
-    const perLine = !L.silhouette && s.gradient?.on && s.gradient.scope === 'line';
-    if (!L.silhouette && !perLine) job.fill = runFill(s, fillRect(box, L));
+    const perLine = !L.silhouette && !hollow && s.gradient?.on && s.gradient.scope === 'line';
+    if (!L.silhouette && !hollow && !perLine) job.fill = runFill(s, fillRect(box, L));
     job.runs = L.lines.map((ln, i) => {
       const run = { text: ln, x: L.ox + L.lineX[i], y: startY + i * L.lineH + L.baseY };
       if (perLine) run.fill = runFill(s, fillRect(box, L, i));
@@ -489,19 +553,24 @@ function paintBox(ctx, box, L) {
 // export allocating and dropping hundreds of them.
 //
 // Last shadow first, so shadows[0] ends up on top of the rest.
-function paintShadows(ctx, box, L, SS) {
+//
+// `F` is the footprint the texture has when it is not the layout's own: the
+// bent box's (`meshFootprint`), which the silhouette is painted into bent, so
+// a shadow is the bent letters' shadow, thrown straight.
+function paintShadows(ctx, box, L, SS, F = L) {
   const s = L.s;
   if (!(s.shadows ?? []).length) return;
   const sil = document.createElement('canvas');
   // The texture's own size (see `renderBoxTexture`): whole pixels at any scale.
-  sil.width = Math.ceil(L.cw * SS);
-  sil.height = Math.ceil(L.ch * SS);
+  sil.width = Math.ceil(F.cw * SS);
+  sil.height = Math.ceil(F.ch * SS);
   const sctx = sil.getContext('2d');
   for (let i = s.shadows.length - 1; i >= 0; i--) {
     const sh = s.shadows[i];
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.clearRect(0, 0, sil.width, sil.height);
     sctx.scale(SS, SS);
+    sctx.translate(F.ox - L.ox, F.oy - L.oy);
     sctx.imageSmoothingQuality = 'high';
     paintBox(sctx, box, { ...L, silhouette: sh.color });
     ctx.save();
@@ -539,7 +608,13 @@ export function textureScale(cw, ch, scale, maxPx = Infinity, maxSide = Infinity
   if (Math.ceil(side * ss) > maxSide) {
     ss = maxSide / side;
     // A quotient times its divisor can land a hair over, and a hair is a pixel.
-    while (Math.ceil(side * ss) > maxSide) ss *= 1 - Number.EPSILON;
+    // So can the same scale as a canvas keeps it: a 2D context may hold its
+    // transform in single precision (Skia does), and the painter sizes its
+    // surface from the transform it reads back - one ulp up was a 16,385 px
+    // surface at the limit, and a throw. Stepped down by single-precision
+    // ulps, which is a handful of turns, until both are inside.
+    const over = (v) => Math.ceil(side * v) > maxSide || Math.ceil(side * Math.fround(v)) > maxSide;
+    while (over(ss)) ss *= 1 - 2 ** -23;
   }
   return ss;
 }
@@ -559,8 +634,16 @@ export function textureScale(cw, ch, scale, maxPx = Infinity, maxSide = Infinity
 // sits inside it, and how many page px it spans. Exported because the editor
 // draws a warped box from exactly this - see `paintWarpedBox` - rather than
 // from a second painter that would have to be kept in step with it.
+//
+// At the export's 2, inside what a canvas may be and what the painter will
+// paint: the editor's picture is made within the painter's longest side
+// (`pictureTexture`), and a box it showed must not be one the export throws on
+// (an upright 8200 x 60 line is 16,400 px at 2, over the Rust painter's
+// 16,384). The area is a canvas's, `MAX_DEVICE_AREA` (warp-paint.js), which is
+// under the engine's own (67 MP) too. Only a box over one of them is touched,
+// and only its resolution: an ordinary box is painted at 2 exactly as before.
 export function renderBox(box, p, tips) {
-  return warpTexture(renderBoxTexture(box, p, tips), box);
+  return warpTexture(renderBoxTexture(box, p, tips, 2, MAX_DEVICE_AREA, glyphPainter().maxSide ?? Infinity), box);
 }
 
 // Everything `renderBox` does EXCEPT the mesh - the finished, unwarped picture
@@ -584,21 +667,92 @@ export function renderBox(box, p, tips) {
 // at `SS`, so the picture is the same picture at any scale and only its
 // resolution moves. `maxSide` is the longest side the canvas may have, for a
 // painter that has a limit. The scale that was really used comes back as `ss`.
-export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxSide = Infinity) {
-  const L = layoutBox(box, p);
+//
+// THE MESH IN THE JOB. Where the painter bends outlines itself (`meshInJob`:
+// the Rust engine, a box with no ink and no mask) the mesh is NOT left for
+// `warpTexture`: the glyph job carries it, the letters and their strokes come
+// out of the painter already bent, and the texture is the bent box's own
+// footprint (`meshFootprint`) with `warped: true` on it, which `warpTexture`
+// reads as "done". The shadows are then the bent letters' silhouette thrown
+// straight, and the blur, the smear and the roughening run over the bent
+// picture. `flat` asks for the texture unbent whatever the painter can do:
+// the gizmo's drag, which re-runs only the mesh over one texture per frame.
+// What a box is painted from: its layout, and where the painter bends its
+// mesh itself (`meshInJob`), that mesh stated in the layout's coordinates and
+// the bent footprint `F`. `foot` is the footprint the picture has: `F`, or
+// the layout's own. `flat` asks for the box unbent whatever the painter can
+// do.
+function boxPlan(box, p, flat = false) {
+  const L0 = layoutBox(box, p);
+  const s = L0.s;
+  const F = (!flat && meshInJob(box) && meshFootprint(box, L0)) || null;
+  // The layout the glyphs are painted from: the box's own, with the mesh
+  // stated in its coordinates when the painter is to bend them.
+  const L = F ? { ...L0, mesh: { cols: s.warp.cols, rows: s.warp.rows, pts: s.warp.pts, x: L0.ox, y: L0.oy, w: box.w, h: box.h } } : L0;
+  return { L, F, foot: F ?? L };
+}
+
+// Whether the painter paints the whole box in one job - its glyphs, and the
+// shadows, the blur, the smear and the mask with them - instead of handing
+// back glyphs for the canvas to lay those over (`paintShadows`,
+// `applyTextFilters`, `drawClipShapes`). One engine has to measure and paint
+// and its painter has to say it does this (`box`, the Rust painter's), and
+// nothing of the box may be drawn by the canvas: hand-drawn ink is, so an
+// inked box keeps the canvas passes whole. Never true under the browser
+// engine.
+export function boxInJob(box) {
+  return engineDraws() && glyphPainter().box === true && !inkActive(box.style.ink);
+}
+
+// The box, finished, onto `ctx`, whose user space is the layout's own (the
+// box's top-left at (L.ox, L.oy)). Whatever transform the context carries -
+// the texture's scale, a turn, a mirror - is the picture's: the painter
+// states every pass in the layout's units and the transform carries them, so
+// a turned box is painted turned and not painted straight and resampled.
+function paintBoxJob(ctx, box, L, foot, coarse = false) {
   const s = L.s;
-  const SS = textureScale(L.cw, L.ch, scale, maxPx, maxSide);
+  const mb = s.motionBlur;
+  // The editor's picture is repainted at every edit, and a smear is its
+  // steps times four copies of the box: it takes the coarser list the
+  // browser engine's editor shows (`motionBlurPreviewTaps`), same reach and
+  // same tone. A file is always the whole list.
+  const taps = coarse ? motionBlurPreviewTaps : motionBlurTaps;
+  glyphPainter().paintBox(ctx, {
+    job: glyphJob(box, L),
+    // The footprint in the layout's coordinates: every pixel the box can ink.
+    rect: { x: L.ox - foot.ox, y: L.oy - foot.oy, w: foot.cw, h: foot.ch },
+    shadows: s.shadows ?? [],
+    blur: s.blur > 0 ? s.blur : 0,
+    taps: mb?.on ? taps(mb.x, mb.y, mb.amount) : [],
+    // The mask's shapes are the box's own, so the box's corner goes with them.
+    clip: clipActive(s.clip) ? { mode: s.clip.mode === 'include' ? 'include' : 'exclude', x: L.ox, y: L.oy, shapes: s.clip.shapes } : null,
+  });
+}
+
+export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxSide = Infinity, flat = false, coarse = false) {
+  const { L, F, foot } = boxPlan(box, p, flat);
+  const s = L.s;
+  const SS = textureScale(foot.cw, foot.ch, scale, maxPx, maxSide);
   const cnv = document.createElement('canvas');
   // Whole pixels, outwards: at a scale that is not a whole number the footprint
   // does not land on one, and a canvas cut short would lose its last row.
-  const pw = Math.ceil(L.cw * SS);
-  const ph = Math.ceil(L.ch * SS);
+  const pw = Math.ceil(foot.cw * SS);
+  const ph = Math.ceil(foot.ch * SS);
   cnv.width = pw;
   cnv.height = ph;
   const ctx = cnv.getContext('2d');
   ctx.scale(SS, SS); // all drawing stays in native units; SS handled here
+  // The bent footprint's corner is not the layout's: the job is stated in the
+  // layout's coordinates and moved to where the box sits in this canvas.
+  if (F) ctx.translate(F.ox - L.ox, F.oy - L.oy);
   ctx.imageSmoothingQuality = 'high';
-  paintShadows(ctx, box, L, SS);
+  // The whole box in one job where the painter does that: every pass below
+  // is the engine's, in this order, and the canvas only holds the result.
+  if (boxInJob(box)) {
+    paintBoxJob(ctx, box, L, foot, coarse);
+    return { canvas: cnv, ox: foot.ox, oy: foot.oy, cw: pw / SS, ch: ph / SS, ss: SS, warped: !!F };
+  }
+  paintShadows(ctx, box, L, SS, foot);
   paintBox(ctx, box, L);
   // Ink sits over the type, under the blur and the smear: it is part of the
   // picture those operate on, not something applied afterwards. Shapes are
@@ -618,7 +772,10 @@ export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxS
   // the composite, rather than per drawing call. The chain is text-paint.js's,
   // the one the editor's ink canvas runs too, and the order is the editor's
   // CSS filter list (see `applyTextFilters`).
-  const out = applyTextFilters(cnv, s, SS, noiseOrigin(L));
+  const grain = noiseOrigin(L);
+  // Roughened already, in the outlines, where the painter does that.
+  const filters = roughenInJob(box) ? { ...s, roughen: { ...s.roughen, on: false } } : s;
+  const out = applyTextFilters(cnv, filters, SS, { x: grain.x + foot.ox - L.ox, y: grain.y + foot.oy - L.oy });
   if (out !== cnv) {
     cnv.width = 0;
     cnv.height = 0;
@@ -648,7 +805,72 @@ export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxS
   // lands on whole pixels - at 2 always - and a fraction of a pixel more where
   // the size above was rounded up, so a caller that places or stretches the
   // bitmap by these numbers maps one texture pixel to `1 / SS` page px.
-  return { canvas: out, ox: L.ox, oy: L.oy, cw: pw / SS, ch: ph / SS, ss: SS };
+  return { canvas: out, ox: foot.ox, oy: foot.oy, cw: pw / SS, ch: ph / SS, ss: SS, warped: !!F };
+}
+
+// Whether a box's roughening goes to the glyph painter in the job, to move
+// the outlines, instead of being run over the finished texture's pixels
+// (`roughenPixels`). Moved pixels are antialiased edges torn apart and
+// averaged back together; a moved outline is rasterised after, and is as
+// sharp roughened as plain. Two things have to hold: one engine measures and
+// paints and its painter says it roughens (`roughen`, the Rust painter's),
+// and nothing of the box is drawn by the canvas - hand-drawn ink is, and a
+// box with ink keeps the pixel pass whole, so its ink and its letters are
+// roughened alike. Never true under the browser engine.
+//
+// It changes the order: the outline is roughened before the blur and the
+// smear are laid over the picture, where the pixel pass came after them.
+// The grit of a roughening, page px: the fine tear laid over the crumple.
+// Only a painter that roughens outlines draws it (`roughenInJob`); moved
+// pixels tear on their own.
+export function roughenGrit(s) {
+  const g = Number(s?.roughen?.grit);
+  return s?.roughen?.on && g > 0 ? g : 0;
+}
+
+export function roughenInJob(box) {
+  const s = box.style;
+  return s.roughen?.on === true && engineDraws() && glyphPainter().roughen === true && !inkActive(s.ink);
+}
+
+// Whether a box's mesh goes to the glyph painter in the job, to bend the
+// outlines, instead of being run over the finished texture. Three things have
+// to hold: one engine measures and paints and its painter says it bends
+// (`mesh`, the Rust painter's); the box has a mesh that moves something; and
+// nothing of the box is drawn by the canvas in the box's unbent coordinates -
+// hand-drawn ink is, and so is the visibility mask unless the painter paints
+// the whole box (`boxInJob`), where the mask's shapes are bent through the
+// mesh with the letters. A box the canvas draws part of keeps the texture
+// warp whole, so its ink and its mask bend with its letters as they always
+// have. Never true under the browser engine.
+export function meshInJob(box) {
+  const s = box.style;
+  return (
+    engineDraws() &&
+    glyphPainter().mesh === true &&
+    warpActive(s, box.w, box.h) &&
+    !inkActive(s.ink) &&
+    (!clipActive(s.clip) || glyphPainter().box === true)
+  );
+}
+
+// The footprint of a box whose painter bends it: the layout's footprint
+// carried through the mesh (what `warpTexture` would make of it), and the
+// layout's padding again on every side - the reach of a shadow, a blur and a
+// smear is laid on AFTER the bend here, so it is not shortened where the mesh
+// squeezes. Null where the mesh cannot be planned, or where the picture the
+// texture warp falls back to is not the map the painter would bend by (a
+// corner dragged to the homography's horizon): the box then takes the texture
+// path, which has an answer for both.
+function meshFootprint(box, L) {
+  const w = box.style.warp;
+  const rect = { x: -L.ox, y: -L.oy, w: L.cw, h: L.ch };
+  const plan = warpPlan(w, box.w, box.h, rect);
+  if (!plan) return null;
+  if (!plan.projective && meshMap(w.pts, w.cols, w.rows, box.w, box.h)?.kind === 'projective') return null;
+  const e = warpExtent({ warp: w, w: box.w, h: box.h, ox: L.ox, oy: L.oy, cw: L.cw, ch: L.ch });
+  if (!e) return null;
+  return { ox: e.ox + L.pad, oy: e.oy + L.pad, cw: e.cw + 2 * L.pad, ch: e.ch + 2 * L.pad };
 }
 
 // The mesh warp, over everything: the box is a finished picture by now - type
@@ -669,6 +891,8 @@ export function renderBoxTexture(box, p, tips, scale = 2, maxPx = Infinity, maxS
 export function warpTexture(tex, box, release = true) {
   const s = box.style;
   const keep = { canvas: tex.canvas, ox: tex.ox, oy: tex.oy, cw: tex.cw, ch: tex.ch };
+  // Bent already, by the painter (`renderBoxTexture`).
+  if (tex.warped) return keep;
   if (!warpActive(s, box.w, box.h)) return keep;
   const warped = warpBoxCanvas(tex.canvas, {
     warp: s.warp,
@@ -708,6 +932,10 @@ export function boxFootprint(box, p) {
   const flat = { ox: L.ox, oy: L.oy, cw: L.cw, ch: L.ch };
   const s = box.style;
   if (!warpActive(s, box.w, box.h)) return flat;
+  if (meshInJob(box)) {
+    const bent = meshFootprint(box, L);
+    if (bent) return bent;
+  }
   return warpExtent({ warp: s.warp, w: box.w, h: box.h, ...flat }) ?? flat;
 }
 
@@ -844,8 +1072,38 @@ function paintBoxOnPage(ctx, box, p, tips) {
     (s.blur ?? 0) > 0 ||
     (s.motionBlur?.on && ((s.motionBlur.x ?? 0) !== 0 || (s.motionBlur.y ?? 0) !== 0)) ||
     clipActive(s.clip) ||
-    inkActive(s.ink);
-  if (rot !== 0 && !s.roughen.on && opaque && !composited) {
+    inkActive(s.ink) ||
+    // No fill is a cut out of the bands, and a cut made straight on the page
+    // would take the page with it.
+    !!s.noFill;
+  // A turned or mirrored box whose painter paints the whole of it
+  // (`boxInJob`): painted AT the angle, shadows, blur, smear, mask and mesh
+  // with it, and laid down pixel for pixel. The raster path below paints it
+  // straight and turns the bitmap, which is a resample of every edge in it.
+  // Any opacity: the picture is one raster, laid once at the caller's alpha.
+  if ((rot !== 0 || flipped) && boxInJob(box)) {
+    const { L, F, foot } = boxPlan(box, p);
+    // A mesh the painter cannot bend (`meshFootprint`) is the texture warp's.
+    if (F || !warpActive(s, box.w, box.h)) {
+      ctx.save();
+      ctx.translate(box.x + box.w / 2, box.y + box.h / 2);
+      if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
+      if (flipped) ctx.scale(fx, fy);
+      ctx.translate(-box.w / 2 - L.ox, -box.h / 2 - L.oy);
+      try {
+        paintBoxJob(ctx, box, L, foot);
+        return;
+      } catch {
+        // A surface the engine will not paint (a box across a huge page at a
+        // high scale): the raster path has a budget for that.
+      } finally {
+        ctx.restore();
+      }
+    }
+  }
+  // Roughening is a pass over the composite too, except where the painter
+  // roughens the outlines themselves (`roughenInJob`).
+  if (rot !== 0 && (!s.roughen.on || roughenInJob(box)) && opaque && !composited) {
     // Rotated text: paint glyphs DIRECTLY at the angle so they rasterize sharp
     // (rotating a pre-rendered bitmap would resample and soften it). Pivot
     // around the box center like the editor rotates .tbox. Roughened or
@@ -907,8 +1165,10 @@ function paintBoxOnPage(ctx, box, p, tips) {
 // `scratch` is an optional reusable (W*scale)×(H*scale) canvas to avoid per-box
 // allocations. `p` is the box's page (so line-backed text resolves correctly).
 // `scale` supersamples to match a scaled document; returned bounds are in the
-// scaled (device) pixel space.
-export function renderBoxLayer(box, W, H, scratch, p, scale = 1, tips) {
+// scaled (device) pixel space. `dx`/`dy` move the box by that many page px
+// before it is painted: a longstrip neighbour's box, painted into this page's
+// document from its own page's space (psd.js).
+export function renderBoxLayer(box, W, H, scratch, p, scale = 1, tips, dx = 0, dy = 0) {
   const SW = Math.round(W * scale);
   const SH = Math.round(H * scale);
   const cnv = scratch || document.createElement('canvas');
@@ -918,6 +1178,7 @@ export function renderBoxLayer(box, W, H, scratch, p, scale = 1, tips) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, SW, SH);
   if (scale !== 1) ctx.scale(scale, scale);
+  if (dx || dy) ctx.translate(dx, dy);
   ctx.imageSmoothingQuality = 'high';
   paintBoxOnPage(ctx, box, p, tips); // full opacity; layer opacity applied by consumer
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -986,12 +1247,19 @@ async function renderPageBlob(p, fmt) {
 // chapter and every offset below it would be wrong. So the sizes are resolved
 // once, up front, and written back onto the pages - the same field the editor
 // fills in when an image loads, so nothing downstream has to be told twice.
-async function measureStrip(pages) {
+//
+// `check` is the export's `chapterHeld`, asked before each page's picture is
+// minted and before its size is written back: a size measured after its
+// chapter closed is the defaults' (the picture went with the chapter), and a
+// page given them keeps them.
+export async function measureStrip(pages, check = null) {
   for (const p of pages) {
     if (p.w > 0 && p.h > 0) continue;
+    check?.();
     // One page's picture at a time: the point of the slice loop below is that
     // the whole chapter is never resident, and measuring must not undo that.
     const { w, h } = await withPageImages(p, () => pageSpace(p));
+    check?.();
     p.w = w;
     p.h = h;
   }
@@ -1021,11 +1289,10 @@ async function withPagesImages(list, fn) {
 // here is one slice tall and is released before the next one is drawn, so a
 // 200-page chapter costs one slice of memory rather than a 400,000px raster no
 // browser would hand out anyway.
-export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1) {
-  await settleNoise((pages ?? []).flatMap((p) => p?.boxes ?? []));
-  // One prefetch for the whole slice: the same brush usually runs through every
-  // page of a chapter, and the library's cache would answer the rest anyway.
-  const tips = await settleBoxTips((pages ?? []).flatMap((p) => p?.boxes ?? []));
+//
+// `check` is the export's `chapterHeld`, asked last thing before the slice's
+// pictures are minted (see `chapterNow`).
+export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1, check = null) {
   const W = maxPageWidth(pages) || PAGE_W;
   const H = Math.max(1, Math.round(y1 - y0));
   const canvas = document.createElement('canvas');
@@ -1058,6 +1325,16 @@ export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1) {
     }
   });
 
+  // What the slice's lettering needs, and only its own: the roughening phase,
+  // and the tips its ink stamps with, in one prefetch. Asked of the whole
+  // chapter, every slice decoded every page's tips - a distinct imported tip
+  // per page is gigabytes held across the first slice's paint, past the
+  // brush cache's budget, for boxes the slice never draws.
+  const painted = textHits.map((h) => h.box);
+  await settleNoise(painted);
+  const tips = await settleBoxTips(painted);
+
+  check?.();
   // Pass 1: paint all artwork intersecting the requested output rectangle.
   await withPagesImages(
     artHits.map((h) => h.p),
@@ -1097,8 +1374,10 @@ export async function renderStripSliceCanvas(pages, tops, y0, y1, scale = 1) {
 // Render one source page of a longstrip column to a Blob via the strip compositor,
 // slicing at [top, top + h] in document space so cross-seam lettering and neighbor
 // boxes are preserved.
-async function renderStripPageBlob(p, fmt) {
-  const pages = app.pages?.length ? app.pages : [p];
+// `column` is the pages of the document the export holds (`chapterNow`):
+// `app.pages` by the time this runs can be another chapter's.
+async function renderStripPageBlob(p, fmt, column = app.pages) {
+  const pages = column?.length ? column : [p];
   const idx = pages.findIndex((pg) => pg?.id === p?.id);
   // The current source boundary and the column width use the same measured
   // layout as whole-chapter export. Measurement pins one image at a time, so
@@ -1123,9 +1402,9 @@ const RASTER = new Set(['PNG', 'JPG', 'WebP']);
 
 // The whole-chapter strip export. Called only from `exportImages`, which already
 // holds `app.exporting` across it.
-async function exportStripImages(fmt, held) {
-  const pages = app.pages;
-  const { tops, total } = await measureStrip(pages);
+async function exportStripImages(fmt, held, chapter = null) {
+  const pages = chapter?.pages ?? app.pages;
+  const { tops, total } = await measureStrip(pages, () => chapterHeld(chapter));
   const target = app.stripSliceH > 0 ? app.stripSliceH : SLICE_H_DEFAULT;
   const { cuts, warnings } = planStripCuts(pages, target);
   if (!(total > 0) || cuts.length < 2) {
@@ -1142,11 +1421,14 @@ async function exportStripImages(fmt, held) {
   // output at once behind the directory dialog.
   const dir = isTauri() ? await pickExportDir() : null;
   enginesHeld(held);
+  chapterHeld(chapter);
   if (isTauri() && !dir) return true; // user cancelled
   let written = 0;
   try {
     for (let i = 0; i < n; i++) {
-      const canvas = await renderStripSliceCanvas(pages, tops, cuts[i], cuts[i + 1]);
+      const same = () => chapterHeld(chapter, written);
+      same();
+      const canvas = await renderStripSliceCanvas(pages, tops, cuts[i], cuts[i + 1], 1, same);
       const blob = await new Promise((res) => canvas.toBlob(res, MIME[fmt], QUALITY[fmt]));
       // Hand the slice's pixels back before the next one is allocated. A canvas
       // held only by a local is collectable anyway, but "eventually" is not a
@@ -1154,6 +1436,7 @@ async function exportStripImages(fmt, held) {
       canvas.width = 0;
       canvas.height = 0;
       enginesHeld(held, written);
+      same();
       const name = `${baseName}-strip-${String(i + 1).padStart(digits, '0')}.${ext}`;
       if (dir) await writeItemTo(dir, name, blob, held, written);
       else downloadBlob(blob, name);
@@ -1347,10 +1630,44 @@ export function enginesHeld(held, written = 0) {
   if (!enginesAre(held)) throw new EngineSwitched(written);
 }
 
+// ONE EXPORT, ONE CHAPTER. The dialog closes as the export starts, and the
+// editor under it stays live - its way back to the project, and from there
+// into another chapter, included. The export walks the page objects it began
+// with, but their pictures are not theirs to keep: `page-images.js` mints them
+// from whichever chapter's directories it is pointed at, by file name, and
+// closing a chapter nulls them. So a chapter opened mid-export put the old
+// chapter's lettering over a blank sheet, or over the NEW chapter's page of
+// the same file name, and wrote it under the old chapter's name.
+//
+// `chapterNow` is the document the export began on: `app.pages` and
+// `app.chapterRef`, which are only ever replaced by a chapter closing or
+// opening. `chapterHeld` is asked before a page's pictures are loaded and
+// again before its file is written; another document by then stops the
+// export there, and the files already written - each of them whole, and the
+// old chapter's - stand and are counted, as an engine switch counts them.
+export function chapterNow() {
+  return { pages: app.pages, ref: app.chapterRef };
+}
+export class ChapterSwitched extends Error {
+  constructor(written = 0) {
+    const before =
+      written > 0
+        ? `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the rest were not written.`
+        : 'Nothing was written.';
+    super(`another chapter was opened while this one was being exported. ${before} Export again.`);
+    this.name = 'ChapterSwitched';
+    this.written = written;
+  }
+}
+export function chapterHeld(chapter, written = 0) {
+  if (chapter && (app.pages !== chapter.pages || app.chapterRef !== chapter.ref)) throw new ChapterSwitched(written);
+}
+
 // Nested builders have written no file of their own. The writer supplies the
 // chapter's count for every failure, including a font wait or disk failure.
 function exportFailure(error, written) {
   if (error instanceof EngineSwitched) return new EngineSwitched(Math.max(written, error.written));
+  if (error instanceof ChapterSwitched) return new ChapterSwitched(Math.max(written, error.written));
   if (!written || (error?.exportWritten ?? 0) >= written) return error;
   const reason = String(error?.message || error).replace(/nothing was written\.?/gi, '').trim();
   const before = `${written} ${written === 1 ? 'file was' : 'files were'} written before that, whole, and ${written === 1 ? 'stays' : 'stay'}; the remaining files were not written.`;
@@ -1363,6 +1680,8 @@ function exportFailure(error, written) {
 export async function exportImages(fmt, scope) {
   app.exporting = true;
   let written = 0;
+  // Before the first await: the chapter the user asked to export.
+  const chapter = chapterNow();
   try {
     let held = enginesNow();
     // The browser's own font set is the browser path's wait, and with the
@@ -1389,6 +1708,9 @@ export async function exportImages(fmt, scope) {
     // The engine these waits began on is not the one installed: they were the
     // wrong waits. (Never taken with the switch left alone.)
     if (!enginesAre(held)) held = await enginesSettled(isLongstrip() ? app.pages : pages);
+    // The waits above are where a chapter could have been swapped in under
+    // `pages`, and nothing has been read off it yet.
+    chapterHeld(chapter);
 
     // JSON is one document for the whole scope (not one file per page), so it
     // round-trips through the JSON importer in a single pick.
@@ -1399,7 +1721,7 @@ export async function exportImages(fmt, scope) {
     // page is still a single page, and the user asking for "this page" in a
     // strip is asking for the slice they are looking at, not a re-cut of it.
     if (isLongstrip() && scope === 'all' && RASTER.has(fmt)) {
-      return await exportStripImages(fmt, held);
+      return await exportStripImages(fmt, held, chapter);
     }
 
     const baseName = sanitizeExportName(app.exportName);
@@ -1410,6 +1732,7 @@ export async function exportImages(fmt, scope) {
     // a 100-page PSD export is gigabytes of blobs for no better dialog.
     const streamDir = isTauri() && scope === 'all' ? await pickExportDir() : null;
     enginesHeld(held);
+    chapterHeld(chapter);
     if (isTauri() && scope === 'all' && !streamDir) return true; // cancelled
     const items = [];
     for (const p of pages) {
@@ -1419,6 +1742,9 @@ export async function exportImages(fmt, scope) {
       // so a page turn mid-export cannot revoke the image being drawn, and
       // handed back when its file is written.
       let blob;
+      // With no await before the mint: the directories it reads are the ones
+      // of the chapter this asks about.
+      chapterHeld(chapter, written);
       try {
         blob = await withPageImages(p, async () => {
           if (fmt === 'PSD') {
@@ -1430,7 +1756,7 @@ export async function exportImages(fmt, scope) {
             return new Blob([bytes], { type: MIME.PSD });
           }
           if (isLongstrip() && RASTER.has(fmt)) {
-            return await renderStripPageBlob(p, fmt);
+            return await renderStripPageBlob(p, fmt, chapter.pages);
           }
           return await renderPageBlob(p, fmt);
         });
@@ -1439,6 +1765,9 @@ export async function exportImages(fmt, scope) {
         throw exportFailure(e, written);
       }
       enginesHeld(held, written);
+      // A chapter closed while this page was drawn took its pictures with it:
+      // the file is a blank sheet, or another chapter's art, and is not written.
+      chapterHeld(chapter, written);
       const name = `${baseName}-${p.id}.${ext}`;
       if (streamDir) {
         await writeItemTo(streamDir, name, blob, held, written);

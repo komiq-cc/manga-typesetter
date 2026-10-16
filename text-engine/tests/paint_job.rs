@@ -4,8 +4,8 @@
 #![cfg(feature = "paint")]
 
 use mt_text::paint::{
-    decode, paint_job, Affine, Align, Band, BoldDraw, Fill, Job, Pt, Raster, Request, Rgba, Run,
-    Stop, Tile, MAGIC, MAX_SIDE, WIRE_VERSION,
+    decode, paint_job, Affine, Align, Band, BoldDraw, Fill, Job, Mesh, Pt, Raster, Request, Rgba,
+    Roughen, Run, Stop, Tile, MAGIC, MAX_MESH_SIDE, MAX_SIDE, WIRE_VERSION,
 };
 use mt_text::{bold_outset, BoldAdvance, Engine, Error, Face, FontId, Synth, WEBKIT_BOLD_ADVANCE};
 
@@ -27,6 +27,10 @@ fn run(text: &str, x: f64, y: f64) -> Run {
         x,
         y,
         rot: 0.0,
+        sx: 1.0,
+        sy: 1.0,
+        skew: 0.0,
+        drip: 0.0,
         fill: None,
     }
 }
@@ -38,7 +42,10 @@ fn job(runs: Vec<Run>) -> Job {
         letter_spacing: 0.0,
         bands: Vec::new(),
         silhouette: None,
+        no_fill: false,
         fill: Some(Fill::Solid(BLACK)),
+        mesh: None,
+        roughen: None,
         runs,
     }
 }
@@ -494,6 +501,63 @@ fn bands_are_painted_widest_first_under_the_fill() {
     );
 }
 
+#[test]
+fn no_fill_cuts_the_glyphs_out_of_the_bands() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let ink = e.line_ink(face, "I").unwrap();
+    let bands = vec![
+        Band {
+            color: RED,
+            opacity: 1.0,
+            line: 20.0,
+        },
+        Band {
+            color: BLUE,
+            opacity: 1.0,
+            line: 8.0,
+        },
+    ];
+    let mut j = job(vec![run("I", 100.0, 100.0)]);
+    j.bands = bands.clone();
+    j.fill = Some(Fill::Solid(WHITE));
+    j.no_fill = true;
+    let r = paint(&mut e, &request(j.clone(), face));
+    let (left, right) = (100.0 - ink.left, 100.0 + ink.right);
+    let mid_y = (100.0 - ink.ascent / 2.0) as i32;
+    // The bands outside the stem are as they were, and the stem is empty:
+    // not the fill, and not the half of the blue band that lay inside it.
+    assert_eq!(px(&r, (left - 7.0) as i32, mid_y), [255, 0, 0, 255]);
+    assert_eq!(px(&r, (left - 2.5) as i32, mid_y), [0, 0, 255, 255]);
+    assert_eq!(px(&r, (left + 1.5) as i32, mid_y), [0, 0, 0, 0]);
+    assert_eq!(px(&r, ((left + right) / 2.0) as i32, mid_y), [0, 0, 0, 0]);
+    assert_eq!(px(&r, (right + 7.0) as i32, mid_y), [255, 0, 0, 255]);
+    // It reaches as far as it did with a fill.
+    assert_box(
+        inked(&r),
+        (
+            left - 10.0,
+            100.0 - ink.ascent - 10.0,
+            right + 10.0,
+            100.0 + ink.descent + 10.0,
+        ),
+    );
+
+    // The silhouette a shadow is cast from is cut the same way.
+    let grey = Rgba([119, 119, 119, 255]);
+    j.silhouette = Some(grey);
+    let s = paint(&mut e, &request(j.clone(), face));
+    assert_eq!(px(&s, (left - 7.0) as i32, mid_y), [119, 119, 119, 255]);
+    assert_eq!(px(&s, ((left + right) / 2.0) as i32, mid_y), [0, 0, 0, 0]);
+
+    // And with no band there is nothing to cut from: nothing is drawn.
+    j.bands.clear();
+    assert!(paint_job(&mut e, &request(j.clone(), face)).unwrap().is_none());
+    j.silhouette = None;
+    assert!(paint_job(&mut e, &request(j, face)).unwrap().is_none());
+}
+
 /// The stretches of ink along device row `y`, each from where it starts to
 /// where it ends in fractions of a pixel. Right for upright edges, which is
 /// what a stem has: a pixel's coverage is then how far the ink reaches
@@ -926,6 +990,240 @@ fn a_curved_glyphs_gradient_is_stated_in_the_glyphs_own_frame() {
     );
 }
 
+/// A curved job of one glyph at (200, 150), turned and scaled as asked.
+fn curved(text: &str, rot: f64, sx: f64, sy: f64, skew: f64) -> Job {
+    let mut j = job(vec![Run {
+        rot,
+        sx,
+        sy,
+        skew,
+        drip: 0.0,
+        fill: Some(Fill::Solid(BLACK)),
+        ..run(text, 200.0, 150.0)
+    }]);
+    j.curved = true;
+    j.fill = None;
+    j
+}
+
+/// Straight-alpha sum of the differences between two rasters on the same
+/// pixels, and how many pixels differ by more than 8.
+fn difference(a: &Raster, b: &Raster) -> (u64, usize) {
+    assert_eq!((a.x, a.y, a.width, a.height), (b.x, b.y, b.width, b.height));
+    let sum = a
+        .data
+        .iter()
+        .zip(&b.data)
+        .map(|(p, q)| u64::from(p.abs_diff(*q)))
+        .sum();
+    let big = a
+        .data
+        .chunks(4)
+        .zip(b.data.chunks(4))
+        .filter(|(p, q)| p.iter().zip(*q).any(|(p, q)| p.abs_diff(*q) > 8))
+        .count();
+    (sum, big)
+}
+
+#[test]
+fn a_curved_glyph_is_scaled_about_its_centre() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let ink = e.glyph_ink(face, "H").unwrap();
+    let one = inked(&paint(
+        &mut e,
+        &request(curved("H", 0.0, 1.0, 1.0, 0.0), face),
+    ));
+    let wide = inked(&paint(
+        &mut e,
+        &request(curved("H", 0.0, 2.0, 1.0, 0.0), face),
+    ));
+    // Twice as wide about the same centre; as tall as before.
+    assert_box(
+        wide,
+        (
+            200.0 - 2.0 * ink.left,
+            150.0 - ink.ascent,
+            200.0 + 2.0 * ink.right,
+            150.0 + ink.descent,
+        ),
+    );
+    let (w1, w2) = (f64::from(one.2 - one.0), f64::from(wide.2 - wide.0));
+    assert!((w2 / w1 - 2.0).abs() < 0.05, "{w1} {w2}");
+    assert_eq!((one.1, one.3), (wide.1, wide.3));
+    // Tall only.
+    let tall = inked(&paint(
+        &mut e,
+        &request(curved("H", 0.0, 1.0, 3.0, 0.0), face),
+    ));
+    assert_box(
+        tall,
+        (
+            200.0 - ink.left,
+            150.0 - 3.0 * ink.ascent,
+            200.0 + ink.right,
+            150.0 + 3.0 * ink.descent,
+        ),
+    );
+}
+
+#[test]
+fn a_scaled_glyph_is_the_glyph_at_the_bigger_size() {
+    // The scale is about the glyph's centre, so size 30 at 2x is size 60,
+    // curves included: the outline is flattened finely enough for the size
+    // it ends up at.
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    for (text, from, to, k) in [
+        ("H", 30.0, 60.0, 2.0),
+        ("O", 10.0, 80.0, 8.0),
+        ("S", 60.0, 30.0, 0.5),
+    ] {
+        let small = Face::new(font, from);
+        let big = Face::new(font, to);
+        let scaled = paint(&mut e, &request(curved(text, 0.0, k, k, 0.0), small));
+        let direct = paint(&mut e, &request(curved(text, 0.0, 1.0, 1.0, 0.0), big));
+        let (sum, wrong) = difference(&scaled, &direct);
+        let pixels = scaled.width as usize * scaled.height as usize;
+        assert!(
+            wrong * 200 < pixels,
+            "{text}: {wrong} of {pixels} pixels differ"
+        );
+        assert!(sum < 255 * 4 * pixels as u64 / 400, "{text}: {sum}");
+    }
+    // And a turned one.
+    let small = Face::new(font, 30.0);
+    let big = Face::new(font, 60.0);
+    let quarter = core::f64::consts::FRAC_PI_2 / 1.5;
+    let scaled = paint(&mut e, &request(curved("R", quarter, 2.0, 2.0, 0.0), small));
+    let direct = paint(&mut e, &request(curved("R", quarter, 1.0, 1.0, 0.0), big));
+    let (_, wrong) = difference(&scaled, &direct);
+    assert!(wrong * 200 < scaled.width as usize * scaled.height as usize);
+}
+
+#[test]
+fn a_positive_skew_leans_the_top_of_the_letter_right() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 80.0);
+    let ink = e.glyph_ink(face, "I").unwrap();
+    let mean_x = |r: &Raster, y0: i32, y1: i32| {
+        let (mut sum, mut n) = (0.0, 0.0);
+        for y in y0..y1 {
+            for x in r.x..r.x + r.width as i32 {
+                let a = f64::from(px(r, x, y)[3]);
+                sum += a * f64::from(x);
+                n += a;
+            }
+        }
+        sum / n
+    };
+    let height = ink.ascent + ink.descent;
+    let (top, foot) = ((150.0 - ink.ascent) as i32, (150.0 + ink.descent) as i32);
+    let q = (height / 4.0) as i32;
+    for skew in [0.3_f64, -0.3] {
+        let r = paint(&mut e, &request(curved("I", 0.0, 1.0, 1.0, skew), face));
+        let lean = mean_x(&r, top, top + q) - mean_x(&r, foot - q, foot);
+        // The two bands are `height / 2` apart: the shift is tan(skew) of it.
+        let want = skew.tan() * f64::from(foot - top - q);
+        assert!(
+            (lean - want).abs() < 0.08 * want.abs() + 1.0,
+            "{skew}: {lean} vs {want}"
+        );
+        assert_eq!(lean > 0.0, skew > 0.0);
+    }
+    // The leaning letter turns with the rest of the frame: skew, then turn.
+    let r = paint(
+        &mut e,
+        &request(
+            curved("I", core::f64::consts::FRAC_PI_2, 1.0, 1.0, 0.3),
+            face,
+        ),
+    );
+    let upright = paint(&mut e, &request(curved("I", 0.0, 1.0, 1.0, 0.3), face));
+    assert_eq!((r.width, r.height), (upright.height, upright.width));
+}
+
+#[test]
+fn a_mirrored_glyph_keeps_its_bands_outside() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let ink = e.glyph_ink(face, "L").unwrap();
+    let mut j = curved("L", 0.0, -1.0, 1.0, 0.0);
+    j.bands = vec![Band {
+        color: RED,
+        opacity: 1.0,
+        line: 8.0,
+    }];
+    let r = paint(&mut e, &request(j, face));
+    // Mirrored about the centre line: the ink that was right of it is left.
+    assert_box(
+        inked(&r),
+        (
+            200.0 - ink.right - 4.0,
+            150.0 - ink.ascent - 4.0,
+            200.0 + ink.left + 4.0,
+            150.0 + ink.descent + 4.0,
+        ),
+    );
+    // The band is round the mirrored glyph, not inside it.
+    let edge = (200.0 - ink.right) as i32;
+    // The foot bar of the L now points left; its end is two pixels in from
+    // the edge, three above the bottom.
+    let bar = (150.0 + ink.descent - 3.0) as i32;
+    assert_eq!(px(&r, edge - 2, bar), RED.0);
+    assert_eq!(px(&r, edge + 2, bar), BLACK.0);
+}
+
+#[test]
+fn only_a_curved_job_reads_scale_and_skew() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let plain = paint(&mut e, &request(job(vec![run("HI", 30.0, 80.0)]), face));
+    let odd = job(vec![Run {
+        sx: 3.0,
+        sy: 0.5,
+        skew: 1.0,
+        drip: 0.0,
+        ..run("HI", 30.0, 80.0)
+    }]);
+    assert_eq!(paint(&mut e, &request(odd, face)), plain);
+}
+
+#[test]
+fn a_run_scale_does_not_stretch_its_fill() {
+    // A gradient across the glyph's frame, red at x = -20 to blue at +20,
+    // under a letter made eight times as wide. Stretched with the letter it
+    // would run across all of it; it does not.
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let ink = e.glyph_ink(face, "I").unwrap();
+    let mut j = curved("I", 0.0, 8.0, 1.0, 0.0);
+    j.runs[0].fill = Some(Fill::Linear {
+        from: Pt::new(-20.0, 0.0),
+        to: Pt::new(20.0, 0.0),
+        stops: two_stops(RED, BLUE),
+    });
+    let r = paint(&mut e, &request(j, face));
+    let at = |x: i32| px(&r, x, 150);
+    // Offset -12 is a fifth of the way: 80% red.
+    let p = at(188);
+    assert!(p[0].abs_diff(204) <= 3 && p[2].abs_diff(51) <= 3, "{p:?}");
+    let q = at(212);
+    assert!(q[0].abs_diff(51) <= 3 && q[2].abs_diff(204) <= 3, "{q:?}");
+    // Beyond the gradient's ends the letter is the end colours.
+    let (lx, rx) = (
+        (200.0 - 8.0 * ink.left) as i32 + 3,
+        (200.0 + 8.0 * ink.right) as i32 - 3,
+    );
+    assert_eq!(at(lx), RED.0);
+    assert_eq!(at(rx), BLUE.0);
+}
+
 #[test]
 fn synthetic_bold_grows_the_ink_by_one_outset_and_italic_slants_it() {
     let mut e = Engine::new();
@@ -1258,8 +1556,10 @@ fn wire(font: u32, text: &str) -> Vec<u8> {
     b.extend_from_slice(&[255, 0, 0, 255]);
     f(&mut b, 1.0);
     b.extend_from_slice(&[0, 0, 255, 128]);
+    u(&mut b, 0); // no mesh
+    u(&mut b, 0); // not roughened
     u(&mut b, 1); // one run
-    for v in [100.0, 40.0, 0.0] {
+    for v in [100.0, 40.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
         f(&mut b, v);
     }
     u(&mut b, 4); // its own fill: a pattern
@@ -1300,16 +1600,23 @@ fn the_wire_form_decodes_to_the_job_it_states() {
                 line: 6.0
             }],
             silhouette: None,
+            no_fill: false,
             fill: Some(Fill::Linear {
                 from: Pt::new(0.0, 10.0),
                 to: Pt::new(0.0, 50.0),
                 stops: two_stops(RED, Rgba([0, 0, 255, 128])),
             }),
+            mesh: None,
+            roughen: None,
             runs: vec![Run {
                 text: "Héllo".to_owned(),
                 x: 100.0,
                 y: 40.0,
                 rot: 0.0,
+                sx: 1.0,
+                sy: 1.0,
+                skew: 0.0,
+                drip: 0.0,
                 fill: Some(Fill::Pattern {
                     tile: 0,
                     pitch: 12.0,
@@ -1323,6 +1630,54 @@ fn the_wire_form_decodes_to_the_job_it_states() {
         (r.tiles.len(), r.tiles[0].width, r.tiles[0].height),
         (1, 1, 2)
     );
+}
+
+#[test]
+fn a_runs_scale_and_skew_are_read_and_their_range_is_checked() {
+    let good = wire(1, "abc");
+    // The pattern fill (36 bytes) and the text length sit after the run's
+    // x, y, rot, sx, sy, skew, drip.
+    let len_at = good.len() - 20 - 3 - 4;
+    let drip_at = len_at - 36 - 8;
+    let skew_at = drip_at - 8;
+    let (sy_at, sx_at) = (skew_at - 8, skew_at - 16);
+    let f = |at: usize| f64::from_le_bytes(good[at..at + 8].try_into().unwrap());
+    assert_eq!(
+        (f(sx_at - 8), f(sx_at), f(sy_at), f(skew_at)),
+        (0.0, 1.0, 1.0, 0.0)
+    );
+    assert_eq!(f(sx_at - 24), 100.0);
+    let with = |at: usize, v: f64| {
+        let mut b = good.clone();
+        b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        decode(&b)
+    };
+    let run = |at, v| with(at, v).map(|r| r.job.runs[0].clone());
+    let r = run(sx_at, -2.0).unwrap();
+    assert_eq!((r.sx, r.sy, r.skew), (-2.0, 1.0, 0.0));
+    let r = run(sy_at, 100.0).unwrap();
+    assert_eq!((r.sx, r.sy, r.skew), (1.0, 100.0, 0.0));
+    let r = run(skew_at, -1.4).unwrap();
+    assert_eq!((r.sx, r.sy, r.skew), (1.0, 1.0, -1.4));
+    assert_eq!(run(sx_at, 0.01).unwrap().sx, 0.01);
+    for at in [sx_at, sy_at] {
+        for bad in [0.0, 0.009, -0.009, 100.5, -101.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(with(at, bad).err(), Some(Error::BadSpec), "{at} {bad}");
+        }
+    }
+    for bad in [1.41, -1.41, 3.0, f64::NAN, f64::NEG_INFINITY] {
+        assert_eq!(with(skew_at, bad).err(), Some(Error::BadSpec), "{bad}");
+    }
+    assert_eq!(run(drip_at, 12.5).unwrap().drip, 12.5);
+    assert_eq!(run(drip_at, 4096.0).unwrap().drip, 4096.0);
+    for bad in [-0.5, 4096.5, f64::NAN, f64::INFINITY] {
+        assert_eq!(with(drip_at, bad).err(), Some(Error::BadSpec), "{bad}");
+    }
+    // The version before this one is not read.
+    let mut old = good.clone();
+    old[4] = 6;
+    assert_eq!(decode(&old).err(), Some(Error::BadSpec));
+    assert_eq!(WIRE_VERSION, 7);
 }
 
 #[test]
@@ -1600,4 +1955,594 @@ fn decode_alone_refuses_a_run_over_the_wire_limit() {
         Some(Error::BadSpec)
     );
     assert!(decode(&wire(7, &"I".repeat(262_144))).is_ok());
+}
+
+// ---- the mesh warp and the drip ----
+
+/// The mesh that moves nothing: the grid over the rectangle.
+fn grid(cols: u32, rows: u32, (x, y, w, h): (f64, f64, f64, f64)) -> Mesh {
+    let mut pts = Vec::new();
+    for j in 0..=rows {
+        for i in 0..=cols {
+            pts.push(Pt::new(
+                (w * f64::from(i)) / f64::from(cols),
+                (h * f64::from(j)) / f64::from(rows),
+            ));
+        }
+    }
+    Mesh {
+        cols,
+        rows,
+        pts,
+        x,
+        y,
+        w,
+        h,
+    }
+}
+
+const BOX: (f64, f64, f64, f64) = (10.0, 10.0, 220.0, 70.0);
+
+fn banded(text: &str) -> Job {
+    let mut j = job(vec![run(text, 20.0, 60.0)]);
+    j.bands = vec![Band {
+        color: WHITE,
+        opacity: 1.0,
+        line: 8.0,
+    }];
+    j
+}
+
+#[test]
+fn a_mesh_that_moves_nothing_paints_the_pixels_of_no_mesh() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face {
+        synth: Synth {
+            bold: true,
+            oblique: false,
+        },
+        ..Face::new(font, 40.0)
+    };
+    let mut j = banded("Bend me");
+    let plain = paint(&mut e, &request(j.clone(), face));
+    for (cols, rows) in [(1, 1), (3, 2), (24, 24)] {
+        j.mesh = Some(grid(cols, rows, BOX));
+        assert_eq!(
+            paint(&mut e, &request(j.clone(), face)),
+            plain,
+            "{cols}x{rows}"
+        );
+    }
+    // A mesh that cannot be read is no mesh either.
+    let mut torn = grid(2, 2, BOX);
+    torn.pts[4].y -= 20.0;
+    torn.pts.pop();
+    j.mesh = Some(torn);
+    assert_eq!(paint(&mut e, &request(j, face)), plain);
+}
+
+#[test]
+fn a_one_cell_mesh_moved_whole_moves_the_picture_whole() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "ComicNeue-Regular.ttf");
+    let face = Face::new(font, 40.0);
+    let mut j = banded("Whole");
+    let plain = paint(&mut e, &request(j.clone(), face));
+    let mut m = grid(1, 1, BOX);
+    for p in &mut m.pts {
+        *p = Pt::new(p.x + 7.0, p.y - 3.0);
+    }
+    j.mesh = Some(m);
+    let moved = paint(&mut e, &request(j, face));
+    // A parallelogram is one affine map: no edge is cut, and the same
+    // outline a whole number of pixels away covers the same pixels.
+    assert_eq!((moved.x, moved.y), (plain.x + 7, plain.y - 3));
+    assert_eq!((moved.width, moved.height), (plain.width, plain.height));
+    assert_eq!(moved.data, plain.data);
+}
+
+/// The first and the last device row with ink in columns `x0..x1`.
+fn rows_inked(r: &Raster, x0: i32, x1: i32) -> (i32, i32) {
+    let mut span = (i32::MAX, i32::MIN);
+    for y in r.y..r.y + r.height as i32 {
+        if (x0..x1).any(|x| px(r, x, y)[3] != 0) {
+            span = (span.0.min(y), span.1.max(y));
+        }
+    }
+    span
+}
+
+#[test]
+fn an_arch_lifts_the_middle_and_the_band_bends_with_the_letters() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    // Seven stems across the box, and the box's arch: the middle node up
+    // 18, the ends down 18, a parabola between (4 cells reproduce it).
+    let mut m = grid(4, 1, BOX);
+    for p in &mut m.pts {
+        let u = p.x / BOX.2;
+        p.y += 36.0 * (0.5 - 4.0 * u * (1.0 - u));
+    }
+    let text = "I I I I I I I I I";
+    let mut fill = job(vec![run(text, 20.0, 60.0)]);
+    let flat = paint(&mut e, &request(fill.clone(), face));
+    fill.mesh = Some(m.clone());
+    let bent = paint(&mut e, &request(fill, face));
+    let (fx0, _, fx1, _) = inked(&flat);
+    let mid = (fx0 + fx1) / 2;
+    let (flat_top, flat_foot) = rows_inked(&flat, fx0, fx1);
+    // The stem nearest the middle, and the first one.
+    let (mid_top, mid_foot) = rows_inked(&bent, mid - 8, mid + 8);
+    let (end_top, end_foot) = rows_inked(&bent, fx0, fx0 + 4);
+    let u_end = (f64::from(fx0) + 2.0 - BOX.0) / BOX.2;
+    let end_shift = 36.0 * (0.5 - 4.0 * u_end * (1.0 - u_end));
+    assert!(
+        (f64::from(mid_top - flat_top) + 18.0).abs() <= 1.5,
+        "{mid_top} {flat_top}"
+    );
+    assert!((f64::from(mid_foot - flat_foot) + 18.0).abs() <= 1.5);
+    assert!(
+        (f64::from(end_top - flat_top) - end_shift).abs() <= 2.5,
+        "{end_top} {end_shift}"
+    );
+    assert!((f64::from(end_foot - flat_foot) - end_shift).abs() <= 2.5);
+    // The letters are as wide as they were: an arch moves a point up or
+    // down only.
+    let (bx0, _, bx1, _) = inked(&bent);
+    assert_eq!((bx0, bx1), (fx0, fx1));
+
+    // With a band the picture is the bent letters with 4 more on every
+    // side: the band went through the mesh with them.
+    let mut j = banded(text);
+    j.mesh = Some(m);
+    let ringed = paint(&mut e, &request(j, face));
+    let (rx0, ry0, rx1, ry1) = inked(&ringed);
+    let (_, by0, _, by1) = inked(&bent);
+    for (got, want) in [
+        (bx0 - rx0, 4),
+        (rx1 - bx1, 4),
+        (by0 - ry0, 4),
+        (ry1 - by1, 4),
+    ] {
+        assert!((got - want).abs() <= 1, "{got} for {want}");
+    }
+    // White just above the middle stem, black inside it.
+    let above = px(&ringed, mid, mid_top - 2);
+    assert_eq!(above, [255, 255, 255, 255], "the band above the stem");
+}
+
+#[test]
+fn a_gradient_goes_with_the_letter_the_mesh_moves() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    // Red at the cap height, blue at the baseline.
+    let mut j = job(vec![run("I I I I I I I I I", 20.0, 60.0)]);
+    j.fill = Some(Fill::Linear {
+        from: Pt::new(0.0, 31.0),
+        to: Pt::new(0.0, 60.0),
+        stops: two_stops(RED, BLUE),
+    });
+    let flat = paint(&mut e, &request(j.clone(), face));
+    let mut m = grid(4, 1, BOX);
+    for p in &mut m.pts {
+        let u = p.x / BOX.2;
+        p.y += 36.0 * (0.5 - 4.0 * u * (1.0 - u));
+    }
+    j.mesh = Some(m);
+    let bent = paint(&mut e, &request(j, face));
+    let (x0, _, x1, _) = inked(&flat);
+    let mid = (x0 + x1) / 2;
+    let (flat_top, flat_foot) = rows_inked(&flat, mid - 8, mid + 8);
+    let (top, foot) = rows_inked(&bent, mid - 8, mid + 8);
+    assert!(top < flat_top - 12, "the middle stem went up");
+    // The stem has the colours it had, 18 higher: red-ish at its top and
+    // blue-ish at its foot. Left where the job stated it, the gradient
+    // would paint the lifted stem red nearly to its foot.
+    for (dy, name) in [(3, "top"), (14, "middle")] {
+        let (a, b) = (px(&flat, mid, flat_top + dy), px(&bent, mid, top + dy));
+        for c in 0..3 {
+            assert!(
+                (i32::from(a[c]) - i32::from(b[c])).abs() <= 12,
+                "{name}: {a:?} {b:?}"
+            );
+        }
+    }
+    let (a, b) = (px(&flat, mid, flat_foot - 3), px(&bent, mid, foot - 3));
+    assert!(
+        b[2] > 180 && (i32::from(a[2]) - i32::from(b[2])).abs() <= 12,
+        "{a:?} {b:?}"
+    );
+}
+
+#[test]
+fn a_band_stays_outside_a_letter_the_mesh_turns_over() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    // Left and right swapped: the box mirrored about its own middle.
+    let mut m = grid(1, 1, BOX);
+    m.pts.swap(0, 1);
+    m.pts.swap(2, 3);
+    let mut fill = job(vec![run("Flip", 20.0, 60.0)]);
+    fill.mesh = Some(m.clone());
+    let plain = paint(&mut e, &request(job(vec![run("Flip", 20.0, 60.0)]), face));
+    let turned = paint(&mut e, &request(fill, face));
+    let (px0, py0, px1, py1) = inked(&plain);
+    let (tx0, ty0, tx1, ty1) = inked(&turned);
+    // Mirrored about x = 120: the same rows, the columns reflected.
+    assert_eq!((ty0, ty1), (py0, py1));
+    assert_eq!((tx0, tx1), (240 - px1, 240 - px0));
+    let mut j = banded("Flip");
+    j.mesh = Some(m);
+    let ringed = paint(&mut e, &request(j, face));
+    let (rx0, ry0, rx1, ry1) = inked(&ringed);
+    for (got, want) in [
+        (tx0 - rx0, 4),
+        (rx1 - tx1, 4),
+        (ty0 - ry0, 4),
+        (ry1 - ty1, 4),
+    ] {
+        assert!((got - want).abs() <= 1, "{got} for {want}");
+    }
+}
+
+#[test]
+fn a_mesh_gone_to_its_horizon_refuses_the_job() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    // The right edge folded back so far that the homography's horizon runs
+    // through the letters.
+    let mut m = grid(1, 1, BOX);
+    m.pts[1] = Pt::new(120.0, 34.9);
+    m.pts[3] = Pt::new(120.0, 35.1);
+    let mut j = job(vec![run("Horizon line here", -200.0, 60.0)]);
+    j.mesh = Some(m);
+    assert_eq!(paint_job(&mut e, &request(j, face)), Err(Error::BadSpec));
+    // And the next job paints.
+    let next = paint(&mut e, &request(job(vec![run("ok", 20.0, 60.0)]), face));
+    assert!(next.data.iter().any(|&v| v != 0));
+}
+
+#[test]
+fn a_drip_pulls_the_foot_down_and_keeps_the_top_level() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let mut j = curved("H", 0.0, 1.0, 1.0, 0.0);
+    let plain = paint(&mut e, &request(j.clone(), face));
+    j.runs[0].drip = 14.0;
+    let wet = paint(&mut e, &request(j.clone(), face));
+    let (px0, py0, px1, py1) = inked(&plain);
+    let (wx0, wy0, wx1, wy1) = inked(&wet);
+    assert_eq!(
+        (wx0, wx1, wy0),
+        (px0, px1, py0),
+        "the top and the sides stay"
+    );
+    assert_eq!(wy1, py1 + 14, "the foot is 14 lower");
+    // The upper half is the same pixels: nothing above the middle moves.
+    let half = (py0 + py1) / 2 - 1;
+    for y in py0..half {
+        for x in px0..px1 {
+            assert_eq!(px(&wet, x, y), px(&plain, x, y), "{x} {y}");
+        }
+    }
+    // A band is pulled with the outline: 4 more on every side of the wet
+    // letter, the top included.
+    j.bands = vec![Band {
+        color: WHITE,
+        opacity: 1.0,
+        line: 8.0,
+    }];
+    let ringed = paint(&mut e, &request(j.clone(), face));
+    let (rx0, ry0, rx1, ry1) = inked(&ringed);
+    for (got, want) in [
+        (wx0 - rx0, 4),
+        (rx1 - wx1, 4),
+        (wy0 - ry0, 4),
+        (ry1 - wy1, 4),
+    ] {
+        assert!((got - want).abs() <= 1, "{got} for {want}");
+    }
+    // Only a curved job reads it.
+    let mut straight = job(vec![run("H", 20.0, 60.0)]);
+    let dry = paint(&mut e, &request(straight.clone(), face));
+    straight.runs[0].drip = 14.0;
+    assert_eq!(paint(&mut e, &request(straight, face)), dry);
+}
+
+/// `wire(1, "abc")` with a mesh block in place of its "no mesh".
+fn wire_with_mesh(block: &[u8]) -> Vec<u8> {
+    let good = wire(1, "abc");
+    // From the end: the tile (20), the text (3) and its length (4), the
+    // run's pattern fill (36) and seven numbers (56), the run count (4),
+    // the roughening's `0` (4), and before that the mesh's `0`.
+    let mesh_at = good.len() - 20 - 3 - 4 - 36 - 56 - 4 - 4 - 4;
+    assert_eq!(good[mesh_at..mesh_at + 12], [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+    let mut b = good[..mesh_at].to_vec();
+    b.extend_from_slice(block);
+    b.extend_from_slice(&good[mesh_at + 4..]);
+    b
+}
+
+/// `wire(1, "abc")` with a roughening in place of its "not roughened".
+fn wire_with_roughen(amount: f64, detail: f64, seed: f64, origin: [f64; 2]) -> Vec<u8> {
+    wire_with_grit(amount, detail, seed, origin, 0.0)
+}
+
+fn wire_with_grit(amount: f64, detail: f64, seed: f64, origin: [f64; 2], grit: f64) -> Vec<u8> {
+    let good = wire(1, "abc");
+    let at = good.len() - 20 - 3 - 4 - 36 - 56 - 4 - 4;
+    let mut b = good[..at].to_vec();
+    b.extend_from_slice(&1u32.to_le_bytes());
+    for v in [amount, detail, seed, origin[0], origin[1], grit] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&good[at + 4..]);
+    b
+}
+
+#[test]
+fn a_roughening_on_the_wire_is_read_and_a_bad_one_is_refused() {
+    let r = decode(&wire_with_grit(4.0, 0.05, 7.0, [12.0, -6.0], 1.5)).unwrap();
+    assert_eq!(
+        r.job.roughen,
+        Some(Roughen {
+            amount: 4.0,
+            detail: 0.05,
+            seed: 7.0,
+            origin: Pt::new(12.0, -6.0),
+            grit: 1.5,
+        })
+    );
+    for grit in [-0.5, 5000.0, f64::NAN] {
+        assert_eq!(
+            decode(&wire_with_grit(4.0, 0.05, 7.0, [0.0, 0.0], grit)).err(),
+            Some(Error::BadSpec),
+            "grit {grit}"
+        );
+    }
+    for (amount, detail, seed) in [
+        (5000.0, 0.05, 7.0),
+        (4.0, -0.01, 7.0),
+        (4.0, 9.0, 7.0),
+        (f64::NAN, 0.05, 7.0),
+        (4.0, 0.05, f64::INFINITY),
+    ] {
+        assert_eq!(
+            decode(&wire_with_roughen(amount, detail, seed, [0.0, 0.0])).err(),
+            Some(Error::BadSpec),
+            "{amount} {detail} {seed}"
+        );
+    }
+}
+
+fn mesh_block(cols: u32, rows: u32, rect: [f64; 4], pts: &[f64]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&cols.to_le_bytes());
+    b.extend_from_slice(&rows.to_le_bytes());
+    for v in rect.iter().chain(pts) {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b
+}
+
+#[test]
+fn a_mesh_on_the_wire_is_read_and_a_bad_one_is_refused() {
+    let pts = [
+        0.0, 1.0, 50.0, -4.0, 100.0, 2.0, 0.0, 40.0, 50.0, 44.5, 100.0, 40.0,
+    ];
+    let rect = [12.0, -6.0, 100.0, 40.0];
+    let r = decode(&wire_with_mesh(&mesh_block(2, 1, rect, &pts))).unwrap();
+    assert_eq!(
+        r.job.mesh,
+        Some(Mesh {
+            cols: 2,
+            rows: 1,
+            pts: pts.chunks(2).map(|p| Pt::new(p[0], p[1])).collect(),
+            x: 12.0,
+            y: -6.0,
+            w: 100.0,
+            h: 40.0,
+        })
+    );
+    // The rest of the job is where it was.
+    assert_eq!(r.job.runs[0].text, "abc");
+    assert_eq!(decode(&wire(1, "abc")).unwrap().job.mesh, None);
+    // The largest grid, and one past it each way.
+    let side = MAX_MESH_SIDE;
+    let many = vec![0.0; (side as usize + 1) * 2 * 2];
+    assert!(decode(&wire_with_mesh(&mesh_block(side, 1, rect, &many))).is_ok());
+    let refused = |block: Vec<u8>| decode(&wire_with_mesh(&block)).err();
+    assert_eq!(
+        refused(mesh_block(side + 1, 1, rect, &many)),
+        Some(Error::BadSpec)
+    );
+    assert_eq!(
+        refused(mesh_block(1, side + 1, rect, &many)),
+        Some(Error::BadSpec)
+    );
+    assert_eq!(refused(mesh_block(2, 0, rect, &pts)), Some(Error::BadSpec));
+    assert_eq!(
+        refused(mesh_block(u32::MAX, u32::MAX, rect, &pts)),
+        Some(Error::BadSpec)
+    );
+    // A rectangle with no size, a number that is not one.
+    for bad in [
+        [12.0, -6.0, 0.0, 40.0],
+        [12.0, -6.0, 100.0, -1.0],
+        [f64::NAN, 0.0, 100.0, 40.0],
+    ] {
+        assert_eq!(refused(mesh_block(2, 1, bad, &pts)), Some(Error::BadSpec));
+    }
+    let mut nan = pts;
+    nan[7] = f64::INFINITY;
+    assert_eq!(refused(mesh_block(2, 1, rect, &nan)), Some(Error::BadSpec));
+    // A point short, and a point too many: the job no longer parses.
+    assert!(refused(mesh_block(2, 1, rect, &pts[..10])).is_some());
+    let mut long = pts.to_vec();
+    long.extend([1.0, 2.0]);
+    assert!(refused(mesh_block(2, 1, rect, &long)).is_some());
+    // A count the bytes cannot hold asks for no memory.
+    let mut cut = wire_with_mesh(&mesh_block(side, side, rect, &pts));
+    cut.truncate(cut.len() - 40);
+    assert_eq!(decode(&cut).err(), Some(Error::BadSpec));
+}
+
+// ---- roughening ----
+
+fn rough(amount: f64, detail: f64) -> Roughen {
+    Roughen {
+        amount,
+        detail,
+        seed: 7.0,
+        origin: Pt::new(20.0, 20.0),
+        grit: 0.0,
+    }
+}
+
+/// How many pixels are neither clear nor full: the edge.
+fn edge_pixels(r: &Raster) -> usize {
+    r.data
+        .chunks(4)
+        .filter(|p| p[3] != 0 && p[3] != 255)
+        .count()
+}
+
+fn solid_pixels(r: &Raster) -> usize {
+    r.data.chunks(4).filter(|p| p[3] == 255).count()
+}
+
+#[test]
+fn a_roughening_that_moves_nothing_paints_the_pixels_of_none() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 40.0);
+    let mut j = banded("Rough me");
+    let plain = paint(&mut e, &request(j.clone(), face));
+    for (amount, detail) in [(0.0, 0.05), (4.0, 0.0)] {
+        j.roughen = Some(rough(amount, detail));
+        assert_eq!(
+            paint(&mut e, &request(j.clone(), face)),
+            plain,
+            "{amount} {detail}"
+        );
+    }
+}
+
+#[test]
+fn a_roughened_letter_moves_within_half_the_amount_and_stays_sharp() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let mut j = job(vec![run("Rough", 20.0, 80.0)]);
+    let plain = paint(&mut e, &request(j.clone(), face));
+    j.roughen = Some(rough(6.0, 0.05));
+    let bent = paint(&mut e, &request(j.clone(), face));
+    assert_ne!(bent, plain);
+    // The same job, the same bytes.
+    assert_eq!(paint(&mut e, &request(j.clone(), face)), bent);
+    // No point goes further than half the amount.
+    let (p, b) = (inked(&plain), inked(&bent));
+    for (got, was) in [(b.0, p.0), (b.1, p.1), (b.2, p.2), (b.3, p.3)] {
+        assert!((got - was).abs() <= 4, "{b:?} against {p:?}");
+    }
+    // The ink is the letter's, moved: about as much of it, and an edge no
+    // wider than an edge is. Moved pixels made every edge pixel a grey one
+    // and the letter's inside with it.
+    let ratio = solid_pixels(&bent) as f64 / solid_pixels(&plain) as f64;
+    assert!((0.9..1.1).contains(&ratio), "solid ink ratio {ratio}");
+    let edges = edge_pixels(&bent) as f64 / edge_pixels(&plain) as f64;
+    assert!(edges < 1.5, "edge pixels grew by {edges}");
+    // Another seed is another crumple.
+    j.roughen = Some(Roughen {
+        seed: 8.0,
+        ..rough(6.0, 0.05)
+    });
+    assert_ne!(paint(&mut e, &request(j, face)), bent);
+}
+
+#[test]
+fn a_roughened_band_is_roughened_with_its_letter() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 60.0);
+    let mut j = job(vec![run("Ring", 30.0, 90.0)]);
+    j.bands = vec![Band {
+        color: RED,
+        opacity: 1.0,
+        line: 8.0,
+    }];
+    j.roughen = Some(rough(6.0, 0.08));
+    let r = paint(&mut e, &request(j, face));
+    // Everywhere there is fill there is band round it: no black pixel has a
+    // clear pixel within two of it.
+    let (w, h) = (r.width as i32, r.height as i32);
+    for y in 0..h {
+        for x in 0..w {
+            let p = px(&r, x + r.x, y + r.y);
+            if p != [0, 0, 0, 255] {
+                continue;
+            }
+            for (dx, dy) in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
+                let q = px(&r, x + r.x + dx, y + r.y + dy);
+                assert_ne!(q[3], 0, "fill at {x},{y} has no band at {dx},{dy}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_roughening_is_stated_in_the_box_and_bent_by_the_mesh_after() {
+    let mut e = Engine::new();
+    let font = load(&mut e, "ComicNeue-Regular.ttf");
+    let face = Face::new(font, 40.0);
+    let mut j = banded("Bend me");
+    j.roughen = Some(rough(5.0, 0.06));
+    let rough_only = paint(&mut e, &request(j.clone(), face));
+    // A mesh that moves the whole box moves the roughened picture whole: the
+    // crumple is the box's, not the page's.
+    let mut moved = grid(1, 1, BOX);
+    for p in &mut moved.pts {
+        p.x += 30.0;
+        p.y += 10.0;
+    }
+    j.mesh = Some(moved);
+    let both = paint(&mut e, &request(j, face));
+    assert_eq!((both.x, both.y), (rough_only.x + 30, rough_only.y + 10));
+    assert_eq!(both.data, rough_only.data);
+}
+
+#[test]
+fn a_mesh_that_enlarges_the_letters_flattens_them_as_finely_as_a_transform_would() {
+    // The outline is flattened before the mesh bends it. A mesh that makes
+    // the box fifty times larger made its chords fifty times further from the
+    // curve as well, and an "O" came out faceted (6102 pixels off, by up to
+    // 169 levels, against the same enlargement made by the transform).
+    let mut e = Engine::new();
+    let font = load(&mut e, "DejaVuSans.ttf");
+    let face = Face::new(font, 20.0);
+    let mut j = job(vec![run("O", 20.0, 40.0)]);
+    j.bands = vec![Band {
+        color: RED,
+        opacity: 1.0,
+        line: 0.5,
+    }];
+    let mut big = request(j.clone(), face);
+    big.transform = Affine::scale(50.0, 50.0);
+    let want = paint(&mut e, &big);
+    let mut m = grid(1, 1, (0.0, 0.0, 64.0, 64.0));
+    m.pts = vec![
+        Pt::new(0.0, 0.0),
+        Pt::new(3200.0, 0.0),
+        Pt::new(0.0, 3200.0),
+        Pt::new(3200.0, 3200.0),
+    ];
+    j.mesh = Some(m);
+    let got = paint(&mut e, &request(j, face));
+    assert_eq!(difference(&got, &want), (0, 0));
 }

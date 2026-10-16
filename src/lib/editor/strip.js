@@ -1,5 +1,7 @@
 // Arithmetic and layout functions for longstrip webtoon columns.
 import { styleReach } from '../paint-reach.js';
+import { warpActive } from '../warp.js';
+import { warpExtent } from '../warp-paint.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -55,6 +57,12 @@ const AA_PAD = 4;
 //   the style's   `styleReach`: the ink, the outline, each shadow by its own
 //                 offset, the blurs and the crumple, around the box.
 //
+// And a mesh (`meshReach`) carries all of that with it: the style's reach is
+// counted from the frame as the mesh bends it. The check's overflow sees a mesh
+// only once it has measured ink outside the box, and a box it has not checked
+// yet, or one a pending fit left unmeasured, was culled where its bent picture
+// still showed.
+//
 // It used to be one pad on every side, and not the right one for any of them:
 // the ink's overhang past the right and the bottom was not in it at all (it was
 // measured from the box's corner), nor was text overflowing the box, so a box
@@ -64,19 +72,45 @@ export function boxPaintReach(box) {
   const s = box?.style;
   if (!s) return { l: 0, t: 0, r: 0, b: 0 };
   const st = styleReach(s, Math.max(0, box.w ?? 0), Math.max(0, box.h ?? 0));
+  const m = meshReach(box) ?? { l: 0, t: 0, r: 0, b: 0 };
   const o = box.review?.overflow ?? {};
   const side = (a, b) => Math.ceil(Math.max(a, Number(b) || 0)) + AA_PAD;
-  return { l: side(st.l, o.l), t: side(st.t, o.t), r: side(st.r, o.r), b: side(st.b, o.b) };
+  return { l: side(st.l + m.l, o.l), t: side(st.t + m.t, o.t), r: side(st.r + m.r, o.r), b: side(st.b + m.b, o.b) };
+}
+
+// How far a box's mesh carries its frame past each edge of the box's own, page
+// px, mirrored as the picture is (`paintBoxOnPage`): `{ l, t, r, b }`, none
+// below zero. Null for a box with no mesh that moves anything. From the mesh
+// alone, so it lays no text out either.
+export function meshReach(box) {
+  const s = box?.style;
+  const w = Math.max(0, box?.w ?? 0);
+  const h = Math.max(0, box?.h ?? 0);
+  if (!s || !warpActive(s, w, h)) return null;
+  const e = warpExtent({ warp: s.warp, w, h, ox: 0, oy: 0, cw: w, ch: h });
+  if (!e) return null;
+  let l = e.ox;
+  let t = e.oy;
+  let r = e.cw - e.ox - w;
+  let b = e.ch - e.oy - h;
+  if (s.flipH) [l, r] = [r, l];
+  if (s.flipV) [t, b] = [b, t];
+  return { l: Math.max(0, l), t: Math.max(0, t), r: Math.max(0, r), b: Math.max(0, b) };
 }
 
 // Vertical span of a box in unzoomed strip coordinates: what it paints (above),
 // turned with the box about its centre.
 export function boxPaintedStripSpan(box, ownerTop = 0) {
+  return turnedSpan(box, boxPaintReach(box), ownerTop);
+}
+
+// The box's frame grown by `e` past each edge, turned with the box about its
+// centre, as a vertical span on its page (moved down by `ownerTop`).
+export function turnedSpan(box, e, ownerTop = 0) {
   const y = box?.y ?? 0;
   const w = Math.max(0, box?.w ?? 0);
   const h = Math.max(0, box?.h ?? 0);
   const rot = box?.style?.rotation || 0;
-  const e = boxPaintReach(box);
   if (!rot) return { top: ownerTop + y - e.t, bottom: ownerTop + y + h + e.b };
   // The painted rectangle about the box's centre, (u, v); turned, a point's
   // height is u sin + v cos, which is lowest and highest at its corners.

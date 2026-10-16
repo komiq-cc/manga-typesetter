@@ -16,6 +16,7 @@
 //       straight { s, text, isCurve: false, lines, inks, shift, lineH, blockH,
 //                  blockY, anchorX, indents, lineX, baseY }
 //       curved   { s, text, isCurve: true, layout }
+//                (an SFX layout's glyphs also carry `sx`, `sy` and `skew`)
 //       `opts.cache: false` keeps the layout out of measure.js's memo.
 //   placeAtHeight(place, cand)       -> `place` moved to `cand`'s height, for a
 //       candidate that differs from the one it was made for in `y`/`h` only.
@@ -100,6 +101,7 @@ import { warpPlan } from './warp-paint.js';
 import { shapeBounds } from './balloon.js';
 import { neededHeight } from './typeset.js';
 import { normalizeFit, REVIEW_REASONS } from './data.js';
+import { sfxActive, sfxLayout } from './sfx.js';
 
 export { REVIEW_REASONS };
 
@@ -113,11 +115,13 @@ export function boxCandidate(box, text) {
   return { x: box.x, y: box.y, w: box.w, h: box.h, style: box.style, text, fit: box.fit ?? null };
 }
 
-// Glyph-by-glyph text - the bezier path, the closed ring, the arc - in the
-// precedence every renderer states (path > circle > arc). A style question only;
-// whether there is text to put on the curve is `placeBlock`'s.
+// Glyph-by-glyph text - SFX lettering, the bezier path, the closed ring, the arc
+// - in the precedence every renderer states (SFX > path > circle > arc). A style
+// question only; whether there is text to put on the curve is `placeBlock`'s.
+// SFX counts only while the Rust engine can lay it out (`sfxActive`); otherwise
+// the box is the plain text it falls back to.
 export function curvedStyle(s) {
-  return !!((s?.path?.on && (s.path.pts?.length ?? 0) >= 2) || s?.circle?.on || (s?.curve && s.curve !== 0));
+  return !!(sfxActive(s) || (s?.path?.on && (s.path.pts?.length ?? 0) >= 2) || s?.circle?.on || (s?.curve && s.curve !== 0));
 }
 
 // ===== auto and manual =====
@@ -198,6 +202,11 @@ export function placeBlock(cand, opts) {
   const size = s.size;
   const text = applyCase(String(cand.text ?? ''), s);
   const blank = text.trim() === '';
+  // SFX first. An engine that would not lay the letters out (`sfxLayout` says
+  // [] for it) leaves the box what the rest of its style makes it, rather than
+  // a curve with no letters.
+  const sfxGlyphs = !blank && sfxActive(s) ? sfxLayout(text, s, size) : null;
+  if (sfxGlyphs?.length) return { s, text, isCurve: true, layout: sfxGlyphs };
   const isPath = !blank && s.path?.on && (s.path.pts?.length ?? 0) >= 2;
   const isCircle = !blank && !isPath && s.circle?.on;
   if (isPath || isCircle || (!blank && s.curve && s.curve !== 0)) {
@@ -320,7 +329,8 @@ const unite = (r, x0, y0, x1, y1) =>
 //   the glyphs   each line's ink at its anchor and baseline. A curve's glyphs
 //                one by one: each glyph's own ink (`glyphInk` - centred on its
 //                anchor, on a middle baseline, the way every curved renderer
-//                draws it) turned by the glyph's rotation (OVF-6, below).
+//                draws it) turned by the glyph's rotation (OVF-6, below), and
+//                for SFX scaled and leaned by its own.
 //   the ink      the hand-drawn strokes, each one's reach with its tip
 //                (`inkBounds`), box-local from the box's corner.
 //   the strokes  outset by the outermost band's outer edge (`strokeExtent`) on
@@ -338,7 +348,8 @@ const unite = (r, x0, y0, x1, y1) =>
 //                the smear not at all.
 //   the crumple  roughening moves each pixel by at most half its `amount` along
 //                each axis: `amount` is feDisplacementMap's `scale`, the full
-//                span of the displacement (`roughenOffset`).
+//                span of the displacement (`roughenOffset`). Its `grit` is a
+//                second span on top, half of it each way.
 //   the mask     an include mask shows nothing outside its shapes, so the
 //                rectangle is cut to theirs. An exclude mask only takes pixels
 //                away from the inside of it, which a rectangle cannot say
@@ -370,7 +381,10 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
     const cy = cand.h / 2;
     for (const g of place.layout) {
       const k = glyphInk(g.ch, s, s.size);
-      if (k) r = unite(r, ...turnedInk(k, g.rot, cx + g.x, cy + g.y));
+      if (!k) continue;
+      // A drip pulls the placed letter's foot straight down the box (paint/mod.rs).
+      const [x0, y0, x1, y1] = turnedInk(k, g.rot, cx + g.x, cy + g.y, g.sx, g.sy, g.skew);
+      r = unite(r, x0, y0, x1, y1 + (g.drip > 0 ? g.drip : 0));
     }
   } else {
     r = linesInkRect(place);
@@ -400,7 +414,7 @@ export function boxInkRect(cand, place = placeBlock(cand)) {
     u = grow(u, mx, my);
   }
   if (s.roughen?.on) {
-    const d = Math.abs(Number(s.roughen.amount) || 0) / 2;
+    const d = (Math.abs(Number(s.roughen.amount) || 0) + Math.max(0, Number(s.roughen.grit) || 0)) / 2;
     u = grow(u, d, d);
   }
   if (clipActive(s.clip) && s.clip.mode === 'include') {
@@ -499,16 +513,28 @@ function clipToRect(poly, r) {
 // but only these rectangles say by how much.
 //
 // Canvas rotation, y down: (u, v) goes to (u cos - v sin, u sin + v cos).
-function turnedInk(k, rot, ax, ay) {
+//
+// An SFX glyph is also scaled (`sx`, `sy`) and leaned (`skew`, radians) about its
+// own centre before it is turned, in the engine's order (paint/mod.rs): the ink
+// rectangle is scaled, each corner slides sideways by `tan(skew)` times its
+// height above the centre (y points down, so a positive skew moves the top to
+// the right), and the result is turned as above. A glyph without the three is
+// the unscaled, unleaned one, to the bit.
+export function turnedInk(k, rot, ax, ay, sx = 1, sy = 1, skew = 0) {
   const a = Number(rot) || 0;
   const cos = Math.cos(a);
   const sin = Math.sin(a);
+  const kx = Number.isFinite(sx) ? sx : 1;
+  const ky = Number.isFinite(sy) ? sy : 1;
+  const lean = Number.isFinite(skew) ? Math.tan(skew) : 0;
   let x0 = Infinity;
   let y0 = Infinity;
   let x1 = -Infinity;
   let y1 = -Infinity;
-  for (const u of [k.left, k.right]) {
-    for (const v of [-k.ascent, k.descent]) {
+  for (const u0 of [k.left, k.right]) {
+    for (const v0 of [-k.ascent, k.descent]) {
+      const v = v0 * ky;
+      const u = u0 * kx - lean * v;
       const x = u * cos - v * sin;
       const y = u * sin + v * cos;
       if (x < x0) x0 = x;

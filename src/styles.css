@@ -1268,21 +1268,17 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .boot{ height:100vh; background:var(--bg); }
 
 /* ---------- floating panels ---------- */
-/* `fp-expand`/`fp-collapse` are shared by `.fpanel` and `.stub-ink` (the stub's
-   inner skin - see `.panel-stub` below for why the button itself never moves):
-   the base rule on each plays `fp-expand` (grows and fades in from the corner
-   they share) every time one mounts; an `.fp-exit` on the panel or on the stub
-   button switches it to `fp-collapse`, the same motion inverted, shrinking
-   toward that corner instead. Two
-   keyframes rather than one played in reverse - merely flipping
-   `animation-direction` on a class that has already settled into its `both`
-   fill does not reliably restart a finished animation, since nothing about
-   that changes `animation-name`; a genuinely new name is what forces the
-   browser to replay it. See FloatingPanel.svelte's `exitingPanel`/`exitingStub`
-   state for what keeps the outgoing element mounted long enough to play
-   `fp-collapse` - the two overlap, so the panel gathers into the icon while the
-   icon grows out of the same corner, rather than the user waiting out one
-   before the other begins.
+/* `fp-expand` plays on `.fpanel` and on `.stub-ink` (a hidden panel's tab -
+   see `.panel-stub` below) every time one mounts: it grows and fades in from
+   the top-left corner. An `.fp-exit` on the panel switches it to
+   `fp-collapse`, the same motion inverted, so a hidden panel gathers into its
+   corner while its tab grows in under the tool strip. Two keyframes rather
+   than one played in reverse - merely flipping `animation-direction` on a
+   class that has already settled into its `both` fill does not reliably
+   restart a finished animation, since nothing about that changes
+   `animation-name`; a genuinely new name is what forces the browser to replay
+   it. See FloatingPanel.svelte's `exitingPanel` for what keeps the outgoing
+   panel mounted long enough to play `fp-collapse`.
    `.fp-exit` also takes pointer events off whatever is leaving. That is not
    decoration: for the 420ms of the collapse the outgoing panel was still
    full-size and still live, so a click meant for the canvas landed on it, and
@@ -1326,40 +1322,32 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
   content:""; position:absolute; right:3px; bottom:3px; width:8px; height:8px;
   border-right:1.5px solid var(--t3); border-bottom:1.5px solid var(--t3);
 }
-/* An icon now, not a text pill (see FloatingPanel.svelte) - square rather
-   than the pill's rounded-full shape so the drag affordance reads as a
-   button, not a chip, at this size.
-   The button is a bare 34px hit target and nothing else: every visible part of
-   it, and the animation, live on `.stub-ink` inside. Hit-testing follows the
-   transformed box, so an animation on the button itself meant the control
-   started life 2.7px wide and only reached 34px when the gather finished -
-   untappable for most of the window in which the user is most likely to want
-   it. Mirrored by KEEP_STUB in src/lib/editor/panels.svelte.js, which clamps
-   the stub against this footprint rather than the panel's; the two numbers have
-   to agree or a stub parked in a corner is either yanked inward or left with
-   nothing to grab. */
+/* A hidden panel's tab under the tool strip (RailTools.svelte): one per
+   panel, each its own tab, in the inverse of the chrome's colour (`--accent`
+   flips with the theme) so it stands out against the dark art and the strip.
+   The button is a bare hit target the width of the strip and nothing else:
+   every visible part of it, and the animation, live on `.stub-ink` inside, so
+   the target is full size from the frame it appears. */
+.ed-rail-dock{ display:flex; flex-direction:column; gap:6px; }
 .panel-stub{
-  position:fixed; display:grid; place-items:center; width:34px; height:34px; padding:0;
+  display:grid; place-items:center; width:40px; height:40px; padding:0;
   border:none; background:transparent; cursor:pointer;
 }
 .stub-ink{
   width:100%; height:100%; display:grid; place-items:center;
-  background:var(--panel); border:1px solid var(--line2); border-radius:9px; box-shadow:var(--edge);
-  color:var(--t2);
+  background:var(--accent); color:var(--accent-fg); border-radius:9px; box-shadow:var(--edge);
   transform-origin:top left; animation:fp-expand .42s cubic-bezier(0,0,.2,1) both;
 }
-.panel-stub.fp-exit{ pointer-events:none; }
-.panel-stub.fp-exit .stub-ink{ animation:fp-collapse .42s cubic-bezier(.4,0,1,1) both; }
-.panel-stub:hover .stub-ink{ color:var(--text); border-color:var(--t3); }
+.panel-stub:hover .stub-ink{ background:color-mix(in srgb, var(--accent) 85%, var(--panel)); }
 .panel-stub svg{ width:18px; height:18px; }
 /* Every selector that sets an animation above has to be named here, at its own
    specificity or higher. A media query adds none of its own, so the previous
-   `.panel-stub, .fpanel` - (0,1,0) - lost to `.fpanel.fp-exit` and
-   `.panel-stub.fp-exit` at (0,2,0), and the collapse played in full for a user
+   `.panel-stub, .fpanel` - (0,1,0) - lost to `.fpanel.fp-exit` at (0,2,0),
+   and the collapse played in full for a user
    who had asked for no motion. The JS half (GATHER_MS → 0) cut it to about one
    frame, which is why this went unnoticed; it was never the guard. */
 @media (prefers-reduced-motion: reduce){
-  .fpanel, .fpanel.fp-exit, .stub-ink, .panel-stub.fp-exit .stub-ink{ animation:none }
+  .fpanel, .fpanel.fp-exit, .stub-ink{ animation:none }
 }
 
 /* ---------- editor: reference sidebar + tool rail ---------- */
@@ -1457,8 +1445,13 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
    hidden behind it. Kept the same in the visible state too, on purpose: one
    offset for both states is one fewer thing to keep in sync as either geometry
    moves. */
+/* The tool strip, and under it, apart from it, the tabs of the hidden floating
+   panels (`.ed-rail-dock`). */
+.ed-rail-stack{
+  position:absolute; left:2px; top:var(--chrome-top); display:flex; flex-direction:column; gap:12px;
+}
 .ed-rail-tools{
-  position:absolute; left:2px; top:var(--chrome-top); display:flex; flex-direction:column; gap:3px;
+  display:flex; flex-direction:column; gap:3px;
   background:color-mix(in srgb, var(--panel) 92%, transparent); border:1px solid var(--line);
   border-radius:9px; padding:4px; box-shadow:var(--edge); backdrop-filter:blur(6px);
   cursor:default;
@@ -1466,7 +1459,7 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 /* A vertical strip has no room for a tooltip centred underneath it - the rail
    sits at the window's left edge with the sidebar hidden, and a centred tip
    runs straight off it. These read to the side instead. */
-.ed-rail-tools [data-tip]:hover::after{
+.ed-rail-tools [data-tip]:hover::after,.ed-rail-dock [data-tip]:hover::after{
   left:calc(100% + 7px); top:50%; transform:translateY(-50%);
 }
 .ed-rail-tools button{

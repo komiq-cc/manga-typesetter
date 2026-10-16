@@ -118,7 +118,7 @@ const { undo, history, initHistory } =
   await import("./editor/history.svelte.js");
 const { switchHistoryPage } = await import("./editor/history-file.svelte.js");
 const { setPageSwitchHook, boxText, setChapterTypesetMode } = await import("./store.svelte.js");
-const { prefs, setPref } = await import("./prefs.svelte.js");
+await import("./prefs.svelte.js");
 const { typesetEnabled, setTypesetEnabled } = await import("./measure.js");
 const { boxCandidate, placeBlock } = await import("./contain.js");
 const { setLegacyTypeset } = await import("./data.js");
@@ -600,7 +600,6 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
   });
   afterEach(() => {
     metrics.on = false;
-    setPref("typeset", true);
     setTypesetEnabled(false);
     setLegacyTypeset("plain");
   });
@@ -613,8 +612,7 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
     await writeFile(join(c.dir, "chapter.json"), JSON.stringify(rec));
   };
 
-  it("breaks the lines and sizes the boxes the same when reopened with the preference off", async () => {
-    setPref("typeset", true);
+  it("breaks the lines and sizes the boxes the same when reopened", async () => {
     const { p, c } = await chapter();
     expect((await record(c)).typesetting).toEqual({ mode: "smart", version: 1 });
     await openChapter(p.id, c.id);
@@ -632,7 +630,6 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
 
     expect(await flushBeforeLeaving("editor")).toBe(true);
     closeChapter();
-    setPref("typeset", false);
     await openChapter(p.id, c.id);
     expect(app.typesetting.mode).toBe("smart");
     expect(typesetEnabled()).toBe(true);
@@ -666,40 +663,79 @@ describe("the chapter's typesetting survives the trip to disk and back", () => {
     closeChapter();
   });
 
-  it("opens a chapter from before the field plain where the beta was never saved on, whatever the default", async () => {
-    const { p, c } = await chapter();
-    await withField(c, undefined);
-    setLegacyTypeset("plain");
-    setPref("typeset", true);
-    await openChapter(p.id, c.id);
-    expect(app.typesetting).toEqual({ mode: "plain", version: 1 });
-    expect(typesetEnabled()).toBe(false);
-    closeChapter();
-  });
+  // The line breaking is each box's. A chapter laid out with the old switch
+  // off - its field says so, or it has none and this machine had the beta off -
+  // opens 'smart' with every box given the plain wrap it was drawn with: the
+  // same breaks and the same boxes as the plain chapter, and nothing written.
+  for (const [name, field, legacy] of [
+    ["saved plain", { mode: "plain", version: 1 }, "smart"],
+    ["from before the field, laid out plain here", undefined, "plain"],
+  ]) {
+    it(`opens a chapter ${name} as smart, with its boxes plain, moving and writing nothing`, async () => {
+      const { p, c } = await chapter();
+      await openChapter(p.id, c.id);
+      addEmptyBox(200, 300);
+      endEdit(LONG);
+      settleEdits();
+      expect(await flushBeforeLeaving("editor")).toBe(true);
+      closeChapter();
+      await withField(c, field);
+      setLegacyTypeset(legacy);
+      const onDisk = await readFile(join(c.dir, "chapter.json"), "utf8");
+      // What the old switch drew: the chapter opened plain, wholesale.
+      await openChapter(p.id, c.id);
+      setChapterTypesetMode("plain");
+      const plainBreaks = breaks(app.pages[0]);
+      const plainBoxes = heights(app.pages[0]);
+      closeChapter();
+      await writeFile(join(c.dir, "chapter.json"), onDisk);
+
+      await openChapter(p.id, c.id);
+      expect(app.typesetting).toEqual({ mode: "smart", version: 1 });
+      expect(typesetEnabled()).toBe(true);
+      const pg = app.pages[0];
+      expect(pg.boxes[0].style).toMatchObject({ shape: "off", hyphenate: false });
+      // The balloon is the limit a solved box grows to, which the old switch
+      // never turned off: it stays as the file has it.
+      expect(pg.boxes[0].style.balloon).toBe(JSON.parse(onDisk).pages[0].boxes[0].style.balloon);
+      expect(breaks(pg)).toEqual(plainBreaks);
+      expect(heights(pg)).toEqual(plainBoxes);
+      expect(app.saved).toBe(true);
+      closeChapter();
+      expect(await readFile(join(c.dir, "chapter.json"), "utf8")).toBe(onDisk);
+    });
+  }
 
   it("lets the field win over this machine's answer whenever it is there", async () => {
     const { p, c } = await chapter();
+    await openChapter(p.id, c.id);
+    addEmptyBox(200, 300);
+    endEdit(LONG);
+    settleEdits();
+    expect(await flushBeforeLeaving("editor")).toBe(true);
+    closeChapter();
+    // The field says plain and this machine says smart: the boxes open plain.
     setLegacyTypeset("smart");
     await withField(c, { mode: "plain", version: 1 });
     await openChapter(p.id, c.id);
-    expect(app.typesetting.mode).toBe("plain");
+    expect(app.typesetting.mode).toBe("smart");
+    expect(app.pages[0].boxes[0].style.shape).toBe("off");
     closeChapter();
+    // The field says smart and this machine says plain: the boxes keep theirs.
     setLegacyTypeset("plain");
-    setPref("typeset", false);
     await withField(c, { mode: "smart", version: 1 });
     await openChapter(p.id, c.id);
     expect(app.typesetting.mode).toBe("smart");
+    expect(app.pages[0].boxes[0].style.shape).toBe("auto");
     closeChapter();
   });
 
-  it("saves the switch made in Settings with the chapter", async () => {
+  it("saves the chapter's breaker, switched wholesale, with the chapter", async () => {
     const { p, c } = await chapter();
     await openChapter(p.id, c.id);
     expect(app.typesetting.mode).toBe("smart");
     setChapterTypesetMode("plain");
     expect(typesetEnabled()).toBe(false);
-    // A preference is not the chapter's switch.
-    expect(prefs.typeset).toBe(true);
     expect(await flushBeforeLeaving("editor")).toBe(true);
     closeChapter();
     expect((await record(c)).typesetting).toEqual({ mode: "plain", version: 1 });

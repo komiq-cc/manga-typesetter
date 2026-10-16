@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import { rustEngine } from '../test/rust-engine.js';
-import { renderBoxTexture, textureScale } from './exporter.js';
+import { renderBoxTexture, renderBox, textureScale } from './exporter.js';
 import { textEngine, setTextEngine, glyphPainter, setGlyphPainter } from './text-engine/index.js';
 import { createRustGlyphPainter } from './text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
@@ -208,11 +208,14 @@ describe('the longest side of one texture', () => {
   });
 
   it('lowers the scale until the longer side fits, whichever side that is, and never a pixel over', () => {
-    for (const [cw, ch, scale] of [[7024, 108, 3], [108, 7024, 3], [5461.4, 30, 3.0001], [16385, 10, 1], [9999.99, 7, 6.6]]) {
+    for (const [cw, ch, scale] of [[7024, 108, 3], [108, 7024, 3], [5461.4, 30, 3.0001], [16385, 10, 1], [9999.99, 7, 6.6], [8208, 68, 2]]) {
       const ss = textureScale(cw, ch, scale, Infinity, 16384);
       expect(ss).toBeLessThan(scale);
       // The canvas is cut to whole pixels outwards (`renderBoxTexture`).
       expect(Math.ceil(Math.max(cw, ch) * ss)).toBeLessThanOrEqual(16384);
+      // And so is the painter's surface, from the transform the canvas gives
+      // back - in single precision, under Skia.
+      expect(Math.ceil(Math.max(cw, ch) * Math.fround(ss))).toBeLessThanOrEqual(16384);
       // To the limit and not far under it.
       expect(Math.max(cw, ch) * ss).toBeGreaterThan(16383);
     }
@@ -239,6 +242,24 @@ describe('the longest side of one texture', () => {
     expect([r.ox, r.oy]).toEqual([full.ox, full.oy]);
     expect(r.cw).toBeCloseTo(full.cw, 0);
     expect(r.ch).toBeCloseTo(full.ch, 0);
+  });
+});
+
+describe('the export paints within the painter\'s limits', () => {
+  // The editor's picture is made inside the painter's longest side, so a box
+  // it shows has to be one the file can have too: at the export's 2 this line
+  // is 16,400 px long and the engine refuses it with a throw that stopped the
+  // whole page.
+  it('lowers the resolution of a box too long for the painter, and only of that box', () => {
+    const long = { ...boxOf({}, 'SMALL TEXT'), w: 8200, h: 60 };
+    const r = renderBox(long, pageOf(long), null);
+    expect(r.canvas.width).toBeLessThanOrEqual(glyphPainter().maxSide);
+    expect(r.cw).toBeGreaterThan(8200);
+    const box = boxOf();
+    const a = renderBox(box, pageOf(box), null);
+    const b = paint(box);
+    expect([a.canvas.width, a.canvas.height, a.ox, a.oy]).toEqual([b.canvas.width, b.canvas.height, b.ox, b.oy]);
+    expect(Buffer.from(pixels(a).data).equals(Buffer.from(pixels(b).data))).toBe(true);
   });
 });
 

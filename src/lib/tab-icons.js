@@ -32,6 +32,11 @@ export const iconGradientLinear = wrap(
   '<rect x="3" y="3" width="14" height="14" rx="2"/><path d="M4.5 15.5 15.5 4.5" stroke-width="1.2"/><path d="M7.5 16.5 16.5 7.5" stroke-width="1.2"/><path d="M3.5 12.5 12.5 3.5" stroke-width="1.2"/>',
 );
 
+// No fill: an empty swatch struck through, the mark every paint program uses.
+export const iconNoFill = wrap(
+  '<rect x="3" y="3" width="14" height="14" rx="2"/><path d="M4.2 15.8 15.8 4.2"/>',
+);
+
 // Radial gradient: rings out from a centre.
 export const iconGradientRadial = wrap(
   '<rect x="3" y="3" width="14" height="14" rx="2"/><circle cx="10" cy="10" r="1.4"/><circle cx="10" cy="10" r="4.4" stroke-width="1.2"/>',
@@ -87,7 +92,12 @@ export const iconEffectEdges = wrap('<path d="M3 12l2.5-3 2 3 2.5-4 2 4 2.5-3 2 
 // A circle partly overlapping a rect: balloon / mask clip.
 export const iconEffectMask = wrap('<rect x="3" y="5" width="10" height="10" rx="1.5"/><circle cx="13" cy="9" r="4.5"/>');
 
+// Three letters-like bars, each one higher than the last: lettering whose
+// letters step up the line.
+export const iconEffectSfx = wrap('<path d="M4.5 16v-3.5"/><path d="M10 16V9.5"/><path d="M15.5 16V5"/>');
+
 export const effectsSubTabIcons = {
+  sfx: iconEffectSfx,
   stroke: iconEffectStroke,
   shadow: iconEffectShadow,
   warp: iconEffectWarp,

@@ -1151,6 +1151,7 @@ const BULK_VALUES = () => ({
   lineHeight: 1.8,
   letterSpacing: 3,
   color: '#123456',
+  noFill: true,
   opacity: 0.33,
   // Three stops rather than the default two, and one of them part-transparent:
   // a bulk edit moves the WHOLE gradient, so a stop list of a different length
@@ -1186,6 +1187,7 @@ const BULK_VALUES = () => ({
   'roughen.amount': 11,
   'roughen.detail': 0.11,
   'roughen.seed': 42,
+  'roughen.grit': 1.5,
   shape: 'off',
   minOrphan: 6,
   hyphenate: false,
@@ -1247,10 +1249,12 @@ describe('the bulk edit mask', () => {
     // gradient, smear or stroke list, never one field of one stroke. `path`,
     // `ink` and `warp` are box-local geometry - drawn against this box, by
     // hand, in this box's own px - so they stay the Inspector's along with
-    // x/y/w/h. Every other group is still one row per field.
+    // x/y/w/h. `sfx` is the Rust engine's per-letter lettering and has no row
+    // in the panel (its moves are tuned against one box's text). Every other
+    // group is still one row per field.
     const WHOLE = new Set(BULK_WHOLE_LEAVES);
     const leaves = Object.entries(defaultStyle())
-      .filter(([k]) => k !== 'path' && k !== 'ink' && k !== 'warp')
+      .filter(([k]) => k !== 'path' && k !== 'ink' && k !== 'warp' && k !== 'sfx')
       .flatMap(([k, v]) =>
         v && typeof v === 'object' && !WHOLE.has(k) ? Object.keys(v).map((f) => `${k}.${f}`) : [k],
       );
@@ -3677,7 +3681,6 @@ describe('the typesetting defaults a new box is born with', () => {
   const withLines = (lines) => [{ id: 1, w: 800, h: 1200, lines, boxes: [] }];
   const DEFAULTS = {
     defaultAutoHeight: true,
-    defaultShape: true,
     defaultBlockShape: 'auto',
     defaultHyphenate: true,
     defaultBalloon: true,
@@ -3697,22 +3700,31 @@ describe('the typesetting defaults a new box is born with', () => {
 
   it('seeds a typed box from the preferences', () => {
     setPref('defaultAutoHeight', false);
-    setPref('defaultShape', false);
     setPref('defaultMinOrphan', 6);
     const s = byId(addEmptyBox(100, 100)).style;
     expect(s.autoHeight).toBe(false);
-    expect(s.shape).toBe('off');
+    expect(s.shape).toBe('auto');
+    expect(s.hyphenate).toBe(true);
     expect(s.minOrphan).toBe(6);
   });
 
-  // BRK-3: the block shape rides on the shaped switch - it names which shaped
-  // breaking a box gets, and a box that is not shaped at all has no shape.
+  // The line breaking's one switch, "Hyphenate long words": off is the plain
+  // wrap, whatever the settings under it say.
+  it('seeds the plain wrap with the line breaking switched off', () => {
+    setPref('defaultHyphenate', false);
+    expect(byId(addEmptyBox(100, 100)).style).toMatchObject({ shape: 'off', hyphenate: false, balloon: false });
+    setPref('defaultHyphenate', true);
+    expect(byId(addEmptyBox(100, 300)).style).toMatchObject({ shape: 'auto', hyphenate: true, balloon: true });
+  });
+
+  // BRK-3: the block shape rides on the line breaking switch - it names which
+  // shaped breaking a box gets, and a box that is not shaped at all has no shape.
   it('seeds the block shape, and plain wrapping still wins over it', () => {
     setPref('defaultBlockShape', 'oval');
     expect(byId(addEmptyBox(100, 100)).style.shape).toBe('oval');
     setPref('defaultBlockShape', 'hexagon');
     expect(byId(addEmptyBox(100, 300)).style.shape).toBe('oval');
-    setPref('defaultShape', false);
+    setPref('defaultHyphenate', false);
     expect(byId(addEmptyBox(100, 500)).style.shape).toBe('off');
   });
 
@@ -3906,7 +3918,6 @@ describe('optional previous-box style inheritance', () => {
   afterEach(() => {
     setPref('inheritBoxStyle', true);
     setPref('defaultAutoHeight', true);
-    setPref('defaultShape', true);
     setPref('defaultHyphenate', true);
     unbindTags();
   });
@@ -3967,7 +3978,6 @@ describe('optional previous-box style inheritance', () => {
     styleSource(place(1));
     setPref('inheritBoxStyle', false);
     setPref('defaultAutoHeight', false);
-    setPref('defaultShape', false);
     setPref('defaultHyphenate', false);
 
     for (const b of [place(3), byId(addEmptyBox(500, 500))]) {

@@ -20,16 +20,21 @@
 //! even tone here, where on a canvas it is darker wherever the strokes of
 //! two neighbouring glyphs or lines overlap.
 
+mod blur;
+mod boxjob;
 pub(crate) mod budget;
 mod compose;
 mod geom;
 mod job;
 mod outline;
+mod pattern;
 mod raster;
+mod roughen;
 mod scene;
 mod shade;
 mod shape;
 mod stroke;
+mod warp;
 
 #[cfg(any(
     feature = "raster-tiny-skia",
@@ -40,15 +45,23 @@ mod stroke;
 pub mod compare;
 
 use geom::positive;
+pub use boxjob::{
+    decode_box, paint_box, paint_box_with, BoxRequest, Clip, ClipMode, ClipShape, Shadow, Tap,
+    BOX_MAGIC, BOX_WIRE_VERSION,
+};
 pub use geom::{Affine, IBox, Polys, Pt};
 pub use job::{
     decode, Align, Band, Fill, Job, Request, Rgba, Run, Stop, Tile, MAGIC, MAX_WEIGHT, WIRE_VERSION,
 };
 pub use outline::FLATTEN_TOLERANCE;
+pub use pattern::{tile as pattern_tile, Kind as PatternKind, MAX_TILE_SIDE};
 pub use raster::{Coverage, Exact, Part, Rasterizer, STRIP_ROWS};
+pub use roughen::Roughen;
 pub use scene::Scene;
 pub use shape::{align_offset, curved_origin, shape_run, Placed, ShapedRun};
 pub use stroke::{Join, Side};
+pub use warp::{Mesh, MAX_MESH_SIDE};
+use warp::Cut;
 
 use compose::{compose, Layer};
 use shade::Shader;
@@ -119,6 +132,14 @@ pub struct Raster {
     pub data: Vec<u8>,
 }
 
+/// What bends every outline of a job, after the glyph's own drip: the box's
+/// roughening, stated in the unbent box, and then its mesh.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Bends<'a> {
+    pub rough: Option<&'a roughen::RoughMap>,
+    pub mesh: Option<&'a warp::MeshMap<'a>>,
+}
+
 /// One glyph's outline in job space, and what a synthesised bold does to it.
 struct GlyphPolys {
     polys: Polys,
@@ -126,6 +147,59 @@ struct GlyphPolys {
     bold: f64,
     /// The step a smeared bold is drawn over, in job space.
     smear: Option<Pt>,
+    /// The letter's drip: the lower half of this outline pulled down.
+    drip: Option<warp::Drip>,
+}
+
+impl GlyphPolys {
+    /// `polys`, which are this glyph's contours as they are or moved, where
+    /// they are painted: through the letter's drip, then the box's
+    /// roughening, then its mesh, then `transform`. The bends come after the
+    /// outline is moved, so a band bends with the letter it is a stroke of.
+    fn placed(
+        &self,
+        polys: &Polys,
+        bends: Bends<'_>,
+        transform: &Affine,
+        tol: f64,
+    ) -> Result<Polys, Error> {
+        let Some(bounds) = polys.bounds() else {
+            return Ok(polys.map(transform));
+        };
+        let (drip, rough, mesh) = (self.drip, bends.rough, bends.mesh);
+        let cuts = [
+            drip.map(|d| d.cut(tol)),
+            rough.map(|r| r.cut(tol)),
+            mesh.map(|m| m.cut(bounds, tol)),
+        ];
+        let mut cuts = cuts.into_iter().flatten();
+        // Nothing bends: the numbers a job always had.
+        let Some(first) = cuts.next() else {
+            return Ok(polys.map(transform));
+        };
+        // One map is cut as that map asks; one after another, by the finer
+        // cut of them all.
+        let cut = cuts.fold(first, Cut::both);
+        let map = |p: Pt| {
+            let p = drip.map_or(p, |d| d.at(p));
+            let p = rough.map_or(p, |r| r.at(p));
+            mesh.map_or(p, |m| m.at(p))
+        };
+        Ok(warp::bend(polys, map, cut, tol)?.map(transform))
+    }
+
+    /// Whether the mesh turns this glyph over.
+    fn mirrored(&self, mesh: Option<&warp::MeshMap<'_>>) -> bool {
+        mesh.is_some_and(|m| self.tangent(m).det() < 0.0)
+    }
+
+    /// The affine map that is the mesh over this glyph: where its middle
+    /// goes, and how the plane is stretched and turned across it.
+    fn tangent(&self, mesh: &warp::MeshMap<'_>) -> Affine {
+        self.polys
+            .bounds()
+            .map_or(Affine::IDENTITY, |b| mesh.tangent_over(b))
+    }
 }
 
 /// The outlines of a job's glyphs, and the shapes made from them.
@@ -136,13 +210,17 @@ pub(crate) struct Glyphs {
 
 impl Glyphs {
     /// Adds the glyphs of a shaped run. `frame` maps the run's own frame
-    /// (origin at its start on the baseline, y down) to job space.
+    /// (origin at its start on the baseline, y down) to job space. `drip`
+    /// pulls the lower half of every glyph of the run down by that many job
+    /// units: from the middle of the glyph's own height, as it stands in job
+    /// space, to its foot. Zero for none.
     pub(crate) fn add_run(
         &mut self,
         engine: &Engine,
         run: &ShapedRun,
         frame: &Affine,
         bold_draw: BoldDraw,
+        drip: f64,
         tol: f64,
     ) -> Result<(), Error> {
         for g in &run.glyphs {
@@ -172,7 +250,23 @@ impl Glyphs {
                 }
             };
             budget::check()?;
-            budget::push(&mut self.items, GlyphPolys { polys, bold, smear })?;
+            let drip = match polys.bounds() {
+                Some((_, top, _, bottom)) if positive(drip) && bottom > top => Some(warp::Drip {
+                    mid: (top + bottom) / 2.0,
+                    bottom,
+                    pull: drip,
+                }),
+                _ => None,
+            };
+            budget::push(
+                &mut self.items,
+                GlyphPolys {
+                    polys,
+                    bold,
+                    smear,
+                    drip,
+                },
+            )?;
         }
         Ok(())
     }
@@ -239,20 +333,21 @@ impl Glyphs {
     /// the rasteriser moved both ways and the rasteriser tells grown from
     /// shrunk by the sign of what it sums (`raster.rs`). The sides are the
     /// rasteriser's, in device pixels: a transform that mirrors turns what
-    /// was moved to the right in job units into what is on the left there.
+    /// was moved to the right in job units into what is on the left there,
+    /// and so does a mesh that turns a glyph over.
+    ///
+    /// `bends` are the box's roughening and its warp. They and a glyph's own
+    /// drip bend the outline after it is moved and before the transform
+    /// (`GlyphPolys::placed`).
     fn parts(
         &self,
         range: core::ops::Range<usize>,
         extra: f64,
         ring: bool,
+        bends: Bends<'_>,
         transform: &Affine,
         tol: f64,
     ) -> Result<budget::Buffer<Part>, Error> {
-        let (right, left) = if transform.det() < 0.0 {
-            (Side::Left, Side::Right)
-        } else {
-            (Side::Right, Side::Left)
-        };
         let mut parts = budget::Buffer::new();
         for g in &self.items[range] {
             let extra = extra.max(0.0);
@@ -260,14 +355,20 @@ impl Glyphs {
                 // Nothing moves the outline: no band, and the fill as
                 // the font drew it.
                 if !ring {
-                    budget::push(&mut parts, Part::plain(g.polys.map(transform)))?;
+                    let polys = g.placed(&g.polys, bends, transform, tol)?;
+                    budget::push(&mut parts, Part::plain(polys))?;
                 }
                 budget::check()?;
                 continue;
             }
+            let (right, left) = if (transform.det() < 0.0) != g.mirrored(bends.mesh) {
+                (Side::Left, Side::Right)
+            } else {
+                (Side::Right, Side::Left)
+            };
             let part = Part {
-                right: Self::moved(g, extra, right, tol).map(transform),
-                left: Some(Self::moved(g, extra, left, tol).map(transform)),
+                right: g.placed(&Self::moved(g, extra, right, tol), bends, transform, tol)?,
+                left: Some(g.placed(&Self::moved(g, extra, left, tol), bends, transform, tol)?),
                 ring,
             };
             budget::check()?;
@@ -284,6 +385,8 @@ struct Planned<'a> {
     bx: IBox,
     shader: Shader<'a>,
     alpha: f32,
+    /// The layer takes away what is under it (`Layer::erase`).
+    erase: bool,
 }
 
 fn plan<'a>(parts: budget::Buffer<Part>, shader: Shader<'a>, alpha: f64) -> Option<Planned<'a>> {
@@ -304,6 +407,7 @@ fn plan<'a>(parts: budget::Buffer<Part>, shader: Shader<'a>, alpha: f64) -> Opti
         bx,
         shader,
         alpha: alpha.min(1.0) as f32,
+        erase: false,
     })
 }
 
@@ -331,11 +435,23 @@ fn finish(
                     cov,
                     shader: p.shader,
                     alpha: p.alpha,
+                    erase: p.erase,
                 },
             )?;
         }
     }
     compose(&mut layers, surface)
+}
+
+/// How much finer than the transform asks an outline bent by `mesh` is
+/// flattened: by the most the mesh enlarges it, and never coarser. A mesh
+/// that only moves, turns or shrinks what it bends is flattened as if it were
+/// not there, to the byte.
+pub(crate) fn magnified(mesh: Option<&warp::MeshMap<'_>>) -> f64 {
+    match mesh.map(warp::MeshMap::stretch) {
+        Some(k) if k > 1.0 + 1e-6 => k,
+        _ => 1.0,
+    }
 }
 
 /// Paints one job with the exact-area rasteriser.
@@ -369,8 +485,17 @@ pub fn paint_job_with(
     if !transform.is_finite() || transform.invert().is_none() || !positive(face.size) {
         return Ok(None);
     }
-    // The flattening tolerance is a distance in device pixels.
-    let tol = FLATTEN_TOLERANCE / transform.max_scale();
+    // The box's mesh, when it moves anything.
+    let mesh = match &job.mesh {
+        Some(m) => m.map()?,
+        None => None,
+    };
+    let mesh = mesh.as_ref();
+    // The flattening tolerance is a distance in device pixels. The outline
+    // is flattened before the mesh bends it, and a mesh that enlarges it
+    // enlarges each chord's distance from its curve as much as a transform
+    // would, so it is flattened finer by that too (`MeshMap::stretch`).
+    let tol = FLATTEN_TOLERANCE / (transform.max_scale() * magnified(mesh));
     // The weight is stated in device pixels and applied in job units, where
     // every other pen is: divided by the scale that keeps areas, which is
     // the scale itself for every transform that does not stretch one way
@@ -402,20 +527,44 @@ pub fn paint_job_with(
         } else {
             Affine::IDENTITY
         };
+        // The glyph's own frame is the fill's, leaned and scaled; the fill
+        // stays in `frame` so a gradient is not stretched per letter. A run
+        // that is not scaled or leaned skips the product so its numbers are
+        // the ones a plain curved run always had.
+        // The outline is flattened after it is placed (`FlattenPen::map`),
+        // so a bigger letter gets its finer chords from the frame itself.
+        let glyph_frame = if job.curved && (run.sx, run.sy, run.skew) != (1.0, 1.0, 0.0) {
+            // skewX(skew) * scale(sx, sy): y points down, so a positive
+            // skew moves the top of the letter right.
+            let lean = Affine([1.0, 0.0, -run.skew.tan(), 1.0, 0.0, 0.0]);
+            frame.after(&lean.after(&Affine::scale(run.sx, run.sy)))
+        } else {
+            frame
+        };
         let start = if job.curved {
             let (dx, dy) = curved_origin(engine, face, shaped.advance)?;
-            frame.after(&Affine::translate(dx, dy))
+            glyph_frame.after(&Affine::translate(dx, dy))
         } else {
             Affine::translate(run.x + align_offset(job.align, shaped.advance), run.y)
         };
         let from = glyphs.len();
-        glyphs.add_run(engine, &shaped, &start, bold_draw, tol)?;
+        let drip = if job.curved { run.drip } else { 0.0 };
+        glyphs.add_run(engine, &shaped, &start, bold_draw, drip, tol)?;
         budget::push(&mut runs, (from..glyphs.len(), frame))?;
     }
     let all = 0..glyphs.len();
     if all.is_empty() {
         return Ok(None);
     }
+    // And its roughening, which is stated in the box before the mesh bends it.
+    let rough = match &job.roughen {
+        Some(r) => r.map()?,
+        None => None,
+    };
+    let bends = Bends {
+        rough: rough.as_ref(),
+        mesh,
+    };
 
     let mut planned: budget::Buffer<Planned<'_>> = budget::Buffer::new();
     if let Some(color) = job.silhouette {
@@ -423,11 +572,17 @@ pub fn paint_job_with(
         // half that band's pen, not a stroke laid over a fill. A band is
         // not moved by the weight, so the shape is as wide as the wider of
         // the heavier fill and the band.
+        //
+        // With no fill the glyphs are cut out of it below, so it is the band
+        // alone that makes it: no band, no shape.
         let extra = job.bands.first().map_or(0.0, |b| (b.line / 2.0).max(0.0));
-        let parts = glyphs.parts(all.clone(), extra.max(weight), false, transform, tol)?;
-        let shader = Shader::new(&Fill::Solid(color), transform, tiles);
-        if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
-            budget::push(&mut planned, p)?;
+        if !job.no_fill || positive(extra) {
+            let grown = if job.no_fill { extra } else { extra.max(weight) };
+            let parts = glyphs.parts(all.clone(), grown, false, bends, transform, tol)?;
+            let shader = Shader::new(&Fill::Solid(color), transform, tiles);
+            if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+                budget::push(&mut planned, p)?;
+            }
         }
     } else {
         for band in &job.bands {
@@ -438,7 +593,7 @@ pub fn paint_job_with(
             // weight is there to follow, strokes a glyph exactly on its
             // outline (P5B-REPORT.md).
             let reach = band.line / 2.0;
-            let parts = glyphs.parts(all.clone(), reach, true, transform, tol)?;
+            let parts = glyphs.parts(all.clone(), reach, true, bends, transform, tol)?;
             let shader = Shader::new(&Fill::Solid(band.color), transform, tiles);
             if let Some(p) = shader.and_then(|s| plan(parts, s, band.opacity)) {
                 budget::push(&mut planned, p)?;
@@ -453,6 +608,7 @@ pub fn paint_job_with(
             // A run's own fill is stated in the run's frame, the job's in
             // the job's.
             let (fill, frame) = match (&run.fill, &job.fill) {
+                _ if job.no_fill => continue,
                 (Some(fill), _) => (fill, *frame),
                 (None, Some(fill)) => (fill, Affine::IDENTITY),
                 (None, None) => continue,
@@ -471,16 +627,54 @@ pub fn paint_job_with(
             if range.is_empty() {
                 continue;
             }
-            let parts = glyphs.parts(range, weight, false, transform, tol)?;
-            let shader = Shader::new(fill, &transform.after(&frame), tiles);
-            if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
-                budget::push(&mut planned, p)?;
+            // A gradient or a pattern is bent with the letters it fills, as
+            // it was when the mesh was run over the finished picture: each
+            // glyph is a layer of its own, and its fill is stated in the
+            // frame the mesh carries that glyph's own place to (the map's
+            // tangent there, which within one letter is the map). A flat
+            // colour is the same wherever it is bent to.
+            let bent = mesh.filter(|_| !matches!(fill, Fill::Solid(_)));
+            let Some(m) = bent else {
+                let parts = glyphs.parts(range, weight, false, bends, transform, tol)?;
+                let shader = Shader::new(fill, &transform.after(&frame), tiles);
+                if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+                    budget::push(&mut planned, p)?;
+                }
+                continue;
+            };
+            for g in range {
+                let parts = glyphs.parts(g..g + 1, weight, false, bends, transform, tol)?;
+                let carried = glyphs.items[g].tangent(m).after(&frame);
+                let shader = Shader::new(fill, &transform.after(&carried), tiles);
+                if let Some(p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+                    budget::push(&mut planned, p)?;
+                }
             }
         }
     }
 
+    // No fill: the glyphs, as heavy as they would have been filled, are taken
+    // out of everything laid down so far. A canvas does it with
+    // `destination-out` after the bands (browser-painter.js). The cut is last
+    // and reaches no further than the glyphs, which the bands already cover,
+    // so it adds nothing to the surface; with nothing under it, it is not made.
+    if job.no_fill && !planned.is_empty() {
+        const OPAQUE: Fill = Fill::Solid(Rgba([0, 0, 0, 255]));
+        let parts = glyphs.parts(all.clone(), weight, false, bends, transform, tol)?;
+        let shader = Shader::new(&OPAQUE, transform, tiles);
+        if let Some(mut p) = shader.and_then(|s| plan(parts, s, 1.0)) {
+            p.erase = true;
+            budget::push(&mut planned, p)?;
+        }
+    }
+
     budget::check()?;
-    let Some(surface) = planned.iter().map(|p| p.bx).reduce(|a, b| a.union(&b)) else {
+    let Some(surface) = planned
+        .iter()
+        .filter(|p| !p.erase)
+        .map(|p| p.bx)
+        .reduce(|a, b| a.union(&b))
+    else {
         return Ok(None);
     };
     let (width, height) = (surface.width(), surface.height());
@@ -524,6 +718,7 @@ mod hardening_tests {
                     &run,
                     &Affine::IDENTITY,
                     BoldDraw::Outset,
+                    0.0,
                     FLATTEN_TOLERANCE
                 ),
                 Err(Error::BadSpec)
@@ -585,6 +780,7 @@ mod hardening_tests {
             },
             shader: Shader::new(&fill, &Affine::IDENTITY, &[]).unwrap(),
             alpha: 1.,
+            erase: false,
         };
         let planned = [p].into_iter().collect();
         let _scope = budget::Scope::new();
@@ -625,7 +821,10 @@ mod hardening_tests {
                 letter_spacing: 0.,
                 bands: vec![],
                 silhouette: None,
+                no_fill: false,
                 fill: Some(Fill::Solid(Rgba([0, 0, 0, 255]))),
+                mesh: None,
+                roughen: None,
                 runs: ["III".to_owned(), "I".repeat(262_145)]
                     .into_iter()
                     .map(|text| job::Run {
@@ -633,6 +832,10 @@ mod hardening_tests {
                         x: 10.,
                         y: 50.,
                         rot: 0.,
+                        sx: 1.,
+                        sy: 1.,
+                        skew: 0.,
+                        drip: 0.,
                         fill: None,
                     })
                     .collect(),

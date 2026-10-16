@@ -13,7 +13,7 @@
 // strip pixels, which is the space `stripOffsets(pages)` answers in at zoom 1 -
 // the same space the stitched export canvas works in.
 
-import { stripOffsets } from './strip.js';
+import { stripOffsets, boxPaintedStripSpan, meshReach, turnedSpan } from './strip.js';
 
 // How much clear space a cut must leave above and below any lettering. A cut
 // that grazes a box's edge is as bad as one through it: the glyph outlines,
@@ -60,6 +60,38 @@ export function boxSpanY(box) {
   return { top: cy - half, bottom: cy + half };
 }
 
+// The stretch of the strip a box keeps a cut out of, in its own page's
+// coordinates: its frame and the pad around it (`boxSpanY`), and past that
+// anything it paints further. The pad is an allowance for paint over the
+// frame's edge, and a box can paint further than any allowance: a mesh carries
+// the whole picture off its frame - a box at 7800 bent 100 px down painted
+// across a cut planned clear at 8000 - and so can a long shadow, a smear, or
+// glyphs the check measured outside the box. So the band also holds what the
+// box paints as the slices pick their boxes by it (`boxPaintedStripSpan`: the
+// style's reach and the overflow the check measured), and the frame carried
+// through the mesh (`warpExtent`) with the pad around that. A box whose paint
+// is inside its pad keeps the band it always had.
+export function boxCutSpan(box, pad = CUT_PAD) {
+  const frame = boxSpanY(box);
+  const painted = boxPaintedStripSpan(box);
+  let top = Math.min(frame.top - pad, painted.top);
+  let bottom = Math.max(frame.bottom + pad, painted.bottom);
+  const bent = meshSpanY(box);
+  if (bent) {
+    top = Math.min(top, bent.top - pad);
+    bottom = Math.max(bottom, bent.bottom + pad);
+  }
+  return { top, bottom };
+}
+
+// A warped box's frame as the mesh leaves it, mirrored and turned about the
+// box's centre as the picture is (`meshReach`), as a vertical span on its
+// page. Null for a box with no mesh that moves anything.
+function meshSpanY(box) {
+  const m = meshReach(box);
+  return m ? turnedSpan(box, m) : null;
+}
+
 // Every stretch of the strip a cut may not land in, in strip coordinates, sorted
 // and merged so that no two of them touch or overlap.
 //
@@ -73,8 +105,8 @@ export function forbiddenBands(pages, pad = CUT_PAD) {
   const raw = [];
   (pages ?? []).forEach((p, i) => {
     for (const box of p?.boxes ?? []) {
-      const { top, bottom } = boxSpanY(box);
-      raw.push({ top: tops[i] + top - pad, bottom: tops[i] + bottom + pad });
+      const { top, bottom } = boxCutSpan(box, pad);
+      raw.push({ top: tops[i] + top, bottom: tops[i] + bottom });
     }
   });
   raw.sort((a, b) => a.top - b.top);

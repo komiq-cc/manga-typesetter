@@ -20,7 +20,7 @@
 // a partial or hand-edited group degrades to something both renderers can paint.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { normalizeStyle, defaultStyle, PATTERN_KINDS } from './data.js';
+import { normalizeStyle, defaultStyle, PATTERN_KINDS, openTypesetting, PLAIN_BREAKS, plainStyle } from './data.js';
 import { parsePresets } from './presets.svelte.js';
 import { normalizeTranslations } from './importer.js';
 import { migrateEntry, migrateDoc } from './editor/history-file.svelte.js';
@@ -707,19 +707,19 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
 
   it('reads a blob with no `shortcuts` key and leaves the map empty', async () => {
     const { prefs } = await withStorage('{"typeset":true}');
-    expect(prefs.typeset).toBe(true);
+    expect(prefs.defaultHyphenate).toBe(true);
     expect(prefs.shortcuts).toEqual({});
   });
 
   it('reads a blob with no keys at all', async () => {
     const { prefs } = await withStorage('{}');
-    expect(prefs.typeset).toBe(true);
+    expect(prefs.defaultHyphenate).toBe(true);
     expect(prefs.shortcuts).toEqual({});
   });
 
   it('leaves the defaults standing for a corrupt or absent blob', async () => {
     expect((await withStorage('{ not json')).prefs.shortcuts).toEqual({});
-    expect((await withStorage(null)).prefs.typeset).toBe(true);
+    expect((await withStorage(null)).prefs.defaultHyphenate).toBe(true);
   });
 
   it('refuses a `shortcuts` of the wrong shape rather than handing it to the matcher', async () => {
@@ -735,9 +735,9 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
     const { prefs } = await withStorage('{"typeset":true}');
     const d = defaultStyle();
     expect(prefs.defaultAutoHeight).toBe(d.autoHeight);
-    expect(prefs.defaultShape).toBe(d.shape !== 'off');
+    // The line breaking's one switch: on is the shaped breaker, hyphenating.
+    expect(prefs.defaultHyphenate).toBe(d.hyphenate && d.shape !== 'off');
     expect(prefs.defaultBlockShape).toBe(d.shape);
-    expect(prefs.defaultHyphenate).toBe(d.hyphenate);
     expect(prefs.defaultBalloon).toBe(d.balloon);
     expect(prefs.defaultMinOrphan).toBe(d.minOrphan);
   });
@@ -756,6 +756,16 @@ describe('a prefs blob from before shortcuts could be rebound', () => {
     expect(c.prefs.defaultBlockShape).toBe('rect');
     const e = await withStorage('{"defaultBlockShape":"off"}');
     expect(e.prefs.defaultBlockShape).toBe('auto');
+  });
+
+  // "Shaped line breaks" off was the plain wrap. It is the one switch off now,
+  // and the box it gives is plain whatever the rest say.
+  it('reads an old "Shaped line breaks" off as the line breaking switched off', async () => {
+    const a = await withStorage('{"defaultShape":false,"defaultHyphenate":true,"defaultBalloon":true}');
+    expect(a.prefs.defaultHyphenate).toBe(false);
+    expect(a.prefs.defaultBalloon).toBe(true);
+    const b = await withStorage('{"defaultShape":true,"defaultHyphenate":true}');
+    expect(b.prefs.defaultHyphenate).toBe(true);
   });
 });
 
@@ -797,38 +807,36 @@ describe('a prefs blob from before chapters carried their typesetting', () => {
     expect(legacyTypesetting()).toEqual({ mode: 'smart', version: 1 });
   });
 
-  it('reads it as plain where nothing says the beta was on, even with the default on', async () => {
+  it('reads it as plain where nothing says the beta was on, while new chapters are smart', async () => {
     for (const raw of [null, '{}', '{"typeset":false}', '{"typeset":"yes"}', '{ not json']) {
-      const { legacyTypesetting, setTypesetDefault, newTypesetting } = await withStorage(raw);
-      // The in-memory default is not what the old chapters were set with.
-      setTypesetDefault(true);
+      const { legacyTypesetting, newTypesetting } = await withStorage(raw);
+      // What a new chapter is made with is not what the old chapters were set with.
       expect(newTypesetting().mode).toBe('smart');
       expect(legacyTypesetting().mode).toBe('plain');
     }
     expect((await withStorage(null, { broken: true })).legacyTypesetting().mode).toBe('plain');
   });
 
-  it('keeps its first answer when the preference changes afterwards', async () => {
-    // Beta never on: turning it on for new chapters leaves the old ones plain,
-    // this launch and every launch after.
+  it('keeps its first answer through every later save of the preferences', async () => {
+    // Beta never on: the old chapters stay plain, this launch and every launch after.
     const a = await withStorage('{"typeset":false}');
-    a.setPref('typeset', true);
+    a.setPref('defaultAutoHeight', false);
     expect(a.legacyTypesetting().mode).toBe('plain');
     const a2 = await withStorage(a.map.get('mt.prefs'));
-    expect(a2.prefs.typeset).toBe(true);
     expect(a2.legacyTypesetting().mode).toBe('plain');
-    // Beta on: turning it off leaves the old ones smart.
+    // Beta on: they stay smart.
     const b = await withStorage('{"typeset":true}');
-    b.setPref('typeset', false);
+    b.setPref('defaultAutoHeight', false);
     const b2 = await withStorage(b.map.get('mt.prefs'));
-    expect(b2.prefs.typeset).toBe(false);
     expect(b2.legacyTypesetting().mode).toBe('smart');
+    // And the old new-chapter switch is gone: nothing sets it.
+    b2.setPref('typeset', false);
+    expect('typeset' in b2.prefs).toBe(false);
   });
 
-  // BRK-1: smart line breaking is on by default for new chapters.
-  it('fresh prefs (no saved blob) defaults prefs.typeset to true and newTypesetting to smart', async () => {
-    const { prefs, newTypesetting } = await withStorage(null);
-    expect(prefs.typeset).toBe(true);
+  it('a new chapter is always smart: there is no switch for it', async () => {
+    const { prefs, newTypesetting } = await withStorage('{"typeset":false}');
+    expect('typeset' in prefs).toBe(false);
     expect(newTypesetting().mode).toBe('smart');
   });
 
@@ -840,6 +848,65 @@ describe('a prefs blob from before chapters carried their typesetting', () => {
   it('saved blob with typeset:false and no legacyTypeset derives legacy plain', async () => {
     const { legacyTypesetting } = await withStorage('{"typeset":false}');
     expect(legacyTypesetting().mode).toBe('plain');
+  });
+});
+
+// The line breaking was one switch for the whole chapter. A chapter laid out
+// with it off opens smart with every box given the plain wrap as its own - in
+// the document and in the undo history - and one laid out with it on comes
+// back as it went in.
+describe('a chapter laid out under the old chapter switch', () => {
+  it('opens a plain chapter smart, and says its boxes were plain', () => {
+    expect(openTypesetting({ mode: 'plain', version: 2 })).toEqual({ typesetting: { mode: 'smart', version: 2 }, plain: true });
+    for (const raw of [null, undefined, {}, { mode: 'fancy' }]) expect(openTypesetting(raw).plain).toBe(true);
+    expect(openTypesetting({ mode: 'smart', version: 1 })).toEqual({ typesetting: { mode: 'smart', version: 1 }, plain: false });
+  });
+
+  it('gives a style the plain wrap and leaves its balloon alone', () => {
+    const s = { font: 'X', shape: 'oval', hyphenate: true, balloon: true };
+    expect(plainStyle(s)).toEqual({ font: 'X', ...PLAIN_BREAKS, balloon: true });
+    expect(s.shape).toBe('oval');
+    // Already plain, or not a style: the very value back.
+    const plain = { shape: 'off', hyphenate: false, balloon: false };
+    expect(plainStyle(plain)).toBe(plain);
+    expect(plainStyle(null)).toBeNull();
+    expect(plainStyle('words')).toBe('words');
+  });
+
+  it('loads every box of a plain chapter with the plain wrap', () => {
+    const raw = [
+      { id: 1, boxes: [{ id: 'b1', x: 0, y: 0, w: 100, h: 40, style: { font: 'X', shape: 'oval', hyphenate: true, balloon: true } }, { id: 'b2', x: 0, y: 0, w: 100, h: 40 }] },
+      { id: 2, boxes: [] },
+    ];
+    loadProjectPages(raw, { plain: true });
+    expect(app.pages[0].boxes[0].style).toMatchObject({ ...PLAIN_BREAKS, balloon: true });
+    expect(app.pages[0].boxes[1].style).toMatchObject(PLAIN_BREAKS);
+    // The record handed in is not touched.
+    expect(raw[0].boxes[0].style.shape).toBe('oval');
+    loadProjectPages(raw);
+    expect(app.pages[0].boxes[0].style.shape).toBe('oval');
+  });
+
+  it('gives the boxes and box styles of a stored stack the plain wrap', () => {
+    const smart = { shape: 'auto', hyphenate: true, balloon: true, strokes: [], shadows: [], gradient: {}, pattern: {} };
+    const entries = [
+      { t: 'style', before: { ...smart, color: '#000' }, after: { ...smart, color: '#f00' } },
+      { t: 'place', box: { id: 'b1', style: smart } },
+      { t: 'placeMany', items: [{ box: { id: 'b2', style: smart } }] },
+      { t: 'bulk', items: [{ boxId: 'b1', before: smart, after: smart }], lastStyleBefore: smart },
+    ];
+    const [st, pl, many, bulk] = entries.map((e) => migrateEntry(e, true));
+    for (const s of [st.before, st.after, pl.box.style, many.items[0].box.style, bulk.items[0].before, bulk.items[0].after]) {
+      expect(s).toMatchObject({ ...PLAIN_BREAKS, balloon: true });
+    }
+    expect(st.after.color).toBe('#f00');
+    // Not a box's style: the template the next box inherits keeps what it had.
+    expect(bulk.lastStyleBefore).toBe(smart);
+    // And a chapter that was not plain keeps its stack as recorded.
+    for (const e of entries) expect(migrateEntry(e)).toBe(e);
+    const doc = { version: 1, pages: { 1: { undo: entries, redo: [] } } };
+    expect(migrateDoc(doc)).toBe(doc);
+    expect(migrateDoc(doc, true).pages[1].undo[0].before.shape).toBe('off');
   });
 });
 

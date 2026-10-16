@@ -1175,6 +1175,38 @@ describe('buildPagePsd', () => {
     expect([psd.imageData.width, psd.imageData.height]).toEqual([PAGE_W, PAGE_H]);
   });
 
+  // The same unmeasured page with art to measure: the document is the art's
+  // size, and the page the file carries for re-import has to say that size
+  // too - the importer believes it, and a page that says 850x1200 over
+  // 123x234 art has every box rescaled out of place the next time the art is
+  // measured.
+  it('embeds the page at the size the document was measured to', async () => {
+    const prevImage = globalThis.Image;
+    globalThis.Image = class {
+      set src(url) {
+        this._src = url;
+        queueMicrotask(() => {
+          this.naturalWidth = 123;
+          this.naturalHeight = 234;
+          this.onload?.();
+        });
+      }
+      get src() {
+        return this._src;
+      }
+    };
+    try {
+      const bytes = await withStubDocument(() => buildPagePsd({ id: 7, w: 0, h: 0, raw: 'blob:art', lines: [], boxes: [] }));
+      const psd = readPsd(bytes, READ);
+      expect([psd.width, psd.height]).toEqual([123, 234]);
+      const xmp = psd.imageResources.xmpMetadata;
+      const page = JSON.parse(Buffer.from(xmp.match(/<mt:project>([\s\S]*?)<\/mt:project>/)[1].trim(), 'base64').toString('utf8')).page;
+      expect([page.w, page.h]).toEqual([123, 234]);
+    } finally {
+      globalThis.Image = prevImage;
+    }
+  });
+
   it('comes out of the whole pipeline with a white page as its merged image', async () => {
     // End to end, not at the seam: the composite has to survive buildPagePsd
     // too, because a black one is what every export looked like in Finder,

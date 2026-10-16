@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ort::session::Session;
 use tauri::async_runtime::Mutex as AsyncMutex;
@@ -184,7 +184,9 @@ impl TextRecognizer for Recognizer {
 /// Directory where downloaded model weights reside, relative to `$HOME`.
 const MODELS_SUFFIX: [&str; 2] = [".mangatypesetter", "models"];
 
-/// Wall-clock timeout on model downloads (default 300s, overridable via `MT_DOWNLOAD_DEADLINE`).
+/// How long a model download may wait on the network without a byte arriving -
+/// to connect, for the headers, or between body reads (default 300s,
+/// overridable via `MT_DOWNLOAD_DEADLINE`).
 fn download_deadline() -> Duration {
     let secs = std::env::var("MT_DOWNLOAD_DEADLINE")
         .ok()
@@ -373,6 +375,12 @@ fn commit_download(tmp: &Path, path: &Path) -> Result<(), String> {
 
 /// Streams a model file to disk via a scratch file with backpressured async-to-disk channel.
 async fn download(url: &str, path: &Path) -> Result<(), String> {
+    download_within(url, path, download_deadline()).await
+}
+
+/// `download`, with the stall bound passed in - the seam the tests use, since
+/// no suite may wait the real five minutes out.
+async fn download_within(url: &str, path: &Path, stall: Duration) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -396,30 +404,44 @@ async fn download(url: &str, path: &Path) -> Result<(), String> {
         })
     };
 
+    // A timeout says which wait gave out; anything else is reqwest's own words.
+    let failed = |e: reqwest::Error| {
+        if e.is_timeout() {
+            format!(
+                "download stalled for {:.0}s (stalled mirror?): {url}",
+                stall.as_secs_f64()
+            )
+        } else {
+            format!("{url}: {e}")
+        }
+    };
+
     let streamed = async {
+        // The stall bound is a timeout the transfer is actually waiting on.
+        // It used to be a deadline compared AFTER `chunk().await` came back,
+        // and a server that sends its headers and a few bytes and then holds
+        // the connection open never lets that call come back - so the check
+        // never ran, the download waited for good, and every analyze needing
+        // the same weight queued behind its gate in `ensure`. reqwest's read
+        // timeout covers both waits that can stall: the one for the response
+        // headers, and each read of the body, reset by every read that lands.
+        // Time spent blocked on the disk writer below is not a read, so a slow
+        // disk is never mistaken for a stalled mirror.
         let mut resp = reqwest::Client::builder()
-            .connect_timeout(download_deadline())
+            .connect_timeout(stall)
+            .read_timeout(stall)
             .build()
             .map_err(|e| format!("{url}: {e}"))?
             .get(url)
             .send()
             .await
-            .map_err(|e| format!("{url}: {e}"))?
+            .map_err(failed)?
             .error_for_status()
             .map_err(|e| format!("{url}: {e}"))?;
 
-        let mut deadline = Instant::now() + download_deadline();
-
         // `chunk()` rather than `bytes_stream()`: the same streaming, without
         // pulling the `stream` feature and `futures-util` in for one loop.
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{url}: {e}"))? {
-            if Instant::now() > deadline {
-                return Err(format!(
-                    "download stalled for {:.0}s (stalled mirror?): {url}",
-                    download_deadline().as_secs_f64()
-                ));
-            }
-            deadline = Instant::now() + download_deadline();
+        while let Some(chunk) = resp.chunk().await.map_err(failed)? {
             if tx.send(chunk.to_vec()).await.is_err() {
                 // The only way the receiver hangs up is a write error, and it
                 // is holding the message that says which. Stop feeding it and
@@ -885,6 +907,74 @@ mod tests {
 
         assert!(commit_download(&tmp, &dest).is_err());
         assert!(!tmp.exists(), "a failed rename must not leak the scratch file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A server that takes one request and then goes quiet with the connection
+    /// held open: after its headers and a few bytes of a much longer body, or
+    /// (`headers: false`) before saying anything at all. It hangs up when the
+    /// client does, or after a minute whatever happens.
+    fn stalling_server(headers: bool) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else { return };
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(60)));
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            if headers {
+                let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n");
+                let _ = conn.write_all(&[7u8; 16]);
+                let _ = conn.flush();
+            }
+            // Held open, sending nothing, until the client gives up on it.
+            while matches!(conn.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        format!("http://{addr}/model.onnx")
+    }
+
+    /// Runs `download_within` on its own thread and gives it a hard ceiling, so
+    /// a download that never ends fails this test instead of hanging the suite.
+    fn download_or_hang(url: String, dest: PathBuf, stall: Duration) -> Result<(), String> {
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(tauri::async_runtime::block_on(download_within(&url, &dest, stall)));
+        });
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("the download never ended: the stall bound did not interrupt the wait")
+    }
+
+    #[test]
+    fn a_download_that_stalls_mid_body_fails_instead_of_waiting_for_good() {
+        // The bug this pins: the deadline was compared only after a chunk had
+        // arrived, so a mirror that went quiet mid-body held the download - and
+        // the per-file gate every later analyze waits on - forever.
+        let root = scratch("stall-body");
+        let dest = root.join("model.onnx");
+        let err = download_or_hang(stalling_server(true), dest.clone(), Duration::from_millis(300))
+            .expect_err("a stalled transfer must fail");
+        assert!(err.contains("stalled"), "{err}");
+        assert!(!dest.exists(), "a partial download must never be committed");
+        let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();
+        assert!(left.is_empty(), "the scratch file must not survive: {left:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_download_whose_headers_never_come_fails_instead_of_waiting_for_good() {
+        let root = scratch("stall-headers");
+        let dest = root.join("model.onnx");
+        let err = download_or_hang(stalling_server(false), dest.clone(), Duration::from_millis(300))
+            .expect_err("a server that never answers must fail the download");
+        assert!(err.contains("stalled"), "{err}");
+        assert!(!dest.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

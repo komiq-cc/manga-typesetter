@@ -191,7 +191,9 @@ describe('what it holds', () => {
     }
     // The painter's one scratch canvas is the painter's, and is bounded
     // (rust-painter.js); nothing of the box's own size is left.
-    expect(made.length).toBeGreaterThan(Object.keys(KINDS).length);
+    // At least one a box: its texture. (A painter that paints the whole box
+    // itself makes no others; the canvas passes made several each.)
+    expect(made.length).toBeGreaterThanOrEqual(Object.keys(KINDS).length);
     const held = made.filter((r) => !r.released);
     expect(held.length).toBeLessThanOrEqual(1);
     for (const r of held) expect(r.c.width * r.c.height).toBeLessThanOrEqual(SCRATCH_KEEP_PX);
@@ -309,7 +311,10 @@ describe('what it holds', () => {
   it('the mesh gizmo\'s texture is the gesture\'s: painted from again and again, and not released', () => {
     const box = boxOf(KINDS.warped);
     const p = pageOf(box);
-    const tex = renderBoxTexture(box, p, null, 2, PICTURE_MAX_PX);
+    // Asked for unbent (`flat`), as the gesture does: the painter would bend
+    // the letters itself, and a drag runs the mesh over this one texture.
+    const tex = renderBoxTexture(box, p, null, 2, PICTURE_MAX_PX, Infinity, true);
+    expect(tex.warped).toBe(false);
     const size = [tex.canvas.width, tex.canvas.height];
     const el = createCanvas(1, 1);
     paintPictureTexture(el, tex, box);
@@ -318,10 +323,11 @@ describe('what it holds', () => {
     paintPictureTexture(el, tex, box);
     expect(unlike(first, bytes(el))).toBeGreaterThan(0);
     expect([tex.canvas.width, tex.canvas.height]).toEqual(size);
-    // What it shows is what a paint from nothing would.
-    const whole = createCanvas(1, 1);
-    paintBoxPicture(whole, box, p, 2, null);
-    expect([el.width, el.height]).toEqual([whole.width, whole.height]);
-    expect(unlike(bytes(el), bytes(whole))).toBe(0);
+    // What it shows is what a texture warp from nothing would: the frames of a
+    // drag are the raster warp. (The picture the box settles to when the drag
+    // ends is bent by the painter and is a little larger, `meshInJob`.)
+    const whole = warpTexture(renderBoxTexture(box, p, null, 2, PICTURE_MAX_PX, Infinity, true), box);
+    expect([el.width, el.height]).toEqual([whole.canvas.width, whole.canvas.height]);
+    expect(unlike(bytes(el), bytes(whole.canvas))).toBe(0);
   });
 });

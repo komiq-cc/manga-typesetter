@@ -29,7 +29,7 @@ import { initHistory } from '../../lib/editor/history.svelte.js';
 import { restoreFonts, scanSystemFonts, addFontFile } from '../../lib/fonts.js';
 import { engineSwitch, useTextEngine } from '../../lib/engine-switch.svelte.js';
 import { textEngine } from '../../lib/text-engine/index.js';
-import { legacyTypesetting, setLegacyTypeset, REVIEW_REASONS } from '../../lib/data.js';
+import { legacyTypesetting, openTypesetting, setLegacyTypeset, REVIEW_REASONS } from '../../lib/data.js';
 
 const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 async function settle(frames = 3) {
@@ -60,8 +60,9 @@ async function openRecord(rec) {
   const pages = rec.pages.map((p) => ({ ...p, raw: null, cleaned: null, file: null, cleanedFile: null }));
   app.chapterRef = null;
   const t0 = performance.now();
-  useChapterTypesetting(rec.typesetting ?? legacyTypesetting());
-  const minted = loadProjectPages(pages);
+  const opened = openTypesetting(rec.typesetting ?? legacyTypesetting());
+  useChapterTypesetting(opened.typesetting);
+  const minted = loadProjectPages(pages, { plain: opened.plain });
   const ms = performance.now() - t0;
   app.chapterRef = { projectId: 'p9-check', chapterId: 'copy' };
   if (minted) markUnsaved();

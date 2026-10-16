@@ -8,6 +8,7 @@ import { textEngine, setTextEngine, glyphPainter, setGlyphPainter, engineDraws }
 import { createRustGlyphPainter } from './text-engine/rust-painter.js';
 import { setTypesetEnabled, typesetEnabled, clearLayoutMemo } from './measure.js';
 import { defaultStyle, normalizeStyle } from './data.js';
+import { applySfxPreset, sfxPresets } from './sfx.js';
 
 // ===========================================================================
 // The footprint of a box holds the ink of its glyphs, not only their advances
@@ -192,12 +193,55 @@ describe('with the engine measuring and painting, nothing is cut', () => {
   });
 });
 
+// SFX letters are placed one by one, each scaled, leaned and turned about its
+// anchor, and their footprint was an em margin around the anchors: a lean was
+// reach across even when the letter had been turned on its side, and an
+// accent shaken up off its anchor stood past the margin. Both were cut, in the
+// file and in the editor's picture alike.
+const sfx = (moves) => ({ on: true, amount: 1, seed: 5, flow: 'row', rowShift: 0, moves });
+// Made when asked for: the presets are the engine's, and it is not in yet
+// while this file is read.
+const SFX = {
+  'a leaned letter tilted onto its side (lean 75, tilt 90)': () =>
+    boxOf({ font: 'Bangers', size: 100, sfx: sfx([{ kind: 'lean', a: 75, b: 0 }, { kind: 'tilt', a: 90, b: 0 }]) }, 'I', { w: 100, h: 100 }),
+  // The seed is one whose shake lifts the É's accent 7 px past the margin.
+  'accented capitals shaken in a small box (Shaky)': () => {
+    const box = boxOf({ font: 'Bangers', size: 200 }, 'jÉÅW', { w: 50, h: 50 });
+    applySfxPreset(box.style, sfxPresets().find((p) => p.id === 'shaky'));
+    box.style.sfx.seed = 1;
+    return box;
+  },
+};
+
+describe('SFX letters: the footprint holds every placed letter\'s ink', () => {
+  // The glyphs painted on their own, so that what falls outside the canvas is
+  // there to be counted: the whole-box job paints only inside its rectangle,
+  // and cuts the same ink without a trace of it.
+  const glyphsAlone = () => ({ ...whole, box: false, paintBox: undefined });
+  for (const [name, make] of Object.entries(SFX)) {
+    it(name, () => {
+      const box = make();
+      expect(placeBlock(boxCandidate(box, box.text)).isCurve).toBe(true);
+      for (const scale of [1, 2, 6]) {
+        const r = painted(box, scale, glyphsAlone());
+        expect(r.rasters).toBeGreaterThan(0);
+        expect(r.lost, `scale ${scale}`).toBe(0);
+      }
+    });
+  }
+});
+
 describe('a box whose ink is inside its footprint is untouched', () => {
+  // The footprint is what is under test, so both paints lay the shadows, the
+  // blur, the smear and the mask the same way: by the canvas. The painter
+  // that paints the whole box itself (`box`) makes other bytes of those
+  // passes, and box-job.engine.test.js holds it to these.
+  const canvasPasses = (p) => ({ ...p, box: false, paintBox: undefined });
   for (const [name, box] of Object.entries(INSIDE)) {
     it(`${name}: the same canvas, origin and bytes`, () => {
       for (const scale of [2, 2.74]) {
-        const old = painted(box, scale, asBefore);
-        const now = painted(box, scale);
+        const old = painted(box, scale, canvasPasses(asBefore));
+        const now = painted(box, scale, canvasPasses(whole));
         expect([now.canvas.width, now.canvas.height, now.ox, now.oy, now.cw, now.ch]).toEqual([old.canvas.width, old.canvas.height, old.ox, old.oy, old.cw, old.ch]);
         const a = pixels(old.canvas).data;
         const b = pixels(now.canvas).data;

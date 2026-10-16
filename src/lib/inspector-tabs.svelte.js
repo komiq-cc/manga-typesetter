@@ -39,7 +39,9 @@ export function cycleInspectorTab(step = 1) {
 // words: they must not be confused.
 // `liquify` sits beside `transform` because it edits the same mesh with a
 // round tool instead of handles.
-export const EFFECTS_SUBTABS = ['stroke', 'shadow', 'warp', 'transform', 'liquify', 'blur', 'edges', 'mask'];
+// `sfx` is first in the row and is not the default: the tab a session opens on
+// is still Stroke.
+export const EFFECTS_SUBTABS = ['sfx', 'stroke', 'shadow', 'warp', 'transform', 'liquify', 'blur', 'edges', 'mask'];
 
 export const effectsSubTab = $state({ id: 'stroke' });
 
