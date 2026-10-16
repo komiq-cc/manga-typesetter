@@ -1536,6 +1536,11 @@ svg.rough-def{ position:absolute; width:0; height:0; pointer-events:none; }
 .pill-proj{ cursor:default; font-weight:600; letter-spacing:.2px; overflow:hidden; }
 .pill-proj:hover{ border-color:var(--line2); }
 .pill-proj .pill-label{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* The check list's count (FLOW-1): a control, unlike the project pill beside
+   it - a press walks to the next box or line that needs a look. */
+.pill-check{ flex:none; gap:5px; padding:0 8px 0 11px; }
+.pill-check-n{ font-weight:700; color:var(--warn); font-variant-numeric:tabular-nums; }
+.pill-check svg{ width:13px; height:13px; opacity:.7; }
 
 /* The save indicator. There is no manual save in this app, so a rejected
    autosave is the user's only signal that their work is not reaching the disk -

@@ -8,7 +8,7 @@
   // left of it, app drawers on the right.
   // Nothing here is laid out by a parent, every row pins itself to the window,
   // so the canvas underneath is never inset by chrome it does not know about.
-  import { app, openBulk, closeBulk, isTranslateMode, toast, toastError } from '../store.svelte.js';
+  import { app, openBulk, closeBulk, isTranslateMode, toast, toastError, checks, goNextCheck } from '../store.svelte.js';
   import { goProject, goLibrary } from '../route.svelte.js';
   import { projectById, chapterById } from '../library.svelte.js';
   import { exportTextJson } from '../exporter.js';
@@ -107,6 +107,10 @@
   // the targets the user had picked and reseed the style; `closeBulk` is what
   // Escape and the panel's own Cancel already do.
   const toggleBulk = () => (app.bulk.active ? closeBulk() : openBulk());
+  // The check list (FLOW-1): how much is left, and one press to the next of it.
+  // Gone while nothing is left, and in a translate chapter, which has no boxes.
+  const toCheck = $derived(translate ? 0 : checks.items.length);
+  const nextKey = $derived(formatCombo(comboFor('review.next')));
   const regionsKey = $derived(formatCombo(comboFor('view.regions')));
   const regionsTip = $derived(
     `Regions - bubble outlines, detected text, line numbers${regionsKey ? ` (${regionsKey})` : ''}. Hold \\ to see the raw page`,
@@ -121,6 +125,12 @@
     <span class="pill-label">{label}</span>
     <span class="save-dot" class:saved={app.saved} class:failed={app.saveFailed} title={saveTitle}></span>
   </div>
+  {#if toCheck}
+    <button class="pill pill-check" onclick={() => goNextCheck(checks.items)} data-tip={`Next to check${nextKey ? ` (${nextKey})` : ''}`}>
+      <span class="pill-check-n">{toCheck}</span> to check
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5" /></svg>
+    </button>
+  {/if}
 </div>
 
 <div class="pill-row far-right">

@@ -1,73 +1,87 @@
 <script>
-  // The queue's "needs review" list (UX-6): every box in the chapter whose text
-  // does not fit it, counted, and one click from each to the box. A bad fit was
-  // only ever found by looking at every page; the flag is written by the
-  // containment check (contain.js) and this only reads it.
-  import { app, flaggedBoxes, gotoPage, selectBox, boxText, isLongstrip } from './store.svelte.js';
-  import { revealInStrip } from './editor/strip-sync.svelte.js';
+  // The queue's check list (UX-6, FLOW-1): every box or line in the chapter
+  // that still needs a look, counted, grouped by reason, one click from each to
+  // the place. It only reads `checks.items` (store.svelte.js); fixing the box
+  // is what clears its row.
+  import { app, checks, openCheck, boxText, lineText, lineByN } from './store.svelte.js';
   import { reviewReason, reviewWhere, reviewTitle } from './review-label.js';
-  import { plural } from './format.js';
 
-  // Reactive through every box's `review`, which the store writes only when a
-  // flag actually changes - so this re-reads on a verdict, not on a keystroke.
-  const flagged = $derived(flaggedBoxes(app.pages));
+  const items = $derived(checks.items);
   let open = $state(false);
 
-  // Built only while the list is open: a chapter opening can flag dozens of
+  // What each reason is called, in the order the groups show.
+  const GROUPS = [
+    ['overflow', 'Text does not fit'],
+    ['open', 'No bubble outline found'],
+    ['outline', 'Outline not approved'],
+    ['stale', 'Layout out of date'],
+    ['empty', 'No text yet'],
+    ['font', 'Font missing'],
+    ['unplaced', 'Line not placed'],
+  ];
+
+  // Built only while the list is open: a chapter opening can list dozens of
   // boxes, and the text of each is a line lookup.
-  const rows = $derived.by(() => {
+  const groups = $derived.by(() => {
     if (!open) return [];
-    const out = [];
-    for (const f of flagged) {
-      const i = app.pages.findIndex((pg) => pg.id === f.pageId);
-      const pg = app.pages[i];
-      const b = pg?.boxes.find((x) => x.id === f.boxId);
-      if (!b) continue;
-      out.push({
-        key: `${f.pageId}:${f.boxId}`,
-        pageIndex: i,
-        boxId: f.boxId,
-        text: String(boxText(b, pg) ?? '').replace(/\s+/g, ' ').trim(),
-        reason: reviewReason(f.review),
-        where: reviewWhere(f.review),
-        title: reviewTitle(f.review),
-      });
+    const by = new Map();
+    for (const it of items) {
+      const pg = app.pages[it.pageIndex];
+      if (!pg) continue;
+      const b = it.boxId != null ? pg.boxes.find((x) => x.id === it.boxId) : null;
+      const text = b ? boxText(b, pg) : lineText(lineByN(pg, it.lineN));
+      const row = {
+        key: `${it.reason}:${it.pageId}:${it.boxId ?? 'l' + it.lineN}`,
+        it,
+        text: String(text ?? '').replace(/\s+/g, ' ').trim(),
+        why: whyOf(it),
+        title: it.reason === 'overflow' ? reviewTitle(it.review) : undefined,
+      };
+      if (!by.has(it.reason)) by.set(it.reason, []);
+      by.get(it.reason).push(row);
     }
-    return out;
+    // Outlines nobody approved: the least sure first (01-bubble-check.md).
+    by.get('outline')?.sort((a, b) => a.it.confidence - b.it.confidence);
+    return GROUPS.filter(([k]) => by.has(k)).map(([k, name]) => ({ key: k, name, rows: by.get(k) }));
   });
 
-  // To the box's page, then the box itself - selected, so the Inspector is on it.
-  // In a strip the page is somewhere in the column rather than turned to, so the
-  // canvas is asked to scroll the box into view as well.
-  function jump(r) {
-    if (r.pageIndex !== app.pageIndex) gotoPage(r.pageIndex);
-    selectBox(r.boxId);
-    if (isLongstrip()) revealInStrip(r.boxId);
+  function whyOf(it) {
+    if (it.reason === 'overflow') {
+      const where = reviewWhere(it.review);
+      return `${reviewReason(it.review)}${where ? ` · ${where}` : ''}`;
+    }
+    if (it.reason === 'outline') return `${Math.round((it.confidence || 0) * 100)}% sure`;
+    if (it.reason === 'font') return it.font;
+    if (it.reason === 'unplaced') return `Line ${it.lineN}`;
+    return '';
   }
+
+  const here = (it) =>
+    it.pageIndex === app.pageIndex && (it.boxId != null ? it.boxId === app.selectedId : !app.selectedId && app.pages[it.pageIndex]?.activeLineN === it.lineN);
 </script>
 
-{#if flagged.length}
+{#if items.length}
   <div class="rv">
     <button class="rv-head" aria-expanded={open} onclick={() => (open = !open)}>
       <span class="rv-mark" aria-hidden="true">!</span>
-      <span class="rv-count">{plural(flagged.length, 'box', 'boxes')} {flagged.length === 1 ? 'needs' : 'need'} review</span>
+      <span class="rv-count">{items.length} to check</span>
       <svg class="rv-chev" class:open viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" /></svg>
     </button>
     {#if open}
       <div class="rv-list">
-        {#each rows as r (r.key)}
-          <button
-            class="rv-row"
-            class:here={r.pageIndex === app.pageIndex && r.boxId === app.selectedId}
-            title={r.title}
-            onclick={() => jump(r)}
-          >
-            <span class="rv-pg">p.{r.pageIndex + 1}</span>
-            <span class="rv-col">
-              <span class="rv-text">{r.text || 'Empty box'}</span>
-              <span class="rv-why">{r.reason}{r.where ? ` · ${r.where}` : ''}</span>
-            </span>
-          </button>
+        {#each groups as g (g.key)}
+          <div class="rv-grp" data-reason={g.key}>
+          <div class="rv-group">{g.name} <span class="rv-n">{g.rows.length}</span></div>
+          {#each g.rows as r (r.key)}
+            <button class="rv-row" class:here={here(r.it)} title={r.title} onclick={() => openCheck(r.it)}>
+              <span class="rv-pg">p.{r.it.pageIndex + 1}</span>
+              <span class="rv-col">
+                <span class="rv-text">{r.text || 'Empty box'}</span>
+                {#if r.why}<span class="rv-why">{r.why}</span>{/if}
+              </span>
+            </button>
+          {/each}
+          </div>
         {/each}
       </div>
     {/if}
@@ -135,6 +149,23 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .rv-grp {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .rv-group {
+    padding: 6px 9px 2px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: var(--t2);
+  }
+  .rv-n {
+    font-weight: 600;
+    color: var(--t3);
+    font-variant-numeric: tabular-nums;
   }
   .rv-row {
     display: flex;

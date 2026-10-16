@@ -108,6 +108,7 @@ import { scaleStroke } from './brush.js';
 import { translateStrokes } from './brush-board.svelte.js';
 import { translateClipShapes } from './text-paint.js';
 import { stripPageExtent, stripDragYBounds } from './editor/strip.js';
+import { revealInStrip } from './editor/strip-sync.svelte.js';
 import { exportPageColumn } from './export-pages.svelte.js';
 
 export { PAGE_W, PAGE_H };
@@ -1207,8 +1208,8 @@ export function makeBoxAuto(boxId = app.selectedId, p = page()) {
   return true;
 }
 
-// Every flagged box, in page order: what the queue's list and the export's
-// pre-flight read. Reactive when read inside a `$derived` - it reads each box's
+// Every flagged box, in page order: the overflow half of the check list
+// (`checkItems`). Reactive when read inside a `$derived` - it reads each box's
 // `review`, and `writeReview` only writes when a flag actually changes, and
 // each box's solver status, past which it reads only for a box that overflowed.
 export function flaggedBoxes(pages = app.pages) {
@@ -1224,6 +1225,114 @@ export function flaggedBoxes(pages = app.pages) {
     }
   }
   return out;
+}
+
+// ===== the check list (FLOW-1) =====
+//
+// Every reason a box or a line still needs a look, in one list: what the
+// "N to check" pill counts, what Next (Mod+J) walks, what the queue's review
+// list groups and what the export warns with. Derived, never stored: each
+// reason is read off the box as it stands, so fixing the box is what clears it.
+//
+// Order: page order, then box order on the page, then the page's unplaced
+// lines in queue order. A box with several reasons has one item per reason, in
+// CHECK_REASONS order, so the list can group them; Next walks places, not items.
+//
+//   overflow  the text does not fit (`reviewOf`, as `flaggedBoxes` lists it)
+//   open      the finder found no closed outline (01-bubble-check.md)
+//   outline   an outline nobody approved; `confidence` for the list's sort
+//   stale     laid out for inputs the box no longer has (`isLayoutStale`)
+//   empty     a box with no text and no ink: a line placed before it had English
+//   font      set in a font this machine cannot draw
+//   unplaced  a detected line with no box yet (`placeableDetectedLines`)
+//
+// Glossary misses (06-text.md) join once the series guide exists (M4).
+export const CHECK_REASONS = ['overflow', 'open', 'outline', 'stale', 'empty', 'font', 'unplaced'];
+
+export function pageCheckItems(pg, pageIndex = app.pages.indexOf(pg)) {
+  const out = [];
+  if (!pg) return out;
+  const pageId = pg.id;
+  (pg.boxes ?? []).forEach((b, slot) => {
+    const at = { pageId, pageIndex, slot, boxId: b.id };
+    const review = reviewOf(b, pg) ?? relaidNote(b);
+    if (review) out.push({ ...at, reason: 'overflow', review });
+    const state = outlineState(b);
+    if (state === 'open') out.push({ ...at, reason: 'open' });
+    else if (state === 'waiting') out.push({ ...at, reason: 'outline', confidence: Number(b.outline?.confidence) || 0 });
+    if (isLayoutStale(b, pg)) out.push({ ...at, reason: 'stale' });
+    const inked = !!(b.style?.ink?.on && b.style.ink.strokes?.length);
+    if (!inked && !String(boxText(b, pg) ?? '').trim()) out.push({ ...at, reason: 'empty' });
+    const font = b.style?.font;
+    if (typeof font === 'string' && font && fontMissing(font)) out.push({ ...at, reason: 'font', font });
+  });
+  const n = pg.boxes?.length ?? 0;
+  placeableDetectedLines(pg).forEach((l, i) => {
+    out.push({ pageId, pageIndex, slot: n + i, lineN: l.n, reason: 'unplaced' });
+  });
+  return out;
+}
+
+export function checkItems(pages = app.pages) {
+  if (isTranslateMode()) return [];
+  const out = [];
+  (pages ?? []).forEach((pg, i) => {
+    for (const it of pageCheckItems(pg, i)) out.push(it);
+  });
+  return out;
+}
+
+// The open chapter's list, worked out once and shared: the pill, the queue's
+// list, the page dots and the export all read `checks.items` rather than each
+// walking the chapter. Lazy: nothing is computed until something reads it.
+class ChapterChecks {
+  items = $derived(checkItems(app.pages));
+}
+export const checks = new ChapterChecks();
+
+// The first item at a place after `cursor` ({ pageIndex, boxId?, lineN? }),
+// wrapping to the start of the chapter. A cursor on nothing (no selection)
+// takes the page's first item, so Next from a fresh page starts on it. Null
+// when the list is empty.
+export function nextCheck(items, cursor = { pageIndex: app.pageIndex, boxId: app.selectedId }) {
+  if (!items?.length) return null;
+  const pi = cursor?.pageIndex ?? 0;
+  const pg = app.pages[pi];
+  let slot = -1;
+  if (cursor?.boxId != null) slot = (pg?.boxes ?? []).findIndex((b) => b.id === cursor.boxId);
+  else if (cursor?.lineN != null) {
+    const own = items.find((it) => it.pageIndex === pi && it.lineN === cursor.lineN);
+    slot = own ? own.slot : -1;
+  }
+  const after = (it) => it.pageIndex > pi || (it.pageIndex === pi && it.slot > slot);
+  return items.find(after) ?? items[0];
+}
+
+// Open one check item: its page, then the box selected (the Inspector on it),
+// or the unplaced line made the queue's active line with the Place tool ready.
+export function openCheck(it) {
+  if (!it) return false;
+  if (it.pageIndex !== app.pageIndex) gotoPage(it.pageIndex);
+  if (it.boxId != null) {
+    selectBox(it.boxId);
+    if (isLongstrip()) revealInStrip(it.boxId);
+  } else if (it.lineN != null) {
+    if (app.selectedId) deselect();
+    page().activeLineN = it.lineN;
+    setTool('place');
+  }
+  return true;
+}
+
+// Next (Mod+J): the next thing to check after the selection. Says so when the
+// list is empty.
+export function goNextCheck(items = checkItems()) {
+  const it = nextCheck(items);
+  if (!it) {
+    toast('Nothing to check');
+    return false;
+  }
+  return openCheck(it);
 }
 
 // Every box on a page, for the moments a whole page's worth of text arrives at

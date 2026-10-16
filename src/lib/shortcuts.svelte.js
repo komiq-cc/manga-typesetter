@@ -305,6 +305,9 @@ const DEFS = [
   // looking at, which is not something a mis-typed combo should be able to do.
   { id: 'queue.placeDetected', label: 'Place detected bubbles on this page', group: 'Text queue', combo: 'Mod+Shift+p', whenTyping: true },
 
+  // The check list (FLOW-1): the next box or line that still needs a look.
+  { id: 'review.next', label: 'Next to check', group: 'Text queue', combo: 'Mod+j', whenTyping: true },
+
   // History.
   { id: 'edit.undo', label: 'Undo', group: 'History', combo: 'Mod+z' },
   { id: 'edit.redo', label: 'Redo', group: 'History', combo: 'Mod+Shift+z' },

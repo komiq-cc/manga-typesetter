@@ -176,15 +176,15 @@ describe('the first-fit notice', () => {
     open(file);
     const view = render(EngineNotice);
     const list = render(ReviewList);
-    await fireEvent.click(list.getByRole('button', { name: /3 boxes need review/ }));
-    const rows = [...list.container.querySelectorAll('.rv-row')];
+    await fireEvent.click(list.getByRole('button', { name: /to check/ }));
+    const rows = [...list.container.querySelectorAll('[data-reason="overflow"] .rv-row')];
     expect(rows).toHaveLength(3);
     expect(rows.map((r) => r.querySelector('.rv-why').textContent)).toContain('Line breaks changed with the new text engine');
     // Answered, the notice goes and the list is the flagged boxes alone.
     await fireEvent.click(button(view, 'Keep'));
     await tick();
     expect(notice(view)).toBe(null);
-    expect(list.getByRole('button', { name: /1 box needs review/ })).toBeTruthy();
+    expect(list.container.querySelectorAll('[data-reason="overflow"] .rv-row')).toHaveLength(1);
   });
 
   it('Keep saves the chapter once, at version 2', async () => {

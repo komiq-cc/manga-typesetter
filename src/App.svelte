@@ -17,7 +17,7 @@
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import ChapterVersionsSheet from './lib/home/ChapterVersionsSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, approveOutline, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, toastError, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, approveOutline, toggleLayoutLock, placeDetectedOnPage, checks, goNextCheck, closeBulk, toast, toastError, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -356,6 +356,10 @@
     'queue.placeDetected': () => {
       if (isTranslateMode()) return false;
       placeDetectedOnPage();
+    },
+    'review.next': () => {
+      if (isTranslateMode() || !app.loaded) return false;
+      goNextCheck(checks.items);
     },
 
     'edit.undo': () => {
