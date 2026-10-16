@@ -32,7 +32,7 @@
   // Side-effect import: reading the stored preferences also applies them, and
   // the typesetting switch has to be applied before the first line is measured.
   import './lib/prefs.svelte.js';
-  import { library, initRoot, openChapter, flushBeforeLeaving, leaveApprovalCurrent } from './lib/library.svelte.js';
+  import { library, initRoot, openChapter, flushBeforeLeaving, leaveApprovalCurrent, checkOutsideChange } from './lib/library.svelte.js';
   import { route, goBack } from './lib/route.svelte.js';
   import { watchFontLoads, installContextMenuGuard, isReloadKey, isEditableTarget } from './lib/shell-guards.js';
 
@@ -530,7 +530,15 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} onkeyup={onKeyup} onblur={() => (app.peekRaw = false)} />
+<!-- Back from another app: a chapter.json changed there is picked up now,
+     not at the next save (SAV-2). Leaving the window lets go of the raw-page
+     peek, whose key-up went to the other app. -->
+<svelte:window
+  onkeydown={onKeydown}
+  onkeyup={onKeyup}
+  onfocus={() => route.name === 'editor' && checkOutsideChange()}
+  onblur={() => (app.peekRaw = false)}
+/>
 
 {#if route.name === 'editor'}
   <EditorRoot onFontLib={() => (fontModalOpen = true)} onSettings={() => (settingsOpen = true)} />

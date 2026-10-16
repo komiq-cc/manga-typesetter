@@ -223,7 +223,7 @@ vi.mock('./text-engine/font-sync.js', async (original) => {
 });
 
 const { fsx } = await import('./fsx.js');
-const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter } = await import('./library.svelte.js');
+const { library, setRoot, createProject, createChapter, openChapter, closeChapter, flushBeforeLeaving, resetSaveFailures, setChapterMode, saveOpenChapter, _noteChapterRead } = await import('./library.svelte.js');
 const store = await import('./store.svelte.js');
 const { app, autoFitBox, boxEdited, resizeBox, setLineText, markUnsaved, markSaved, flushSave, firstFitChanges, keepFirstFit, relayoutAll, setChapterTypesetMode, useChapterTypesetting, loadProjectPages, DOC_SAVE_MS } = store;
 const { defaultStyle } = await import('./data.js');
@@ -3709,6 +3709,7 @@ describe('saves, fonts, the engine starting and Keep, in any order', () => {
         rawB.pages[0].lines[0].en = 'B KEEP CHOICE';
         fsx._tree.files.set(chapterPath, JSON.stringify(rawB));
         fsx._tree.files.set(translationsPath, buildTextJson(rawB.pages));
+        _noteChapterRead(c.dir, onDisk());
         // Public loader APIs advance documentTurn without replacing ref.
         useChapterTypesetting(rawB.typesetting);
         loadProjectPages(rawB.pages);

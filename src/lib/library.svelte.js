@@ -60,12 +60,18 @@ const ROOT_KEY = 'mt.libraryRoot';
 const SCHEMA = 1;
 const lastSnapshot = new Map();
 // The exact chapter.json text each open chapter had when this app last read
-// or wrote it (SAV-2). A save that finds other bytes on disk has found a change
-// it did not make - another tool, a sync client, a hand edit - and must not
-// write over it unkept. The text, not `updatedAt`: a script that edits the
-// file seldom touches the stamp. Keyed by chapter directory, like
-// `lastSnapshot`.
+// or wrote it (SAV-2). Other bytes on disk are a change this app did not
+// make - another tool, a script, a hand edit - and someone made it on purpose,
+// so it wins: the editor's own version goes on the snapshot shelf and the
+// chapter is reloaded from disk (`adoptOutsideChange`). The text, not
+// `updatedAt`: a script that edits the file seldom touches the stamp. Keyed by
+// chapter directory, like `lastSnapshot`.
 const diskText = new Map();
+// For tests that stand in for a reload with the store's own loader calls:
+// they record what that load read, as openChapter does.
+export function _noteChapterRead(chapterDir, text) {
+  diskText.set(chapterDir, text);
+}
 const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 const sourceUndos = new Map();
 
@@ -2219,22 +2225,14 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   const chapterText = await fsx.readTextFile(path);
   if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
   const record = JSON.parse(chapterText);
-  // Changed on disk since this app last read or wrote it (SAV-2). The other
-  // version is kept on the snapshot shelf before ours goes over it, and the
-  // save is refused when it cannot be kept - the rejection reaches the save
-  // indicator like any failed write. Ours then wins on disk, so the editor
-  // keeps saving; the user is told, and Versions has the other one.
+  // Changed on disk since this app last read or wrote it (SAV-2). Decided
+  // before anything is written, the timed snapshot included.
   const known = diskText.get(c.dir);
-  let outside = false;
-  if (known !== undefined && chapterText !== known) {
-    await requireSnapshot(c.dir, chapterText, record, 'outside-change');
-    if (app.chapterRef !== ref || chapterSaveCycle() !== requestedTurn) return;
-    outside = true;
-  }
+  const outside = known !== undefined && chapterText !== known;
   // The outgoing disk version, not the editor's next version. The save queue
   // serialises this with every other save; the ref and turn still have to be
   // ours when it finishes, just as they must after the record read above.
-  if (Date.now() - (lastSnapshot.get(c.dir) ?? 0) >= SNAPSHOT_INTERVAL_MS) {
+  if (!outside && Date.now() - (lastSnapshot.get(c.dir) ?? 0) >= SNAPSHOT_INTERVAL_MS) {
     try {
       await takeSnapshot(c.dir, chapterText, record, 'timed');
       lastSnapshot.set(c.dir, Date.now());
@@ -2284,14 +2282,26 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
   // `writeJson`'s own serialisation, done here so the bytes remembered are the
   // bytes written.
   const written = JSON.stringify(record, null, 2);
+  if (outside) {
+    // The outside version stays where it is. Ours is the one that moves: onto
+    // the shelf, required, so a save that cannot keep it fails like any other
+    // write and the edits stay on screen. Then the editor is marked saved -
+    // its work is on disk, just not in chapter.json - and reloads. Its
+    // typesetting snapshot is settled too: a Keep or final caller waiting on
+    // it would otherwise queue save after save until the reload, each one
+    // another copy on the shelf.
+    await requireSnapshot(c.dir, written, record, 'app-edits');
+    if (app.chapterRef === ref && chapterSaveCycle() === requestedTurn) {
+      resetSaveFailures();
+      app.saveFailed = false;
+      noteTypesettingSaved(record.typesetting);
+      if (seq === saveSeq) markSaved({ written: true });
+      queueAdopt(ref);
+    }
+    return;
+  }
   await fsx.writeTextFileAtomic(path, written);
   diskText.set(c.dir, written);
-  if (outside) {
-    toastError(
-      'chapter.json was changed outside the app while this chapter was open. Your version was saved. ' +
-        'The other one is kept under Versions as "Changed outside the app".',
-    );
-  }
   // …and the translations beside it, on the same debounce. Every route into the
   // document already ends in `markUnsaved()` - detection, a queue edit, a
   // placement - so this file is refreshed 800ms after the last keystroke rather
@@ -2336,6 +2346,76 @@ async function writeOpenChapter(seq, requestedRef, requestedTurn) {
     noteTypesettingSaved(record.typesetting);
     if (seq === saveSeq) markSaved({ written: true });
   }
+}
+
+// Reload the open chapter from disk after an outside change (SAV-2). Run after
+// the save queue, never inside it: the reopen flushes saves first, and a save
+// that waited on its own reload would wait for ever. The undo history goes,
+// as on a restore - its entries describe the document that was replaced.
+// A user who has left the chapter, or opened another, is left alone.
+let adoptFor = null;
+function queueAdopt(ref) {
+  if (adoptFor === ref) return;
+  adoptFor = ref;
+  saving.then(() => setTimeout(() => adoptOutsideChange(ref), 0));
+}
+
+async function adoptOutsideChange(ref) {
+  if (adoptFor === ref) adoptFor = null;
+  if (app.chapterRef !== ref) return;
+  const c = chapterById(ref.projectId, ref.chapterId);
+  if (!c) return;
+  try {
+    await closeHistory(app.pages[app.pageIndex]?.id ?? null);
+    if (app.chapterRef !== ref) return;
+    closeChapter();
+    try {
+      await fsx.remove(await fsx.join(c.dir, 'logs', 'history.json'));
+    } catch {
+      /* none written yet */
+    }
+    await openChapter(ref.projectId, ref.chapterId);
+    toastError(
+      'chapter.json was changed outside the app, so the chapter was reloaded from disk. ' +
+        'Your edits in the app are kept under Versions as "Your edits before a reload".',
+    );
+  } catch (e) {
+    toastError(`chapter.json was changed outside the app and could not be reloaded: ${e?.message ?? e}`);
+  }
+}
+
+// The same check when the window comes back to the front, so an edit made in
+// another tool shows up before the user types over a stale page - not only at
+// the next save. Queued behind the saves, so it never reads a half-landed
+// write of our own. An editor with unsaved work saves instead, and the save
+// path above keeps that work and reloads.
+export function checkOutsideChange() {
+  const ref = app.chapterRef;
+  if (!ref || !app.loaded) return Promise.resolve(false);
+  const done = saving.then(async () => {
+    if (app.chapterRef !== ref) return false;
+    const c = chapterById(ref.projectId, ref.chapterId);
+    const known = c ? diskText.get(c.dir) : undefined;
+    if (known === undefined) return false;
+    let text;
+    try {
+      text = await fsx.readTextFile(await fsx.join(c.dir, 'chapter.json'));
+    } catch {
+      return false;
+    }
+    if (app.chapterRef !== ref || text === known) return false;
+    if (!app.saved) {
+      // Unsaved edits go through the one path that knows how to keep them.
+      flushSave().catch(() => {});
+      return true;
+    }
+    // Everything of ours is the text we last wrote: keep that, and reload.
+    await requireSnapshot(c.dir, known, JSON.parse(known), 'app-edits');
+    queueAdopt(ref);
+    return true;
+  });
+  saving = done.catch(() => {});
+  return done;
 }
 
 export function closeChapter() {
