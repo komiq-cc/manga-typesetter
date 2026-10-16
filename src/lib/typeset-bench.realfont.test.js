@@ -113,7 +113,9 @@ describe('the lettering benchmark', () => {
       console.log(`approved: ${bench.approve(results, ids).join(' ') || 'nothing'}`);
       if (unknown.length) console.log(`no such case: ${unknown.join(' ')}`);
     }
-  });
+    // Two engines over every case, each placing its boxes with the outline
+    // finder: past the 10 s default when the whole suite runs at once.
+  }, 60_000);
 
   it('runs every case under the Rust engine too, and places a box with lines in it', () => {
     expect(rust.map((r) => r.id)).toEqual(CASES.map((c) => c.id));
