@@ -1285,10 +1285,37 @@ export function checkItems(pages = app.pages) {
 // The open chapter's list, worked out once and shared: the pill, the queue's
 // list, the page dots and the export all read `checks.items` rather than each
 // walking the chapter. Lazy: nothing is computed until something reads it.
-class ChapterChecks {
-  items = $derived(checkItems(app.pages));
+//
+// Held page by page, so a keystroke in one box works out that page's list
+// again and only joins the others: a whole chapter of fits and stamps is tens
+// of milliseconds, too much to pay per letter.
+class PageChecks {
+  constructor(pg) {
+    this.pg = pg;
+  }
+  items = $derived(pageCheckItems(this.pg, app.pages.indexOf(this.pg)));
 }
-export const checks = new ChapterChecks();
+// Each page's list is made under its own effect root, and so is the
+// chapter's. A derived made with no effect over it (here, inside the chapter's
+// list as it runs) is never told when what it read changes, and keeps its first
+// answer forever.
+function rooted(make) {
+  let made;
+  $effect.root(() => {
+    made = make();
+  });
+  return made;
+}
+const pageChecks = new WeakMap();
+function checksOf(pg) {
+  let c = pageChecks.get(pg);
+  if (!c) pageChecks.set(pg, (c = rooted(() => new PageChecks(pg))));
+  return c.items;
+}
+class ChapterChecks {
+  items = $derived(isTranslateMode() ? [] : app.pages.flatMap(checksOf));
+}
+export const checks = rooted(() => new ChapterChecks());
 
 // The first item at a place after `cursor` ({ pageIndex, boxId?, lineN? }),
 // wrapping to the start of the chapter. A cursor on nothing (no selection)
