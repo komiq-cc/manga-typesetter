@@ -3094,7 +3094,7 @@ describe('nudging a box with the arrow keys', () => {
     expect([byId(id).x, byId(id).y]).toEqual([x + 1, y - 10]);
   });
 
-  // A run of presses is one gesture. The history is five steps deep, so an entry
+  // A run of presses is one gesture. The history is `MAX_STEPS` deep, so an entry
   // per keypress would empty it before the user finished moving one box.
   it('coalesces a run into a single move entry', () => {
     const id = aBox();

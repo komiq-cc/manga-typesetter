@@ -17,7 +17,7 @@
 // ~1.5 MB a page, raw and cleaned, is ~600 MB held from the moment it opens
 // until it closes - dwarfing everything else the editor keeps (the box JSON for
 // the same chapter is ~5 MB, and the undo history, which is delta-based, capped
-// at five steps a page and already spilled to `logs/history.json`, is under
+// at `MAX_STEPS` a page and already spilled to `logs/history.json`, is under
 // one). Asset URLs shrink what an entry costs, not what the window is for: the
 // decoded bitmaps are still the bound that matters.
 //

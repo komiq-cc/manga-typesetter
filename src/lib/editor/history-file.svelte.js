@@ -1,7 +1,7 @@
 // ===== The history file =====
 // Only the page on screen keeps its undo stack in memory. Every other page's
 // lives here, in the chapter's own directory, so a chapter with two hundred
-// pages costs five entries of RAM rather than a thousand - and so undo survives
+// pages costs one page's entries of RAM rather than every page's - and so undo survives
 // a relaunch.
 //
 //   <chapter-dir>/logs/history.json

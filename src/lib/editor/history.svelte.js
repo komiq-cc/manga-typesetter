@@ -24,7 +24,10 @@ import {
   setFitLander,
 } from '../store.svelte.js';
 
-export const MAX_STEPS = 5;
+// About thirty steps a page (UND-1). Entries are deltas of tens of bytes, the
+// live stack is one page's, and the rest spill to `logs/history.json`, so the
+// depth costs disk, not RAM.
+export const MAX_STEPS = 30;
 
 export const history = $state({ canUndo: false, canRedo: false, pageId: null });
 
@@ -128,7 +131,7 @@ const recheck = (p, boxes) => {
 // queue-placed box has none, and these are no-ops for it.
 //
 // Both halves ask whether the line is there rather than asserting it: the
-// history is bounded at five steps and shares a page with edits it did not
+// history is bounded (`MAX_STEPS`) and shares a page with edits it did not
 // record, so a line that is already back (or already gone) is a document that
 // agrees with where this entry is trying to take it, not a failure to report.
 const dropLine = (p, e) => {

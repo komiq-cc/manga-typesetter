@@ -5140,7 +5140,7 @@ export function moveBoxTo(b, x, y, p = page(), from = moveGeom(b)) {
 // jump back onto the page on the first arrow press.
 //
 // A run of presses coalesces into one entry through the same settle window the
-// Inspector's sliders use - the history is five steps deep, so an entry per
+// Inspector's sliders use - the history is `MAX_STEPS` deep, so an entry per
 // keypress would empty it before the user had finished moving one box.
 const NUDGE_SETTLE_MS = 400;
 let nudgePending = null;
