@@ -80,6 +80,13 @@ const setFields = (b, from) => {
       if (from.auto) b.auto = structuredClone(from.auto);
       else delete b.auto;
     }
+    else if (k === 'colours') {
+      b.style.color = from.colours.color;
+      from.colours.strokes.forEach((c, i) => {
+        if (b.style.strokes[i]) b.style.strokes[i].color = c;
+      });
+      b.style.autoContrast = from.colours.auto;
+    }
     else b[k] = from[k];
   }
 };

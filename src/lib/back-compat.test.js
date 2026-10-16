@@ -1048,4 +1048,23 @@ describe('a chapter with bubble outlines', () => {
     expect('fit' in pageById(7).detect.boxes[0]).toBe(false);
     expect('outline' in pageById(7).detect.boxes[0]).toBe(false);
   });
+
+  // LET-3: the text colour the bubble called for rides on the outline record,
+  // and the box's own flag on its style.
+  it('keeps the bubble ink on the record and drops one that is not black or white', () => {
+    const outline = { source: 'dark', confidence: 0.9, approved: null, ink: '#ffffff' };
+    loadProjectPages([PAGE({ fit: POLY, outline })]);
+    expect(byId('o1').outline).toEqual(outline);
+    loadProjectPages([PAGE({ fit: POLY, outline: { ...outline, ink: 'red' } })]);
+    expect('ink' in byId('o1').outline).toBe(false);
+  });
+
+  it('reads a style saved before automatic colour as one that does not pick', () => {
+    loadProjectPages([PAGE({ fit: POLY })]);
+    expect(byId('o1').style.autoContrast).toBe(false);
+    loadProjectPages([PAGE({ fit: POLY, style: { font: 'Bangers', size: 30, autoContrast: true } })]);
+    expect(byId('o1').style.autoContrast).toBe(true);
+    loadProjectPages([PAGE({ fit: POLY, style: { font: 'Bangers', size: 30, autoContrast: 'yes' } })]);
+    expect(byId('o1').style.autoContrast).toBe(false);
+  });
 });

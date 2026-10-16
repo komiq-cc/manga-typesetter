@@ -97,7 +97,7 @@ import { takesHeightFloor } from './resize-math.js';
 // app's answer to "where do the pixels come from", and it answers null wherever
 // there is no canvas - which is to say under node, where every test below takes
 // the fallback path exactly as a page nobody has opened does.
-import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint, localUniformity } from './balloon.js';
+import { detectBalloon, detectBalloonAt, inscribedRect, balloonFrame, shapeContainsPoint, localUniformity, contrastInk } from './balloon.js';
 import { findOutline } from './bubble-outline.js';
 import { pagePixelsFor, forgetPagePixels } from './page-pixels.js';
 import { measureChapterFits } from './chapter-fit.js';
@@ -3676,7 +3676,16 @@ export function measureBalloon(p, block, pixels, scale = null) {
   const image = pixels ?? pagePixelsFor(p);
   if (!image) return null;
   const neighbors = neighbourBlocks(p, block, image, scale);
-  return outlineMeasure(findOutline(image, block, { neighbors })) ?? fillMeasure(detectBalloon(image, block)) ?? openMeasure();
+  const m = outlineMeasure(findOutline(image, block, { neighbors })) ?? fillMeasure(detectBalloon(image, block));
+  return m ? withInk(m, image) : openMeasure();
+}
+
+// The measurement with the text colour its bubble calls for written on its
+// outline record (LET-3), read off the same pixels the outline came from.
+function withInk(m, image) {
+  const ink = contrastInk(image, m.fit);
+  if (ink) m.outline.ink = ink;
+  return m;
 }
 
 // The other detected blocks near this one, in the pixels' space. Only those
@@ -3764,9 +3773,9 @@ export function measureBalloonAt(p, imgX, imgY, pixels, scale = null) {
   const block = [x - 1, y - 1, x + 1, y + 1];
   const neighbors = neighbourBlocks(p, block, image, scale);
   const found = outlineMeasure(findOutline(image, block, { minPad: CLICK_PAD, neighbors }));
-  if (found && shapeContainsPoint(found.fit, x, y)) return found;
+  if (found && shapeContainsPoint(found.fit, x, y)) return withInk(found, image);
   const filled = fillMeasure(detectBalloonAt(image, x, y));
-  if (filled && shapeContainsPoint(filled.fit, x, y)) return filled;
+  if (filled && shapeContainsPoint(filled.fit, x, y)) return withInk(filled, image);
   return openMeasure();
 }
 
@@ -3955,6 +3964,10 @@ function bornBox(p, ln, imgX, imgY, measured) {
     ...(outline ? { outline } : null),
     auto: normalizeAuto({ refSize: style.size }),
   };
+  // A box born in plain black or white lets its bubble pick between the two;
+  // any other colour was picked by somebody, and stays (LET-3).
+  b.style.autoContrast = PLAIN_INKS.has(String(b.style.color).toLowerCase());
+  applyBubbleInk(b, p);
   // Before the push and before the record, so the one `place` entry this gesture
   // writes carries the box the user is actually looking at. A box whose line
   // already has its translation typed in the queue is placed at the size that
@@ -4571,6 +4584,7 @@ function setBoxOutline(b, p, fit, outline, geomBefore = refitGeom(b)) {
   const before = geomBefore.fit;
   b.fit = fit;
   setOutline(b, outline);
+  applyBubbleInk(b, p);
   const text = boxText(b, p);
   const auto = isAutoBox(boxCandidate(b, text));
   if (auto && !b.auto && b.style.size > 0) b.auto = normalizeAuto({ refSize: b.style.size });
@@ -4749,7 +4763,46 @@ const refitGeom = (b) => ({
   fit: b.fit ? $state.snapshot(b.fit) : null,
   outline: b.outline ? $state.snapshot(b.outline) : null,
   auto: b.auto ? $state.snapshot(b.auto) : null,
+  // A refit can recolour the text (LET-3), so the entry carries the colours.
+  colours: {
+    color: b.style.color,
+    strokes: (b.style.strokes ?? []).map((k) => k.color),
+    auto: !!b.style.autoContrast,
+  },
 });
+
+// ===== the text colour from the bubble (LET-3) =====
+//
+// On a box that lets its bubble pick (`style.autoContrast`): black or white
+// text, whichever stands out on the bubble's inside, and the first stroke the
+// other one. Runs at placement and at a refit, never on its own: the colour a
+// box has is the colour it keeps until its outline changes. The colour comes
+// from the outline record when the finder measured it, else from the page's
+// pixels if they are in hand - and is then written onto the record, so the
+// file remembers what the bubble said. Answers whether anything changed.
+const PLAIN_INKS = new Set(['#000000', '#ffffff', '#000', '#fff']);
+function applyBubbleInk(b, p) {
+  if (!b.style?.autoContrast || !b.fit) return false;
+  let ink = b.outline?.ink;
+  if (!ink) {
+    const image = pagePixelsFor(p);
+    ink = image ? contrastInk(image, b.fit) : null;
+    if (ink && b.outline && !b.outline.open) b.outline.ink = ink;
+  }
+  if (!ink) return false;
+  const edge = ink === '#000000' ? '#ffffff' : '#000000';
+  let changed = false;
+  if (b.style.color !== ink) {
+    b.style.color = ink;
+    changed = true;
+  }
+  const k = b.style.strokes?.[0];
+  if (k && k.color !== edge) {
+    k.color = edge;
+    changed = true;
+  }
+  return changed;
+}
 
 // ===== locks (FIT-5) =====
 //
@@ -5778,6 +5831,9 @@ export function mergeMaskedInto(out, template, mask = {}) {
       if (gv !== undefined) out[grp][field] = gv;
     }
   }
+  // A colour set across boxes is a colour set by hand: the bubbles stop
+  // picking it (LET-3).
+  if (mask.color || mask.strokes) out.autoContrast = false;
   return out;
 }
 

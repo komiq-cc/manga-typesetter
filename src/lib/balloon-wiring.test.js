@@ -76,6 +76,7 @@ const {
   moveBoxTo,
   duplicateBox,
   translateFit,
+  mergeMaskedInto,
 } = await import('./store.svelte.js');
 const { copyStyle, pasteStyle } = await import('./presets.svelte.js');
 const { tags } = await import('./tags.svelte.js');
@@ -86,7 +87,7 @@ const { balloonWidthsFor, lineIndents, textInset, contentWidth, layoutLines, lin
 // turns it on - so this file, which is about that beta being wired up, turns it
 // on for the whole run.
 setTypesetEnabled(true);
-const { inscribedRect, balloonFrame, interiorLineWidths, layoutShape, shapeBounds } = await import('./balloon.js');
+const { inscribedRect, balloonFrame, interiorLineWidths, layoutShape, shapeBounds, contrastInk } = await import('./balloon.js');
 // What layout reads for a stored fit: a found outline is a `poly`, laid out
 // as the formula that explains it (`layoutShape`).
 const L = (fit) => layoutShape(fit);
@@ -2233,5 +2234,115 @@ describe('placement chooses the size (FIT-1)', () => {
       hist.redo();
       expect(page().boxes[0].auto.status).toBe('shrunk');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LET-3: a box born in plain black or white lets its bubble pick the colour -
+// white text with a black stroke in a black bubble, black with a white stroke
+// on paper - at placement and at a refit, and never once a colour is set by
+// hand.
+describe('the text colour from the bubble (LET-3)', () => {
+  const lightPage = () => {
+    const img = pageImage(500, 500);
+    drawEllipse(img, 250, 250, 130, 80);
+    drawGlyphColumn(img, 240, 180, 20, 140);
+    return img;
+  };
+  // The same bubble filled black, with light lettering in it.
+  const darkPage = () => {
+    const img = pageImage(500, 500);
+    for (let y = 160; y <= 340; y++)
+      for (let x = 110; x <= 390; x++) if (Math.hypot((x + 0.5 - 250) / 130, (y + 0.5 - 250) / 80) <= 1) put(img, x, y, INK);
+    for (let gy = 180; gy + 22 <= 320; gy += 28) {
+      fillRect(img, 240, gy, 20, 22, PAPER);
+      fillRect(img, 244, gy + 4, 12, 14, INK);
+    }
+    return img;
+  };
+
+  it('reads black on paper and white on black, past the lettering still on the page', () => {
+    const oval = { kind: 'ellipse', cx: 250, cy: 250, rx: 120, ry: 70 };
+    expect(contrastInk(lightPage(), oval)).toBe('#000000');
+    expect(contrastInk(darkPage(), oval)).toBe('#ffffff');
+    expect(contrastInk(lightPage(), { kind: 'ellipse', cx: -500, cy: -500, rx: 10, ry: 10 })).toBe(null);
+  });
+
+  // The block a little wider than the lettering, as a detector gives it: the
+  // dark finder reads the block's own median, and a block of nothing but the
+  // light letters reads light.
+  const DARK_BLOCK = [236, 176, 264, 324];
+
+  it('gives a box in a black bubble white text with a black stroke', () => {
+    loadProjectPages(withDetect(DARK_BLOCK, true));
+    pixels = darkPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    expect(b.fit).not.toBe(null);
+    expect(b.style.autoContrast).toBe(true);
+    expect(b.style.color).toBe('#ffffff');
+    expect(b.style.strokes[0].color).toBe('#000000');
+    expect(b.outline.ink).toBe('#ffffff');
+  });
+
+  it('leaves a box on paper in black with a white stroke', () => {
+    loadProjectPages(withDetect([240, 180, 260, 320], true));
+    pixels = lightPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    expect(b.style.color).toBe('#000000');
+    expect(b.style.strokes[0].color).toBe('#ffffff');
+    expect(b.outline.ink).toBe('#000000');
+  });
+
+  it('recolours at a refit, as one undo step with the outline', () => {
+    loadProjectPages(withDetect(DARK_BLOCK, true));
+    pixels = lightPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    pixels = darkPage();
+    expect(refitBalloon(b.id)).toBe(true);
+    expect(b.style.color).toBe('#ffffff');
+    expect(b.style.strokes[0].color).toBe('#000000');
+    hist.undo();
+    expect(b.style.color).toBe('#000000');
+    expect(b.style.strokes[0].color).toBe('#ffffff');
+    expect(b.outline.ink).toBe('#000000');
+    hist.redo();
+    expect(b.style.color).toBe('#ffffff');
+  });
+
+  it('never changes a colour set by hand', () => {
+    loadProjectPages(withDetect(DARK_BLOCK, true));
+    pixels = lightPage();
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    b.style.color = '#c02020';
+    b.style.autoContrast = false;
+    pixels = darkPage();
+    refitBalloon(b.id);
+    expect(b.style.color).toBe('#c02020');
+    expect(b.style.strokes[0].color).toBe('#ffffff');
+  });
+
+  it('does not pick for a box born in a colour somebody chose', () => {
+    loadProjectPages(withDetect(DARK_BLOCK, true));
+    pixels = darkPage();
+    const kept = app.lastStyle;
+    app.lastStyle = { ...kept, color: '#2050c0' };
+    placeActiveAt(250, 250);
+    const b = page().boxes[0];
+    app.lastStyle = kept;
+    expect(b.fit).not.toBe(null);
+    expect(b.style.color).toBe('#2050c0');
+    expect(b.style.autoContrast).toBe(false);
+  });
+
+  it('stops picking once a bulk edit sets a colour', () => {
+    const out = mergeMaskedInto({ ...defaultStyle(), autoContrast: true }, { ...defaultStyle(), color: '#ff0000' }, { color: true });
+    expect(out.color).toBe('#ff0000');
+    expect(out.autoContrast).toBe(false);
+    const kept = mergeMaskedInto({ ...defaultStyle(), autoContrast: true }, { ...defaultStyle(), size: 40 }, { size: true });
+    expect(kept.autoContrast).toBe(true);
   });
 });

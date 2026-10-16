@@ -1250,11 +1250,13 @@ describe('the bulk edit mask', () => {
     // `ink` and `warp` are box-local geometry - drawn against this box, by
     // hand, in this box's own px - so they stay the Inspector's along with
     // x/y/w/h. `sfx` is the Rust engine's per-letter lettering and has no row
-    // in the panel (its moves are tuned against one box's text). Every other
+    // in the panel (its moves are tuned against one box's text). `autoContrast`
+    // is a box's own flag, not a look: a bulk colour clears it on every target
+    // (`mergeMaskedInto`) rather than copying it. Every other
     // group is still one row per field.
     const WHOLE = new Set(BULK_WHOLE_LEAVES);
     const leaves = Object.entries(defaultStyle())
-      .filter(([k]) => k !== 'path' && k !== 'ink' && k !== 'warp' && k !== 'sfx')
+      .filter(([k]) => k !== 'path' && k !== 'ink' && k !== 'warp' && k !== 'sfx' && k !== 'autoContrast')
       .flatMap(([k, v]) =>
         v && typeof v === 'object' && !WHOLE.has(k) ? Object.keys(v).map((f) => `${k}.${f}`) : [k],
       );
@@ -3931,7 +3933,7 @@ describe('optional previous-box style inheritance', () => {
   const styleSource = (b) => {
     Object.assign(b.style, {
       font: 'Bangers', size: 48, rotation: 30, bold: true,
-      color: '#123456', curve: 25, flipH: true,
+      color: '#123456', autoContrast: false, curve: 25, flipH: true,
       strokes: [{ color: '#ff0000', width: 8, opacity: 1 }],
     });
     rememberStyle(b);
@@ -3943,7 +3945,8 @@ describe('optional previous-box style inheritance', () => {
     const original = styleSource(first);
     setPref('inheritBoxStyle', false);
 
-    expect(place(3).style).toEqual(defaultStyle());
+    // Born in plain black, so its bubble may pick the colour (LET-3).
+    expect(place(3).style).toEqual({ ...defaultStyle(), autoContrast: true });
     expect(byId(addEmptyBox(500, 500)).style).toEqual(defaultStyle());
     expect(first.style).toEqual(original);
   });

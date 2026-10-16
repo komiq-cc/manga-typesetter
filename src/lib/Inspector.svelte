@@ -415,9 +415,16 @@
   // snapshot never sees a press on its square or its fields: the snapshot is
   // armed here instead, before the write, or a pick made after a pause would
   // record before === after and be lost to undo.
+  // A colour set by hand is the box's colour from here on: its bubble stops
+  // picking black or white for it (LET-3).
+  function handColour() {
+    if (box?.style) box.style.autoContrast = false;
+  }
+
   function setColour(obj, key, hex) {
     armSnap();
     obj[key] = hex;
+    handColour();
     touch();
   }
 
@@ -425,6 +432,7 @@
     const raw = String(v ?? '').trim();
     if (HEX.test(raw)) {
       obj[key] = raw.startsWith('#') ? raw : '#' + raw;
+      handColour();
       touch();
       hexFlag(el, false);
     } else {

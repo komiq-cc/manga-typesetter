@@ -248,6 +248,11 @@ export function defaultStyle() {
     // neither gradient nor pattern is on; when one of them is on it is the
     // colour behind the fill layer (and the PSD fallback colour).
     color: '#000000',
+    // The bubble picks `color` and the first stroke's colour (LET-3): black or
+    // white text, whichever stands out on the bubble, and the stroke the other
+    // one. Set on a box born in plain black or white, cleared the moment a
+    // colour is set by hand. Absent on a style saved before it existed: off.
+    autoContrast: false,
     // Gradient fill. `scope` decides what the gradient spans: 'box' runs once
     // across the whole text block, 'line' restarts on every wrapped line.
     // `kind` is 'linear' or 'radial'.
@@ -825,6 +830,7 @@ export function normalizeStyle(s) {
     // Anything else - a typo in a hand-edited file, a value from a newer build -
     // is the default, not a string every layout would have to second-guess.
     shape: BLOCK_SHAPES.includes(flat.shape) ? flat.shape : d.shape,
+    autoContrast: flat.autoContrast === true,
     blur: Math.max(0, num(src.blur, 0)),
     motionBlur: mb,
     path: pth,
@@ -981,6 +987,9 @@ export function normalizeOutline(o) {
   };
   if (typeof o.note === 'string' && o.note.trim()) out.note = o.note.trim().slice(0, 500);
   if (o.open === true) out.open = true;
+  // The text colour the bubble's inside calls for, measured where the pixels
+  // were (LET-3): kept so a box placed later, off the page on screen, gets it.
+  if (o.ink === '#000000' || o.ink === '#ffffff') out.ink = o.ink;
   return out;
 }
 

@@ -1791,3 +1791,37 @@ export function detectBalloon(image, block, opts = {}) {
   const fit = fitBalloonShape(interiorProfile(region), opts);
   return { ...fit, escaped: region.escaped, threshold: region.threshold };
 }
+
+// ===== the text colour a bubble calls for (LET-3) =====
+//
+// Black or white, whichever stands out more against the bubble's inside: the
+// median brightness of the pixels inside `shape`, as relative luminance, and
+// the WCAG contrast of each against it. The median, not the mean, so the
+// source lettering still on an uncleaned page (sparse dark strokes on a light
+// bubble, or light ones on a dark one) does not pull it. Sampled on a grid of
+// at most 64 by 64 over the shape's bounds, which is plenty for one number.
+// Ported from Komatose's `contrastingText` (server/textContrast.ts, MIT).
+//
+// Null when the shape covers no pixel of the image.
+const linear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+export function contrastInk(image, shape) {
+  const bb = shapeBounds(shape);
+  if (!image?.data || !bb || !(bb.w > 0) || !(bb.h > 0)) return null;
+  const { width: W, height: H, data } = image;
+  const step = Math.max(1, Math.max(bb.w, bb.h) / 64);
+  const vals = [];
+  for (let y = bb.y + step / 2; y < bb.y + bb.h; y += step) {
+    const py = Math.floor(y);
+    if (py < 0 || py >= H) continue;
+    for (let x = bb.x + step / 2; x < bb.x + bb.w; x += step) {
+      const px = Math.floor(x);
+      if (px < 0 || px >= W || !shapeContainsPoint(shape, x, y)) continue;
+      const i = (py * W + px) * 4;
+      vals.push(0.2126 * linear(data[i] / 255) + 0.7152 * linear(data[i + 1] / 255) + 0.0722 * linear(data[i + 2] / 255));
+    }
+  }
+  if (!vals.length) return null;
+  vals.sort((a, b) => a - b);
+  const l = vals[Math.floor(vals.length / 2)];
+  return (l + 0.05) / 0.05 >= 1.05 / (l + 0.05) ? '#000000' : '#ffffff';
+}
