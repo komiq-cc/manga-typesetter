@@ -17,7 +17,7 @@
   import ChapterSourcesSheet from './lib/home/ChapterSourcesSheet.svelte';
   import ChapterVersionsSheet from './lib/home/ChapterVersionsSheet.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, toastError, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
+  import { app, byId, page, selectBox, settleEdits, deleteBox, duplicateBox, copyBox, pasteBox, hasCopiedBox, nudgeBox, deselect, nextPage, prevPage, setTool, resetBoxRotation, toggleBalloonFit, refitBalloon, approveOutline, toggleLayoutLock, placeDetectedOnPage, closeBulk, toast, toastError, setPageSwitchHook, flushSidebar, noteFontsChanged, isLongstrip, isTranslateMode, chapterSaveCycle } from './lib/store.svelte.js';
   import { copyStyle, pasteStyle } from './lib/presets.svelte.js';
   import { dispatchShortcut, registerShortcutHandlers } from './lib/shortcuts.svelte.js';
   import { setInspectorTab, cycleInspectorTab } from './lib/inspector-tabs.svelte.js';
@@ -266,6 +266,11 @@
     sourcesOpen = true;
   }
 
+  // The raw-page peek ends with its key, wherever focus went meanwhile.
+  function onKeyup(e) {
+    if (e.key === '\\' && app.peekRaw) app.peekRaw = false;
+  }
+
   // Arrow keys, as the step they move a box by. Shift multiplies it.
   const NUDGE = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   const NUDGE_FAST = 10;
@@ -301,6 +306,14 @@
     'box.retypeset': () => {
       if (isTranslateMode() || !app.selectedId) return false;
       refitBalloon(app.selectedId);
+    },
+    'box.approveOutline': () => {
+      if (isTranslateMode() || !app.selectedId) return false;
+      approveOutline(app.selectedId);
+    },
+    'view.regions': () => {
+      if (isTranslateMode()) return false;
+      app.showRegions = !app.showRegions;
     },
     // Lock layout, as a switch on the selected box: the way to lock a box that
     // has no lock chip yet, since the chip only shows once a box has a lock.
@@ -459,6 +472,13 @@
     // widget's own keys): that control has said what the key meant there.
     if (typing || e.defaultPrevented) return;
     const mod = e.metaKey || e.ctrlKey;
+    // Hold \ to see the raw page in place of the cleaned one (FLOW-7). Held,
+    // not toggled: let go and the cleaned page is back (`onKeyup`).
+    if (!mod && !e.altKey && e.key === '\\') {
+      e.preventDefault();
+      if (!isTranslateMode()) app.peekRaw = true;
+      return;
+    }
     // Tab / Shift+Tab: cycle box selection in document order, but only when
     // focus is not on a focusable UI control (e.g. sidebar inputs or inspector buttons).
     if (!mod && e.key === 'Tab' && app.selectedId) {
@@ -510,7 +530,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<svelte:window onkeydown={onKeydown} onkeyup={onKeyup} onblur={() => (app.peekRaw = false)} />
 
 {#if route.name === 'editor'}
   <EditorRoot onFontLib={() => (fontModalOpen = true)} onSettings={() => (settingsOpen = true)} />

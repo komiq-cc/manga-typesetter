@@ -512,6 +512,13 @@ export const app = $state({
   detecting: false, // detection/OCR request in flight
   detectBatch: null, // { done, total } while a whole-chapter detect runs, else null
   chapterPlace: null, // { done, total } while "Place chapter" measures its balloons, else null
+  // The Regions view (Bubble C, FLOW-7, FLOW-12): every bubble outline in its
+  // approval colour, the selected box's points, detected blocks with no box,
+  // and line numbers. A view, not a document setting.
+  showRegions: false,
+  // True while the raw-page key is held (FLOW-7): the canvas shows the page
+  // before cleaning, in place.
+  peekRaw: false,
   chapterRef: null, // { projectId, chapterId } while a chapter is open
   // The open chapter's workflow mode, mirrored from its chapter.json - see
   // CHAPTER_MODES. It is a property of the chapter and not a preference of the
@@ -4544,11 +4551,26 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   // on top of it - the same reason `toggleBalloonFit` settles first.
   settleEdits();
   const before = b.fit;
-  const geomBefore = refitGeom(b);
   const m = balloonUnder(p, b);
-  const fit = m?.fit ?? null;
+  const { fit, solved } = setBoxOutline(b, p, m?.fit ?? null, m?.outline);
+  const where = fit ? `the ${panelLike(b) ? 'panel' : 'balloon'} under this box` : null;
+  if (fit) toast(solved != null ? `Typeset again in ${where}` : `Fitted to ${where}`);
+  else if (before) toast('No balloon found under this box - layout is rectangular again');
+  else toast('No balloon found under this box');
+  return !!fit;
+}
+
+// A box given a new fit and outline record, and its text typeset again in it:
+// the solver, as at placement, or, when it has nothing to say, the old fit
+// (a fit that appears where there was none sizes the box to the balloon) and
+// the ladder. One undo step (`refit`), recorded only when something changed.
+//
+// `geomBefore` is for a gesture that already moved the outline live (a point
+// drag): the box as it stood when the gesture began.
+function setBoxOutline(b, p, fit, outline, geomBefore = refitGeom(b)) {
+  const before = geomBefore.fit;
   b.fit = fit;
-  setOutline(b, m?.outline);
+  setOutline(b, outline);
   const text = boxText(b, p);
   const auto = isAutoBox(boxCandidate(b, text));
   if (auto && !b.auto && b.style.size > 0) b.auto = normalizeAuto({ refSize: b.style.size });
@@ -4566,13 +4588,156 @@ export function refitBalloon(boxId = app.selectedId, p = page()) {
   const geomAfter = refitGeom(b);
   if (JSON.stringify(geomAfter) !== JSON.stringify(geomBefore)) {
     recordEdit({ t: 'refit', pageId: p.id, boxId: b.id, geomBefore, geomAfter });
+    markUnsaved();
   }
-  const where = fit ? `the ${panelLike(b) ? 'panel' : 'balloon'} under this box` : null;
-  if (fit) toast(solved != null ? `Typeset again in ${where}` : `Fitted to ${where}`);
-  else if (before) toast('No balloon found under this box - layout is rectangular again');
-  else toast('No balloon found under this box');
-  markUnsaved();
+  return { fit, solved };
+}
+
+// ===== the outline, by hand (Bubble C) =====
+//
+// What the Regions view and the Inspector do to a box's outline: approve it,
+// replace it with the box's own rectangle, or move its points. Every change to
+// the points clears the approval and typesets the text again inside them.
+
+// The outline's state, for its colour and the Inspector's words:
+//   'user' | 'ai'   approved, and by whom
+//   'waiting'       a fit nobody has approved - including one saved before
+//                   outlines had a record
+//   'open'          looked, and found no closed outline
+//   null            never looked (no fit, no record)
+export function outlineState(b) {
+  if (!b) return null;
+  if (b.fit) return b.outline?.approved ?? 'waiting';
+  return b.outline?.open ? 'open' : null;
+}
+
+// Any fit as outline points, for drawing and for the handles: a poly is
+// itself; an oval is sampled; a rectangle is its corners; rows go down the
+// left edges and back up the right.
+export function outlinePoints(fit) {
+  const f = normalizeFit(fit);
+  if (!f) return [];
+  if (f.kind === 'poly') return f.pts;
+  if (f.kind === 'rect') return [[f.x, f.y], [f.x + f.w, f.y], [f.x + f.w, f.y + f.h], [f.x, f.y + f.h]];
+  if (f.kind === 'ellipse') {
+    const n = 32;
+    return Array.from({ length: n }, (_, i) => {
+      const a = (i / n) * Math.PI * 2;
+      return [Math.round((f.cx + f.rx * Math.cos(a)) * 100) / 100, Math.round((f.cy + f.ry * Math.sin(a)) * 100) / 100];
+    });
+  }
+  const left = [];
+  const right = [];
+  f.spans.forEach((sp, i) => {
+    if (!sp) return;
+    const y0 = f.y0 + i * f.step;
+    left.push([sp[0], y0], [sp[0], y0 + f.step]);
+    right.push([sp[1], y0], [sp[1], y0 + f.step]);
+  });
+  const pts = [...left, ...right.reverse()];
+  // Rows of hundreds of bands are hundreds of points; keep every k-th so the
+  // handles stay few. The stored fit is untouched until the user drags one.
+  const k = Math.ceil(pts.length / 64);
+  return k > 1 ? pts.filter((_, i) => i % k === 0) : pts;
+}
+
+// Approve the outline under one box. An open outline cannot be approved: there
+// is nothing drawn to approve, and approving it would hide it from the check.
+export function approveOutline(boxId = app.selectedId, p = page(), by = 'user') {
+  const b = (p?.boxes ?? []).find((x) => x.id === boxId);
+  if (!b) return false;
+  if (!b.fit) {
+    toast('No outline to approve - use Outline = box, or Refit');
+    return false;
+  }
+  const n = approveBoxes(p, [b], by);
+  if (n) toast('Outline approved');
+  return n > 0;
+}
+
+// Approve every fitted, unapproved outline on the page, in one undo step.
+export function approvePageOutlines(p = page(), by = 'user') {
+  // Only what nobody approved: an AI approval stays one, for the user to spot-check.
+  const waiting = (p?.boxes ?? []).filter((b) => b.fit && !b.outline?.approved);
+  const n = approveBoxes(p, waiting, by);
+  const open = (p?.boxes ?? []).filter((b) => outlineState(b) === 'open').length;
+  const openStr = open ? ` · ${open} with no outline left` : '';
+  toast(n ? `Approved ${n} outline${n === 1 ? '' : 's'}${openStr}` : `Nothing to approve${openStr}`);
+  return n;
+}
+
+function approveBoxes(p, boxes, by) {
+  settleEdits();
+  const items = [];
+  for (const b of boxes) {
+    if (!b.fit || b.outline?.approved === by) continue;
+    const before = b.outline ? $state.snapshot(b.outline) : null;
+    // A fit saved before outlines had a record is the old fill-and-fit's.
+    b.outline = { ...(before ?? { source: 'fill', confidence: 0 }), approved: by };
+    delete b.outline.open;
+    items.push({ boxId: b.id, before, after: $state.snapshot(b.outline) });
+  }
+  if (items.length) {
+    recordEdit({ t: 'outlines', pageId: p.id, items });
+    markUnsaved();
+  }
+  return items.length;
+}
+
+// The box's own rectangle as its outline: for free text, an SFX, or a bubble
+// the finder could not close. Unapproved, like any new outline.
+export function outlineToBox(boxId = app.selectedId, p = page()) {
+  const b = (p?.boxes ?? []).find((x) => x.id === boxId);
+  if (!b) return false;
+  settleEdits();
+  const { x, y, w, h } = b;
+  const fit = normalizeFit({ kind: 'poly', pts: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]] });
+  if (!fit) return false;
+  setBoxOutline(b, p, fit, { source: 'box', confidence: 1, approved: null });
+  toast('Outline set to the box');
+  return true;
+}
+
+// A point drag, live: the outline moves under the pointer and the text follows
+// it on screen. Nothing is recorded; `commitOutlinePoints` does that once, from
+// the geometry `outlineGeom` took when the drag began.
+export const outlineGeom = (b) => refitGeom(b);
+export function previewOutlinePoints(b, pts) {
+  const fit = normalizeFit({ kind: 'poly', pts });
+  if (fit) b.fit = fit;
   return !!fit;
+}
+
+// The points as the user left them: a hand-made outline, unapproved, with the
+// text typeset again inside it. One undo step back to `geomBefore`.
+export function commitOutlinePoints(boxId, pts, p = page(), geomBefore = null) {
+  const b = (p?.boxes ?? []).find((x) => x.id === boxId);
+  if (!b) return false;
+  const fit = normalizeFit({ kind: 'poly', pts });
+  if (!fit) return false;
+  setBoxOutline(b, p, fit, { source: 'manual', confidence: 1, approved: null }, geomBefore ?? refitGeom(b));
+  return true;
+}
+
+// The layout key (01-bubble-check.md): a box's solver stamp already is one - a
+// hash of its text, rectangle, style (font included) and fit, renewed by every
+// solve and every move that keeps the solve. An auto box whose stamp no longer
+// matches was laid out for inputs it no longer has.
+export function isLayoutStale(b, p = page()) {
+  if (!b?.auto?.stamp || b.auto.status === 'pending') return false;
+  return !solveStands(b, boxText(b, p));
+}
+
+// "Keep current layouts": the boxes stand as they are, and their stamps say so.
+export function keepCurrentLayouts(p = page()) {
+  let n = 0;
+  for (const b of p?.boxes ?? []) {
+    if (!isLayoutStale(b, p)) continue;
+    b.auto.stamp = solveStamp(b, boxText(b, p));
+    n++;
+  }
+  if (n) markUnsaved();
+  return n;
 }
 
 // What a refit can move, as its history entry records it. Plain copies, taken

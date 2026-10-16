@@ -14,6 +14,7 @@
   import { exportTextJson } from '../exporter.js';
   import { sidecarReady } from '../sidecar.js';
   import DetectMenu from './DetectMenu.svelte';
+  import { comboFor, formatCombo } from '../shortcuts.svelte.js';
 
   let { onFontLib, onSettings } = $props();
 
@@ -106,6 +107,10 @@
   // the targets the user had picked and reseed the style; `closeBulk` is what
   // Escape and the panel's own Cancel already do.
   const toggleBulk = () => (app.bulk.active ? closeBulk() : openBulk());
+  const regionsKey = $derived(formatCombo(comboFor('view.regions')));
+  const regionsTip = $derived(
+    `Regions - bubble outlines, detected text, line numbers${regionsKey ? ` (${regionsKey})` : ''}. Hold \\ to see the raw page`,
+  );
 </script>
 
 <div class="pill-row left">
@@ -144,6 +149,16 @@
     {/if}
   </div>
   {#if !translate}
+    <button
+      class="pill pill-icon"
+      class:on={app.showRegions}
+      onclick={() => (app.showRegions = !app.showRegions)}
+      aria-pressed={app.showRegions}
+      aria-label="Regions"
+      data-tip={regionsTip}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="11" rx="8" ry="6" stroke-dasharray="3 2.2" /><path d="M9 16.5 7.5 20.5l4-3.6" /></svg>
+    </button>
     <button
       class="pill pill-icon"
       class:on={app.bulk.active}

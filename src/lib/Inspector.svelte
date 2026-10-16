@@ -16,6 +16,10 @@
     boxSnap,
     boxEditRecords,
     refitBalloon,
+    approveOutline,
+    approvePageOutlines,
+    outlineToBox,
+    outlineState,
     toast,
     resizeBox,
   } from './store.svelte.js';
@@ -33,7 +37,9 @@
     LINE_HEIGHT_MIN,
     LINE_HEIGHT_MAX,
     letterSpacingRange,
+    normalizeFit,
   } from './data.js';
+  import { layoutShape } from './balloon.js';
   import { gradientCss, patternTileCanvas, sampleStops } from './text-paint.js';
   import { insertPathAnchor } from './measure.js';
   import { maskTool, setMaskTool } from './mask-tool.svelte.js';
@@ -791,6 +797,39 @@
     delArm = false;
     removePreset(presetId);
     presetId = '';
+  }
+
+  // What the box's text is laid out to, in words.
+  function fitLabel(b) {
+    // What layout reads: a found outline is laid out as the formula that
+    // explains it (`layoutShape`).
+    const f = layoutShape(normalizeFit(b.fit));
+    if (!f) return 'Not fitted · rectangular layout';
+    if (b.outline?.source === 'caption' || f.kind === 'rect') return 'Fitted · rectangular panel';
+    if (f.kind === 'ellipse') return 'Fitted · oval balloon';
+    return 'Fitted · balloon outline';
+  }
+
+  // The outline record, in words: who approved it, or how it was found and how
+  // sure the finder was.
+  const SOURCE_WORDS = {
+    ring: 'inked outline',
+    flood: 'filled interior',
+    dark: 'dark bubble',
+    caption: 'caption frame',
+    fill: 'balloon fit',
+    manual: 'drawn by hand',
+    box: 'the box',
+  };
+  function outlineWords(b) {
+    const st = outlineState(b);
+    if (st === 'open') return 'No closed outline found';
+    const o = b.outline;
+    const how = o ? SOURCE_WORDS[o.source] ?? o.source : 'balloon fit';
+    if (st === 'user') return `Approved · ${how}`;
+    if (st === 'ai') return `Approved by AI · ${how}`;
+    const sure = o && o.source !== 'manual' && o.source !== 'box' ? ` · ${Math.round(o.confidence * 100)}%` : '';
+    return `Not approved · ${how}${sure}`;
   }
 
   // Deletion itself stays instant; the toast says how to take it back, which
@@ -1777,12 +1816,21 @@
         <div class="insp-rule"></div>
         {@render secHead('Typeset')}
         <div class="grp">
-          <span class="lbl">{box.fit ? (box.fit.kind === 'ellipse' ? 'Fitted · oval balloon' : box.fit.kind === 'rows' ? 'Fitted · balloon outline' : 'Fitted · rectangular panel') : 'Not fitted · rectangular layout'}</span>
-          <!-- A verb, not a segment: it sat alone in a shell that implies
-               mutually exclusive choices it has none of. -->
-          <button type="button" class="rbtn" title="Measure the balloon under this box again, from where the box is now, and typeset the text in it" onclick={() => refitBalloon(box.id)}>
-            {box.fit ? 'Re-fit to balloon' : 'Fit to balloon'}
-          </button>
+          <span class="lbl">{fitLabel(box)}</span>
+          <!-- The outline's state (Bubble C), in the colour the Regions view
+               draws it in. -->
+          {#if outlineState(box)}
+            <span class="outline-state {outlineState(box)}">{outlineWords(box)}</span>
+          {/if}
+          <!-- Verbs, not segments: none of them excludes another. -->
+          <div class="outline-btns">
+            <button type="button" class="rbtn" title="Find the bubble under this box again, from where the box is now, and typeset the text in it" onclick={() => refitBalloon(box.id)}>
+              {box.fit ? 'Refit outline' : 'Find outline'}
+            </button>
+            <button type="button" class="rbtn" title="Use this box's own rectangle as its outline - for free text, an SFX, or a bubble with no closed outline" onclick={() => outlineToBox(box.id)}>Outline = box</button>
+            <button type="button" class="rbtn" disabled={!box.fit || box.outline?.approved === 'user'} title="Mark this outline right" onclick={() => approveOutline(box.id)}>Approve</button>
+            <button type="button" class="rbtn" title="Approve every outline on this page that nobody approved yet" onclick={() => approvePageOutlines()}>Approve page</button>
+          </div>
         </div>
       </div>
     {/if}
@@ -1795,6 +1843,42 @@
 {/if}
 
 <style>
+  /* The outline's state. A dot in the Regions view's colour for it, the words
+     in the panel's own text colour, so both themes read it. */
+  .outline-state {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--t2);
+  }
+  .outline-state::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+  }
+  .outline-state.user::before {
+    background: #1f9d55;
+  }
+  .outline-state.ai::before {
+    background: #2f6fde;
+  }
+  .outline-state.waiting::before {
+    background: #e08a00;
+  }
+  .outline-state.open::before {
+    background: #d33a2c;
+  }
+  .outline-btns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .outline-btns .rbtn {
+    width: 100%;
+  }
   /* The tab strip. It sticks to the top of the panel's own scroll, because the
       panel is a floating window a letterer resizes down to a few rows: a tab bar
       that scrolls away is a tab bar you cannot reach without scrolling back.

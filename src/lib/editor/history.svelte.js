@@ -275,6 +275,26 @@ const KINDS = {
       restoreFit(b, e, dir, pageById(e.pageId));
     },
   },
+  // Outlines approved (`approveOutline`, `approvePageOutlines`): each box's
+  // outline record as it was on either side, null for none. Nothing is laid
+  // out again; approval changes no geometry.
+  outlines: {
+    label: 'that approval',
+    apply(e, dir) {
+      const p = pageById(e.pageId);
+      if (!p) throw new Error('the page is gone');
+      let hit = 0;
+      for (const item of e.items ?? []) {
+        const b = p.boxes.find((x) => x.id === item.boxId);
+        if (!b) continue;
+        const g = dir === 'undo' ? item.before : item.after;
+        if (g) b.outline = structuredClone(g);
+        else delete b.outline;
+        hit++;
+      }
+      if (!hit) throw new Error(e.items?.length > 1 ? 'those text boxes are gone' : 'the text box is gone');
+    },
+  },
   // A lock set or let go (`setBoxLocks`): the locks and the reference size of
   // each box, exactly as they were on either side. Nothing is laid out again,
   // because the command itself lays nothing out - putting back the locks is

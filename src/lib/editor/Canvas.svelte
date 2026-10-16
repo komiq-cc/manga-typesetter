@@ -2,6 +2,7 @@
   // Editor canvas viewport and page rendering.
   import { onMount, untrack } from 'svelte';
   import TextBox from '../TextBox.svelte';
+  import RegionsLayer from './RegionsLayer.svelte';
   import {
     app,
     page,
@@ -177,7 +178,8 @@
   // painted out of it - is the one thing that cannot be translated from. So it
   // is `pg.raw` outright, and a chapter with no raw shows nothing rather than
   // quietly showing the cleaned art instead.
-  const srcOf = (pg) => (translate ? pg.raw : (pg.cleaned ?? pg.raw));
+  // Held raw-page key (FLOW-7): the page before cleaning, in place.
+  const srcOf = (pg) => (translate || app.peekRaw ? pg.raw : (pg.cleaned ?? pg.raw));
 
   // ---------- the pages a paged chapter keeps in the DOM ----------
   //
@@ -270,6 +272,14 @@
     if (!stripResident) return true;
     const ownerTop = unzoomedStripTops[pageIndex] ?? 0;
     return isBoxInStripWindow(box, ownerTop, stripResident.top, stripResident.bottom, isTarget);
+  };
+
+  // A strip page any of whose height is in the resident window: the pages the
+  // Regions view draws over.
+  const pageInStripWindow = (pg, pageIndex) => {
+    if (!stripResident) return true;
+    const top = unzoomedStripTops[pageIndex] ?? 0;
+    return top < stripResident.bottom && top + (pg.h || 0) > stripResident.top;
   };
 
   const pageHasVisibleBoxes = (pg, pageIndex) => {
@@ -1024,6 +1034,14 @@
                   {/each}
                 </div>
               {/if}
+              {#if app.showRegions && pg.w > 0 && pageInStripWindow(pg, i)}
+                <div
+                  class="page-boxlayer"
+                  style="top:{stripLayout.tops[i] ?? 0}px; left:calc(50% - {(pg.w * app.zoom) / 2}px); width:{pg.w * app.zoom}px; height:{pg.h * app.zoom}px;"
+                >
+                  <RegionsLayer {pg} />
+                </div>
+              {/if}
             {/each}
           {/if}
         </div>
@@ -1059,6 +1077,9 @@
               {/each}
             {/if}
           </div>
+          {#if app.showRegions && !translate && m.i === app.pageIndex && m.pg.w > 0}
+            <RegionsLayer pg={m.pg} />
+          {/if}
         </div>
       {/each}
     {/if}
